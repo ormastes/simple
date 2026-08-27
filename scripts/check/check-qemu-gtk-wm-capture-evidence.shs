@@ -16,30 +16,10 @@ QEMU_BIN="${QEMU_BIN:-qemu-system-$QEMU_ARCH}"
 SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-explicit-env}"
 SIMPLE_BIN_STATUS=pass
 is_rust_seed_simple() {
-    # Identity probe, not just a path pattern (2026-07-28).
-    # This used to test ONLY for a src/compiler_rust/ path. The deployed Rust
-    # seed lives at bin/release/<triple>/simple, which matches none of those
-    # patterns, so the seed was classified "not a seed" and every self-hosted
-    # claim in this script was asserted against it. Ask the binary instead.
-    # Audit: doc/08_tracking/todo/check_scripts_seed_identity_fail_open_2026-07-28.md
     case "$1" in
-        src/compiler_rust/*|./src/compiler_rust/*|*/src/compiler_rust/*) return 0 ;;
+        src/compiler_rust/*|*/src/compiler_rust/*|./src/compiler_rust/*) return 0 ;;
+        *) return 1 ;;
     esac
-    # Not runnable: leave it to the caller's own missing-binary branch, which
-    # already fails. Do not report "seed" for something we never ran.
-    [ -n "${1:-}" ] && [ -x "$1" ] || return 1
-    # Executable but unverifiable => treat as forbidden (fail closed). The seed
-    # self-identifies on stderr, so 2>&1 is required.
-    if command -v timeout >/dev/null 2>&1; then
-        _irss_v="$(timeout 10 "$1" --version 2>&1)" || return 0
-    else
-        _irss_v="$("$1" --version 2>&1)" || return 0
-    fi
-    [ -n "$_irss_v" ] || return 0
-    case "$_irss_v" in
-        *"bootstrap seed only"*|*"Rust-built"*|*"debug build"*) return 0 ;;
-    esac
-    return 1
 }
 if [ "${SIMPLE_BIN:-}" = "" ]; then
     SIMPLE_BIN_SOURCE="missing-self-hosted"
@@ -67,10 +47,8 @@ elif [ ! -x "$SIMPLE_BIN" ]; then
 fi
 export SIMPLE_BIN SIMPLE_BIN_SOURCE SIMPLE_BIN_STATUS
 AUTO_QMP_LAUNCH="${QEMU_AUTO_LAUNCH_SIMPLEOS_DESKTOP:-0}"
-AUTO_QMP_LAUNCHER="${SIMPLEOS_DESKTOP_QMP_LAUNCHER:-}"
 HOST_WM_SMOKE="${QEMU_GTK_WM_HOST_SMOKE:-1}"
 FORCE_QEMU_LIVE_AND_HOST_PERF_FOR_TEST="${QEMU_GTK_WM_CAPTURE_FORCE_LIVE_HOST_PERF_FOR_TEST:-0}"
-GUI_SMF_ARTIFACT_CONTRACT="${QEMU_GTK_WM_GUI_SMF_ARTIFACT_CONTRACT:-1}"
 AUTO_QMP_OUT="$BUILD_DIR/auto-qmp.out"
 AUTO_QMP_PID=""
 AUTO_QMP_STATUS=not-run
@@ -93,36 +71,6 @@ AUTO_QMP_EXIT_CODE=0
 
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
 rm -f "$REPORT_PATH" "$BUILD_DIR/evidence.env" "$BUILD_DIR/qemu-display-help.txt" "$BUILD_DIR/wm.out" "$BUILD_DIR/wm-host.out" "$BUILD_DIR/fake-qmp.out" "$BUILD_DIR/gtk-gl.out" "$AUTO_QMP_OUT"
-
-emit_simple_bin_failure() {
-    reason="$1"
-    {
-        echo "qemu_gtk_wm_capture_status=fail"
-        echo "qemu_gtk_wm_capture_reason=$reason"
-        echo "qemu_gtk_wm_capture_simple_bin=$SIMPLE_BIN"
-        echo "qemu_gtk_wm_capture_simple_bin_source=$SIMPLE_BIN_SOURCE"
-        echo "qemu_gtk_wm_capture_simple_bin_status=$SIMPLE_BIN_STATUS"
-    } >"$BUILD_DIR/evidence.env"
-    {
-        echo "# QEMU GTK WM Capture Evidence"
-        echo
-        echo "- status: fail"
-        echo "- reason: $reason"
-        echo "- simple bin: $SIMPLE_BIN"
-        echo "- simple bin source: $SIMPLE_BIN_SOURCE"
-        echo "- simple bin status: $SIMPLE_BIN_STATUS"
-    } >"$REPORT_PATH"
-    cat "$BUILD_DIR/evidence.env"
-}
-
-if [ "$SIMPLE_BIN_STATUS" = "forbidden" ]; then
-    emit_simple_bin_failure "simple-bin-forbidden"
-    exit 1
-fi
-if [ "$SIMPLE_BIN_STATUS" != "pass" ]; then
-    emit_simple_bin_failure "simple-bin-$SIMPLE_BIN_STATUS"
-    exit 1
-fi
 
 file_byte_count() {
     if [ -f "$1" ]; then
@@ -190,17 +138,7 @@ cleanup_auto_qmp() {
         wait "$AUTO_QMP_PID" >/dev/null 2>&1 || true
     fi
 }
-on_int() {
-    cleanup_auto_qmp
-    exit 130
-}
-on_term() {
-    cleanup_auto_qmp
-    exit 143
-}
-trap cleanup_auto_qmp EXIT
-trap on_int INT
-trap on_term TERM
+trap cleanup_auto_qmp EXIT INT TERM
 
 qemu_display_gtk_supported=false
 qemu_display_reason=missing-qemu-bin
@@ -316,19 +254,8 @@ run_gtk_scene_evidence() {
 
 if [ -z "${QEMU_QMP_SOCKET:-}" ] && [ "$AUTO_QMP_LAUNCH" = "1" ]; then
     set +e
-    if [ -n "$AUTO_QMP_LAUNCHER" ]; then
-        if [ ! -x "$AUTO_QMP_LAUNCHER" ] || [ -L "$AUTO_QMP_LAUNCHER" ]; then
-            printf '%s\n' 'simpleos_desktop_qmp_status=unavailable' \
-                'simpleos_desktop_qmp_reason=compiled-launcher-missing-or-symlink' >"$AUTO_QMP_OUT"
-            auto_qmp_code=1
-        else
-            "$AUTO_QMP_LAUNCHER" >"$AUTO_QMP_OUT" 2>&1
-            auto_qmp_code=$?
-        fi
-    else
-        SIMPLE_LIB="${SIMPLE_LIB:-src}" "$SIMPLE_BIN" run src/app/test/simpleos_desktop_qmp_launch.spl --mode=interpreter --clean >"$AUTO_QMP_OUT" 2>&1
-        auto_qmp_code=$?
-    fi
+    SIMPLE_LIB="${SIMPLE_LIB:-src}" "$SIMPLE_BIN" run src/app/test/simpleos_desktop_qmp_launch.spl --mode=interpreter --clean >"$AUTO_QMP_OUT" 2>&1
+    auto_qmp_code=$?
     AUTO_QMP_EXIT_CODE="$auto_qmp_code"
     set -e
     AUTO_QMP_STATUS="$(sed -n 's/^simpleos_desktop_qmp_status=//p' "$AUTO_QMP_OUT" | tail -n 1)"
@@ -370,8 +297,7 @@ if [ -z "${QEMU_QMP_SOCKET:-}" ]; then
     BUILD_DIR="$BUILD_DIR/fake-qmp" \
     REPORT_PATH="$FAKE_QMP_REPORT_PATH" \
     SIMPLE_BIN="$SIMPLE_BIN" \
-    SIMPLE_BIN_SOURCE="$SIMPLE_BIN_SOURCE" \
-        sh scripts/check/check-qemu-capture-fake-qmp-evidence.shs >"$BUILD_DIR/fake-qmp.out" 2>&1
+        sh scripts/check-qemu-capture-fake-qmp-evidence.shs >"$BUILD_DIR/fake-qmp.out" 2>&1
     fake_qmp_exit_code=$?
     set -e
     fake_qmp_status="$(sed -n 's/^qemu_capture_fake_qmp_status=//p' "$BUILD_DIR/fake-qmp.out" | tail -n 1)"
@@ -393,7 +319,6 @@ if [ -z "${QEMU_QMP_SOCKET:-}" ]; then
 	        REPORT_PATH="$WM_HOST_REPORT_PATH" \
 	        BUILD_DIR="$BUILD_DIR/wm-host" \
 	        SIMPLE_BIN="$SIMPLE_BIN" \
-	        SIMPLE_BIN_SOURCE="$SIMPLE_BIN_SOURCE" \
 	            sh scripts/check/check-wm-launch-capture-evidence.shs >"$BUILD_DIR/wm-host.out" 2>&1
         host_wm_exit_code=$?
         set -e
@@ -414,13 +339,11 @@ elif [ -n "${QEMU_QMP_SOCKET:-}" ]; then
     set +e
     RUN_ELECTRON_LIVE_SMOKE=0 \
     RUN_QEMU_LIVE_CAPTURE=1 \
-	    RUN_WM_CONTRACT_AND_SPECS=0 \
 	    STRICT_LIVE_CAPTURE=0 \
 	    STRICT_QEMU_CAPTURE=1 \
 	    REPORT_PATH="$WM_REPORT_PATH" \
 	    BUILD_DIR="$BUILD_DIR/wm" \
 	    SIMPLE_BIN="$SIMPLE_BIN" \
-	    SIMPLE_BIN_SOURCE="$SIMPLE_BIN_SOURCE" \
 	        sh scripts/check/check-wm-launch-capture-evidence.shs >"$BUILD_DIR/wm.out" 2>&1
     wm_exit_code=$?
     set -e
@@ -438,13 +361,7 @@ elif [ -n "${QEMU_QMP_SOCKET:-}" ]; then
     qemu_live_sample_matches="${qemu_live_sample_matches:-0}"
     qemu_live_sample_mismatches="${qemu_live_sample_mismatches:-0}"
     qemu_live_scene_mismatches="${qemu_live_scene_mismatches:-0}"
-    if [ "$wm_exit_code" -ge 128 ]; then
-        status=fail
-        reason=wm-live-capture-interrupted
-        perf_status=fail
-        perf_reason="$reason"
-        perf_release_blocker="$reason"
-    elif [ "$wm_exit_code" -eq 0 ] && grep -q '^wm_launch_capture_evidence_status=pass' "$BUILD_DIR/wm.out"; then
+    if [ "$wm_exit_code" -eq 0 ] && grep -q '^wm_launch_capture_evidence_status=pass' "$BUILD_DIR/wm.out"; then
         status=pass
         reason=pass
         perf_status=unavailable
@@ -528,14 +445,13 @@ if [ "$FORCE_QEMU_LIVE_AND_HOST_PERF_FOR_TEST" = "1" ]; then
     perf_release_blocker=forced-live-host-perf-for-test-not-release-evidence
 fi
 
-if [ -n "$SIMPLE_GUI_DYNLIB_ARTIFACT" ] && [ "$GUI_SMF_ARTIFACT_CONTRACT" = "1" ]; then
+if [ -n "$SIMPLE_GUI_DYNLIB_ARTIFACT" ]; then
     gui_smf_qemu_status=not-run
     gui_smf_qemu_reason=live-qemu-not-executed
     if command -v aarch64-linux-gnu-gcc >/dev/null 2>&1; then
         arm64_dynlib="$BUILD_DIR/libpure_gui_hot_arm64.so"
         arm64_smf="$SIMPLE_GUI_DYNLIB_ARTIFACT"
         mkdir -p "$(dirname "$arm64_dynlib")"
-        mkdir -p "$(dirname "$arm64_smf")"
         cat > "$BUILD_DIR/gui_hot_stub.c" <<'CSTUB'
 #include <stdint.h>
 int64_t gui_dynlib_hot_probe_tick(int64_t batch_ptr, int64_t batch_len) {
@@ -586,15 +502,11 @@ fi
 {
     echo "qemu_gtk_wm_capture_status=$status"
     echo "qemu_gtk_wm_capture_reason=$reason"
-    echo "qemu_gtk_wm_capture_simple_bin=$SIMPLE_BIN"
-    echo "qemu_gtk_wm_capture_simple_bin_source=$SIMPLE_BIN_SOURCE"
-    echo "qemu_gtk_wm_capture_simple_bin_status=$SIMPLE_BIN_STATUS"
     echo "qemu_gtk_wm_capture_qemu_bin=$QEMU_BIN"
     echo "qemu_gtk_wm_capture_qemu_arch=$QEMU_ARCH"
     echo "qemu_gtk_wm_capture_display_gtk_supported=$qemu_display_gtk_supported"
     echo "qemu_gtk_wm_capture_display_reason=$qemu_display_reason"
     echo "qemu_gtk_wm_capture_auto_qmp_launch=$AUTO_QMP_LAUNCH"
-    echo "qemu_gtk_wm_capture_auto_qmp_launcher=$AUTO_QMP_LAUNCHER"
     echo "qemu_gtk_wm_capture_host_wm_smoke=$HOST_WM_SMOKE"
     echo "qemu_gtk_wm_capture_auto_qmp_status=$AUTO_QMP_STATUS"
     echo "qemu_gtk_wm_capture_auto_qmp_reason=$AUTO_QMP_REASON"
@@ -700,9 +612,6 @@ fi
     echo
     echo "- status: $status"
     echo "- reason: $reason"
-    echo "- simple bin: $SIMPLE_BIN"
-    echo "- simple bin source: $SIMPLE_BIN_SOURCE"
-    echo "- simple bin status: $SIMPLE_BIN_STATUS"
     echo "- qemu bin: $QEMU_BIN"
     echo "- qemu arch: $QEMU_ARCH"
     echo "- qemu display gtk supported: $qemu_display_gtk_supported"

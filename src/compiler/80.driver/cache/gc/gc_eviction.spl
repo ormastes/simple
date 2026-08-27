@@ -1,0 +1,119 @@
+# Eviction ranking and the §18.5 protection order
+#
+# Agent C3. Ranking answers "which of the evictable things goes first" — it never
+# answers "may this be evicted at all". That second question is answered only by
+# protection class (>= GC_FIRST_PROTECTED_CLASS is never evicted) and by the mark
+# closure. Ranking a protected entry low would still not delete it.
+#
+# Signal order (design §18.5, strongest first):
+#   namespace protection class -> TTL status -> last access time ->
+#   access frequency -> recomputation cost -> unique retained bytes ->
+#   artifact size -> toolchain/target relevance
+#
+# Comparison is lexicographic over those signals in that order; ties break on
+# digest text so the ordering is TOTAL and the plan is reproducible.
+
+use compiler.driver.cache.metadata.cache_metadata.{CacheMetadata, cache_metadata_ttl_expired, gc_class_is_protected}
+
+struct EvictionCandidate:
+    """One evictable object, with its ranking signals resolved at plan time."""
+    digest: text
+    protection_class: i64
+    ttl_expired: bool
+    last_access_time: i64
+    access_count: i64
+    recomputation_cost_ms: i64
+    unique_retained_bytes: i64
+    artifact_size_bytes: i64
+    toolchain_relevant: bool
+
+fn eviction_candidate_of(m: CacheMetadata, now: i64) -> EvictionCandidate:
+    EvictionCandidate(
+        digest: m.digest,
+        protection_class: m.namespace_protection_class,
+        ttl_expired: cache_metadata_ttl_expired(m, now),
+        last_access_time: m.last_access_time,
+        access_count: m.access_count,
+        recomputation_cost_ms: m.recomputation_cost_ms,
+        unique_retained_bytes: m.unique_retained_bytes,
+        artifact_size_bytes: m.artifact_size_bytes,
+        toolchain_relevant: m.toolchain_relevant,
+    )
+
+fn eviction_candidate_protected(c: EvictionCandidate) -> bool:
+    gc_class_is_protected(c.protection_class)
+
+fn gc_bool_rank(b: bool) -> i64:
+    if b:
+        return 1
+    0
+
+# True when `a` should be evicted BEFORE `b`.
+fn gc_candidate_lt(a: EvictionCandidate, b: EvictionCandidate) -> bool:
+    if a.protection_class != b.protection_class:
+        return a.protection_class < b.protection_class
+    if a.ttl_expired != b.ttl_expired:
+        return a.ttl_expired                      # expired goes first
+    if a.last_access_time != b.last_access_time:
+        return a.last_access_time < b.last_access_time      # coldest first
+    if a.access_count != b.access_count:
+        return a.access_count < b.access_count              # least used first
+    if a.recomputation_cost_ms != b.recomputation_cost_ms:
+        return a.recomputation_cost_ms < b.recomputation_cost_ms  # cheapest to redo first
+    if a.unique_retained_bytes != b.unique_retained_bytes:
+        return a.unique_retained_bytes > b.unique_retained_bytes  # frees most first
+    if a.artifact_size_bytes != b.artifact_size_bytes:
+        return a.artifact_size_bytes > b.artifact_size_bytes
+    if a.toolchain_relevant != b.toolchain_relevant:
+        return gc_bool_rank(a.toolchain_relevant) < gc_bool_rank(b.toolchain_relevant)
+    a.digest < b.digest
+
+# Insertion sort: candidate lists are small (a GC pass considers the evictable
+# tail, not the whole store) and this keeps the order stable and closure-free.
+fn gc_rank_candidates(items: [EvictionCandidate]) -> [EvictionCandidate]:
+    var out: [EvictionCandidate] = []
+    for c in items:
+        var inserted = false
+        var next: [EvictionCandidate] = []
+        for existing in out:
+            if not inserted and gc_candidate_lt(c, existing):
+                next = next.push(c)
+                inserted = true
+            next = next.push(existing)
+        if not inserted:
+            next = next.push(c)
+        out = next
+    out
+
+# Select evictions until `bytes_to_free` is met. PROTECTED candidates are skipped
+# unconditionally — reaching the target is not a reason to delete a root, and a
+# short result is the correct outcome (see gc_admission.gc_pinned_overflow_check).
+fn gc_select_evictions(ranked: [EvictionCandidate], bytes_to_free: i64) -> [text]:
+    var out: [text] = []
+    var freed: i64 = 0
+    if bytes_to_free <= 0:
+        return out
+    for c in ranked:
+        if freed >= bytes_to_free:
+            return out
+        if eviction_candidate_protected(c):
+            continue
+        out = out.push(c.digest)
+        freed = freed + c.artifact_size_bytes
+    out
+
+fn gc_selected_bytes(ranked: [EvictionCandidate], selected: [text]) -> i64:
+    var total: i64 = 0
+    for d in selected:
+        for c in ranked:
+            if c.digest == d:
+                total = total + c.artifact_size_bytes
+    total
+
+# Bytes held by protected candidates — the numerator of a PinnedOverflow report.
+fn gc_protected_bytes(items: [EvictionCandidate]) -> i64:
+    var total: i64 = 0
+    for c in items:
+        if eviction_candidate_protected(c):
+            total = total + c.artifact_size_bytes
+    total

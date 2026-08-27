@@ -1,0 +1,95 @@
+# @feature mcdc_hal_runtime_hardening
+# @req REQ-004 REQ-005 REQ-018
+
+use std.spec.*
+use compiler.tools.verify.mcdc_scenario_exclusion.*
+use std.common.structural.mcdc.contracts.*
+
+val DIGEST = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+fn exclusion(reviewed: i64, expires: i64) -> text:
+    "# @mcdc-exclude: scenario=rt.clock.monotonic.rollback | capability=clock.monotonic.rollback.inject | reason=host clock cannot produce a monotonic rollback | evidence={DIGEST} | owner=runtime.safety | reviewed={reviewed} | expires={expires}"
+
+describe "reason-bearing MC/DC scenario exclusions":
+    it "accepts only a fresh capability-unproducible scenario expression":
+        val parsed = parse_mcdc_scenario_exclusion_v1(
+            exclusion(1700000000, 1705000000), 1701000000)
+        expect(mcdc_scenario_exclusion_accepted_v1(parsed)).to_be(true)
+        expect(parsed.scenario_id).to_equal("rt.clock.monotonic.rollback")
+        expect(parsed.capability_id).to_equal("clock.monotonic.rollback.inject")
+
+    it "reports an exclusion explicitly and never as covered or passed":
+        val parsed = parse_mcdc_scenario_exclusion_v1(
+            exclusion(1700000000, 1705000000), 1701000000)
+        val report = mcdc_scenario_exclusion_report_v1(parsed)
+        expect(report).to_start_with("EXCLUDED scenario=")
+        expect(report.contains("reason=host clock cannot produce")).to_be(true)
+        expect(report.contains("PASS")).to_be(false)
+        expect(report.contains("covered")).to_be(false)
+
+    it "rejects missing reasons evidence and unstable identities":
+        val missing_reason = exclusion(1700000000, 1705000000).replace(
+            "reason=host clock cannot produce a monotonic rollback", "reason=")
+        val missing_evidence = exclusion(1700000000, 1705000000).replace(
+            DIGEST, "sha256:0")
+        val unstable = exclusion(1700000000, 1705000000).replace(
+            "scenario=rt.clock.monotonic.rollback", "scenario=RT clock rollback")
+        expect(mcdc_scenario_exclusion_accepted_v1(
+            parse_mcdc_scenario_exclusion_v1(missing_reason, 1701000000))).to_be(false)
+        expect(mcdc_scenario_exclusion_accepted_v1(
+            parse_mcdc_scenario_exclusion_v1(missing_evidence, 1701000000))).to_be(false)
+        expect(mcdc_scenario_exclusion_accepted_v1(
+            parse_mcdc_scenario_exclusion_v1(unstable, 1701000000))).to_be(false)
+
+    it "rejects expired future-reviewed and overlong review windows":
+        val stale = parse_mcdc_scenario_exclusion_v1(
+            exclusion(1700000000, 1700500000), 1701000000)
+        val future = parse_mcdc_scenario_exclusion_v1(
+            exclusion(1702000000, 1705000000), 1701000000)
+        val too_long = parse_mcdc_scenario_exclusion_v1(
+            exclusion(1700000000, 1800000000), 1701000000)
+        expect(stale.status == McdcScenarioExclusionStatusV1.Stale).to_be(true)
+        expect(mcdc_scenario_exclusion_accepted_v1(future)).to_be(false)
+        expect(mcdc_scenario_exclusion_accepted_v1(too_long)).to_be(false)
+
+    it "fails the normal-mode audit on any malformed or stale directive":
+        var audit = mcdc_scenario_exclusion_audit_v1()
+        audit = mcdc_scenario_exclusion_audit_add_v1(
+            audit, parse_mcdc_scenario_exclusion_v1(
+                exclusion(1700000000, 1705000000), 1701000000))
+        expect(mcdc_scenario_exclusion_normal_gate_v1(audit)).to_be(true)
+        audit = mcdc_scenario_exclusion_audit_add_v1(
+            audit, parse_mcdc_scenario_exclusion_v1(
+                exclusion(1700000000, 1700500000), 1701000000))
+        expect(mcdc_scenario_exclusion_normal_gate_v1(audit)).to_be(false)
+
+    it "composes the directive audit with the exact normal-mode denominator gate":
+        var audit = mcdc_scenario_exclusion_audit_v1()
+        audit = mcdc_scenario_exclusion_audit_add_v1(
+            audit, parse_mcdc_scenario_exclusion_v1(
+                exclusion(1700000000, 1705000000), 1701000000))
+        val exact = mcdc_normal_gate_v1(
+            McdcReportModeV1.Normal, true,
+            mcdc_coverage_summary_v1(10, 2, 8), 2, 2, 0)
+        val incomplete = mcdc_normal_gate_v1(
+            McdcReportModeV1.Normal, true,
+            mcdc_coverage_summary_v1(10, 2, 7), 2, 2, 0)
+        expect(mcdc_audited_normal_gate_v1_passes(exact, audit)).to_be(true)
+        expect(mcdc_audited_normal_gate_v1_passes(incomplete, audit)).to_be(false)
+
+    it "ignores ordinary source lines instead of treating them as exclusions":
+        val parsed = parse_mcdc_scenario_exclusion_v1(
+            "it \"executes a normal scenario\":", 1701000000)
+        val audit = mcdc_scenario_exclusion_audit_add_v1(
+            mcdc_scenario_exclusion_audit_v1(), parsed)
+        expect(audit.directive_count).to_equal(0)
+        expect(mcdc_scenario_exclusion_normal_gate_v1(audit)).to_be(true)
+
+    it "scans once with bounded storage and rejects duplicate stable scenarios":
+        var source = exclusion(1700000000, 1705000000)
+        source = source + "\n" + exclusion(1700000000, 1705000000)
+        val audit = scan_mcdc_scenario_exclusions_v1(source, 1701000000)
+        expect(audit.directive_count).to_equal(2)
+        expect(audit.accepted_count).to_equal(1)
+        expect(audit.rejected_count).to_equal(1)
+        expect(mcdc_scenario_exclusion_normal_gate_v1(audit)).to_be(false)

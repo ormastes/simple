@@ -2,8 +2,6 @@
 
 ## Sub-Glossaries
 - [Simple Feature Module (SFM)](simple_feature_module_glossary.md) — `.sfm` feature-module format, layers, DI/AOP, security level, profiles, VERSION.md ([tldr](simple_feature_module_glossary_tldr.md)).
-- [SQLite counterparts in Simple](07_guide/lib/database/sqlite_counterparts.md) — which in-tree pure-Simple module replaces each piece of C SQLite, and which paths really are C-blocked.
-- [LLM repository wiki](00_llm_process/llm_wiki.md) — short canonical lookups for ambiguous repository terms before an LLM chooses an implementation.
 
 ## Simple embedded DB / Simple SQLite
 
@@ -22,33 +20,11 @@ interpreting PureDatabase is reserved for an explicitly selected slow
 diagnostic path. A configured artifact path is not evidence that the boundary
 is active; confirm the worker/library invocation.
 
-## Textual DB
-
-The SDN-text-file store: `std.database.core` (`SdnDatabase`/`SdnTable`/`SdnRow`
-in `src/lib/nogc_sync_mut/database/core.spl`) with atomic fsync+lock writes
-(`atomic.spl`) and WAL (`wal.spl`). Backs the tracking DBs under
-`doc/08_tracking/**/*.sdn` and the `SPLSTORE1` enterprise file backend. One of
-Simple's three DB implementations — canonical map:
-`doc/07_guide/lib/database/db_implementations_map.md`.
-
-## DB server (Simple DB)
-
-"DB" / "DB server" means Simple's PostgreSQL-like server tier:
-`std.database.server` = `src/lib/nogc_sync_mut/database/server/{server,session,txn,capability,durability,protocol,transport}.spl`
-— sessions, deny-wins capabilities, transactions, commit-before-ack durability,
-framed transport. This is the authoritative multi-user enterprise tier. Its
-store port is the Textual DB's `SdnDatabase` (see `server.spl`'s capsule
-header); do not confuse the three DB kinds (canonical map:
-`doc/07_guide/lib/database/db_implementations_map.md`), and do not call
-`postgres_mimic` (below) "the DB server".
-
 ## PostgreSQL mimic
 
-The pure-Simple PostgreSQL-compatible session/query **compatibility surface** at
+The pure-Simple PostgreSQL-compatible session/query server surface at
 `std.database.postgres_mimic`, backed by `PureDatabase`. “Mimic” means bounded
-compatibility, not full PostgreSQL parity — and it is NOT the DB server tier
-(`std.database.server`, above); it is only a compatibility layer on top.
-Production uses a cached SMF/LSM or
+compatibility, not full PostgreSQL parity. Production uses a cached SMF/LSM or
 native artifact even when launched from interpreter mode.
 
 ## In-Tree Counterpart Rule
@@ -426,6 +402,16 @@ See:
 - `doc/06_spec/app/compiler/feature/simple_optimization_plugin_spec.md`
 - `doc/02_requirements/feature/unified_optimizer_plugin.md`
 
+## Must-check tiers
+
+The mandatory release-safety split between a lightweight interactive push
+consumer and an expensive bootstrap evidence producer. The push tier validates
+committed tree structure plus a source-fresh textual SDN ledger, with bounded
+ref count and evidence hashing. The bootstrap tier runs compiler phases,
+full/exhaustive checks, Sdoctest, Caret, platform, and performance producers,
+then atomically promotes only explicit PASS evidence. TODO remains visible debt,
+never an implicit pass.
+
 ## MIR Optimizer
 The compile-time static optimization pass pipeline in `src/compiler/60.mir_opt/`. Runs deterministic passes (DCE, const-fold, inline, CSE, GVN, copy propagation, loop optimization, auto-vectorization, bounds-check elimination, tail-call optimization, strength reduction, string-builder optimization) on MIR before backend codegen. Passes implement `trait MirPass` and register via `DynamicPassRegistry` / `OptimizerManifest`. Controlled by `OptLevel` (nil/Size/Speed/Aggressive).
 
@@ -744,75 +730,6 @@ describe "Parser deplyomeent coverage":
 
 ```
 
-## Environment Test
-
-An executable, fail-closed test that qualifies a feature against the actual
-hardware, operating-system service, driver, runtime library, compiler,
-validator, HAL, or wrapper it depends on. An environment test must retain a
-machine-readable receipt naming the dependency and evidence class.
-
-Finding a library, tool, device node, adapter, or environment variable proves
-only **presence**. Successfully opening it proves **loadability**. Neither means
-the external works as expected. A complete environment test proves, as
-applicable:
-
-1. the exact external library/tool and version or driver/device identity;
-2. the canonical HAL/wrapper owner used by production code;
-3. initialization and capability/readiness checks;
-4. real input transfer from the CPU or caller;
-5. execution through the external system;
-6. output/readback through the same owner;
-7. exact comparison with an independent oracle;
-8. repeated-use identity/resource stability;
-9. invalid-input, unavailable-resource, and teardown behavior;
-10. a retained command, receipt, evidence class, and bounded runtime.
-
-An external dependency is **fully environment-qualified** only when every
-required row above has current passing evidence on the target environment.
-“100% environment tested” means 100% of the declared external-dependency matrix
-is qualified; it does not mean every possible device, driver version, OS, or
-failure in the world has been tested. Any missing target host or native device
-keeps the matrix incomplete and must remain `blocked`, never assumed PASS.
-
-## Environment Evidence Class
-
-The origin and claim boundary attached to an environment-test receipt:
-
-- `physical-device`: work executed on identified hardware and returned
-  device-origin output.
-- `emulator`: the external contract/state machine executed in an emulator; it
-  does not prove physical hardware or native drivers.
-- `software`: a software backend executed the semantics; it is an oracle or
-  fallback, not GPU/hardware proof.
-- `presence-only`: a library/tool/device was found but no end-to-end work was
-  executed.
-- `blocked`: required native execution could not run; the receipt must contain
-  the prerequisite and exact resume command.
-
-Evidence classes cannot be promoted. In particular, source inspection,
-compiler success, CPU mirrors, emulation, screenshots, synthetic handles, or
-library presence cannot satisfy a `physical-device` row.
-
-## HAL/Wrapper Environment Path
-
-The production ownership chain from a feature to an external dependency. A GPU
-environment path is normally:
-
-`producer -> ProcessingIR/DrawIR -> backend -> HAL/session wrapper -> external
-runtime/driver -> device -> HAL readback -> independent CPU oracle`.
-
-Tests must name and exercise this chain. Calling a driver directly can qualify
-the driver, but it does not qualify a production feature that uses a different
-HAL or wrapper.
-
-## CPU/GPU Communication Qualification
-
-Physical-device evidence that CPU input was uploaded, GPU work was dispatched,
-and device output was downloaded through the canonical HAL/session owner. It
-requires exact byte/pixel parity, positive stable device and resource identity,
-at least one repeated dispatch, and fail-closed invalid-transfer coverage.
-Upload-only, dispatch-only, CPU-mirror, or runtime-queue receipts are incomplete.
-
 ---
 
 ## Simple Gui Texture Tree Interface (SGTTI)
@@ -938,8 +855,6 @@ Architecture-neutral address representation: `struct Address { bits: i32, value:
 ## Simple DB
 
 Two-tier database system written in Simple (formerly codenamed **spostgre**).
-Distinct from the current **DB server** tier `std.database.server` (see "DB
-server (Simple DB)" above), which is the authoritative multi-user tier today.
 
 **Simple DB Embedded** (stdlib) — lightweight embedded database for compiler metadata and app-level table storage. Ships with every Simple installation. SDN format, atomic file I/O, QueryBuilder, string interning. No server required.
 

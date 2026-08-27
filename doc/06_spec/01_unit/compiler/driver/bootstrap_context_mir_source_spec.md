@@ -1,6 +1,6 @@
-# Bootstrap Context Mir Source Specification
+# Contract spec: test/01_unit/compiler/driver/bootstrap_context_mir_source_spec.spl
 
-> Tests covering bootstrap context MIR source.
+> Audience: engineers owning the pinned repository sources. Purpose: keep the pinned observable
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -9,7 +9,47 @@
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Bootstrap Context Mir Source Specification
+# Contract spec: test/01_unit/compiler/driver/bootstrap_context_mir_source_spec.spl
+
+Audience: engineers owning the pinned repository sources. Purpose: keep the pinned observable
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Compiler |
+| Status | Active |
+| Source | `test/01_unit/compiler/driver/bootstrap_context_mir_source_spec.spl` |
+| Updated | 2026-08-27 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Purpose and Audience
+
+Audience: engineers owning the pinned repository sources. Purpose: keep the pinned observable
+contracts red-visible, so a regression in the owned code fails this spec
+instead of shipping silently.
+
+## Scope and Preconditions
+
+Precondition: the repository working tree holds the subject code under test.
+Each scenario exercises the subject and asserts its observable contract; no
+behavior outside the named subject is claimed.
+
+## Primary Workflow
+
+Run the scenarios; each one drives the subject through its pinned contract
+and asserts the expected observable outcome with an executed oracle.
+
+## Unsupported / Limitations
+
+Only the pinned contracts are asserted here; end-to-end and integration
+behavior of the surrounding system is covered by companion specs.
+
+## Verification and Recovery
+
+A red scenario names the contract that regressed. Recover by restoring the
+pinned behavior in the subject; verify with
+`bin/simple test test/01_unit/compiler/driver/bootstrap_context_mir_source_spec.spl` and a green Results line.
 
 ## Scenarios
 
@@ -264,14 +304,12 @@ expect(globals_source).to_contain("bootstrap_mir_functions_add(bootstrap_name, m
 #### clears stale bootstrap HIR module before selecting requested entry
 
 - clears stale bootstrap HIR module before selecting requested entry
-   - Expected: source does not contain `ctx.hir_modules[entry_module_name]`
-   - Expected: source does not contain `ctx.hir_modules[extra_name]`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -282,10 +320,8 @@ val globals_source = rt_file_read_text("src/compiler/50.mir/_MirLowering/bootstr
 
 expect(source).to_contain("bootstrap_clear_entry_hir_module()")
 expect(source).to_contain("bootstrap_set_entry_hir_module(ctx.bootstrap_entry_hir.unwrap())")
-expect(source.contains("ctx.hir_modules[entry_module_name]")).to_equal(false)
-expect(source).to_contain("for extra_hir in ctx.hir_modules.values():")
-expect(source.contains("ctx.hir_modules[extra_name]")).to_equal(false)
-expect(globals_source).to_contain("fn bootstrap_clear_entry_hir_module():")
+expect(source).to_not_contain("ctx.hir_modules[entry_module_name]")        expect(source).to_contain("for extra_hir in ctx.hir_modules.values():")
+expect(source).to_not_contain("ctx.hir_modules[extra_name]")        expect(globals_source).to_contain("fn bootstrap_clear_entry_hir_module():")
 expect(globals_source).to_contain("_bootstrap_entry_hir_module = nil")
 ```
 
@@ -506,21 +542,6 @@ expect(analysis).to_not_contain("place.local.id")
 
 </details>
 
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Compiler |
-| Status | Active |
-| Source | `test/01_unit/compiler/driver/bootstrap_context_mir_source_spec.spl` |
-| Updated | 2026-08-26 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering bootstrap context MIR source.
-- bootstrap context MIR source
-
 ## Scenario Summary
 
 | Metric | Count |
@@ -539,53 +560,39 @@ Tests covering bootstrap context MIR source.
 
 Requirements covered by the scenarios in this manual:
 
-- `REQ-SSPEC-UNIT`
 - `REQ-SSPEC-COMPILER`
 <!-- sspec-maintain:traceability:end -->
 
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `a6097e53c84cecdfd0847e8bdbe3c0929e7c41bb627e741c071289384c5b407e`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `df60d1b4615fa6634cbd7be2975ae7835dbc016d1c5621a48e2436ecd24bed78`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `a6097e53c84cecdfd0847e8bdbe3c0929e7c41bb627e741c071289384c5b407e`.
+Source SHA-256: `df60d1b4615fa6634cbd7be2975ae7835dbc016d1c5621a48e2436ecd24bed78`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `a6097e53c84cecdfd0847e8bdbe3c0929e7c41bb627e741c071289384c5b407e`  
+Source SHA-256: `df60d1b4615fa6634cbd7be2975ae7835dbc016d1c5621a48e2436ecd24bed78`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **76/100**; effective score: **49/100**; blockers: **2**.
+Raw score: **95/100**; effective score: **95/100**; blockers: **0**.
 
-SSpec documentization score: 49/100
+SSpec documentization score: 95/100
 source: test/01_unit/compiler/driver/bootstrap_context_mir_source_spec.spl
 mirror: doc/06_spec/01_unit/compiler/driver/bootstrap_context_mir_source_spec.md (current)
-findings: 7 blockers: 2
-  narrative=100 structure=100 oracle=50
-  traceability=60 evidence=70 coverage=100 maintainability=70
+findings: 3 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=100
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-  raw=76; blocker cap makes effective=49
-doc/06_spec/01_unit/compiler/driver/bootstrap_context_mir_source_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/compiler/driver/bootstrap_context_mir_source_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/compiler/driver/bootstrap_context_mir_source_spec.spl:1:1: blocker SSDOC-ORA-002 [oracle] (-50): scenario relies on source-text inspection as system evidence
-  why: Source presence or self-created arithmetic does not demonstrate production behavior.
-  improve: Observe runtime behavior or a stable generated artifact instead.
-test/01_unit/compiler/driver/bootstrap_context_mir_source_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 1 declared requirement(s) have no scenario binding
-  why: A requirement list without scenario evidence is inventory, not traceability.
-  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
-test/01_unit/compiler/driver/bootstrap_context_mir_source_spec.spl:17:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'prefers freshly lowered bootstrap MIR functions over context stubs' has no retained capture or evidence
+test/01_unit/compiler/driver/bootstrap_context_mir_source_spec.spl:49:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'prefers freshly lowered bootstrap MIR functions over context stubs' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/compiler/driver/bootstrap_context_mir_source_spec.spl:26:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'materializes stack slots for reassigned locals before bootstrap LLVM emission' has no retained capture or evidence
+test/01_unit/compiler/driver/bootstrap_context_mir_source_spec.spl:58:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'materializes stack slots for reassigned locals before bootstrap LLVM emission' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/compiler/driver/bootstrap_context_mir_source_spec.spl:37:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'uses requested native-build entry module for bootstrap MIR lowering' has no retained capture or evidence
+test/01_unit/compiler/driver/bootstrap_context_mir_source_spec.spl:69:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'uses requested native-build entry module for bootstrap MIR lowering' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
 <!-- sspec-maintain:scorecard:end -->

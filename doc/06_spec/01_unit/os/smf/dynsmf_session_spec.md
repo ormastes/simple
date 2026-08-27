@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 36 | 36 | 0 | 0 |
+| 15 | 15 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -239,7 +239,17 @@ expect(manifest[7].abi_version).to_equal("1")
 
 </details>
 
-#### creates deterministic compile plans for all precompiled artifacts
+#### gates the 5 new toolchain entries out of default autoload (on-demand only)
+
+- Verify: gates the 5 new toolchain entries out of default autoload (on-demand only)
+   - Expected: manifest[7].default_autoload is false
+   - Expected: manifest[8].default_autoload is false
+   - Expected: manifest[9].default_autoload is false
+   - Expected: manifest[10].default_autoload is false
+   - Expected: manifest[11].default_autoload is false
+   - Expected: manifest[7].artifact_kind equals `precompiled_smf`
+   - Expected: manifest[7].abi_version equals `1`
+
 
 - creates deterministic compile plans for all precompiled artifacts
    - Expected: plans.len() equals `12`
@@ -1325,8 +1335,8 @@ file_delete(dynsmf_srchash_path(artifact_path))
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 36 |
-| Active scenarios | 36 |
+| Total scenarios | 15 |
+| Active scenarios | 15 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
@@ -1334,10 +1344,10 @@ file_delete(dynsmf_srchash_path(artifact_path))
 
 ## Related Documentation
 
-- **Requirements:** `doc/02_requirements/nfr/low_dependency_ui_dynsmf.md`
-- **Plan:** `doc/03_plan/sys_test/low_dependency_ui_dynsmf_dynsmf_session.md`
-- **Design:** `doc/05_design/low_dependency_ui_dynsmf.md`
-- **Research:** `doc/01_research/local/low_dependency_ui_dynsmf.md`
+- **Requirements:** [doc/02_requirements/nfr/low_dependency_ui_dynsmf.md](doc/02_requirements/nfr/low_dependency_ui_dynsmf.md)
+- **Plan:** [doc/03_plan/sys_test/low_dependency_ui_dynsmf_dynsmf_session.md](doc/03_plan/sys_test/low_dependency_ui_dynsmf_dynsmf_session.md)
+- **Design:** [doc/05_design/low_dependency_ui_dynsmf.md](doc/05_design/low_dependency_ui_dynsmf.md)
+- **Research:** [doc/01_research/local/low_dependency_ui_dynsmf.md](doc/01_research/local/low_dependency_ui_dynsmf.md)
 
 
 </details>

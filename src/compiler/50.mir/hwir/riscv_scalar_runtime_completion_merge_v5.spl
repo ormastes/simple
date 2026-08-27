@@ -1,0 +1,77 @@
+# Two-source, full-payload completion merge feeding the one shared v5 skid.
+
+use compiler.mir.hwir.types.{CoreConfig, HwClockDomain, HwCombOp, HwConstant,
+    HwCostModel, HwModule, HwModuleDef, HwNodeId, HwOrigin, HwPort, HwSelectOp, HwSignal}
+
+fn merge_v5_fields(x: i32) -> [(text, i32)]:
+    [("privilege", 2), ("original_instruction", 32), ("canonical_instruction", 32),
+        ("instruction_length_bytes", 3), ("pc_before", x), ("pc_after", x),
+        ("rd", 5), ("rd_write", 1), ("rd_value", x), ("memory_address", x),
+        ("memory_read_mask", 32), ("memory_write_mask", 32),
+        ("memory_read_data", x), ("memory_write_data", x),
+        ("execute_trap_valid", 1), ("execute_trap_cause", x),
+        ("execute_trap_tval", x), ("memory_trap_valid", 1),
+        ("memory_trap_cause", x), ("memory_trap_tval", x),
+        ("redirect_valid", 1), ("redirect_target", x),
+        ("provider_event_id", 64), ("decode_event_id", 64), ("illegal_valid", 1)]
+
+fn merge_v5_zero(width: i32) -> text:
+    if width == 1: return "zero1"
+    if width == 2: return "zero2"
+    if width == 3: return "zero3"
+    if width == 5: return "zero5"
+    if width == 32: return "zero32"
+    "zero64"
+
+pub fn strict_riscv_scalar_runtime_completion_merge_v5(name: text,
+    config: CoreConfig) -> Result<HwModuleDef, text>:
+    if name == "": return Err("HWIR-E-RISCV-RUNTIME-COMPLETION-MERGE-V5-ID: merge requires a module name")
+    val error = config.diagnostic(); if error != "": return Err(error)
+    val x = config.xlen
+    var ports = [HwPort.input("immediate_valid", "Bits", 1),
+        HwPort.input("pending_valid", "Bits", 1), HwPort.input("skid_upstream_ready", "Bits", 1),
+        HwPort.input("immediate_fault", "Bits", 1), HwPort.input("pending_fault", "Bits", 1),
+        HwPort.output("immediate_ready", "Bits", 1), HwPort.output("pending_ready", "Bits", 1),
+        HwPort.output("select_pending", "Bits", 1), HwPort.output("selected_valid", "Bits", 1),
+        HwPort.output("merge_fault", "Bits", 1)]
+    for lane in ["immediate", "pending"]:
+        for field in merge_v5_fields(x): ports.push(HwPort.input(lane + "_" + field[0], "Bits", field[1]))
+    for field in merge_v5_fields(x): ports.push(HwPort.output("selected_" + field[0], "Bits", field[1]))
+    var signals = [HwSignal.comb("overlap", "Bits", 1), HwSignal.comb("provider_fault", "Bits", 1),
+        HwSignal.comb("fault_any", "Bits", 1),
+        HwSignal.comb("not_fault", "Bits", 1), HwSignal.comb("selected_candidate", "Bits", 1),
+        HwSignal.comb("selected_safe", "Bits", 1), HwSignal.comb("ready_safe", "Bits", 1)]
+    val constants = [HwConstant.bits("zero1", 1, 0), HwConstant.bits("zero2", 2, 0),
+        HwConstant.bits("zero3", 3, 0), HwConstant.bits("zero5", 5, 0),
+        HwConstant.bits("zero32", 32, 0), HwConstant.bits("zero64", 64, 0)]
+    val ops = [HwCombOp.binary("and", "overlap", "immediate_valid", "pending_valid", 1),
+        HwCombOp.binary("or", "provider_fault", "immediate_fault", "pending_fault", 1),
+        HwCombOp.binary("or", "fault_any", "overlap", "provider_fault", 1),
+        HwCombOp.unary("passthrough", "merge_fault", "fault_any", 1),
+        HwCombOp.binary("eq", "not_fault", "fault_any", "zero1", 1),
+        HwCombOp.unary("passthrough", "select_pending", "pending_valid", 1),
+        HwCombOp.binary("or", "selected_candidate", "immediate_valid", "pending_valid", 1),
+        HwCombOp.binary("and", "selected_safe", "selected_candidate", "not_fault", 1),
+        HwCombOp.unary("passthrough", "selected_valid", "selected_safe", 1),
+        HwCombOp.binary("and", "ready_safe", "skid_upstream_ready", "not_fault", 1),
+        HwCombOp.binary("and", "immediate_ready", "ready_safe", "immediate_valid", 1),
+        HwCombOp.binary("and", "pending_ready", "ready_safe", "pending_valid", 1)]
+    var selects: [HwSelectOp] = []
+    for field in merge_v5_fields(x):
+        val candidate = "candidate_" + field[0]
+        signals.push(HwSignal.comb(candidate, "Bits", field[1]))
+        selects.push(HwSelectOp.mux(candidate, "select_pending", "pending_" + field[0],
+            "immediate_" + field[0], field[1]))
+        selects.push(HwSelectOp.mux("selected_" + field[0], "selected_safe", candidate,
+            merge_v5_zero(field[1]), field[1]))
+    val module = HwModuleDef(summary: HwModule(name: name, profile: config.profile,
+            port_count: ports.len(), signal_count: signals.len(), register_count: 0, memory_count: 0,
+            comb_op_count: ops.len() + selects.len(), clock_domain_count: 1,
+            fallback_function: "", cost: HwCostModel.empty()), config: config,
+        node_id: HwNodeId.module_root(name), origins: [HwOrigin(
+            node_id: HwNodeId.child(name, "completion-merge"),
+            source_name: "riscv.scalar.runtime-pipeline.v5.two-source-completion-merge")],
+        ports: ports, signals: signals, constants: constants, comb_ops: ops,
+        compare_ops: [], select_ops: selects, clock_domains: [HwClockDomain.default_domain()])
+    val shape_error = module.shape_diagnostic(); if shape_error != "": return Err(shape_error)
+    Ok(module)

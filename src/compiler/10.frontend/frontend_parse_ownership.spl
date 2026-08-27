@@ -1,0 +1,54 @@
+# Persistent ownership boundary for frontend registries that cross a transient
+# per-file parse scope.
+
+use compiler.frontend.resource_registry.{resource_registry_prepare_persistent_globals, resource_registry_reset}
+use compiler.frontend.layer_eq_registry.{layer_eq_registry_prepare_persistent_globals, layer_eq_registry_promote_transient_graph, layer_eq_registry_reset_module, layer_field_pending_reset}
+use compiler.frontend.effect_registry.{effect_registry_prepare_persistent_globals, effect_registry_promote_transient_graph, effect_registry_reset_module, effect_pending_reset}
+use compiler.frontend.aspect_registry.{aspect_registry_prepare_persistent_globals, aspect_registry_promote_transient_graph, aspect_registry_reset_module, aspect_pending_reset}
+use compiler.frontend.facet_static_registry.{facet_static_prepare_persistent_globals, facet_static_promote_transient_graph, facet_static_reset_module}
+use compiler.core.ast.{ast_promote_transient_owner_globals}
+
+fn frontend_prepare_persistent_registry_globals():
+    resource_registry_prepare_persistent_globals()
+    layer_eq_registry_prepare_persistent_globals()
+    effect_registry_prepare_persistent_globals()
+    aspect_registry_prepare_persistent_globals()
+    facet_static_prepare_persistent_globals()
+
+fn frontend_release_parse_scratch():
+    # These facts are consumed by FlatAstBridge within the current parse.  They
+    # are not compilation-wide roots and must not retain scoped payloads.
+    resource_registry_reset()
+    layer_field_pending_reset()
+    effect_pending_reset()
+    aspect_pending_reset()
+
+fn frontend_promote_compilation_registries() -> bool:
+    # Call only after scope_pause and before scope_end.  Run every promotion so
+    # one failure cannot leave a later registry silently unexamined.
+    var ok = true
+    if not layer_eq_registry_promote_transient_graph():
+        ok = false
+    if not effect_registry_promote_transient_graph():
+        ok = false
+    if not aspect_registry_promote_transient_graph():
+        ok = false
+    if not facet_static_promote_transient_graph():
+        ok = false
+    if not ast_promote_transient_owner_globals():
+        ok = false
+    ok
+
+fn frontend_discard_failed_parse_registries(path: text):
+    # Preserve sibling-module facts while removing the failed file's partial
+    # rows.  All reset implementations mutate their durable shells in place.
+    layer_eq_registry_reset_module(path)
+    effect_registry_reset_module(path)
+    aspect_registry_reset_module(path)
+    facet_static_reset_module(path)
+    frontend_release_parse_scratch()
+
+export frontend_prepare_persistent_registry_globals
+export frontend_release_parse_scratch
+export frontend_promote_compilation_registries
+export frontend_discard_failed_parse_registries

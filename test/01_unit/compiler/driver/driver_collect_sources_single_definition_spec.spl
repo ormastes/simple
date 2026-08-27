@@ -8,9 +8,14 @@
 use std.spec.step
 
 use std.spec.*
-use compiler.driver.driver_source_loading.{_driver_collect_sources, _driver_collect_sources_via_find}
+use compiler.driver.driver_source_loading.{_driver_collect_sources, _driver_collect_sources_via_find, _driver_collect_entry_import_source}
+use compiler.driver.driver_compiler_type.{CompilerDriver}
+use compiler.driver.driver_source_pipeline_loading.*
+use compiler.common.driver_core_types.{CompileOptions, CompileMode}
 
 extern fn rt_file_read_text(path: text) -> text
+extern fn rt_env_get(key: text) -> text
+extern fn rt_env_set(key: text, value: text) -> bool
 
 val LOADING = "src/compiler/80.driver/driver_source_loading.spl"
 val HELPERS = "src/compiler/80.driver/driver_helpers.spl"
@@ -56,11 +61,69 @@ describe "driver source collection has exactly one definition":
         # @req REQ-SSPEC-COMPILER
         step("applies the four lane exclusions that only the winning copy carries")
         step("Interpreter, parser, treesitter and async-lowering paths are dropped")
-        expect(_driver_collect_sources("src/compiler/10.frontend/core/interpreter/hashmap.spl").len()).to_equal(0)
+        expect(_driver_collect_sources("src/compiler/10.frontend/core/interpreter/hashmap.spl").len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
         step("A positive control from the same layer is still collected")
         val control = _driver_collect_sources("src/compiler/10.frontend/core/lexer.spl")
         expect(control.len()).to_be_greater_than(0)
+
+    it "admits a canonical treesitter file only through explicit-entry collection":
+        # @req: REQ-COMPILER-DRIVER-001
+        step("Keep bulk filtering while admitting the same production file as an explicit entry")
+        val entry = "src/compiler/10.frontend/treesitter/outline_decls.spl"
+        expect(_driver_collect_sources(entry).len()).to_equal(0)
+        expect(_driver_collect_entry_import_source(entry).len()).to_be_greater_than(0)
+
+    it "routes a native explicit entry around bulk-only lane exclusions":
+        # @req: REQ-COMPILER-DRIVER-001
+        step("Load a canonical treesitter entry through CompilerDriver")
+        val entry = "src/compiler/10.frontend/treesitter/language_detect.spl"
+        val old_entry = rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY")
+        val old_closure = rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE")
+        expect(rt_env_set("SIMPLE_NATIVE_BUILD_ENTRY", entry)).to_equal(true)
+        expect(rt_env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "0")).to_equal(true)
+
+        var options = CompileOptions.default()
+        options.mode = CompileMode.Aot
+        options.cli_mode_text = "aot"
+        options.input_files = [entry]
+        var driver = CompilerDriver.create(options)
+        val (loaded_ctx, loaded_ok) = driver.load_sources_impl()
+
+        expect(rt_env_set("SIMPLE_NATIVE_BUILD_ENTRY", old_entry)).to_equal(true)
+        expect(rt_env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", old_closure)).to_equal(true)
+        expect(loaded_ok).to_equal(true)
+        var found_entry = false
+        for source in loaded_ctx.sources:
+            if source.path == entry:
+                found_entry = true
+        expect(found_entry).to_equal(true)
+
+    it "keeps ordinary source loading on the bulk exclusion path":
+        # @req: REQ-COMPILER-DRIVER-001
+        step("Load the same treesitter file without native-entry authority")
+        val entry = "src/compiler/10.frontend/treesitter/language_detect.spl"
+        val old_entry = rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY")
+        val old_closure = rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE")
+        expect(rt_env_set("SIMPLE_NATIVE_BUILD_ENTRY", "")).to_equal(true)
+        expect(rt_env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "0")).to_equal(true)
+
+        var options = CompileOptions.default()
+        options.mode = CompileMode.Check
+        options.cli_mode_text = "check"
+        options.input_files = [entry]
+        var driver = CompilerDriver.create(options)
+        val (loaded_ctx, loaded_ok) = driver.load_sources_impl()
+
+        expect(rt_env_set("SIMPLE_NATIVE_BUILD_ENTRY", old_entry)).to_equal(true)
+        expect(rt_env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", old_closure)).to_equal(true)
+        expect(loaded_ok).to_equal(true)
+        expect(loaded_ctx.sources.len()).to_equal(0)
+
+    it "keeps repository documentation outside explicit-entry collection":
+        # @req: REQ-COMPILER-DRIVER-001
+        step("Reject a repository doc path before attempting to read it")
+        expect(_driver_collect_entry_import_source("doc/foo.spl").len()).to_equal(0)
 
     it "keeps the exclusion list intact in the definition that actually answers":
         # @req REQ-SSPEC-COMPILER
@@ -80,6 +143,6 @@ describe "driver source collection has exactly one definition":
         expect(loading).to_contain("for path in paths:\n        val loaded = _driver_collect_sources(path)")
 
         step("Delegation is observable: an excluded path yields nothing")
-        expect(_driver_collect_sources_via_find(["src/compiler/10.frontend/core/interpreter"]).len()).to_equal(0)
+        expect(_driver_collect_sources_via_find(["src/compiler/10.frontend/core/interpreter"]).len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
 # @req REQ-SSPEC-COMPILER

@@ -3,7 +3,7 @@
 **Severity:** P2
 **Date:** 2026-07-16
 **Area:** native codegen (module-level text/string global initialization)
-**Status:** default-LLVM source fixed; Cranelift runtime representation and execution pending
+**Status:** runtime-initializer candidate under review; execution pending
 **Related:** `native_module_var_bool_garbage_init_2026-06-13.md` (bool/i64 scalar
 globals — RESOLVED; this is the text sub-case that fix does not cover)
 
@@ -79,3 +79,34 @@ execution is pending a valid pure-Simple runner. Higher-level review rejected a
 raw-pointer relocation because it disagrees with boxed stores and masks the
 empty-string length/NUL requirements. A strict dual-backend parity case must
 cover initial read, reassignment, and a real text operation in both JIT and AOT.
+
+## 2026-07-25 bootstrap blocker
+
+The candidate now lowers non-foldable module globals into one ordered
+`__module_init_*` function and has a strict LLVM/Cranelift fixture for derived
+`text`, module `[text]`, indexing, mutation, and persistence. It is not safe to
+execute yet: the bootstrap real-LLVM path emits functions from a flat
+cross-module accumulator, but does not carry the matching `MirStatic`
+declarations. Emitting the initializer alone would therefore target undeclared
+globals; merging statics naively can also collide on module-local `SymbolId`
+values.
+
+Acceptance requires carrying or remapping each module's statics with its flat
+functions, then running the focused parity case once on both backends. No full
+bootstrap should run before that focused case passes.
+
+The bootstrap candidate now carries module-owned statics with stable remapped
+IDs, emits them before flat functions, and calls one dependency-ordered
+`__module_init_all`. Focused source checks pass. Runtime parity has not run:
+the first sparse-worktree attempt stopped before compilation because
+`bin/simple` was absent, and the deployed test runner independently resolves
+its delegate as `/usr/bin/simple_seed`. Imported globals remain outside this
+fix; the regression covers globals owned and used by their defining module.
+
+A guarded self-hosted candidate build on 2026-07-25 also stopped before
+artifact creation: the deployed CLI rejected `--low-memory`, then the single
+corrected LLVM attempt exited with SIGSEGV 139 after five seconds. Both output
+and cache directories stayed empty. Per the three-cycle/runaway guard, do not
+retry or start a full bootstrap in this lane; resume from a separately admitted
+self-hosted candidate and run only
+`NATIVE_PARITY_CASES=module_global_text_array_persistence`.

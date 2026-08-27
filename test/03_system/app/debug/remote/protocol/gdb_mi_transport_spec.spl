@@ -1,3 +1,4 @@
+# @cover src/lib/nogc_sync_mut/io//__init__.spl 0%
 # GdbMiClient real-subprocess-pipe transport system test.
 #
 # Spawns a real `gdb --interpreter=mi3` subprocess through the same
@@ -22,6 +23,7 @@
 
 use std.io.{shell, shell_bool, shell_output_trimmed, file_write, file_delete, file_exists}
 use std.nogc_sync_mut.io.{process_spawn_piped}
+use app.io.mod.{cwd, env_get}
 use app.debug.remote.protocol.gdb_mi.GdbMiClient
 use app.debug.remote.protocol.gdb_mi_parser.{GdbBreakpoint}
 
@@ -38,15 +40,42 @@ fn _gdb_available() -> bool:
 fn _gcc_available() -> bool:
     shell_bool("which gcc")
 
-fn _piped_process_extern_available() -> bool:
+fn _repo_root() -> text:
+    val configured = env_get("SIMPLE_PROJECT_ROOT") ?? ""
+    if configured != "":
+        return configured
+    val simple_lib = env_get("SIMPLE_LIB") ?? ""
+    if simple_lib.ends_with("/src"):
+        return simple_lib[0 : simple_lib.len() - 4]
+    cwd()
+
+fn _repo_simple_bin(repo_root: text) -> text:
+    "{repo_root}/bin/simple"
+
+fn _shell_quote(value: text) -> text:
+    "'" + value.replace("'", "'\\''") + "'"
+
+fn _piped_process_probe_status() -> text:
     val probe_path = "/tmp/ds6_piped_capability_probe.spl"
     val probe_src = "use std.nogc_sync_mut.io.{process_spawn_piped}\n\nfn main():\n    val pid = process_spawn_piped(\"true\", [])\n    if pid > 0:\n        print \"PIPED_OK\"\n    else:\n        print \"PIPED_FAIL\"\n"
     file_write(probe_path, probe_src)
-    val output = shell_output_trimmed("/home/ormastes/dev/pub/simple/bin/simple run {probe_path} 2>/dev/null", "")
+    val simple_bin = _repo_simple_bin(_repo_root())
+    if not file_exists(simple_bin):
+        file_delete(probe_path)
+        return "RUNNER_MISSING"
+    val output = shell_output_trimmed("{_shell_quote(simple_bin)} run {_shell_quote(probe_path)} 2>/dev/null", "")
     file_delete(probe_path)
-    output.contains("PIPED_OK")
+    if output.contains("PIPED_OK"):
+        return "PIPED_OK"
+    if output.contains("PIPED_FAIL"):
+        return "PIPED_EXTERN_MISSING"
+    "RUNNER_FAILED"
 
 describe "GdbMiClient over a real gdb subprocess pipe":
+    it "quotes repository and probe paths containing spaces and apostrophes":
+        expect(_repo_simple_bin("/tmp/simple repo")).to_equal("/tmp/simple repo/bin/simple")
+        expect(_shell_quote("/tmp/simple repo/owner's probe.spl")).to_equal("'/tmp/simple repo/owner'\\''s probe.spl'")
+
     it "sets a conditional breakpoint via MI and gets a token-matched ^done with condition/hit-count preserved":
         if not _gdb_available():
             print "SKIP: gdb not available on PATH"
@@ -56,7 +85,12 @@ describe "GdbMiClient over a real gdb subprocess pipe":
             print "SKIP: gcc not available on PATH (needed to build the MI fixture binary)"
             return
 
-        if not _piped_process_extern_available():
+        val piped_probe = _piped_process_probe_status()
+        if piped_probe == "RUNNER_MISSING" or piped_probe == "RUNNER_FAILED":
+            expect(piped_probe).to_equal("PIPED_OK")
+            return
+
+        if piped_probe == "PIPED_EXTERN_MISSING":
             print "SKIP: rt_process_spawn_piped is not registered in this interpreter build's extern dispatch table (pre-existing gap, not caused by this change — see doc/08_tracking/bug/interpreter_sffi_missing_piped_process_externs_2026-07-29.md)"
             return
 

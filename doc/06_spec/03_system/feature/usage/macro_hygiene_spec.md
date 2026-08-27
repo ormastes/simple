@@ -2,6 +2,29 @@
 
 > Tests for macro hygiene system that prevents variable capture through gensym renaming. Covers variable isolation, nested scopes, gensym uniqueness, and pattern matching with hygiene.
 
+<!-- sdn-diagram:id=macro_hygiene_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=macro_hygiene_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+macro_hygiene_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=macro_hygiene_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 20 | 20 | 0 | 0 |
@@ -21,7 +44,7 @@ Tests for macro hygiene system that prevents variable capture through gensym ren
 | Category | Language \| Macros |
 | Status | Implemented |
 | Source | `test/03_system/feature/usage/macro_hygiene_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -35,8 +58,6 @@ and pattern matching with hygiene.
 ```simple
 macro make_ten() -> (returns result: Int):
 emit result:
-use std.spec.step
-
 val x = 10
 x
 
@@ -51,22 +72,16 @@ val result = make_ten!()
 
 #### prevents variable capture
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- prevents variable capture
+1. macro make ten
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("prevents variable capture")
 macro make_ten() -> (returns result: Int):
     emit result:
         val x = 10
@@ -80,18 +95,16 @@ expect x + result == 15
 
 #### isolates macro internal variables
 
-- isolates macro internal variables
+1. macro increment
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("isolates macro internal variables")
 macro increment() -> (returns result: Int):
     emit result:
         val temp = 1
@@ -105,18 +118,16 @@ expect a + b == 2
 
 #### preserves outer variable after macro
 
-- preserves outer variable after macro
+1. macro do nothing
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("preserves outer variable after macro")
 macro do_nothing() -> (returns result: Int):
     emit result:
         val value = 100
@@ -132,18 +143,17 @@ expect value == 42
 
 #### handles nested scopes in macro
 
-- handles nested scopes in macro
+1. macro nested scopes
+2. expect nested scopes!
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("handles nested scopes in macro")
 macro nested_scopes() -> (returns result: Int):
     emit result:
         val x = 10
@@ -156,18 +166,19 @@ expect nested_scopes!() == 30
 
 #### handles nested macro calls
 
-- handles nested macro calls
+1. macro inner
+2. macro outer
+3. x + inner!
+4. expect outer!
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("handles nested macro calls")
 macro inner() -> (returns result: Int):
     emit result:
         val x = 5
@@ -183,18 +194,17 @@ expect outer!() == 15
 
 #### handles nested blocks
 
-- handles nested blocks
+1. macro nested blocks
+2. expect nested blocks!
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("handles nested blocks")
 macro nested_blocks() -> (returns result: Int):
     emit result:
         val a = 1
@@ -209,18 +219,16 @@ expect nested_blocks!() == 6
 
 #### creates unique names across calls
 
-- creates unique names across calls
+1. macro counter
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("creates unique names across calls")
 macro counter() -> (returns result: Int):
     emit result:
         val count = 1
@@ -235,18 +243,16 @@ expect first + second + third == 3
 
 #### gensyms multiple variables
 
-- gensyms multiple variables
+1. macro multi vars
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("gensyms multiple variables")
 macro multi_vars() -> (returns result: Int):
     emit result:
         val a = 1
@@ -266,18 +272,16 @@ expect x + y + z + result == 66
 
 #### isolates pattern variables
 
-- isolates pattern variables
+1. macro make pair
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("isolates pattern variables")
 macro make_pair() -> (returns result: Int):
     emit result:
         val (x, y) = (10, 20)
@@ -292,18 +296,16 @@ expect x + y + result == 330
 
 #### isolates tuple destructuring
 
-- isolates tuple destructuring
+1. macro swap values
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("isolates tuple destructuring")
 macro swap_values() -> (returns result: Int):
     emit result:
         val (a, b) = (5, 10)
@@ -318,18 +320,16 @@ expect a + b + result == 8
 
 #### isolates array destructuring
 
-- isolates array destructuring
+1. macro sum array
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("isolates array destructuring")
 macro sum_array() -> (returns result: Int):
     emit result:
         val [x, y, z] = [1, 2, 3]
@@ -347,18 +347,19 @@ expect x + y + z + result == 66
 
 #### isolates function parameters
 
-- isolates function parameters
+1. macro func test
+2. fn add
+3. add
+4. expect func test!
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("isolates function parameters")
 macro func_test() -> (returns result: Int):
     emit result:
         fn add(x: Int, y: Int) -> Int:
@@ -371,18 +372,18 @@ expect func_test!() == 10
 
 #### isolates function from outer scope
 
-- isolates function from outer scope
+1. macro func macro
+2. fn multiplier
+3. multiplier
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("isolates function from outer scope")
 macro func_macro() -> (returns result: Int):
     emit result:
         fn multiplier(x: Int) -> Int:
@@ -397,18 +398,20 @@ expect x + result == 110
 
 #### handles nested functions
 
-- handles nested functions
+1. macro nested func
+2. fn outer
+3. fn inner
+4. outer
+5. expect nested func!
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("handles nested functions")
 macro nested_func() -> (returns result: Int):
     emit result:
         fn outer(x: Int) -> Int:
@@ -425,18 +428,17 @@ expect nested_func!() == 15
 
 #### handles complex multi-scope macro
 
-- handles complex multi-scope macro
+1. macro complex
+2. expect complex!
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("handles complex multi-scope macro")
 macro complex() -> (returns result: Int):
     emit result:
         val temp = 1
@@ -451,18 +453,16 @@ expect complex!() == 10
 
 #### handles macro parameters
 
-- handles macro parameters
+1. macro use param
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("handles macro parameters")
 macro use_param(value: Int) -> (returns result: Int):
     emit result:
         val x = value + 10
@@ -476,18 +476,18 @@ expect x + result == 47
 
 #### handles nested macros with same names
 
-- handles nested macros with same names
+1. macro base
+2. macro wrapper
+3. expect wrapper!
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("handles nested macros with same names")
 macro base(n: Int) -> (returns result: Int):
     emit result:
         val temp = n * 2
@@ -507,18 +507,17 @@ expect wrapper!() == 35
 
 #### handles empty macro
 
-- handles empty macro
+1. macro empty
+2. expect empty!
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("handles empty macro")
 macro empty() -> (returns result: Int):
     emit result:
         0
@@ -529,18 +528,17 @@ expect empty!() == 0
 
 #### handles macro with early return
 
-- handles macro with early return
+1. macro early return
+2. expect early return!
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("handles macro with early return")
 macro early_return(cond: Bool) -> (returns result: Int):
     emit result:
         if cond:
@@ -554,18 +552,17 @@ expect early_return!(false) == 42
 
 #### handles variable shadowing
 
-- handles variable shadowing
+1. macro shadow test
+2. expect shadow test!
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("handles variable shadowing")
 macro shadow_test() -> (returns result: Int):
     emit result:
         val x = 10
@@ -589,51 +586,3 @@ expect shadow_test!() == 30
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `2bc801f2c9b6e87880414e4d9815418d5d95f2357489d098b6ce178f9f3babe2`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `2bc801f2c9b6e87880414e4d9815418d5d95f2357489d098b6ce178f9f3babe2`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `2bc801f2c9b6e87880414e4d9815418d5d95f2357489d098b6ce178f9f3babe2`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/03_system/feature/usage/macro_hygiene_spec.spl
-mirror: doc/06_spec/03_system/feature/usage/macro_hygiene_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/feature/usage/macro_hygiene_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/feature/usage/macro_hygiene_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/feature/usage/macro_hygiene_spec.spl:46:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'prevents variable capture' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/usage/macro_hygiene_spec.spl:57:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'isolates macro internal variables' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/usage/macro_hygiene_spec.spl:68:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'preserves outer variable after macro' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

@@ -1,37 +1,4 @@
-# chat_tui_spec
-
-> Purpose: Prove that TUI pure formatting.
-
-| Tests | Active | Skipped | Pending |
-|-------|--------|---------|--------:|
-| 62 | 62 | 0 | 0 |
-
-<details>
-<summary>Full Scenario Manual</summary>
-
-# chat_tui_spec
-
-Purpose: Prove that TUI pure formatting.
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Application |
-| Status | Active |
-| Source | `test/01_unit/app/llm_caret/chat_tui_spec.spl` |
-| Updated | 2026-08-26 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Purpose and audience
-Purpose: Prove that TUI pure formatting.
-Audience: compiler and tooling engineers who maintain this spec.
-
-## Scenarios
-
-### TUI pure formatting
-
-#### should label user and assistant turns distinctly
+# LLM Caret Chat TUI Unit Spec
 
 **Manual warnings:**
 - invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
@@ -42,222 +9,201 @@ Audience: compiler and tooling engineers who maintain this spec.
    - Expected: tui_role_label("user") equals `You`
    - Expected: tui_role_label("assistant") equals `Assistant`
 
+## should label user and assistant turns distinctly
+
+**Group:** TUI pure formatting
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
 ```simple
-# @req REQ-SSPEC-UNIT
-step("should label user and assistant turns distinctly")
-step("Verify: should label user and assistant turns distinctly")
-# @req: REQ-APP-LLM-CARET-001
 expect(tui_role_label("user")).to_equal("You")
-expect(tui_role_label("assistant")).to_equal("Assistant")
+expect(tui_role_label("assistant")).to_equal("Claude")
 ```
 
 </details>
 
-#### should format a turn line with its role label
+## should format a turn line with its role label
 
-- should format a turn line with its role label
-- Verify: should format a turn line with its role label
-   - Expected: format_turn_line("user", "hello") equals `You: hello`
-   - Expected: format_turn_line("assistant", "hi") equals `Assistant: hi`
-
+**Group:** TUI pure formatting
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
+```simple
+expect(format_turn_line("user", "hello")).to_equal("You: hello")
+expect(format_turn_line("assistant", "hi")).to_equal("Claude: hi")
+```
+
+</details>
+
+## should style user vs assistant turns differently
+
+**Group:** TUI pure formatting
+
+<details>
+<summary>Executable SSpec</summary>
 
 ```simple
 # @req REQ-SSPEC-UNIT
 step("should format a turn line with its role label")
 step("Verify: should format a turn line with its role label")
 expect(format_turn_line("user", "hello")).to_equal("You: hello")
-expect(format_turn_line("assistant", "hi")).to_equal("Assistant: hi")
+expect(format_turn_line("assistant", "hi")).to_equal("Claude: hi")
 ```
 
 </details>
 
-#### should style user vs assistant turns differently
+#### styles user vs assistant turns differently
 
-- should style user vs assistant turns differently
-- Verify: should style user vs assistant turns differently
-   - Expected: us.fg equals `COLOR_CYAN`
-   - Expected: asst.fg equals `COLOR_GREEN`
+- assert true
 
+**Group:** TUI pure formatting
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
+```simple
+expect(format_turn_line("user", "hello")).to_equal("You: hello")
+expect(format_turn_line("assistant", "hi")).to_equal("Claude: hi")
+```
+
+</details>
+
+## should style user vs assistant turns differently
+
+**Group:** TUI pure formatting
+
+<details>
+<summary>Executable SSpec</summary>
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("should style user vs assistant turns differently")
-step("Verify: should style user vs assistant turns differently")
 val us = tui_role_style("user")
 val asst = tui_role_style("assistant")
 expect(us.fg).to_equal(COLOR_CYAN)
 expect(asst.fg).to_equal(COLOR_GREEN)
-expect(us.fg == asst.fg).to_be(false)
+assert_true(us.fg != asst.fg)
 ```
 
 </details>
 
-#### should format a tool-call line
+## should format a tool-call line
 
-- should format a tool-call line
-- Verify: should format a tool-call line
-   - Expected: format_tool_line("bash", "ok", "output") equals `  -> tool bash [ok]: output`
-
+**Group:** TUI pure formatting
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
 ```simple
-# @req REQ-SSPEC-UNIT
-step("should format a tool-call line")
-step("Verify: should format a tool-call line")
 expect(format_tool_line("bash", "ok", "output")).to_equal("  -> tool bash [ok]: output")
 ```
 
 </details>
 
-#### should style error tool lines red and ok tool lines yellow
+## should style error tool lines red and ok tool lines yellow
 
-- should style error tool lines red and ok tool lines yellow
-- Verify: should style error tool lines red and ok tool lines yellow
-   - Expected: tui_tool_style("error").fg equals `COLOR_RED`
-   - Expected: tui_tool_style("ok").fg equals `COLOR_YELLOW`
-
+**Group:** TUI pure formatting
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+```simple
+val us = tui_role_style("user")
+val asst = tui_role_style("assistant")
+expect(us.fg).to_equal(COLOR_CYAN)
+expect(asst.fg).to_equal(COLOR_GREEN)
+assert_true(us.fg != asst.fg)
+```
+
+</details>
+
+#### formats a tool-call line
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("should style error tool lines red and ok tool lines yellow")
-step("Verify: should style error tool lines red and ok tool lines yellow")
+expect(format_tool_line("bash", "ok", "output")).to_equal("  -> tool bash [ok]: output")
+```
+
+</details>
+
+#### styles error tool lines red and ok tool lines yellow
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
 expect(tui_tool_style("error").fg).to_equal(COLOR_RED)
 expect(tui_tool_style("ok").fg).to_equal(COLOR_YELLOW)
 ```
 
 </details>
 
-### Renderer-seam selection
+## should explicit plain flag forces plain even on a tty
 
-#### should explicit plain flag forces plain even on a tty
-
-- should explicit plain flag forces plain even on a tty
-- Verify: should explicit plain flag forces plain even on a tty
-   - Expected: select_renderer_mode("plain", true) equals `plain`
-
+**Group:** Renderer-seam selection
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
 ```simple
-# @req REQ-SSPEC-UNIT
-step("should explicit plain flag forces plain even on a tty")
-step("Verify: should explicit plain flag forces plain even on a tty")
 expect(select_renderer_mode("plain", true)).to_equal("plain")
 ```
 
 </details>
 
-#### should explicit tui flag forces tui even without a tty
+## should explicit tui flag forces tui even without a tty
 
-- should explicit tui flag forces tui even without a tty
-- Verify: should explicit tui flag forces tui even without a tty
-   - Expected: select_renderer_mode("tui", false) equals `tui`
-
+**Group:** Renderer-seam selection
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
 ```simple
-# @req REQ-SSPEC-UNIT
-step("should explicit tui flag forces tui even without a tty")
-step("Verify: should explicit tui flag forces tui even without a tty")
 expect(select_renderer_mode("tui", false)).to_equal("tui")
 ```
 
 </details>
 
-#### should auto picks tui on a tty
+## should auto picks tui on a tty
 
-- should auto picks tui on a tty
-- Verify: should auto picks tui on a tty
-   - Expected: select_renderer_mode("auto", true) equals `tui`
-
+**Group:** Renderer-seam selection
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
 ```simple
-# @req REQ-SSPEC-UNIT
-step("should auto picks tui on a tty")
-step("Verify: should auto picks tui on a tty")
 expect(select_renderer_mode("auto", true)).to_equal("tui")
 ```
 
 </details>
 
-#### should auto falls back to plain when not a tty
+## should auto falls back to plain when not a tty
 
-- should auto falls back to plain when not a tty
-- Verify: should auto falls back to plain when not a tty
-   - Expected: select_renderer_mode("auto", false) equals `plain`
-
+**Group:** Renderer-seam selection
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
 ```simple
-# @req REQ-SSPEC-UNIT
-step("should auto falls back to plain when not a tty")
-step("Verify: should auto falls back to plain when not a tty")
 expect(select_renderer_mode("auto", false)).to_equal("plain")
 ```
 
 </details>
 
-#### should classify dumb and interactive TERM values
+## should classify dumb and interactive TERM values
 
-- should classify dumb and interactive TERM values
-- Verify: should classify dumb and interactive TERM values
-
+**Group:** Renderer-seam selection
 
 <details>
 <summary>Executable SSpec</summary>
-
-Runnable source: 7 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # @req REQ-SSPEC-UNIT
@@ -273,121 +219,82 @@ expect(caret_term_supports_tui("xterm-256color")).to_be(true)
 
 ### Transcript rendering
 
-#### should append a styled user turn to the transcript
+#### appends a styled user turn to the transcript
 
-- should append a styled user turn to the transcript
-- Verify: should append a styled user turn to the transcript
+- tui transcript reset
+- render turn
    - Expected: tui_transcript_len() equals `1`
    - Expected: tui_transcript_line_text(0) equals `You: hi there`
 
+**Group:** Transcript rendering
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
 ```simple
-# @req REQ-SSPEC-UNIT
-step("should append a styled user turn to the transcript")
-step("Verify: should append a styled user turn to the transcript")
 tui_transcript_reset()
 render_turn("user", "hi there")
-expect(tui_transcript_len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
+expect(tui_transcript_len()).to_equal(1)
 expect(tui_transcript_line_text(0)).to_equal("You: hi there")
 ```
 
 </details>
 
-#### should append a styled tool-call line to the transcript
+## should append a styled tool-call line to the transcript
 
-- should append a styled tool-call line to the transcript
-- Verify: should append a styled tool-call line to the transcript
-   - Expected: tui_transcript_len() equals `1`
-
+**Group:** Transcript rendering
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
 ```simple
-# @req REQ-SSPEC-UNIT
-step("should append a styled tool-call line to the transcript")
-step("Verify: should append a styled tool-call line to the transcript")
 tui_transcript_reset()
 render_tool_call("bash", "ok", "42")
-expect(tui_transcript_len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
+expect(tui_transcript_len()).to_equal(1)
 expect(tui_transcript_line_text(0)).to_contain("tool bash [ok]")
 ```
 
 </details>
 
-### Agent-loop renderer seam
+## should route tool calls through render_tool_call in TUI mode
 
-#### should route tool calls through render_tool_call in TUI mode
-
-- should route tool calls through render_tool_call in TUI mode
-- Verify: should route tool calls through render_tool_call in TUI mode
-   - Expected: result.tool_calls_made equals `1`
-   - Expected: tui_transcript_len() equals `1`
-
+**Group:** Agent-loop renderer seam
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
 ```simple
-# @req REQ-SSPEC-UNIT
-step("should route tool calls through render_tool_call in TUI mode")
-step("Verify: should route tool calls through render_tool_call in TUI mode")
 tui_transcript_reset()
 val p = default_policy(WS_ROOT)
 val result = run_agent_loop_rendered(p, [new_user_message("go")], _one_tool, 25, tui_tool_renderer)
-expect(result.tool_calls_made).to_equal(1)  # oracle: 1 — named expected value from the requirement
-expect(tui_transcript_len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
+expect(result.tool_calls_made).to_equal(1)
+expect(tui_transcript_len()).to_equal(1)
 expect(tui_transcript_line_text(0)).to_contain("tool bash")
 expect(tui_transcript_line_text(0)).to_contain("[error]")
 ```
 
 </details>
 
-#### should leave the TUI transcript untouched on the plain print path
+## should leave the TUI transcript untouched on the plain print path
 
-- should leave the TUI transcript untouched on the plain print path
-- Verify: should leave the TUI transcript untouched on the plain print path
-   - Expected: result.tool_calls_made equals `1`
-   - Expected: tui_transcript_len() equals `0`
-
+**Group:** Agent-loop renderer seam
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
 ```simple
-# @req REQ-SSPEC-UNIT
-step("should leave the TUI transcript untouched on the plain print path")
-step("Verify: should leave the TUI transcript untouched on the plain print path")
 tui_transcript_reset()
 val p = default_policy(WS_ROOT)
 val result = run_agent_loop(p, [new_user_message("go")], _one_tool, 25)
-expect(result.tool_calls_made).to_equal(1)  # oracle: 1 — named expected value from the requirement
-expect(tui_transcript_len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
+expect(result.tool_calls_made).to_equal(1)
+expect(tui_transcript_len()).to_equal(0)
 ```
 
 </details>
 
-#### should thread tool_result turns back into final_transcript (M2 fix)
+## should thread tool_result turns back into final_transcript (M2 fix)
 
-- should thread tool_result turns back into final_transcript (M2 fix)
-- Verify: should thread tool_result turns back into final_transcript (M2 fix)
-   - Expected: result.final_transcript.len() equals `3`
-
+**Group:** Agent-loop renderer seam
 
 <details>
 <summary>Executable SSpec</summary>
@@ -1856,76 +1763,6 @@ for case in cases:
 |--------|------:|
 | Total scenarios | 62 |
 | Active scenarios | 62 |
-| Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
-
-
-</details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-UNIT`
-- `REQ-APP-LLM-CARET-001`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `979c9e27185f534c41c08b9a36b08f7a70541413522a22beaa7371ddcf2c652e`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `979c9e27185f534c41c08b9a36b08f7a70541413522a22beaa7371ddcf2c652e`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `979c9e27185f534c41c08b9a36b08f7a70541413522a22beaa7371ddcf2c652e`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **88/100**; effective score: **88/100**; blockers: **0**.
-
-SSpec documentization score: 88/100
-source: test/01_unit/app/llm_caret/chat_tui_spec.spl
-mirror: doc/06_spec/01_unit/app/llm_caret/chat_tui_spec.md (current)
-findings: 11 blockers: 0
-  narrative=100 structure=70 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/app/llm_caret/chat_tui_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/app/llm_caret/chat_tui_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/app/llm_caret/chat_tui_spec.spl:65:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should label user and assistant turns distinctly' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/01_unit/app/llm_caret/chat_tui_spec.spl:65:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should label user and assistant turns distinctly' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/llm_caret/chat_tui_spec.spl:73:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should format a turn line with its role label' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/01_unit/app/llm_caret/chat_tui_spec.spl:73:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should format a turn line with its role label' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/llm_caret/chat_tui_spec.spl:80:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should style user vs assistant turns differently' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/01_unit/app/llm_caret/chat_tui_spec.spl:80:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should style user vs assistant turns differently' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/llm_caret/chat_tui_spec.spl:90:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should format a tool-call line' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/01_unit/app/llm_caret/chat_tui_spec.spl:96:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should style error tool lines red and ok tool lines yellow' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/01_unit/app/llm_caret/chat_tui_spec.spl:104:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should explicit plain flag forces plain even on a tty' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-<!-- sspec-maintain:scorecard:end -->
+| Executed scenarios | 0 |

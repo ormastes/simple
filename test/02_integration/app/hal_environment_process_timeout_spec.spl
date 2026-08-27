@@ -1,0 +1,67 @@
+# @feature mcdc_hal_runtime_hardening
+# @req REQ-016 REQ-017 NFR-005 NFR-006 NFR-007
+
+use std.spec.*
+use app.test.hal_environment_executor.{
+    hosted_prepare_process_timeout_v1, hosted_process_timeout_execute_v1
+}
+use std.common.structural.environment_instruction.*
+
+fn put_i64(bytes: [u8], offset: i64, value: i64):
+    var i = 0
+    while i < 8:
+        bytes[offset + i] = ((value >> (i * 8)) & 255) as u8
+        i = i + 1
+
+describe "bounded hosted process timeout environment execution":
+    it "captures one real timeout and replays it without a second process":
+        val prepared = hosted_prepare_process_timeout_v1(
+            "/bin/sleep", ["2"], 50, 14)
+        var arguments: [u8] = [0u8; 16]
+        put_i64(arguments, 0, prepared.command_digest_hi)
+        put_i64(arguments, 8, prepared.command_digest_lo)
+        val instruction = env_instruction_v1(
+            71, 0, EnvOpcodeV1.ProcessSpawn, 14, 0,
+            0, 16, 16, 0, 32, 32)
+        val policy = env_executor_policy_v1(
+            env_opcode_mask_v1(EnvOpcodeV1.ProcessSpawn), 1 << 14,
+            0, env_opcode_mask_v1(EnvOpcodeV1.ProcessSpawn),
+            false, true, true)
+        var result: [u8] = [0u8; 32]
+        var replay_result: [u8] = [0u8; 32]
+        val timed_out = hosted_process_timeout_execute_v1(
+            prepared, policy, instruction, arguments, result)
+        val replayed = env_replay_timeout_exact_v1(
+            instruction, instruction, timed_out.observation,
+            arguments, result, replay_result)
+
+        expect(prepared.sealed).to_be(true)
+        expect(prepared.timed_out).to_be(true)
+        expect(timed_out.observation.status).to_equal(
+            EnvInstructionStatusV1.Timeout)
+        expect(timed_out.allocation_count_after_seal).to_equal(0)
+        expect(replayed.physical_effect).to_be(false)
+        expect(replayed.observation.status).to_equal(
+            EnvInstructionStatusV1.Timeout)
+        expect(replay_result).to_equal(result)
+
+    it "rejects unsafe timeout execution before touching caller storage":
+        val prepared = hosted_prepare_process_timeout_v1(
+            "/bin/true", [], 50, 15)
+        var arguments: [u8] = [0u8; 16]
+        put_i64(arguments, 0, prepared.command_digest_hi)
+        put_i64(arguments, 8, prepared.command_digest_lo)
+        val instruction = env_instruction_v1(
+            73, 0, EnvOpcodeV1.ProcessSpawn, 15, 0,
+            0, 16, 16, 0, 32, 32)
+        val policy = env_executor_policy_v1(
+            env_opcode_mask_v1(EnvOpcodeV1.ProcessSpawn), 1 << 15,
+            env_opcode_mask_v1(EnvOpcodeV1.ProcessSpawn), 0,
+            false, false, true)
+        var result: [u8] = [77u8; 32]
+        val rejected = hosted_process_timeout_execute_v1(
+            prepared, policy, instruction, arguments, result)
+
+        expect(rejected.observation.status).to_equal(
+            EnvInstructionStatusV1.UnsafeInstruction)
+        expect(result[0]).to_equal(77u8)

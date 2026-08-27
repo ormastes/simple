@@ -6,9 +6,7 @@ use nogc_sync_mut.database.pure_sql._PureDatabase.row_value_helpers.*
 # sql_parser + MVCC in-process storage.
 
 use std.io_runtime
-use std.nogc_sync_mut.io.file_ops.{
-    file_exists, file_read, file_atomic_write, file_lock, file_unlock
-}
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_read, file_write}
 use std.database.sql.types.{DbValue, DbRow, DbError}
 use nogc_sync_mut.db.dbfs_engine.sql_parser.{
     sql_parse, SqlStmtKind, SqlExprKind, SqlExpr,
@@ -22,6 +20,13 @@ use nogc_sync_mut.db.dbfs_engine.mvcc.{
 use nogc_sync_mut.db.dbfs_engine.fts.search.{FtsEngine}
 use nogc_sync_mut.db.db_query.{query_fts_match, query_page_summary_scan}
 use nogc_sync_mut.db.page_summary.{PageSummaryIndex}
+
+pub struct PureDatabaseQueryEvidenceV1:
+    actual_plan: text
+    result_cache_hit: bool
+    rows_examined: i64
+    transaction_active: bool
+    checkpoint_state: text
 
 class PureDatabase:
     _path: text
@@ -39,7 +44,6 @@ class PureDatabase:
     _last_rowid: i64
     _last_changes: i64
     _in_transaction: bool
-    _txn_disk_base: text
     _dirty: bool
     _auto_checkpoint: bool
     _tbl_fts_next_doc_id: [i64]
@@ -51,8 +55,6 @@ class PureDatabase:
     _snap_tbl_rowids: [i64]
     _snap_indexes: [[[text]]]
     _snap_index_unique: [[bool]]
-    _snap_tbl_pk_col: [i32]
-    _snap_tbl_pk_name: [text]
     _tbl_typed: [[[DbValue]]]
     _tbl_pk_col: [i32]
     _tbl_pk_map: [Dict<text, i32>]
@@ -73,6 +75,9 @@ class PureDatabase:
     _tbl_mvcc_stale: [bool]
     _pk_flat: Dict<text, i32>
     _tbl_pk_name: [text]
+    _last_query_plan: text
+    _last_query_cache_hit: bool
+    _last_query_rows_examined: i64
 
     static fn memory() -> Result<PureDatabase, DbError>:
         Ok(PureDatabase(
@@ -91,7 +96,6 @@ class PureDatabase:
             _last_rowid: 0,
             _last_changes: 0,
             _in_transaction: false,
-            _txn_disk_base: "",
             _dirty: false,
             _auto_checkpoint: true,
             _tbl_fts_next_doc_id: [],
@@ -103,8 +107,6 @@ class PureDatabase:
             _snap_tbl_rowids: [],
             _snap_indexes: [],
             _snap_index_unique: [],
-            _snap_tbl_pk_col: [],
-            _snap_tbl_pk_name: [],
             _tbl_typed: [],
             _tbl_pk_col: [],
             _tbl_pk_map: [],
@@ -124,20 +126,21 @@ class PureDatabase:
             _tbl_pk_dirty: [],
             _tbl_mvcc_stale: [],
             _pk_flat: {},
-            _tbl_pk_name: []
+            _tbl_pk_name: [],
+            _last_query_plan: "unavailable:not-executed",
+            _last_query_cache_hit: false,
+            _last_query_rows_examined: -1
         ))
 
     static fn memory_deferred() -> Result<PureDatabase, DbError>:
-        var db = match PureDatabase.memory():
-            case Ok(created): created
-            case Err(reason): return Err(reason)
+        val r = PureDatabase.memory()
+        var db = r.unwrap()
         db._auto_checkpoint = false
         Ok(db)
 
     static fn open(path: text) -> Result<PureDatabase, DbError>:
-        var db = match PureDatabase.memory():
-            case Ok(created): created
-            case Err(reason): return Err(reason)
+        val r = PureDatabase.memory()
+        var db = r.unwrap()
         db._path = path
         if file_exists(path):
             val loaded = db._load_from_disk()
@@ -150,14 +153,10 @@ class PureDatabase:
         Ok(db)
 
     static fn open_deferred(path: text) -> Result<PureDatabase, DbError>:
-        var db = match PureDatabase.open(path):
-            case Ok(opened): opened
-            case Err(reason): return Err(reason)
+        val r = PureDatabase.open(path)
+        var db = r.unwrap()
         db._auto_checkpoint = false
         Ok(db)
-
-    me set_auto_checkpoint(enabled: bool):
-        self._auto_checkpoint = enabled
 
     me checkpoint() -> Result<(), DbError>:
         if self._dirty:
@@ -503,7 +502,7 @@ class PureDatabase:
         val use_pk = use_typed and kci == self._tbl_pk_col[ti]
         self._ensure_pk_map(ti)
         val pkm = self._tbl_pk_map[ti]
-        var results: [DbRow?] = []
+        val results: [DbRow?] = []
         val n_keys = key_vals.len() as i32
         val n_tuples = tbl.tuples.len() as i32
         var ki: i32 = 0
@@ -514,13 +513,13 @@ class PureDatabase:
                     val tidx = pkm[key_txt]
                     if tidx >= 0 and tidx < n_tuples:
                         if mvcc_is_visible(tbl.tuples[tidx], snap):
-                            results = results.push(DbRow(columns: col_names, values: typed[tidx]))
+                            results.push(DbRow(columns: col_names, values: typed[tidx]))
                         else:
-                            results = results.push(nil)
+                            results.push(nil)
                     else:
-                        results = results.push(nil)
+                        results.push(nil)
                 else:
-                    results = results.push(nil)
+                    results.push(nil)
             elif use_typed:
                 var found_idx: i32 = -1
                 var gi: i32 = 0
@@ -532,11 +531,11 @@ class PureDatabase:
                             gi = n_tuples
                     gi = gi + 1
                 if found_idx >= 0:
-                    results = results.push(DbRow(columns: col_names, values: typed[found_idx]))
+                    results.push(DbRow(columns: col_names, values: typed[found_idx]))
                 else:
-                    results = results.push(nil)
+                    results.push(nil)
             else:
-                results = results.push(nil)
+                results.push(nil)
             ki = ki + 1
         Ok(results)
 
@@ -1058,51 +1057,9 @@ class PureDatabase:
     me _persist() -> Result<(), DbError>:
         if self._path == "":
             return Ok(())
-        # Publication must be a single rename, not delete followed by write:
-        # readers may open the database concurrently and must never observe a
-        # missing or partially-written durable image.
-        if file_atomic_write(self._path, self._serialize_disk()):
+        if file_write(self._path, self._serialize_disk()):
             return Ok(())
         Err(DbError.ConnectionFailed(path: self._path, message: "failed to persist pure database"))
-
-    me _persist_transaction_if_current() -> Result<(), DbError>:
-        if self._path == "":
-            return Ok(())
-
-        # Serialize before taking the inter-process lock so the critical
-        # section contains only compare-and-publish. The lock makes the
-        # durable-image comparison and atomic replacement one indivisible
-        # commit decision across independently opened PureDatabase handles.
-        val next_image = self._serialize_disk()
-        # Lock a stable sidecar rather than the database inode: atomic replace
-        # swaps that inode, which could otherwise split concurrent lockers
-        # between the retired and newly published files.
-        val lock_handle = file_lock(self._path + ".commit.lock", 10)
-        if lock_handle < 0:
-            return Err(DbError.ConnectionFailed(
-                path: self._path,
-                message: "failed to acquire pure database commit lock"
-            ))
-
-        val current_image = if file_exists(self._path): file_read(self._path) else: ""
-        if current_image != self._txn_disk_base:
-            file_unlock(lock_handle)
-            return Err(DbError.QueryFailed(
-                sql: "COMMIT",
-                message: "concurrent commit conflict: durable database changed since BEGIN"
-            ))
-
-        val published = file_atomic_write(self._path, next_image)
-        # Publication is already durable once the atomic replacement succeeds.
-        # A lock-release diagnostic must not report the commit as failed: that
-        # would invite the caller to ROLLBACK state which is already visible.
-        file_unlock(lock_handle)
-        if not published:
-            return Err(DbError.ConnectionFailed(
-                path: self._path,
-                message: "failed to atomically publish pure database transaction"
-            ))
-        Ok(())
 
     me _load_from_disk() -> Result<PureDatabase, DbError>:
         val content = file_read(self._path)
@@ -1216,25 +1173,24 @@ class PureDatabase:
             return self._do_alter_add_column(a_tbl, a_col, a_type)
         # Handle CREATE INDEX before parsing
         val ci_parts = _parse_create_index(sql)
-        if ci_parts.len() >= 5:
+        if ci_parts.len() >= 4:
             val ci_unique = ci_parts[0] == "true"
-            val ci_ine = ci_parts[1] == "true"
-            val ci_name = ci_parts[2]
-            val ci_tbl = ci_parts[3]
+            val ci_name = ci_parts[1]
+            val ci_tbl = ci_parts[2]
             var ci_cols: [text] = []
-            var cci: i32 = 4
+            var cci: i32 = 3
             while cci < ci_parts.len() as i32:
                 ci_cols.push(ci_parts[cci])
                 cci = cci + 1
-            return self._do_create_index(ci_unique, ci_ine, ci_name, ci_tbl, ci_cols)
+            return self._do_create_index(ci_unique, ci_name, ci_tbl, ci_cols)
         # Handle DROP INDEX before parsing
-        val di_parts = _parse_drop_index(sql)
-        if di_parts.len() == 2:
-            return self._do_drop_index(di_parts[0] == "true", di_parts[1])
+        val drop_idx = _parse_drop_index(sql)
+        if drop_idx != "":
+            return self._do_drop_index(drop_idx)
         # Handle DROP TABLE before parsing (parser has no DropTable variant)
-        val dt_parts = _parse_drop_table(sql)
-        if dt_parts.len() == 2:
-            return self._do_drop(dt_parts[0] == "true", dt_parts[1])
+        val drop_tbl = _parse_drop_table(sql)
+        if drop_tbl != "":
+            return self._do_drop(drop_tbl)
         # Handle INSERT OR REPLACE / REPLACE INTO
         var actual_sql = sql
         var is_replace = false
@@ -1251,9 +1207,10 @@ class PureDatabase:
             actual_sql = "INSERT" + after_rep
             is_replace = true
         _reset_param_idx()
-        val stmt = match sql_parse(actual_sql):
-            case Ok(parsed): parsed
-            case Err(_): return Err(DbError.QueryFailed(sql: sql, message: "parse error"))
+        val pr = sql_parse(actual_sql)
+        if pr.is_err():
+            return Err(DbError.QueryFailed(sql: sql, message: "parse error"))
+        val stmt = pr.unwrap()
         if stmt.kind == SqlStmtKind.CreateTable:
             return self._do_create(stmt.create_table)
         if stmt.kind == SqlStmtKind.Insert:
@@ -1275,16 +1232,19 @@ class PureDatabase:
         while si < stmts.len() as i32:
             val s = stmts[si].trim()
             if s != "":
-                val changed = match self.exec(s, []):
-                    case Ok(count): count
-                    case Err(reason): return Err(reason)
-                total = total + changed
+                val r = self.exec(s, [])
+                if r.is_err():
+                    return r
+                total = total + r.unwrap()
             si = si + 1
         Ok(total)
 
     me query(sql: text, params: [DbValue]) -> Result<[DbRow], DbError>:
         if not self.is_open:
             return Err(DbError.Closed)
+        self._last_query_plan = "unavailable:not-executed"
+        self._last_query_cache_hit = false
+        self._last_query_rows_examined = -1
         if params.len() == 1 and sql.starts_with("SELECT * FROM ") and sql.ends_with(" WHERE id = ?"):
             val prefix_len = "SELECT * FROM ".len()
             val suffix_len = " WHERE id = ?".len()
@@ -1320,9 +1280,10 @@ class PureDatabase:
         # ── SELECT result cache: skip parse+scan for repeated queries ──
         if params.len() == 0:
             _reset_param_idx()
-            val cstmt = match sql_parse(sql):
-                case Ok(parsed): parsed
-                case Err(_): return Err(DbError.QueryFailed(sql: sql, message: "parse error"))
+            val cpr = sql_parse(sql)
+            if cpr.is_err():
+                return Err(DbError.QueryFailed(sql: sql, message: "parse error"))
+            val cstmt = cpr.unwrap()
             if cstmt.kind == SqlStmtKind.Select:
                 val ctable = cstmt.select.from_table
                 var cti: i32 = -1
@@ -1330,19 +1291,31 @@ class PureDatabase:
                     cti = self._tbl_name_idx[ctable]
                 if cti >= 0 and cti < self._sel_cache_key.len() as i32:
                     if self._sel_cache_key[cti] == sql and sql != "":
+                        self._last_query_plan = "pure-sql:result-cache:" + ctable
+                        self._last_query_cache_hit = true
+                        self._last_query_rows_examined = 0
                         return Ok(self._sel_cache_res[cti])
+                if cti >= 0 and cti < self._tbl_typed.len() as i32:
+                    self._last_query_plan = "pure-sql:table-scan:" + ctable
+                    self._last_query_rows_examined = self._tbl_typed[cti].len()
                 val result = self._do_select(cstmt.select, params)
                 if result.is_ok() and cti >= 0 and cti < self._sel_cache_key.len() as i32:
                     self._sel_cache_key[cti] = sql
-                    match result:
-                        case Ok(rows): self._sel_cache_res[cti] = rows
-                        case Err(_): pass
+                    self._sel_cache_res[cti] = result.unwrap()
                 return result
         _reset_param_idx()
-        val stmt = match sql_parse(sql):
-            case Ok(parsed): parsed
-            case Err(_): return Err(DbError.QueryFailed(sql: sql, message: "parse error"))
+        val pr = sql_parse(sql)
+        if pr.is_err():
+            return Err(DbError.QueryFailed(sql: sql, message: "parse error"))
+        val stmt = pr.unwrap()
         if stmt.kind == SqlStmtKind.Select:
+            val table = stmt.select.from_table
+            var ti: i32 = -1
+            if self._tbl_name_idx.has(table):
+                ti = self._tbl_name_idx[table]
+            self._last_query_plan = "pure-sql:select-executor:" + table
+            if ti >= 0 and ti < self._tbl_typed.len() as i32:
+                self._last_query_rows_examined = self._tbl_typed[ti].len()
             return self._do_select(stmt.select, params)
         Err(DbError.QueryFailed(sql: sql, message: "query() requires SELECT"))
 
@@ -1600,13 +1573,9 @@ class PureDatabase:
         self._snap_tbl_rowids = []
         self._snap_indexes = []
         self._snap_index_unique = []
-        self._snap_tbl_pk_col = []
-        self._snap_tbl_pk_name = []
         var ti: i32 = 0
         while ti < self._tbl_names.len() as i32:
             self._snap_tbl_names.push(self._tbl_names[ti])
-            self._snap_tbl_pk_col.push(self._tbl_pk_col[ti])
-            self._snap_tbl_pk_name.push(self._tbl_pk_name[ti])
             # Deep copy columns
             var cols_copy: [text] = []
             var ci: i32 = 0
@@ -1622,25 +1591,10 @@ class PureDatabase:
             var tbl = self._tbl_data[ti]
             val visible = tbl.scan(snap)
             self._tbl_data[ti] = tbl
-            # An MvccTuple's `data` is NOT always a serialized row: the typed
-            # fast INSERT path stores a positional handle ("{tuple_pos}") that
-            # indexes _tbl_typed, while the slow path stores _serialize_row(..).
-            # Snapshotting `data` verbatim therefore captured "0"/"1" for
-            # fast-path tables, and ROLLBACK restored rows that deserialized to
-            # a single NULL cell — row counts looked right while every value was
-            # destroyed. Normalize to a serialized row here so the snapshot has
-            # exactly one representation.
-            val typed_now = self._tbl_typed[ti]
             var ri: i32 = 0
             while ri < visible.len() as i32:
-                val raw = visible[ri]
-                var row_ser = raw
-                if _is_numeric_text(raw):
-                    val pos = raw.to_int() ?? -1
-                    if pos >= 0 and pos < typed_now.len() as i64:
-                        row_ser = _serialize_row(typed_now[pos as i32])
                 self._snap_row_tidx.push(ti)
-                self._snap_row_data.push(row_ser)
+                self._snap_row_data.push(visible[ri])
                 ri = ri + 1
             ti = ti + 1
 
@@ -1664,20 +1618,6 @@ class PureDatabase:
         self._indexes = []
         self._index_unique = []
         self._pk_flat = {}
-        # These per-table parallel arrays were previously pushed-without-reset
-        # (growing to 2N per ROLLBACK) or ignored entirely (left stale at N).
-        # Either way the parallel-array invariant broke and index-based reads
-        # returned rows from the rolled-back transaction, or no rows at all.
-        self._tbl_all_visible = []
-        self._tbl_pk_dirty = []
-        self._tbl_mvcc_stale = []
-        self._tbl_pk_name = []
-        self._tbl_typed = []
-        self._tbl_pk_col = []
-        self._tbl_pk_map = []
-        self._tbl_fts_next_doc_id = []
-        self._tbl_fts_doc_ids = []
-        self._tbl_dirty = []
         var restore_ni: Dict<text, i32> = {}
         var restore_ci: [Dict<text, i32>] = []
         var ti: i32 = 0
@@ -1699,21 +1639,11 @@ class PureDatabase:
             self._scan_cache_key.push("")
             self._scan_cache_res.push([])
             self._tbl_all_visible.push(true)
-            # pk_map was reset above, so it must be rebuilt before the next
-            # PK-indexed read (true == needs rebuild).
-            self._tbl_pk_dirty.push(true)
+            self._tbl_pk_dirty.push(false)
             self._tbl_mvcc_stale.push(false)
-            self._tbl_pk_name.push(self._snap_tbl_pk_name[ti])
+            self._tbl_pk_name.push("")
             self._indexes.push(self._snap_indexes[ti])
             self._index_unique.push(self._snap_index_unique[ti])
-            self._tbl_pk_col.push(self._snap_tbl_pk_col[ti])
-            var restore_pk_map: Dict<text, i32> = {}
-            self._tbl_pk_map.push(restore_pk_map)
-            self._tbl_fts_next_doc_id.push(0)
-            self._tbl_fts_doc_ids.push([])
-            var restore_typed: [[DbValue]] = []
-            self._tbl_typed.push(restore_typed)
-            self._tbl_dirty.push(true)
             restore_ni[self._snap_tbl_names[ti]] = ti
             restore_ci.push(_build_col_map(self._snap_tbl_cols[ti]))
             ti = ti + 1
@@ -1731,27 +1661,11 @@ class PureDatabase:
                 tbl.insert(tid, row_data)
                 self._tbl_data[idx] = tbl
                 self._txn.commit(tid)
-                # _tbl_typed is read directly by every fast read path and is
-                # never rebuilt lazily, so it must be repopulated in lockstep
-                # with the MVCC re-insert. Extract-mutate-write-back: a
-                # two-hop mutating chain loses the write on the interpreter.
-                var typed_acc = self._tbl_typed[idx]
-                typed_acc.push(_deserialize_row(row_data))
-                self._tbl_typed[idx] = typed_acc
-                # _tbl_vis is left empty on purpose: _tbl_vis_xmax is -1 here,
-                # which forces the visibility cache to recompute on next read.
             ri = ri + 1
 
     me _do_begin() -> Result<i64, DbError>:
         if self._in_transaction:
             return Err(DbError.QueryFailed(sql: "BEGIN", message: "already in transaction"))
-        # Retain the exact durable image read by this transaction. Reads stay
-        # on the in-memory snapshot; COMMIT validates this image under the
-        # publication lock so a concurrent writer cannot be silently lost.
-        self._txn_disk_base = if self._path != "" and file_exists(self._path):
-            file_read(self._path)
-        else:
-            ""
         self._snapshot_tables()
         self._in_transaction = true
         self._last_changes = 0
@@ -1760,18 +1674,7 @@ class PureDatabase:
     me _do_commit() -> Result<i64, DbError>:
         if not self._in_transaction:
             return Err(DbError.QueryFailed(sql: "COMMIT", message: "no active transaction"))
-        if self._auto_checkpoint and self._dirty:
-            var si: i32 = 0
-            while si < self._tbl_mvcc_stale.len() as i32:
-                self._ensure_mvcc_sync(si)
-                si = si + 1
-            # On conflict this returns without changing transaction state or
-            # clearing its rollback snapshot, so the caller can still retry or
-            # ROLLBACK. No durable bytes have been published in that case.
-            self._persist_transaction_if_current()?
-            self._dirty = false
         self._in_transaction = false
-        self._txn_disk_base = ""
         self._snap_tbl_names = []
         self._snap_tbl_cols = []
         self._snap_row_tidx = []
@@ -1789,7 +1692,6 @@ class PureDatabase:
             return Err(DbError.QueryFailed(sql: "ROLLBACK", message: "no active transaction"))
         self._restore_from_snapshot()
         self._in_transaction = false
-        self._txn_disk_base = ""
         self._snap_tbl_names = []
         self._snap_tbl_cols = []
         self._snap_row_tidx = []
@@ -1867,15 +1769,14 @@ class PureDatabase:
 
     # ── Internal: CREATE INDEX ──────────────────────────────────────────
 
-    me _do_create_index(is_unique: bool, if_not_exists: bool, idx_name: text, tbl_name: text, idx_cols: [text]) -> Result<i64, DbError>:
+    me _do_create_index(is_unique: bool, idx_name: text, tbl_name: text, idx_cols: [text]) -> Result<i64, DbError>:
         val ti = _find_idx(self._tbl_names, tbl_name)
         if ti < 0:
             return Err(DbError.QueryFailed(
                 sql: "CREATE INDEX",
                 message: "no such table: {tbl_name}"
             ))
-        # Check for duplicate index name across all tables.
-        # With IF NOT EXISTS an existing name is a no-op, matching SQLite.
+        # Check for duplicate index name across all tables
         var tti: i32 = 0
         while tti < self._indexes.len() as i32:
             val tbl_idxs = self._indexes[tti]
@@ -1884,9 +1785,6 @@ class PureDatabase:
                 val existing = tbl_idxs[ii]
                 if existing.len() > 0:
                     if existing[0] == idx_name:
-                        if if_not_exists:
-                            self._last_changes = 0
-                            return Ok(0)
                         return Err(DbError.QueryFailed(
                             sql: "CREATE INDEX",
                             message: "index already exists: {idx_name}"
@@ -1937,7 +1835,7 @@ class PureDatabase:
         self._last_changes = 0
         Ok(0)
 
-    me _do_drop_index(if_exists: bool, idx_name: text) -> Result<i64, DbError>:
+    me _do_drop_index(idx_name: text) -> Result<i64, DbError>:
         var found_ti: i32 = -1
         var found_ii: i32 = -1
         var tti: i32 = 0
@@ -1953,9 +1851,6 @@ class PureDatabase:
                 ii = ii + 1
             tti = tti + 1
         if found_ti < 0:
-            if if_exists:
-                self._last_changes = 0
-                return Ok(0)
             return Err(DbError.QueryFailed(
                 sql: "DROP INDEX",
                 message: "no such index: {idx_name}"
@@ -2143,12 +2038,9 @@ class PureDatabase:
 
     # ── Internal: DROP TABLE ────────────────────────────────────────────
 
-    me _do_drop(if_exists: bool, table_name: text) -> Result<i64, DbError>:
+    me _do_drop(table_name: text) -> Result<i64, DbError>:
         val ti = _find_idx(self._tbl_names, table_name)
         if ti < 0:
-            if if_exists:
-                self._last_changes = 0
-                return Ok(0)
             return Err(DbError.QueryFailed(
                 sql: "DROP TABLE",
                 message: "no such table: {table_name}"
@@ -2339,20 +2231,6 @@ class PureDatabase:
         self._last_changes = inserted
         if inserted > 0 and ti >= 0 and ti < self._tbl_all_visible.len() as i32:
             self._tbl_all_visible[ti] = false
-        if inserted > 0:
-            # Drop the per-table parameter-free SELECT/scan result slots. They
-            # are keyed by SQL text only, so a literal `WHERE id = 'x'` that ran
-            # before this INSERT (0 rows) would otherwise be served stale until
-            # some other parameter-free query on the table evicted it — while
-            # the `?`-bound form (which never consults the slot) already saw
-            # the row. The FTS index is maintained incrementally above and is
-            # deliberately not invalidated here.
-            if ti < self._sel_cache_key.len() as i32:
-                self._sel_cache_key[ti] = ""
-                self._sel_cache_res[ti] = []
-            if ti < self._scan_cache_key.len() as i32:
-                self._scan_cache_key[ti] = ""
-                self._scan_cache_res[ti] = []
         self._mark_dirty()?
         Ok(inserted)
 
@@ -2501,7 +2379,7 @@ class PureDatabase:
         var used_range_path = false
         if not used_pk_path and use_typed and not has_join:
             val rng = _extract_int_range(sel.where_expr, col_map)
-            if rng.len() == 5 and _typed_col_int_scannable(typed, vis, n_tuples, rng[0] as i32):
+            if rng.len() == 5:
                 val rng_ci = rng[0] as i32
                 val rng_lo = rng[1]
                 val rng_hi = rng[2]
@@ -2511,7 +2389,7 @@ class PureDatabase:
                 while ri < n_tuples:
                     if vis[ri]:
                         val rv = typed[ri]
-                        if rng_ci < rv.len() as i32 and not rv[rng_ci].is_null():
+                        if rng_ci < rv.len() as i32:
                             val cv = _dbval_as_i64(rv[rng_ci])
                             var lo_ok = false
                             if rng_lo_inc:
@@ -2533,7 +2411,7 @@ class PureDatabase:
         var used_single_bound = false
         if not used_pk_path and not used_range_path and use_typed and not has_join:
             val sb = _extract_single_int_bound(sel.where_expr, col_map)
-            if sb.len() == 3 and _typed_col_int_scannable(typed, vis, n_tuples, sb[0] as i32):
+            if sb.len() == 3:
                 val sb_ci = sb[0] as i32
                 val sb_val = sb[1]
                 val sb_kind = sb[2]
@@ -2541,7 +2419,7 @@ class PureDatabase:
                 while ri < n_tuples:
                     if vis[ri]:
                         val rv = typed[ri]
-                        if sb_ci < rv.len() as i32 and not rv[sb_ci].is_null():
+                        if sb_ci < rv.len() as i32:
                             val cv = _dbval_as_i64(rv[sb_ci])
                             var ok = false
                             if sb_kind == 0:

@@ -7,7 +7,7 @@
 # @cover src/lib/nogc_sync_mut/test_runner/test_runner_args.spl
 # @cover src/lib/nogc_sync_mut/test_runner/test_runner_config.spl
 # @cover src/compiler/80.driver/driver_safety_severity.spl
-# REQ-SSPEC-LIB profile-aware execution — `--profile=<name>` for `run`/`test`.
+# REQ-MC-012 profile-aware execution — `--profile=<name>` for `run`/`test`.
 #
 # Proves:
 #  1. --profile= flag parsing accepts all 4 new tier names plus at least one
@@ -28,14 +28,16 @@
 use std.spec.step
 
 use std.test_runner.test_runner_args.{parse_test_args, test_args_validation_error, normalize_profile_name}
-use std.test_runner.test_runner_config.{propagate_env_vars, resolve_effective_profile, read_sdn_lints_profile}
+use std.test_runner.test_runner_config.{
+    propagate_env_vars, resolve_effective_profile,
+    resolve_mcdc_mode_for_profile, read_sdn_lints_profile
+}
 use compiler.driver.driver_safety_severity.{SafetyPassSeverity, safety_pass_severity_for_name, safety_pass_severity}
 
 extern fn rt_env_get(key: text) -> text
 extern fn rt_env_set(key: text, value: text)
 
 describe "--profile= flag parsing (test runner)":
-    # @manual scenario evidence
     context "the 4 current tier names":
         it "accepts moderate":
             # @req REQ-SSPEC-LIB
@@ -113,6 +115,23 @@ describe "profile resolution order (CLI > simple.sdn [lints] profile= > engine d
         # This repo's cwd during `bin/simple test` has no simple.sdn at the
         # root (verified), so the sdn tier of resolution also yields "".
         expect(resolve_effective_profile(options)).to_equal("")
+
+describe "normal-or-stricter MC/DC mode policy":
+    it "defaults unresolved normal profile to static-on":
+        expect(resolve_mcdc_mode_for_profile("", "", "", "", "", "")).to_equal("on")
+
+    it "preserves explicitly configured dynamic mode":
+        expect(resolve_mcdc_mode_for_profile(
+            "dynamic", "critical", "", "", "", "")).to_equal("dynamic")
+
+    it "rejects explicit off without reviewed waiver metadata":
+        expect(resolve_mcdc_mode_for_profile(
+            "off", "moderate", "", "", "", "")).to_equal("invalid-off")
+
+    it "accepts explicit off with bounded reviewed waiver metadata":
+        expect(resolve_mcdc_mode_for_profile(
+            "off", "critical", "hardware scenario cannot be produced",
+            "safety-reviewer", "review-42", "source-offset-v1")).to_equal("off")
 
 describe "the simple.sdn tier reads the canonical lints.profile form (WP-4)":
     # Before WP-4 this scanner looked for the TOML-ish `[lints]` / `profile = "x"`

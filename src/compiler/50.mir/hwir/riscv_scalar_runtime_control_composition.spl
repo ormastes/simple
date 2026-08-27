@@ -1,0 +1,103 @@
+# Compiler-owned closed composition for the runtime scalar control path.
+
+use std.common.crypto.sha256.{sha256_text}
+use compiler.mir.hwir.types.{CoreConfig, HwNodeId, HwPort}
+use compiler.mir.hwir.combinational_composition.{HwCombBinding,
+    HwCombChildInstance, HwCombCompositionDef, strict_comb_composition}
+use compiler.mir.hwir.riscv_scalar_runtime_control_datapath.{
+    strict_riscv_scalar_runtime_control_datapath}
+use compiler.mir.hwir.riscv_scalar_runtime_control_provider.{
+    strict_riscv_scalar_runtime_control_provider}
+use lib.hardware.riscv_common.isa.scalar_database.{RiscvScalarDecoderPlan}
+
+fn runtime_control_derived_input(name: text) -> bool:
+    name == "branch_target" or name == "jal_target" or name == "jalr_target" or
+        name == "branch_target_misaligned" or name == "jal_target_misaligned" or
+        name == "jalr_target_misaligned"
+
+fn runtime_control_binding(source_owner: text, source_port: text,
+    destination_owner: text, destination_port: text,
+    width: i32) -> HwCombBinding:
+    HwCombBinding(source_owner: source_owner, source_port: source_port,
+        destination_owner: destination_owner, destination_port: destination_port,
+        bit_width: width)
+
+fn runtime_control_top_ports(provider_ports: [HwPort]) -> [HwPort]:
+    var ports: [HwPort] = []
+    for port in provider_ports:
+        if port.direction == "out":
+            ports.push(HwPort.output(port.name, "Bits", port.bit_width))
+        elif not runtime_control_derived_input(port.name):
+            ports.push(HwPort.input(port.name, "Bits", port.bit_width))
+    ports
+
+fn runtime_control_bindings(datapath_ports: [HwPort],
+    provider_ports: [HwPort]) -> [HwCombBinding]:
+    var rows: [HwCombBinding] = []
+    for port in datapath_ports:
+        if port.direction == "in":
+            rows.push(runtime_control_binding("composition", port.name,
+                "datapath", port.name, port.bit_width))
+    for port in provider_ports:
+        if port.direction == "in":
+            if runtime_control_derived_input(port.name):
+                rows.push(runtime_control_binding("datapath", port.name,
+                    "provider", port.name, port.bit_width))
+            else:
+                rows.push(runtime_control_binding("composition", port.name,
+                    "provider", port.name, port.bit_width))
+        else:
+            rows.push(runtime_control_binding("provider", port.name,
+                "composition", port.name, port.bit_width))
+    rows
+
+pub class HwScalarRuntimeControlComposition:
+    node_id: HwNodeId
+    module_name: text
+    config: CoreConfig
+    plan: RiscvScalarDecoderPlan
+    composition: HwCombCompositionDef
+
+    me diagnostic() -> text:
+        val local = self.composition.diagnostic(); if local != "": return local
+        val rebuilt = strict_riscv_scalar_runtime_control_composition(
+            self.module_name, self.config, self.plan)
+        if rebuilt.is_err(): return rebuilt.err().unwrap()
+        val canonical = rebuilt.ok().unwrap()
+        if (self.node_id.value != canonical.node_id.value or
+            self.plan.structural_sha256() != canonical.plan.structural_sha256() or
+            self.composition.structural_sha256() !=
+                canonical.composition.structural_sha256()):
+            return "HWIR-E-RISCV-RUNTIME-CONTROL-COMPOSITION-CANONICAL: control composition requires its exact config, plan, children, and ordered bindings"
+        ""
+
+    me structural_sha256() -> text:
+        sha256_text(["hwir-riscv-scalar-runtime-control-composition/v1",
+            self.node_id.value, self.module_name, self.config.profile,
+            self.config.isa_profile, self.config.compressed_decode_profile,
+            self.config.xlen.to_text(), self.config.physical_address_bits.to_text(),
+            self.config.register_count.to_text(), self.plan.structural_sha256(),
+            self.composition.structural_sha256()].join("\n"))
+
+pub fn strict_riscv_scalar_runtime_control_composition(module_name: text,
+    config: CoreConfig, plan: RiscvScalarDecoderPlan) ->
+        Result<HwScalarRuntimeControlComposition, text>:
+    if module_name == "":
+        return Err("HWIR-E-RISCV-RUNTIME-CONTROL-COMPOSITION-ID: control composition requires a module name")
+    val config_error = config.diagnostic(); if config_error != "": return Err(config_error)
+    val plan_error = plan.diagnostic(); if plan_error != "": return Err(plan_error)
+    if config.xlen as u32 != plan.xlen or config.isa_profile != plan.isa_profile:
+        return Err("HWIR-E-RISCV-RUNTIME-CONTROL-COMPOSITION-CONFIG: control composition requires its exact decoder plan")
+    val datapath = strict_riscv_scalar_runtime_control_datapath(
+        module_name + "_datapath", config)?
+    val provider = strict_riscv_scalar_runtime_control_provider(
+        module_name + "_provider", config, plan)?
+    val top_ports = runtime_control_top_ports(provider.ports)
+    val children = [HwCombChildInstance(owner: "datapath", module: datapath),
+        HwCombChildInstance(owner: "provider", module: provider)]
+    val bindings = runtime_control_bindings(datapath.ports, provider.ports)
+    val composition = strict_comb_composition(module_name, config, top_ports,
+        children, bindings)?
+    Ok(HwScalarRuntimeControlComposition(node_id: HwNodeId.module_root(module_name),
+        module_name: module_name, config: config, plan: plan,
+        composition: composition))

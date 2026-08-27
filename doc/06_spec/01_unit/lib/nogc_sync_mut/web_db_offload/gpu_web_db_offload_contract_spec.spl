@@ -1,0 +1,469 @@
+# gpu_web_db_offload_contract_spec
+
+> Purpose: Prove that GPU web/db offload contract.
+
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 12 | 12 | 0 | 0 |
+
+<details>
+<summary>Full Scenario Manual</summary>
+
+# gpu_web_db_offload_contract_spec
+
+Purpose: Prove that GPU web/db offload contract.
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Standard Library |
+| Status | Active |
+| Source | `test/01_unit/lib/nogc_sync_mut/web_db_offload/gpu_web_db_offload_contract_spec.spl` |
+| Updated | 2026-08-22 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Purpose and audience
+Purpose: Prove that GPU web/db offload contract.
+Audience: compiler and tooling engineers who maintain this spec.
+
+## Scenarios
+
+### GPU web/db offload contract
+
+#### should keep proxy forwarding on the CPU control plane
+
+- Classify proxy forwarding as non-GPU control plane work
+   - Expected: decision.path equals `GpuWdbDecisionPath.CpuFallback`
+   - Expected: decision.reason equals `control-plane-stays-on-cpu`
+   - Expected: decision.cpu_fallback_count equals `1)  # oracle: 1 — named expected value from the requirement`
+   - Expected: decision.gpu_hit_count equals `0)  # oracle: 0 — named expected value from the requirement`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-LIB-NOGC-SYNC-MUT-001
+step("Classify proxy forwarding as non-GPU control plane work")
+val decision = gpu_wdb_decide(
+    request(GpuWdbWorkKind.ProxyForwarding, 65536, 0, true, true, true),
+    gpu_wdb_default_budget()
+)
+expect(decision.path).to_equal(GpuWdbDecisionPath.CpuFallback)
+expect(decision.reason).to_equal("control-plane-stays-on-cpu")
+expect(decision.cpu_fallback_count).to_equal(1)  # oracle: 1 — named expected value from the requirement
+expect(decision.gpu_hit_count).to_equal(0)  # oracle: 0 — named expected value from the requirement
+```
+
+</details>
+
+#### should reject GPU work when CPU fallback is missing
+
+- Submit eligible GPU work without a CPU fallback
+   - Expected: decision.path equals `GpuWdbDecisionPath.Reject`
+   - Expected: decision.reason equals `cpu-fallback-required`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-SSPEC-LOCAL-001
+step("Submit eligible GPU work without a CPU fallback")
+val decision = gpu_wdb_decide(
+    request(GpuWdbWorkKind.DbVectorSearch, 65536, 0, true, true, false),
+    gpu_wdb_default_budget()
+)
+expect(decision.path).to_equal(GpuWdbDecisionPath.Reject)
+expect(decision.reason).to_equal("cpu-fallback-required")
+```
+
+</details>
+
+#### should fall back for stale database generations
+
+- Submit stale DB work that must not use GPU results
+   - Expected: decision.path equals `GpuWdbDecisionPath.CpuFallback`
+   - Expected: decision.reason equals `stale-generation`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-SSPEC-LOCAL-001
+step("Submit stale DB work that must not use GPU results")
+val decision = gpu_wdb_decide(
+    request(GpuWdbWorkKind.DbScanFilterProject, 65536, 0, true, false, true),
+    gpu_wdb_default_budget()
+)
+expect(decision.path).to_equal(GpuWdbDecisionPath.CpuFallback)
+expect(decision.reason).to_equal("stale-generation")
+```
+
+</details>
+
+#### should fall back when the GPU queue is full
+
+- Submit eligible work at the queue limit
+   - Expected: decision.path equals `GpuWdbDecisionPath.CpuFallback`
+   - Expected: decision.reason equals `gpu-queue-full`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-SSPEC-LOCAL-001
+step("Submit eligible work at the queue limit")
+val budget = gpu_wdb_default_budget()
+val decision = gpu_wdb_decide(
+    request(GpuWdbWorkKind.WebEmbedding, 65536, budget.max_queue_depth, true, true, true),
+    budget
+)
+expect(decision.path).to_equal(GpuWdbDecisionPath.CpuFallback)
+expect(decision.reason).to_equal("gpu-queue-full")
+```
+
+</details>
+
+#### should reject tiny batches for GPU performance claims
+
+- Submit a tiny vector batch
+   - Expected: decision.path equals `GpuWdbDecisionPath.CpuFallback`
+   - Expected: decision.reason equals `batch-too-small`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-SSPEC-LOCAL-001
+step("Submit a tiny vector batch")
+val budget = gpu_wdb_default_budget()
+val decision = gpu_wdb_decide(
+    request(GpuWdbWorkKind.DbVectorSearch, budget.min_gpu_batch_bytes - 1, 0, true, true, true),
+    budget
+)
+expect(decision.path).to_equal(GpuWdbDecisionPath.CpuFallback)
+expect(decision.reason).to_equal("batch-too-small")
+```
+
+</details>
+
+#### should reject invalid queue and batch inputs before GPU admission
+
+- Submit impossible runtime accounting values
+   - Expected: negative_queue.path equals `GpuWdbDecisionPath.Reject`
+   - Expected: negative_queue.reason equals `queue-depth-invalid`
+   - Expected: empty_batch.path equals `GpuWdbDecisionPath.Reject`
+   - Expected: empty_batch.reason equals `batch-bytes-invalid`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 15 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-SSPEC-LOCAL-001
+step("Submit impossible runtime accounting values")
+val budget = gpu_wdb_default_budget()
+val negative_queue = gpu_wdb_decide(
+    request(GpuWdbWorkKind.WebRank, budget.min_gpu_batch_bytes, -1, true, true, true),
+    budget
+)
+val empty_batch = gpu_wdb_decide(
+    request(GpuWdbWorkKind.WebRank, 0, 0, true, true, true),
+    budget
+)
+expect(negative_queue.path).to_equal(GpuWdbDecisionPath.Reject)
+expect(negative_queue.reason).to_equal("queue-depth-invalid")
+expect(empty_batch.path).to_equal(GpuWdbDecisionPath.Reject)
+expect(empty_batch.reason).to_equal("batch-bytes-invalid")
+```
+
+</details>
+
+#### should report GPU evidence for eligible coarse batches
+
+- Submit a coarse eligible rank batch
+   - Expected: decision.path equals `GpuWdbDecisionPath.GpuEvidence`
+   - Expected: decision.reason equals `gpu-evidence`
+   - Expected: decision.gpu_hit_count equals `1)  # oracle: 1 — named expected value from the requirement`
+   - Expected: decision.cpu_fallback_count equals `0)  # oracle: 0 — named expected value from the requirement`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-SSPEC-LOCAL-001
+step("Submit a coarse eligible rank batch")
+val budget = gpu_wdb_default_budget()
+val decision = gpu_wdb_decide(
+    request(GpuWdbWorkKind.WebRank, budget.min_gpu_batch_bytes, 0, true, true, true),
+    budget
+)
+expect(decision.path).to_equal(GpuWdbDecisionPath.GpuEvidence)
+expect(decision.reason).to_equal("gpu-evidence")
+expect(decision.gpu_hit_count).to_equal(1)  # oracle: 1 — named expected value from the requirement
+expect(decision.cpu_fallback_count).to_equal(0)  # oracle: 0 — named expected value from the requirement
+```
+
+</details>
+
+#### should build reusable GPU library execution plans
+
+- Convert a runtime snapshot into a shared execution plan
+   - Expected: plan.decision.path equals `GpuWdbDecisionPath.GpuEvidence`
+   - Expected: plan.target equals `gpu_db_vector_search_batch`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 13 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-SSPEC-LOCAL-001
+step("Convert a runtime snapshot into a shared execution plan")
+val budget = gpu_wdb_default_budget()
+val snapshot = GpuWdbRuntimeSnapshot(
+    queue_depth: 0,
+    gpu_available: true,
+    generation_current: true,
+    cpu_fallback_available: true
+)
+val req = gpu_wdb_request(GpuWdbWorkKind.DbVectorSearch, budget.min_gpu_batch_bytes, snapshot)
+val plan = gpu_wdb_execution_plan(req, budget)
+expect(plan.decision.path).to_equal(GpuWdbDecisionPath.GpuEvidence)
+expect(plan.target).to_equal("gpu_db_vector_search_batch")
+```
+
+</details>
+
+#### should reserve one queue slot for an eligible reusable batch plan
+
+- Plan a coarse DB vector batch through the shared queue accounting API
+   - Expected: plan.execution.decision.path equals `GpuWdbDecisionPath.GpuEvidence`
+   - Expected: plan.execution.target equals `gpu_db_vector_search_batch`
+   - Expected: plan.average_item_bytes equals `budget.min_gpu_batch_bytes`
+   - Expected: plan.queue_depth_after equals `4)  # oracle: 4 — named expected value from the requirement`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 15 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-SSPEC-LOCAL-001
+step("Plan a coarse DB vector batch through the shared queue accounting API")
+val budget = gpu_wdb_default_budget()
+val snapshot = GpuWdbRuntimeSnapshot(
+    queue_depth: 3,
+    gpu_available: true,
+    generation_current: true,
+    cpu_fallback_available: true
+)
+val window = gpu_wdb_batch_window(GpuWdbWorkKind.DbVectorSearch, budget.min_gpu_batch_bytes * 4, 4, snapshot)
+val plan = gpu_wdb_batch_plan(window, budget)
+expect(plan.execution.decision.path).to_equal(GpuWdbDecisionPath.GpuEvidence)
+expect(plan.execution.target).to_equal("gpu_db_vector_search_batch")
+expect(plan.average_item_bytes).to_equal(budget.min_gpu_batch_bytes)
+expect(plan.queue_depth_after).to_equal(4)  # oracle: 4 — named expected value from the requirement
+```
+
+</details>
+
+#### should release the queue slot when a reusable batch falls back
+
+- Plan a tiny web batch that must remain on CPU
+   - Expected: plan.execution.decision.path equals `GpuWdbDecisionPath.CpuFallback`
+   - Expected: plan.execution.decision.reason equals `batch-too-small`
+   - Expected: plan.execution.target equals `cpu_fallback`
+   - Expected: plan.queue_depth_after equals `3)  # oracle: 3 — named expected value from the requirement`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 15 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-SSPEC-LOCAL-001
+step("Plan a tiny web batch that must remain on CPU")
+val budget = gpu_wdb_default_budget()
+val snapshot = GpuWdbRuntimeSnapshot(
+    queue_depth: 3,
+    gpu_available: true,
+    generation_current: true,
+    cpu_fallback_available: true
+)
+val window = gpu_wdb_batch_window(GpuWdbWorkKind.WebEmbedding, budget.min_gpu_batch_bytes - 1, 2, snapshot)
+val plan = gpu_wdb_batch_plan(window, budget)
+expect(plan.execution.decision.path).to_equal(GpuWdbDecisionPath.CpuFallback)
+expect(plan.execution.decision.reason).to_equal("batch-too-small")
+expect(plan.execution.target).to_equal("cpu_fallback")
+expect(plan.queue_depth_after).to_equal(3)  # oracle: 3 — named expected value from the requirement
+```
+
+</details>
+
+#### should reject reusable batch plans with no items
+
+- Plan a malformed empty batch
+   - Expected: plan.execution.decision.path equals `GpuWdbDecisionPath.Reject`
+   - Expected: plan.execution.decision.reason equals `batch-item-count-invalid`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 13 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-SSPEC-LOCAL-001
+step("Plan a malformed empty batch")
+val budget = gpu_wdb_default_budget()
+val snapshot = GpuWdbRuntimeSnapshot(
+    queue_depth: 0,
+    gpu_available: true,
+    generation_current: true,
+    cpu_fallback_available: true
+)
+val window = gpu_wdb_batch_window(GpuWdbWorkKind.WebRank, budget.min_gpu_batch_bytes, 0, snapshot)
+val plan = gpu_wdb_batch_plan(window, budget)
+expect(plan.execution.decision.path).to_equal(GpuWdbDecisionPath.Reject)
+expect(plan.execution.decision.reason).to_equal("batch-item-count-invalid")
+```
+
+</details>
+
+#### should require CPU-owned metadata filters in NoSQL mode
+
+- Submit NoSQL work without CPU-owned metadata filtering
+   - Expected: decision.path equals `GpuWdbDecisionPath.Reject`
+   - Expected: decision.reason equals `metadata-filter-must-stay-cpu-owned`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-SSPEC-LOCAL-001
+step("Submit NoSQL work without CPU-owned metadata filtering")
+val decision = gpu_wdb_nosql_mode_admits(65536, false, gpu_wdb_default_budget())
+expect(decision.path).to_equal(GpuWdbDecisionPath.Reject)
+expect(decision.reason).to_equal("metadata-filter-must-stay-cpu-owned")
+```
+
+</details>
+
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 12 |
+| Active scenarios | 12 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
+
+
+</details>
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `359a447ca527d1d723c1bb2a0b5e44b9983e5c6a1c232028beca4d31b88f921e`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `359a447ca527d1d723c1bb2a0b5e44b9983e5c6a1c232028beca4d31b88f921e`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `359a447ca527d1d723c1bb2a0b5e44b9983e5c6a1c232028beca4d31b88f921e`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **83/100**; effective score: **83/100**; blockers: **0**.
+
+SSpec documentization score: 83/100
+source: test/01_unit/lib/nogc_sync_mut/web_db_offload/gpu_web_db_offload_contract_spec.spl
+mirror: doc/06_spec/01_unit/lib/nogc_sync_mut/web_db_offload/gpu_web_db_offload_contract_spec.md (current)
+findings: 14 blockers: 0
+  narrative=100 structure=70 oracle=100
+  traceability=100 evidence=55 coverage=100 maintainability=45
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/lib/nogc_sync_mut/web_db_offload/gpu_web_db_offload_contract_spec.md:1:1: warning SSDOC-EVD-002 [evidence] (-15): source steps are not visible in the generated manual
+  why: Source tokens alone do not prove reader-visible workflow structure.
+  improve: Use supported literal step calls and regenerate the manual.
+doc/06_spec/01_unit/lib/nogc_sync_mut/web_db_offload/gpu_web_db_offload_contract_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/lib/nogc_sync_mut/web_db_offload/gpu_web_db_offload_contract_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/lib/nogc_sync_mut/web_db_offload/gpu_web_db_offload_contract_spec.spl:1:1: advice SSDOC-MNT-001 [maintainability] (-15): multiple scenarios form a flat, unfolded presentation
+  why: Long flat dumps obscure the primary workflow.
+  improve: Group secondary detail and keep the primary workflow visible.
+test/01_unit/lib/nogc_sync_mut/web_db_offload/gpu_web_db_offload_contract_spec.spl:1:1: advice SSDOC-MNT-007 [maintainability] (-10): research, plan, architecture, or design metadata links are incomplete
+  why: Reviewers need selected lifecycle evidence, not inferred project state.
+  improve: Link the selected lifecycle artifacts or configure a reasoned scope suppression.
+test/01_unit/lib/nogc_sync_mut/web_db_offload/gpu_web_db_offload_contract_spec.spl:26:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should keep proxy forwarding on the CPU control plane' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/01_unit/lib/nogc_sync_mut/web_db_offload/gpu_web_db_offload_contract_spec.spl:26:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should keep proxy forwarding on the CPU control plane' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/lib/nogc_sync_mut/web_db_offload/gpu_web_db_offload_contract_spec.spl:38:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should reject GPU work when CPU fallback is missing' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/01_unit/lib/nogc_sync_mut/web_db_offload/gpu_web_db_offload_contract_spec.spl:38:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should reject GPU work when CPU fallback is missing' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/lib/nogc_sync_mut/web_db_offload/gpu_web_db_offload_contract_spec.spl:48:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should fall back for stale database generations' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/01_unit/lib/nogc_sync_mut/web_db_offload/gpu_web_db_offload_contract_spec.spl:48:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should fall back for stale database generations' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/lib/nogc_sync_mut/web_db_offload/gpu_web_db_offload_contract_spec.spl:58:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should fall back when the GPU queue is full' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/01_unit/lib/nogc_sync_mut/web_db_offload/gpu_web_db_offload_contract_spec.spl:69:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should reject tiny batches for GPU performance claims' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/01_unit/lib/nogc_sync_mut/web_db_offload/gpu_web_db_offload_contract_spec.spl:80:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should reject invalid queue and batch inputs before GPU admission' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+<!-- sspec-maintain:scorecard:end -->

@@ -34,9 +34,9 @@ shape of `fourth_tree_wipe_6f86ff32a7d_guard_not_enforced_2026-08-11.md`).
 
 ## Secondary wiring defects seen on the same push
 
-- Shared `.git/hooks/pre-push` symlinks to `/mnt/data/worktrees/codex-01a023a8/scripts/hooks/pre-push`
-  (another session's tree); `check-hook-installation` FAILs on it, and
-  `install-must-check-hooks.shs --install` refuses because a `pre-push.local` exists.
+- The shared-worktree absolute-hook defect is resolved separately in
+  `shared_worktree_pre_push_absolute_symlink_2026-08-22.md`; it does not resolve
+  this ledger-fingerprint bootstrap cycle.
 - `land.shs` pushes via `sj`, which segfaults in a plain `git worktree` (no `.jj`).
 
 ## Proposed fix

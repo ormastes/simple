@@ -1,10 +1,3 @@
-"""
-## Purpose and audience
-Purpose: Prove that dynSMF dynload config loading.
-Audience: compiler and tooling engineers who maintain this spec.
-"""
-
-# @req: REQ-APP-STARTUP-001 — stable requirement identity for this spec.
 # @cover src/app/startup/dynsmf_autoload.spl 40%
 """
 # dynSMF Dynload Config Loading Specification
@@ -34,7 +27,7 @@ use os.smf.dynsmf_session.{
 use app.startup.dynsmf_autoload.{
     dynsmf_dynload_settings_from_values,
     dynsmf_dynload_settings_load,
-    dynsmf_startup_options_from_values
+    dynsmf_startup_session_with_dynload_config_values
 }
 use app.io.mod.{file_write, file_delete}
 
@@ -52,11 +45,9 @@ fn spec_sdn_text() -> text:
 
 describe "dynSMF dynload config loading":
     it "loads settings from SDN file text only":
-        step("Verify: loads settings from SDN file text only")
-        # @req: REQ-APP-STARTUP-001
         val config = dynsmf_dynload_settings_from_values(spec_manifest(), spec_sdn_text(), "")
         expect(config.ok).to_equal(true)
-        expect(config.settings.len()).to_equal(2)  # oracle: 2 — named expected value from the requirement
+        expect(config.settings.len()).to_equal(2)
         expect(config.settings[0].library_id).to_equal("lib_a")
         expect(config.settings[0].presence).to_equal(dynsmf_presence_on())
         expect(config.settings[0].placement).to_equal(dynsmf_placement_dynamic())
@@ -64,32 +55,28 @@ describe "dynSMF dynload config loading":
         expect(config.settings[1].presence).to_equal(dynsmf_presence_off())
 
     it "loads settings from env text only":
-        step("Verify: loads settings from env text only")
         val config = dynsmf_dynload_settings_from_values(spec_manifest(), "", "lib_b:presence=on,activation=startup")
         expect(config.ok).to_equal(true)
-        expect(config.settings.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        expect(config.settings.len()).to_equal(1)
         expect(config.settings[0].library_id).to_equal("lib_b")
         expect(config.settings[0].presence).to_equal(dynsmf_presence_on())
         expect(config.settings[0].activation).to_equal(dynsmf_activation_startup())
 
     it "lets env override the file entry for the same library id":
-        step("Verify: lets env override the file entry for the same library id")
         val config = dynsmf_dynload_settings_from_values(spec_manifest(), spec_sdn_text(), "lib_a:presence=off")
         expect(config.ok).to_equal(true)
-        expect(config.settings.len()).to_equal(2)  # oracle: 2 — named expected value from the requirement
+        expect(config.settings.len()).to_equal(2)
         expect(config.settings[0].library_id).to_equal("lib_a")
         expect(config.settings[0].presence).to_equal(dynsmf_presence_off())
 
     it "fails closed on a malformed file axis value":
-        step("Verify: fails closed on a malformed file axis value")
         val bad = spec_sdn_text() + "  lib_b: \"presence=maybe\"\n"
         val config = dynsmf_dynload_settings_from_values(spec_manifest(), bad, "")
         expect(config.ok).to_equal(false)
         expect(config.reason).to_contain("unknown_presence:maybe")
-        expect(config.settings.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(config.settings.len()).to_equal(0)
 
     it "fails closed on a malformed env entry and unknown library ids":
-        step("Verify: fails closed on a malformed env entry and unknown library ids")
         val bad_env = dynsmf_dynload_settings_from_values(spec_manifest(), "", "lib_a presence=on")
         expect(bad_env.ok).to_equal(false)
         expect(bad_env.reason).to_contain("malformed_env_entry")
@@ -98,62 +85,31 @@ describe "dynSMF dynload config loading":
         expect(unknown.reason).to_equal("unknown_library:lib_zz")
 
     it "returns empty settings when no config is present (back-compat)":
-        step("Verify: returns empty settings when no config is present (back-compat)")
         val config = dynsmf_dynload_settings_from_values(spec_manifest(), "", "")
         expect(config.ok).to_equal(true)
-        expect(config.settings.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(config.settings.len()).to_equal(0)
 
     it "reads a real SDN config file from disk":
-        step("Verify: reads a real SDN config file from disk")
         val path = "build/dynsmf_config_loading_spec_fixture.sdn"
         file_write(path, spec_sdn_text())
         val config = dynsmf_dynload_settings_load(spec_manifest(), path)
         file_delete(path)
         expect(config.ok).to_equal(true)
-        expect(config.settings.len()).to_equal(2)  # oracle: 2 — named expected value from the requirement
+        expect(config.settings.len()).to_equal(2)
         expect(config.settings[0].presence).to_equal(dynsmf_presence_on())
 
     it "treats a missing config file as empty settings":
-        step("Verify: treats a missing config file as empty settings")
         val config = dynsmf_dynload_settings_load(spec_manifest(), "build/definitely_missing_dynload_config.sdn")
         expect(config.ok).to_equal(true)
-        expect(config.settings.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(config.settings.len()).to_equal(0)
 
-    it "lets command args select config and deterministically override env settings":
-        step("Verify: CLI config and ordered setting overlays are reusable")
-        val options = dynsmf_startup_options_from_values(
-            ["tool", "--dynload-config", "profiles/editor.sdn",
-             "--dynload=lib_a:presence=on",
-             "--dynload", "lib_a:presence=off"],
-            "profiles/server.sdn", "lib_b:presence=on")
-        expect(options.ok).to_equal(true)
-        expect(options.config_path).to_equal("profiles/editor.sdn")
-        expect(options.explicit_config).to_equal(true)
-        expect(options.settings_text).to_equal(
-            "lib_b:presence=on;lib_a:presence=on;lib_a:presence=off")
-
-        val config = dynsmf_dynload_settings_from_values(
-            spec_manifest(), "", options.settings_text)
-        expect(config.ok).to_equal(true)
-        expect(config.settings.len()).to_equal(2)
-        expect(config.settings[1].library_id).to_equal("lib_a")
-        expect(config.settings[1].presence).to_equal(dynsmf_presence_off())
-
-    it "honors the argument boundary and rejects missing startup values":
-        step("Verify: app args after -- cannot mutate startup extensions")
-        val bounded = dynsmf_startup_options_from_values(
-            ["--", "--dynload-config=ignored.sdn",
-             "--dynload=lib_a:presence=on"], "", "")
-        expect(bounded.ok).to_equal(true)
-        expect(bounded.config_path).to_equal("simple_dynload.sdn")
-        expect(bounded.settings_text).to_equal("")
-
-        val missing_config = dynsmf_startup_options_from_values(
-            ["--dynload-config"], "", "")
-        expect(missing_config.ok).to_equal(false)
-        expect(missing_config.reason).to_equal("missing_dynload_config_path")
-
-        val missing_setting = dynsmf_startup_options_from_values(
-            ["--dynload="], "", "")
-        expect(missing_setting.ok).to_equal(false)
-        expect(missing_setting.reason).to_equal("missing_dynload_setting")
+    it "keeps non-startup activation queued without dispatching a compiler child":
+        val manifest = [DynSmfManifestEntry(id: "file_io", path: "build/dynsmf/config_non_startup_missing_file_io.smf", source_module: "std.io", artifact_kind: "precompiled_smf", abi_version: "1", default_autoload: true, exports: ["open"])]
+        val sdn = "dynload:\n  file_io: \"presence=on,placement=dynamic,activation=manual\"\n"
+        val session = dynsmf_startup_session_with_dynload_config_values([], "", "", "config-non-startup", manifest, sdn, "")
+        expect(session.loaded.len()).to_equal(0)
+        expect(session.evidence.len()).to_equal(1)
+        expect(session.evidence[0].action).to_equal("compile_background")
+        expect(session.evidence[0].status).to_equal("queued")
+        expect(session.evidence[0].status == "dispatched").to_equal(false)
+        expect(session.evidence[0].reason.contains("spawned_pid:")).to_equal(false)

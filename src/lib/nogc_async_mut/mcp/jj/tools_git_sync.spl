@@ -5,14 +5,6 @@
 use std.nogc_async_mut.mcp.helpers.{LB, RB, Q, jp, js, jo1, jo2, jo3, escape_json, make_tool_result, make_error_response, make_tool_schema_multi, extract_nested_string, extract_arguments_dict}
 use std.nogc_async_mut.mcp.helpers_compat.{make_tool_schema, make_no_param_tool, make_prop, make_prop_bool, make_prop_int}
 use std.nogc_async_mut.mcp.jj.jj_runner.{JjResult, jj_run, jj_run_with_args, shell_quote}
-
-fn owned_work_bookmark(name: String) -> bool:
-    if not name.starts_with("work/") or name.len() > 96 or name.ends_with("/") or name.contains("..") or name.contains("//"):
-        return false
-    for ch in name.chars():
-        if not ((ch >= "a" and ch <= "z") or (ch >= "0" and ch <= "9") or ch == "/" or ch == "-" or ch == "_" or ch == "."):
-            return false
-    true
 use std.nogc_async_mut.mcp.jj.warning.{git_compat_warning, git_compat_warning_no_equiv, show_warnings, handle_git_result_simple}
 use std.nogc_async_mut.mcp.helpers.{NL}
 
@@ -66,20 +58,24 @@ fn schema_git_push() -> String:
     parts.append(make_prop("remote", "Remote name (default: origin)"))
     parts.append(",")
     parts.append(make_prop("bookmark", "Bookmark (branch) name to push"))
+    parts.append(",")
+    parts.append(make_prop_bool("all", "Push all bookmarks"))
     parts.append(RB())
     val props = parts.join("")
-    make_tool_schema_multi("git_push", "[Git compat] Push one owned work/* bookmark", props, "[" + js("bookmark") + "]", false, false, false)
+    make_tool_schema_multi("git_push", "[Git compat] Push to remote (translates to jj git push)", props, "[]", false, false, false)
 
 fn handle_git_push(id: String, body: String, repo_path: String) -> String:
     val args = extract_arguments_dict(body)
     val remote = args.get("remote") ?? ""
     val bookmark = args.get("bookmark") ?? ""
-    if not owned_work_bookmark(bookmark):
-        return make_error_response(id, -32602, "bookmark must be an explicit owned work/* ref; protected and bulk pushes are denied")
+    val all = args.get("all") ?? ""
     var cmd = "git push"
     if remote != "":
         cmd = cmd + " --remote " + shell_quote(remote)
-    cmd = cmd + " --bookmark " + shell_quote(bookmark)
+    if all == "true":
+        cmd = cmd + " --all"
+    elif bookmark != "":
+        cmd = cmd + " --bookmark " + shell_quote(bookmark)
     handle_git_result_simple(id, jj_run(cmd, repo_path), "git_push", "jj git push", "jj_push")
 
 # =============================================================================
@@ -160,3 +156,4 @@ fn handle_git_tag(id: String, body: String, repo_path: String) -> String:
         make_tool_result(id, msg)
     else:
         make_error_response(id, -32603, result.stderr)
+

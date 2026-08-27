@@ -1,8 +1,7 @@
 # Bug: nil Dict receiver — `.get()` returns phantom Some while `.len()` returns -1 (stub Module, stage-4 segfault lineage)
 
 **Date:** 2026-07-27
-Status: CLOSED (not reproducible)
-Status re-verified 2026-08-17 by source inspection (triage shard 01).
+**Status:** superseded — see CORRECTION
 **Area:** native codegen (Dict nil-receiver methods) + Rust seed (HirLowering field-type inference)
 
 ## CORRECTION (2026-07-27, supersedes the analysis above)

@@ -8,7 +8,6 @@
 # - LayoutPhase enum
 
 use compiler.hir.hir_types.{SymbolId}
-use compiler.common.dependency.visibility.{Visibility}
 
 # ============================================================================
 # Layout Phase
@@ -91,13 +90,6 @@ struct MirStatic:
     type_: MirType
     init: MirConstant?
     is_mutable: bool
-    # Zero means "use type natural alignment".  The default keeps existing
-    # MIR fixtures/source constructors compatible while giving object/linker
-    # backends one canonical place for a future explicit override.
-    alignment: i64 = 0
-    # Preserve the complete six-state source visibility lattice; `is_public`
-    # would discard Peer/Up/Internal/Package distinctions.
-    visibility: Visibility = Visibility.Private
 
 # ============================================================================
 # Type Definitions
@@ -110,6 +102,17 @@ struct MirTypeDef:
     kind: MirTypeDefKind
     is_export_c: bool      # @export("C") — generate C ABI wrappers + headers
     export_name: text      # Custom C symbol prefix, empty = use default
+    defining_module: i64 = -1
+    defining_module_name: text = ""
+    visibility: Visibility = Visibility.Private
+    declaration_kind: i64 = 0
+    is_complete_open: bool = false
+    is_dynamic_open: bool = false
+    has_base_type: bool = false
+    base_type: MirType? = nil
+    trait_types: [MirType] = []
+    declaration_fields: [MirDeclarationField] = []
+    attributes: [MirDeclarationAttribute] = []
 
 """Type definition kind."""
 enum MirTypeDefKind:
@@ -124,12 +127,34 @@ struct MirFieldDef:
     offset: i64
     has_bits_attr: bool
     bits_width: i64
+    symbol: SymbolId = SymbolId(id: -1)
+    visibility: Visibility = Visibility.Private
+    is_public: bool = false
+    is_volatile: bool = false
+    has_fixed_address: bool = false
+    fixed_address: i64 = 0
+    has_default: bool = false
+    default_expr_row: i64 = -1
+    has_source_bits: bool = false
+    source_bits: i64 = 0
+    is_reserved: bool = false
+    span_row: i64 = -1
 
 struct MirVariantDef:
     """Enum variant definition."""
     name: text
     discriminant: i64
     payload: MirType?
+    symbol: SymbolId = SymbolId(id: -1)
+    payload_kind: i64 = 0
+    has_discriminant: bool = false
+    has_resolved_discriminant: bool = true
+    discriminant_expr_row: i64 = -1
+    payload_names: [text] = []
+    payload_types: [MirType] = []
+    payload_span_rows: [i64] = []
+    attributes: [MirDeclarationAttribute] = []
+    span_row: i64 = -1
 
 # ============================================================================
 # MIR Types
@@ -163,7 +188,6 @@ enum MirTypeKind:
 
     # Aggregates
     Array(element: MirType, size: i64)
-    Dict(key: MirType, value: MirType)
     Slice(element: MirType)
     Tuple(elements: [MirType])
     Struct(symbol: SymbolId)
@@ -255,7 +279,6 @@ impl MirType:
         match self.kind:
             case Unit | Never: 0
             case Array(elem, size): elem.size_bytes() * size
-            case Dict(_, _): 8
             case Bits(width, _): (width + 7) / 8
             case Tuple(elements):
                 var total = 0
@@ -284,7 +307,6 @@ impl MirType:
         match self.kind:
             case Unit | Never: 1
             case Array(elem, _): elem.alignment()
-            case Dict(_, _): 8
             case Tuple(elements):
                 var max_align = 1
                 for e in elements:
@@ -327,6 +349,63 @@ fn mir_type_is_text(t: MirType) -> bool:
                 case _: false
         case _: false
 
+fn mir_type_probe_text(t: MirType) -> text:
+    """One-level shape name for a MirType, for level-gated diagnostic probes.
+
+    Deliberately shallow (one nesting level) so it is cheap and cannot recurse
+    on a cyclic type. Only used behind an env-gated trace flag, never on a hot
+    path. Retained per the log-retention policy."""
+    if t == nil:
+        return "nil"
+    match t.kind:
+        case I8: "I8"
+        case I16: "I16"
+        case I32: "I32"
+        case I64: "I64"
+        case U8: "U8"
+        case U16: "U16"
+        case U32: "U32"
+        case U64: "U64"
+        case F32: "F32"
+        case F64: "F64"
+        case Bool: "Bool"
+        case Char: "Char"
+        case Unit: "Unit"
+        case Ptr(_, _): "Ptr"
+        case Ref(_, _): "Ref"
+        case FuncPtr(_): "FuncPtr"
+        case Array(elem, size): "Array(" + mir_type_probe_shallow(elem) + "," + size.to_text() + ")"
+        case Dict(k, v): "Dict(" + mir_type_probe_shallow(k) + "," + mir_type_probe_shallow(v) + ")"
+        case Slice(elem): "Slice(" + mir_type_probe_shallow(elem) + ")"
+        case Tuple(_): "Tuple"
+        case Struct(sym): "Struct(" + sym.id.to_text() + ")"
+        case Enum(sym): "Enum(" + sym.id.to_text() + ")"
+        case Result(_, _): "Result"
+        case Bits(w, _): "Bits(" + w.to_text() + ")"
+        case Union(_): "Union"
+        case Never: "Never"
+        case Opaque(name): "Opaque(" + name + ")"
+        case _: "other"
+
+fn mir_type_probe_shallow(t: MirType) -> text:
+    """Leaf-only name used by `mir_type_probe_text` so nesting stays 1 deep."""
+    if t == nil:
+        return "nil"
+    match t.kind:
+        case I32: "I32"
+        case I64: "I64"
+        case U64: "U64"
+        case Bool: "Bool"
+        case Ptr(_, _): "Ptr"
+        case Array(_, _): "Array"
+        case Dict(_, _): "Dict"
+        case Slice(_): "Slice"
+        case Tuple(_): "Tuple"
+        case Struct(sym): "Struct(" + sym.id.to_text() + ")"
+        case Enum(sym): "Enum(" + sym.id.to_text() + ")"
+        case Opaque(name): "Opaque(" + name + ")"
+        case _: "other"
+
 # ============================================================================
 # Exports
 # ============================================================================
@@ -334,3 +413,4 @@ fn mir_type_is_text(t: MirType) -> bool:
 export LocalId, LocalKind, MirLocal
 export MirTypeKind, MirType, MirSignature, MirConstValue
 export mir_signature, mir_signature_simple, mir_local_id, mir_type_is_text
+export mir_type_probe_text, mir_type_probe_shallow

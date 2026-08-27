@@ -154,3 +154,39 @@ physical choices; that dependency is strictly one-way.
 ## Migration order
 
 Freeze contracts and diagnostic names; make boundary/borrow facts authoritative; replace unsafe transport and add bounded task lifecycle; add parent commit; then implement typed storage layouts and MDSOC/project pilots. Performance lowering cannot precede the raw-pointer and alias-soundness gates.
+
+## Implemented structured lifecycle boundary (2026-08-12)
+
+`src/lib/common/structural/parallel_commit/structured_lifecycle.spl` is now the
+runtime-neutral owner for the bounded lifecycle state machine. It provides a
+copied `OwnerSnapshotV1`, capacity-limited reservations, revocable scalar lease
+tokens, a fixed 11-word `StructuredTaskWireResultV1`, cooperative failure
+notifications, a join-ready receipt, and a deterministic
+validate/stage/publish owner commit. Children construct the scalar wire record;
+the owner validates its revision/task/sequence/region/kind/key binding before
+reconstructing the canonical `ResultEnvelopeV1`.
+The owner advances its revision only after every ordered result applies to a
+private staging copy; validation, conflict, stale-revision, and apply errors
+leave canonical values unchanged.
+
+`src/lib/nogc_async_mut/concurrent/structured_task_group.spl` is the hosted-task
+adapter. A child captures immutable scalars only and sends the fixed wire words
+through typed `rt_channel_*_i64` operations. The public worker choice is a
+closed scalar-operation enum; arbitrary function values are excluded until
+transitive closure isolation is compiler-proven. Channel allocation is checked,
+and the owner joins, closes, and frees every per-child channel. Cancellation is
+publication-lease revocation, not physical preemption, because `rt_pool_*`
+currently exposes no cancel operation or trap-catching boundary.
+
+`src/lib/nogc_async_mut/actor/structured_task_group.spl` adapts the same wire
+record to the canonical bounded `ActorMessage`/`ActorMailbox` representation.
+It does not turn actors into OS-thread transports. Process codecs and real
+child-trap notification remain separate prerequisites; a cooperative failure
+wire is not evidence that a runtime abort/panic was trapped.
+
+`src/lib/nogc_async_mut/process_transport/structured_task_group.spl` now owns
+the process codec boundary: a bounded, version-tagged `STP1` frame containing
+the eleven scalar wire words. The adapter validates codec shape and scalar
+bounds before the common task/revision/lease checks. Process creation,
+supervision, OS-pipe lifecycle, and trapped-exit notification remain separate
+runtime responsibilities and are not inferred from codec coverage.

@@ -1,0 +1,61 @@
+# Generate the exact FV2 RV32 ADD proof/cover/mutation bundle consumed by
+# scripts/rtl/run-fv2-rv32-add-formal.shs.
+
+use std.cli.cli_util.{get_cli_args}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
+use std.nogc_sync_mut.io.file_ops.{file_write}
+use compiler.backend.backend.riscv_scalar_rvfi_formal.{
+    RiscvScalarFormalArtifactsV1, generate_rv32_add_formal_artifacts}
+
+pub fn rv32_bundle_name_is_safe(name: text) -> bool:
+    if name == "": return false
+    var index = 0
+    while index < name.len():
+        val code = name.char_code_at(index)
+        val ascii_letter = (code >= 97 and code <= 122) or (code >= 65 and code <= 90)
+        val ascii_digit = code >= 48 and code <= 57
+        if not (ascii_letter or ascii_digit or code == 95): return false
+        index = index + 1
+    true
+
+fn write_rv32_bundle_file(dir: text, name: text, content: text) -> bool:
+    content != "" and file_write(dir + "/" + name, content)
+
+fn write_rv32_add_formal_bundle_v1(
+    dir: text,
+    artifacts: RiscvScalarFormalArtifactsV1
+) -> bool:
+    if dir == "" or artifacts.diagnostic() != "": return false
+    if not dir_create_all(dir): return false
+    write_rv32_bundle_file(dir, artifacts.core_file, artifacts.core_vhdl) and
+        write_rv32_bundle_file(dir, artifacts.harness_file, artifacts.harness_vhdl) and
+        write_rv32_bundle_file(dir, artifacts.mutant_harness_file,
+            artifacts.mutant_harness_vhdl) and
+        write_rv32_bundle_file(dir, artifacts.prove_sby_file, artifacts.prove_sby) and
+        write_rv32_bundle_file(dir, artifacts.cover_sby_file, artifacts.cover_sby) and
+        write_rv32_bundle_file(dir, artifacts.mutant_sby_file, artifacts.mutant_sby) and
+        write_rv32_bundle_file(dir,
+            artifacts.module_name + "_formal_manifest.sdn", artifacts.manifest)
+
+fn main() -> i64:
+    val args = get_cli_args()
+    if args.len() != 2:
+        eprint "Usage: riscv_add_formal_bundle OUTPUT_DIR MODULE_NAME"
+        return 2
+    val output_dir = args[0]
+    val module_name = args[1]
+    if output_dir == "" or not rv32_bundle_name_is_safe(module_name):
+        eprint "FV2-E-RISCV-BUNDLE-IDENTITY: invalid output/module identity"
+        return 2
+    match generate_rv32_add_formal_artifacts(module_name, 0x002081B3):
+        case Err(message):
+            eprint message
+            3
+        case Ok(artifacts):
+            if not write_rv32_add_formal_bundle_v1(output_dir, artifacts):
+                eprint "FV2-E-RISCV-BUNDLE-WRITE: generated bundle could not be retained"
+                4
+            else:
+                print "FV2-RISCV-BUNDLE-WRITTEN module=" + module_name +
+                    " rtl=" + artifacts.rtl_hash
+                0

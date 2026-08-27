@@ -24,8 +24,19 @@ from refc_binary import {
     shared_heap_incref,
     shared_heap_decref
 }
+use std.nogc_sync_mut.io.time_ops.{time_now_micros}
+use std.common.structural.transfer.{
+    TransferEnvelopeV1, ParallelExecutionDomain, ParallelTransferMode,
+    ParallelTransferPayload,
+    parallel_transfer_mode_to_u8, parallel_transfer_payload_to_u8,
+    transfer_envelope_v1, transfer_envelope_v1_boundary_allowed,
+    encode_transfer_envelope, decode_transfer_envelope
+}
 
 export MessageTransfer, TransferResult, TransferStats, ValueWrapper
+export SafeTransferPacket, SafeTransferResult, safe_send_int, safe_receive_int
+export safe_send_handle
+export safe_packet_valid
 export send_value, receive_value, estimate_size
 
 # ============================================================================
@@ -56,7 +67,7 @@ impl ValueWrapper:
     fn is_shared() -> bool:
         """Check if this wrapper uses shared heap."""
         match self:
-            case SharedRef(_): true
+            case SharedRef(ref): ref.id > 0 and ref.offset >= 0 and ref.length > 0
             case Composite(parts):
                 parts.any(\p: p.is_shared())
             case _: false
@@ -78,7 +89,9 @@ impl ValueWrapper:
     fn shared_refs() -> [BinaryRef]:
         """Get all shared references in this wrapper."""
         match self:
-            case SharedRef(ref): [ref]
+            case SharedRef(ref):
+                if ref.id <= 0 or ref.offset < 0 or ref.length <= 0: []
+                else: [ref]
             case Composite(parts):
                 parts.flat_map(\p: p.shared_refs())
             case _: []
@@ -316,18 +329,11 @@ impl MessageTransfer:
         self.stats.total_bytes = self.stats.total_bytes + size
 
         if self.strategy.should_share(size):
-            # Large text - use shared heap
-            # In real impl, would allocate text bytes in shared heap
-            val result = self.shared_heap.allocate(0, size)  # data_ptr placeholder
-            match result:
-                case Success(ref):
-                    self.stats.shared_transfers = self.stats.shared_transfers + 1
-                    self.stats.shared_bytes = self.stats.shared_bytes + size
-                    self.stats.bytes_saved = self.stats.bytes_saved + size
-                    TransferResult.Success(ValueWrapper.SharedRef(ref))
-                case _:
-                    self.stats.failed_transfers = self.stats.failed_transfers + 1
-                    TransferResult.OutOfMemory
+            # A Simple text value has no stable byte address at this boundary.
+            # Never manufacture pointer 0 or put an unowned address in a
+            # shared heap reference; callers must use an encoded envelope.
+            self.stats.failed_transfers = self.stats.failed_transfers + 1
+            TransferResult.InvalidValue
         else:
             # Small text - inline
             self.stats.inline_transfers = self.stats.inline_transfers + 1
@@ -388,6 +394,62 @@ impl MessageTransfer:
 impl Display for MessageTransfer:
     fn fmt() -> text:
         "MessageTransfer(transfers={self.stats.total_transfers}, shared={self.stats.shared_transfers})"
+
+# Safe scalar transport used by actor/process boundaries. The envelope is the
+# authority-bearing wire record; the value is decoded only after envelope and
+# capability validation, never reconstructed from a raw pointer.
+struct SafeTransferPacket:
+    wire: [u8]
+    value: i64
+    # Lightweight integrity checksum only; envelope/registry provide authority.
+    authenticator: i64
+
+enum SafeTransferResult:
+    SafeSuccess(value: i64)
+    Rejected
+
+fn safe_send_int(value: i64, source: ParallelExecutionDomain,
+                 target: ParallelExecutionDomain) -> SafeTransferPacket?:
+    val envelope = transfer_envelope_v1(1, 1, source, target,
+        ParallelTransferMode.Copy, ParallelTransferPayload.InlineCopy, 0, false)
+    if not transfer_envelope_v1_boundary_allowed(envelope):
+        return nil
+    val wire = encode_transfer_envelope(envelope)
+    if wire.len() == 0:
+        return nil
+    Some(SafeTransferPacket(wire: wire, value: value, authenticator: value ^ wire.len()))
+
+fn safe_receive_int(packet: SafeTransferPacket) -> SafeTransferResult:
+    val decoded = decode_transfer_envelope(packet.wire)
+    if not decoded.ok:
+        return SafeTransferResult.Rejected
+    if packet.authenticator != (packet.value ^ packet.wire.len()):
+        return SafeTransferResult.Rejected
+    if parallel_transfer_mode_to_u8(decoded.value.mode) != 0
+        or parallel_transfer_payload_to_u8(decoded.value.payload) != 0:
+        return SafeTransferResult.Rejected
+    SafeTransferResult.SafeSuccess(packet.value)
+
+fn safe_packet_valid(packet: SafeTransferPacket) -> bool:
+    val decoded = decode_transfer_envelope(packet.wire)
+    if not decoded.ok:
+        return false
+    packet.authenticator == (packet.value ^ packet.wire.len())
+        or (packet.value == 0 and packet.authenticator == packet.wire.len())
+
+fn safe_send_handle(region_id: i64, generation: i64, token: i64,
+                    source: ParallelExecutionDomain,
+                    target: ParallelExecutionDomain) -> SafeTransferPacket?:
+    val envelope = transfer_envelope_v1(region_id, generation, source, target,
+        ParallelTransferMode.FrozenShare, ParallelTransferPayload.ObjectHandle,
+        token, false)
+    if not transfer_envelope_v1_boundary_allowed(envelope):
+        return nil
+    val wire = encode_transfer_envelope(envelope)
+    if wire.len() == 0:
+        return nil
+    Some(SafeTransferPacket(wire: wire, value: 0, authenticator: wire.len()))
+
 
 # ============================================================================
 # Value Type (for type-aware wrapping)
@@ -476,5 +538,9 @@ impl Display for MailboxMessage:
 # ============================================================================
 
 fn current_time_ms() -> i64:
-    """Get current time in milliseconds (placeholder)."""
-    0
+    """Get monotonic time in milliseconds for mailbox message metadata."""
+    val micros = time_now_micros()
+    if micros <= 0:
+        0
+    else:
+        micros / 1000

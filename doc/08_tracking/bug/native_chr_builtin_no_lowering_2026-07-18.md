@@ -3,8 +3,7 @@
 - **Date:** 2026-07-18
 - **Area:** compiler / 50.mir method lowering (cranelift native lane)
 - **Severity:** high (silent wrong result, no diagnostic)
-- Status: FIXED
-- Status re-verified 2026-08-17 by source inspection (triage shard 02).
+- **Status:** source fixed — rebuilt Cranelift verification pending after bounded three-cycle diagnosis
 
 ## Symptom
 `val cp: i64 = 65; val s: text = cp.chr()` compiles without error on the
@@ -55,7 +54,7 @@ Note `char_from_code_inline` covers ASCII 32–126 + \t\n\v\f\r only; non-ASCII
 codepoints decode to "". Sufficient for SFNT name matching and 8.3/FAT text,
 NOT a general Unicode chr replacement.
 
-## Sibling defect: bare-metal `.replace` replaced only the first occurrence (source-fixed)
+## Sibling defect: native-lane `.replace` replaces only the FIRST occurrence
 In-guest proof (same probe run): `"Noto Sans Mono".replace(" ", "")` returned
 `NotoSans Mono` (one space left). Interpreter semantics = replace ALL
 (`str_replace_all`). This made `_font_candidate_embedded_postscript_name`
@@ -63,21 +62,8 @@ compute a wrong expected PostScript name, so `sfnt_manifest_names_match`
 correctly failed with reason=names even after the decode side was fixed —
 serial line `font names expected-runtime=|…|NotoSans Mono-Regular|…` vs
 decoded `…|NotoSansMono-Regular|…`. Worked around in font_registry with
-primitive char-extraction stripping.
-
-The x86_64, x86_32, ARM32, and ARM64 hardware runtimes now route
-`rt_string_replace` through a real replace-all owner. Both RISC-V64 runtime
-copies use the same two-pass non-overlapping algorithm and wrapper. The two
-32-bit owners also validate all operands as strings, accept empty replacement
-strings, cap results to their existing 1 MiB string limit, and harden bump
-allocation against alignment overflow instead of retaining their zero-return
-macro stubs. Every owner uses subtraction-form match bounds so length addition
-cannot wrap. A host-executable C regression covers repeated,
-expanding, deleting, missing, empty-needle, and aliased-replacement cases; an
-SSpec source contract pins all six owners and keeps both RISC-V64
-implementations identical. ARM32 now compiles the shared cross-target fixture
-through its hard-float object gate. Fresh 32-bit guest execution remains
-pending.
+primitive char-extraction stripping; the builtin needs an all-occurrences
+native lowering (rt_string_replace appears to be single-shot).
 
 ## Sibling defect (ROOT of the render-fault chain): Option None-discrimination broken on baremetal
 A function that legitimately returns `None` can surface in the caller's
@@ -95,23 +81,16 @@ crash risk.** Workarounds landed: flat `(arrays..., bool)` cross-module APIs
 font_registry, match unwraps only on always-Some paths, and making
 whitespace glyphs a valid Some(0x0 bitmap) instead of None.
 
-## Sibling defect: text char-extraction loop faults on baremetal (source-fixed)
+## Sibling defect: text char-extraction loop faults on baremetal
 First workaround attempt for the `.replace` defect (a `str_char_at(family, i)`
 loop stripping spaces, running during font candidate construction) produced a
 guest EXCEPTION FRAME (`rip=0x8a2bc01` in the
 `FontRasterizer.load_selected_bytes` → candidate-construction path, right
 after `font read alias bytes=1708408`, stray `51984207` printed). `s[idx]`
-text indexing on a text *parameter* exposed an ABI split: MIR passes a raw
-index and expects tagged one-character text, but the ARM32, ARM64, and x86_32
-hardware owners decoded the raw index as tagged and returned a tagged integer.
-Those owners now match the hosted/x86_64/RISC-V64 raw-index/text-result ABI;
-their generic `rt_index_get` paths decode their tagged index before forwarding.
-Hosted LLVM/Cranelift and the shared cross-target fixture now cover literal and
-dynamic text through a typed parameter. ARM32/RV32/Windows ARM64 remain
-object-only checks; rebuilt bare-metal execution is pending. The separate
-`for ch in text` iteration fault is now source-fixed through Unicode-aware
-`rt_string_chars` plus the existing counted array loop; rebuilt execution
-remains pending.
+text indexing on a text *parameter* is implicated (the same op on a LOCAL
+literal receiver works — `char_from_code_inline`'s ASCII table). Replaced
+with a literal lookup table (`_font_candidate_no_space_family`). Not
+root-caused; same erased/typed-receiver builtin family as above.
 
 ## Perf gap: pure-Simple glyf rasterization slows 4K WM re-render past 90s
 With real fonts active, the F11-maximize re-render (full-4K window + text via
@@ -129,124 +108,9 @@ cranelift --runtime-bundle simple-core --mode dynload` on a 7-line entry spun
 being killed. Tiny-entry native-build is effectively unusable for micro
 repros — separate perf bug worth its own investigation.
 
-## Root cause and fix (2026-07-19)
-A typed integer receiver can resolve `chr`/`to_char` through UFCS to an
-unrelated same-named free function in the target source closure. MIR then
-honored that resolution even though the interpreter gives primitive integer
-builtins priority. MIR now routes declared integer receivers directly to
-`rt_char_from_code`; the unresolved native-entry path remains supported, but
-only after a custom struct owner has had precedence. The shared cross-target
-native fixture forces both UFCS collisions and custom-owner calls, plus BMP
-and four-byte UTF-8 values. The pure-Simple runtime now exports the same raw
-`rt_char_from_code` ABI, the pure core interpreter accepts both method names,
-and x86/ARM bare-metal owners use the same raw-codepoint UTF-8 contract rather
-than decoding MIR integers as tagged values or replacing non-ASCII with `?`.
-Hosted, FreeBSD, AArch64, RISC-V64, ARM32/RISC-V32, and Windows ARM64 gates
-already consume the aggregate fixture; the simple-core smoke additionally
-builds and runs C5 against the pure runtime. Rebuilt execution is pending.
-
-## Invalid-scalar parity correction (2026-07-24)
-
-Canonical Simple and every native owner return empty text for negative,
-surrogate, or above-U+10FFFF inputs, but the Rust bootstrap interpreter still
-raised a runtime error. The seed now follows the established Simple contract.
-C5 adds all three invalid classes for pure simple-core; the shared cross-target
-aggregate adds the same oracle to hosted, FreeBSD, ARM, RISC-V, and
-Windows-ARM64 gates. The focused source contract prevents the seed diagnostics
-or aggregate assertions from returning. Incremental
-`cargo check -p simple-compiler` passes.
-
-## Rebuilt Cranelift receipt (2026-07-24)
-
-A self-hosted Stage4 compiler built C5 with Cranelift and the complete
-simple-core archive, but the executable returned diagnostic exit `1`:
-`65.chr() != "A"`. C5 now assigns a distinct non-success exit to each
-codepoint, invalid-scalar, NUL, and custom-owner assertion while preserving
-success exit `42`.
-
-The runtime ABI is correct: `rt_char_from_code` accepts and returns raw `i64`,
-with the result containing a tagged text handle. The remaining bug was MIR
-provenance in `method_calls_literals.spl`: both the function-pointer signature
-and `emit_call` correctly used the raw `MirType.i64()` ABI, but the tagged
-result then returned without conversion. Later equality and text method
-lowering therefore treated the handle as an integer. Current source keeps that
-raw call boundary and routes the result through the existing
-`decode_runtime_value(..., bootstrap_text_type())`/`rt_interp_cstr` path,
-producing a genuine text-typed local without narrowing the 64-bit runtime value
-on ARM32/RV32. The focused contract pins both halves. The bounded diagnosis
-consumed its three cycles, so rebuilt execution of this final source change is
-intentionally deferred to a fresh session.
-
-### Fresh verification attempt
-
-The next session rebuilt C5 three ways with the known self-hosted Stage4:
-normal in-process, `SIMPLE_NATIVE_BUILD_FORCE_WORKER=1`, and
-`SIMPLE_BOOTSTRAP=1`. All completed in under one second, produced the same
-SHA-256, retained the pre-fix direct calls to the colliding source functions,
-and returned diagnostic exit `1`. This Stage4 predates the source fix and
-ignores both worker-selection knobs, so none of those outputs is current-source
-evidence. No current-main pure-Simple compiler candidate exists; active
-Stage2/Stage3/Stage4 builds and their caches belong to older snapshots.
-
-Next verification must first build a current-main Stage4 in an isolated,
-cache-preserving lane, then build C5 once and require exit `42`.
-
-### Current-main Stage4 receipt
-
-An isolated cache-preserving compiler-only Stage4 then built from current main:
-675 files compiled, zero failures, candidate SHA-256
-`be65e69192920ef1e325c8c2ef3aed78b8f0203b8fb37109c66f6daa2ce56c01`.
-Its C5 output still returned diagnostic `1` and retained direct calls to the
-colliding free `chr`/`to_char` functions. This proves the remaining dispatch
-bug is before the tagged-result conversion.
-
-The native-entry HIR receiver has no declared type, while method resolution is
-`FreeFunction`; the old primitive guard admitted a MIR-proven integer only
-when resolution was `Unresolved`. Current source now permits primitive
-precedence for `Unresolved` and `FreeFunction` only, excludes custom owners,
-prelowers the receiver once, and reuses that local if a non-integer
-free-function call falls through. Instance, trait, and static resolutions stay
-on their normal dispatch paths. Rebuilt execution of this second source fix is
-pending the next bounded compiler candidate.
-
-### Local HIR provenance follow-up
-
-A second isolated compiler-only candidate rebuilt after the `FreeFunction`
-gate (675 files, zero failures; SHA-256
-`61864c39380c6005fc6ba1ae677e903456d2cad17afe0fac0e4c670fce023db9`).
-Its C5 binary still exited `1` and called the colliding free function. The
-exact fresh lowering object was
-`cache/objects/6a1f8fdf7334f691.o`; its method symbol size matches the linked
-candidate, ruling out the earlier export-closure, backfill, and stale-cache
-selection theories.
-
-The remaining lost proof is the prelowered binding's MIR type. Let lowering
-already records `val cp: i64` in the function-local `local_hir_types` map, so
-the primitive guard now uses that exact `HirTypeKind.Int` as its final
-provenance source, mirroring the existing text-predicate recovery. Resolution
-and custom-owner gates are unchanged. The focused contract passes 4/4 with the
-direct pure-Simple runtime.
-
-The final bounded rebuild attempt produced only a 662-file closure with five
-unresolved stubs and a candidate that segfaulted on `--version`; it is not a
-valid C5 receipt. Do not credit C5 execution until a correct 675-file candidate
-builds this source and returns `42`.
-
-### Receipt routing correction
-
-The prior C5 commands used `--entry`/`--source`. `bootstrap_main.spl` routes
-that shape to `rt_native_build` unless the special full-CLI Stage4 contract is
-active, so their byte-identical free-function output was Rust-worker evidence,
-not self-hosted MIR evidence. A correct no-stub 675-file candidate now exists
-(SHA-256
-`a654b28ca1c9f4917293f124eb75769302ec47dfb268f867105860f3997d6eb7`);
-its `--version` is `simple-bootstrap 1.0.0-beta`.
-
-The actual pure-Simple positional command reaches MIR lowering but currently
-stops earlier while lowering C5's unannotated `CharOwner`: a nil layout payload
-traps in `TypeLayout.compute_struct_layout`. HIR struct/class producers now
-populate the desugared layout presence bit and payload explicitly. The chr
-runtime-type probe also uses the established Stage4-safe
-`local_mir_type_of(...) ?? MirType.unit()` form instead of optional `if val`.
-The focused source contract passes 5/5. A rebuilt positional C5 exit `42`
-remains the required receipt.
+## Proper fix (todo)
+Trace what `resolution` becomes for a typed scalar receiver calling a
+runtime-builtin-only method name, and either (a) make HIR leave it
+`Unresolved` so the 50.mir fallback fires, or (b) add an explicit typed-lane
+lowering to `rt_char_from_code` / `string_core.char_from_code`. Then remove
+this workaround note and, optionally, revert call sites to `.chr()`.

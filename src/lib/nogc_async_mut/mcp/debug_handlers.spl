@@ -4,7 +4,7 @@
 # Split from debug_tools.spl for file size management.
 
 use std.nogc_async_mut.mcp.helpers.{LB, RB, jp, js, parse_int, extract_nested_string, make_tool_result, make_error_response}
-use std.io.{rt_debug_set_active, rt_debug_add_breakpoint_at, rt_debug_remove_breakpoint_at, rt_debug_continue_exec, rt_debug_pause_exec, rt_debug_set_step_mode_val, rt_debug_stack_trace_lines, rt_debug_local_vars, rt_debug_get_current_file, rt_debug_get_current_line, rt_debug_add_breakpoint_rich, rt_debug_add_function_breakpoint, rt_debug_set_breakpoint_enabled, rt_debug_get_breakpoint_info, rt_debug_list_breakpoints, rt_debug_get_source_lines, rt_debug_add_watch, rt_debug_remove_watch, rt_debug_list_watches, rt_debug_set_variable, rt_debug_terminate, rt_debug_select_frame, rt_debug_get_selected_frame, rt_debug_frame_locals}
+use std.io.{debug_stub_set_active, debug_stub_add_breakpoint_at, debug_stub_remove_breakpoint_at, debug_stub_continue_exec, debug_stub_pause_exec, debug_stub_set_step_mode_val, debug_stub_stack_trace_lines, debug_stub_local_vars, debug_stub_get_current_file, debug_stub_get_current_line, debug_stub_add_breakpoint_rich, debug_stub_add_function_breakpoint, debug_stub_set_breakpoint_enabled, debug_stub_get_breakpoint_info, debug_stub_list_breakpoints, debug_stub_get_source_lines, debug_stub_add_watch, debug_stub_remove_watch, debug_stub_list_watches, debug_stub_set_variable, debug_stub_terminate, debug_stub_select_frame, debug_stub_get_selected_frame, debug_stub_frame_locals}
 
 # Sub-module imports
 use std.nogc_async_mut.mcp.debug_session.{SessionState, TargetType, SessionBreakpoint, SessionDataBreakpoint, DebugSession, SessionManager}
@@ -22,7 +22,7 @@ fn handle_debug_create_session(id: String, body: String, mgr: SessionManager) ->
         target_type = "interpreter"
     val session = mgr.create_session(program, target_type)
     # Activate debug mode in backend
-    rt_debug_set_active(true)
+    debug_stub_set_active(true)
     var result_json = LB()
     result_json = result_json + jp("session_id", js(session.id))
     result_json = result_json + ","
@@ -61,7 +61,7 @@ fn handle_debug_close_session(id: String, body: String, mgr: SessionManager) -> 
     # Deactivate debug mode if no sessions remain
     val remaining = mgr.list_sessions()
     if remaining.len() == 0:
-        rt_debug_set_active(false)
+        debug_stub_set_active(false)
     var result_json = LB()
     result_json = result_json + jp("closed", js(session_id))
     result_json = result_json + ","
@@ -89,7 +89,7 @@ fn handle_debug_set_breakpoint(id: String, body: String, mgr: SessionManager) ->
     if bp_id_str == "":
         return make_error_response(id, -32602, "Session not found: " + session_id)
     # Register breakpoint in debug backend
-    rt_debug_add_breakpoint_at(file, line)
+    debug_stub_add_breakpoint_at(file, line)
     var result_json = LB()
     result_json = result_json + jp("breakpoint_id", bp_id_str)
     result_json = result_json + ","
@@ -121,7 +121,7 @@ fn handle_debug_remove_breakpoint(id: String, body: String, mgr: SessionManager)
             Err(_): pass
         for bp in session.breakpoints:
             if bp.id == bp_id_int:
-                rt_debug_remove_breakpoint_at(bp.file, bp.line)
+                debug_stub_remove_breakpoint_at(bp.file, bp.line)
     val removed = mgr.remove_breakpoint(session_id, bp_id)
     if not removed:
         return make_error_response(id, -32602, "Breakpoint not found: " + bp_id)
@@ -140,7 +140,7 @@ fn handle_debug_continue(id: String, body: String, mgr: SessionManager) -> Strin
     if not found:
         return make_error_response(id, -32602, "Session not found: " + session_id)
     # Tell backend to continue execution
-    rt_debug_continue_exec()
+    debug_stub_continue_exec()
     var result_json = LB()
     result_json = result_json + jp("session_id", js(session_id))
     result_json = result_json + ","
@@ -162,7 +162,7 @@ fn handle_debug_step(id: String, body: String, mgr: SessionManager) -> String:
     if not found:
         return make_error_response(id, -32602, "Session not found: " + session_id)
     # Send step command to backend
-    rt_debug_set_step_mode_val(step_int)
+    debug_stub_set_step_mode_val(step_int)
     var result_json = LB()
     result_json = result_json + jp("session_id", js(session_id))
     result_json = result_json + ","
@@ -180,7 +180,7 @@ fn handle_debug_get_variables(id: String, body: String, mgr: SessionManager) -> 
     if idx < 0:
         return make_error_response(id, -32602, "Session not found: " + session_id)
     # Query backend for local variables
-    val raw_vars = rt_debug_local_vars()
+    val raw_vars = debug_stub_local_vars()
     var vars_arr = "["
     var first = true
     for raw in raw_vars:
@@ -205,7 +205,7 @@ fn handle_debug_stack_trace(id: String, body: String, mgr: SessionManager) -> St
         return make_error_response(id, -32602, "Session not found: " + session_id)
     val session = mgr.sessions[idx]
     # Query backend for stack trace
-    val raw_frames = rt_debug_stack_trace_lines()
+    val raw_frames = debug_stub_stack_trace_lines()
     var frames_arr = "["
     if raw_frames.len() > 0:
         var first = true
@@ -218,8 +218,8 @@ fn handle_debug_stack_trace(id: String, body: String, mgr: SessionManager) -> St
             frame_idx = frame_idx + 1
     else:
         # Fallback: use current location from backend
-        val cur_file = rt_debug_get_current_file()
-        val cur_line = rt_debug_get_current_line()
+        val cur_file = debug_stub_get_current_file()
+        val cur_line = debug_stub_get_current_line()
         var source = session.program
         if cur_file != "":
             source = cur_file
@@ -268,7 +268,7 @@ fn handle_debug_evaluate(id: String, body: String, mgr: SessionManager) -> Strin
             Ok(v): frame_idx = v
             Err(_): pass
     # Evaluate using Pure Simple evaluator (works in interpreter mode)
-    val vars_list = rt_debug_local_vars()
+    val vars_list = debug_stub_local_vars()
     val eval_typed = eval_expression(expression, vars_list)
     val eval_type = eval_get_type(eval_typed)
     val display_result = eval_get_value(eval_typed)
@@ -296,7 +296,7 @@ fn handle_debug_set_function_breakpoint(id: String, body: String, mgr: SessionMa
     if idx < 0:
         return make_error_response(id, -32602, "Session not found: " + session_id)
     val condition = extract_nested_string(body, "arguments", "condition")
-    val bp_id = rt_debug_add_function_breakpoint(func_name, condition)
+    val bp_id = debug_stub_add_function_breakpoint(func_name, condition)
     var result_json = LB()
     result_json = result_json + jp("breakpoint_id", bp_id.to_string())
     result_json = result_json + "," + jp("session_id", js(session_id))
@@ -327,7 +327,7 @@ fn handle_debug_enable_breakpoint(id: String, body: String, mgr: SessionManager)
     var enabled_val = 1
     if enabled_str == "false" or enabled_str == "0":
         enabled_val = 0
-    rt_debug_set_breakpoint_enabled(bp_id, enabled_val)
+    debug_stub_set_breakpoint_enabled(bp_id, enabled_val)
     var result_json = LB()
     result_json = result_json + jp("breakpoint_id", bp_id.to_string())
     result_json = result_json + "," + jp("enabled", enabled_str)
@@ -359,7 +359,7 @@ fn handle_debug_get_source(id: String, body: String, mgr: SessionManager) -> Str
         match cr:
             Ok(v): line_count = v
             Err(_): pass
-    val source_text = rt_debug_get_source_lines(src_file, start_line, line_count)
+    val source_text = debug_stub_get_source_lines(src_file, start_line, line_count)
     var result_json = LB()
     result_json = result_json + jp("session_id", js(session_id))
     result_json = result_json + "," + jp("file", js(src_file))
@@ -382,7 +382,7 @@ fn handle_debug_watch(id: String, body: String, mgr: SessionManager) -> String:
         val expr = extract_nested_string(body, "arguments", "expression")
         if expr == "":
             return make_error_response(id, -32602, "Missing expression for add")
-        val added = rt_debug_add_watch(expr)
+        val added = debug_stub_add_watch(expr)
         var result_json = LB()
         result_json = result_json + jp("action", js("add"))
         result_json = result_json + "," + jp("expression", js(expr))
@@ -396,7 +396,7 @@ fn handle_debug_watch(id: String, body: String, mgr: SessionManager) -> String:
         val expr = extract_nested_string(body, "arguments", "expression")
         if expr == "":
             return make_error_response(id, -32602, "Missing expression for remove")
-        val removed = rt_debug_remove_watch(expr)
+        val removed = debug_stub_remove_watch(expr)
         var result_json = LB()
         result_json = result_json + jp("action", js("remove"))
         result_json = result_json + "," + jp("expression", js(expr))
@@ -407,7 +407,7 @@ fn handle_debug_watch(id: String, body: String, mgr: SessionManager) -> String:
         result_json = result_json + RB()
         return make_tool_result(id, result_json)
     elif action == "list":
-        val watches = rt_debug_list_watches()
+        val watches = debug_stub_list_watches()
         var result_json = LB()
         result_json = result_json + jp("action", js("list"))
         result_json = result_json + "," + jp("watches", watches)
@@ -437,7 +437,7 @@ fn handle_debug_set_variable(id: String, body: String, mgr: SessionManager) -> S
         match fr:
             Ok(v): frame_idx = v
             Err(_): pass
-    val ok = rt_debug_set_variable(var_name, var_value, frame_idx)
+    val ok = debug_stub_set_variable(var_name, var_value, frame_idx)
     var hit_ids = "["
     var first_hit = true
     var hit_count = 0
@@ -575,7 +575,7 @@ fn handle_debug_terminate(id: String, body: String, mgr: SessionManager) -> Stri
     val found = mgr.set_state(session_id, "terminated")
     if not found:
         return make_error_response(id, -32602, "Session not found: " + session_id)
-    rt_debug_terminate()
+    debug_stub_terminate()
     var result_json = LB()
     result_json = result_json + jp("session_id", js(session_id))
     result_json = result_json + "," + jp("state", js("terminated"))

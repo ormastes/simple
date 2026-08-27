@@ -1,0 +1,570 @@
+# codex-impl
+# General exact RT/HAL IO schema. The controller owns and bounds the byte arena;
+# rows contain only scalar spans and are frozen before child dispatch. Providers
+# return child-created arenas and the parent validates before comparing.
+
+use std.common.rt_hal.model.{RtHalOperationKind}
+use std.common.rt_hal.exact_type_id.{RtHalExactTypeForeignCandidate, RT_HAL_EXACT_TYPE_ID_VERSION}
+use std.nogc_sync_mut.rt_hal.exact_type_identity_owner.{RtHalExactTypeRegistryOwner, RtHalExactTypeRegistrySeal, RtHalExactTypeAdmissionBatch, rt_hal_exact_type_registry_readmit_five, rt_hal_exact_type_registry_validates, rt_hal_exact_type_admission_equal}
+use std.nogc_sync_mut.rt_hal.exact_byte_codec_owner.{RtHalCodecError, RtHalExactIoCodecSnapshot, rt_hal_codec_snapshot_finalize, rt_hal_codec_snapshot_span, rt_hal_codec_snapshot_error, rt_hal_codec_parent_snapshot_compare, rt_hal_codec_parent_batch_begin, rt_hal_codec_parent_batch_add, rt_hal_codec_parent_batch_abort, rt_hal_codec_parent_batch_commit, rt_hal_codec_snapshot_release}
+
+pub const RT_HAL_EXACT_IO_VERSION_V2 = 2
+# Conservative retained-size charges. They intentionally include array/header
+# and alignment slack rather than relying on a backend-specific sizeof ABI.
+pub const RT_HAL_EXACT_IO_REQUEST_CHARGE = 320
+pub const RT_HAL_EXACT_IO_RECEIPT_CHARGE = 512
+pub const RT_HAL_EXACT_IO_JOIN_CHARGE = 64
+pub const RT_HAL_EXACT_IO_ADMISSION_CHARGE = 384
+
+pub enum RtHalExactIoDomain:
+    Operation
+    Input
+    Output
+    Error
+    Effect
+
+pub enum RtHalExactEncoding:
+    Unit
+    RawBytes
+    DeclaredUtf8Bytes
+    CanonicalLeSigned
+    CanonicalLeUnsigned
+    CanonicalIeee754
+    CanonicalCodecTranscript
+
+pub struct RtHalExactByteSpan:
+    offset: i64
+    length: i64
+
+pub struct RtHalExactIoBounds:
+    max_rows: i64
+    max_arena_bytes: i64
+    max_field_bytes: i64
+
+pub struct RtHalExactIoRequestRow:
+    version: i64
+    case_id: i64
+    operation: RtHalOperationKind
+    operation_type: RtHalExactTypeForeignCandidate
+    operation_type_descriptor: RtHalExactByteSpan
+    operation_encoding: RtHalExactEncoding
+    operation_domain: RtHalExactIoDomain
+    operation_identity: RtHalExactByteSpan
+    operation_events: RtHalExactByteSpan
+    schema_id: i64
+    input_type: RtHalExactTypeForeignCandidate
+    input_type_descriptor: RtHalExactByteSpan
+    input_encoding: RtHalExactEncoding
+    input_domain: RtHalExactIoDomain
+    input: RtHalExactByteSpan
+    input_events: RtHalExactByteSpan
+
+pub enum RtHalExactOutcomeKind:
+    Value
+    Error
+    Blocked
+    Unsupported
+    TimedOut
+
+# Process adapters return one of these typed states. In particular malformed
+# or nonzero-exit output can never be reported as a timeout.
+pub enum RtHalExactIoJoinStatus:
+    Completed
+    TimedOut
+    Cancelled
+    SpawnFailure
+    ExitFailure
+    ProtocolFailure
+    MemoryBound
+
+pub struct RtHalExactIoJoinReceipt:
+    status: RtHalExactIoJoinStatus
+    receipt_index: i64
+    child_exit_code: i64
+    reaped: bool
+
+pub struct RtHalExactIoReceiptRow:
+    version: i64
+    case_id: i64
+    request_index: i64
+    provider_ordinal: i64
+    schema_id: i64
+    output_type: RtHalExactTypeForeignCandidate
+    output_type_descriptor: RtHalExactByteSpan
+    output_encoding: RtHalExactEncoding
+    error_type: RtHalExactTypeForeignCandidate
+    error_type_descriptor: RtHalExactByteSpan
+    error_encoding: RtHalExactEncoding
+    effect_type: RtHalExactTypeForeignCandidate
+    effect_type_descriptor: RtHalExactByteSpan
+    effect_encoding: RtHalExactEncoding
+    output_domain: RtHalExactIoDomain
+    error_domain: RtHalExactIoDomain
+    effect_domain: RtHalExactIoDomain
+    outcome: RtHalExactOutcomeKind
+    output: RtHalExactByteSpan
+    error: RtHalExactByteSpan
+    effect: RtHalExactByteSpan
+    output_events: RtHalExactByteSpan
+    error_events: RtHalExactByteSpan
+    effect_events: RtHalExactByteSpan
+    observed_once: bool
+    truncated: bool
+
+# Structure-of-arrays carrier. `bytes` is the sole payload buffer; row arrays
+# remain aligned by index. This avoids per-field arrays and comparator copies.
+pub struct RtHalExactIoArena:
+    bytes: [u8]
+    requests: [RtHalExactIoRequestRow]
+    receipts: [RtHalExactIoReceiptRow]
+
+fn rt_hal_exact_span_error(span: RtHalExactByteSpan, arena_bytes: i64, max_field_bytes: i64) -> text:
+    if span.offset < 0 or span.length < 0: return "RTHAL-E-IO-SPAN"
+    if span.length > max_field_bytes: return "RTHAL-E-MEMORY-BOUND"
+    # Subtraction form avoids overflow in offset + length.
+    if span.offset > arena_bytes or span.length > arena_bytes - span.offset:
+        return "RTHAL-E-IO-SPAN"
+    ""
+
+fn rt_hal_exact_encoding_error(encoding: RtHalExactEncoding, span: RtHalExactByteSpan) -> text:
+    if encoding == RtHalExactEncoding.Unit and span.length != 0:
+        return "RTHAL-E-IO-ENCODING"
+    if encoding == RtHalExactEncoding.CanonicalLeSigned or encoding == RtHalExactEncoding.CanonicalLeUnsigned:
+        if span.length != 1 and span.length != 2 and span.length != 4 and span.length != 8:
+            return "RTHAL-E-IO-ENCODING"
+    if encoding == RtHalExactEncoding.CanonicalIeee754 and span.length != 4 and span.length != 8:
+        return "RTHAL-E-IO-ENCODING"
+    ""
+
+fn rt_hal_exact_events_error(encoding: RtHalExactEncoding, events: RtHalExactByteSpan, arena_bytes: i64, max_field_bytes: i64) -> text:
+    val span_problem = rt_hal_exact_span_error(events, arena_bytes, max_field_bytes)
+    if span_problem != "": return span_problem
+    if encoding == RtHalExactEncoding.CanonicalCodecTranscript:
+        if events.length <= 0 or events.length % 16 != 0: return "RTHAL-E-IO-TRANSCRIPT"
+    elif events.length != 0:
+        return "RTHAL-E-IO-TRANSCRIPT"
+    ""
+
+fn rt_hal_exact_candidate_error(candidate: RtHalExactTypeForeignCandidate, descriptor: RtHalExactByteSpan, arena_bytes: i64, max_field_bytes: i64) -> text:
+    if not candidate.valid or candidate.schema_version != RT_HAL_EXACT_TYPE_ID_VERSION:
+        return "RTHAL-E-IO-TYPE"
+    if candidate.descriptor_length <= 0 or candidate.descriptor_length != descriptor.length:
+        return "RTHAL-E-IO-TYPE"
+    rt_hal_exact_span_error(descriptor, arena_bytes, max_field_bytes)
+
+fn rt_hal_exact_utf8_error(bytes: [u8], span: RtHalExactByteSpan) -> text:
+    var index = 0
+    while index < span.length:
+        val first = bytes[span.offset + index] as i64
+        if first <= 0x7f:
+            index = index + 1
+            continue
+        var needed = 0
+        var minimum_second = 0x80
+        var maximum_second = 0xbf
+        if first >= 0xc2 and first <= 0xdf:
+            needed = 1
+        elif first >= 0xe0 and first <= 0xef:
+            needed = 2
+            if first == 0xe0: minimum_second = 0xa0
+            if first == 0xed: maximum_second = 0x9f
+        elif first >= 0xf0 and first <= 0xf4:
+            needed = 3
+            if first == 0xf0: minimum_second = 0x90
+            if first == 0xf4: maximum_second = 0x8f
+        else:
+            return "RTHAL-E-IO-UTF8"
+        if needed > span.length - index - 1: return "RTHAL-E-IO-UTF8"
+        val second = bytes[span.offset + index + 1] as i64
+        if second < minimum_second or second > maximum_second: return "RTHAL-E-IO-UTF8"
+        var lane = 2
+        while lane <= needed:
+            val continuation = bytes[span.offset + index + lane] as i64
+            if continuation < 0x80 or continuation > 0xbf: return "RTHAL-E-IO-UTF8"
+            lane = lane + 1
+        index = index + needed + 1
+    ""
+
+pub fn rt_hal_exact_io_arena_error(arena: RtHalExactIoArena, bounds: RtHalExactIoBounds) -> text:
+    if bounds.max_rows <= 0 or bounds.max_arena_bytes < 0 or bounds.max_field_bytes < 0:
+        return "RTHAL-E-MEMORY-BOUND"
+    if arena.bytes.len() > bounds.max_arena_bytes or arena.requests.len() > bounds.max_rows or arena.receipts.len() > bounds.max_rows - arena.requests.len():
+        return "RTHAL-E-MEMORY-BOUND"
+    var prior_request_id = -1
+    for request in arena.requests:
+        if request.version != RT_HAL_EXACT_IO_VERSION_V2 or request.operation_domain != RtHalExactIoDomain.Operation or request.input_domain != RtHalExactIoDomain.Input:
+            return "RTHAL-E-IO-SCHEMA"
+        if request.case_id < 0 or request.case_id <= prior_request_id or request.schema_id <= 0:
+            return "RTHAL-E-IO-SCHEMA"
+        val operation_type_problem = rt_hal_exact_candidate_error(request.operation_type, request.operation_type_descriptor, arena.bytes.len(), bounds.max_field_bytes)
+        if operation_type_problem != "": return operation_type_problem
+        val input_type_problem = rt_hal_exact_candidate_error(request.input_type, request.input_type_descriptor, arena.bytes.len(), bounds.max_field_bytes)
+        if input_type_problem != "": return input_type_problem
+        val operation_problem = rt_hal_exact_span_error(request.operation_identity, arena.bytes.len(), bounds.max_field_bytes)
+        if operation_problem != "": return operation_problem
+        if request.operation_identity.length <= 0: return "RTHAL-E-IO-SCHEMA"
+        val operation_encoding_problem = rt_hal_exact_encoding_error(request.operation_encoding, request.operation_identity)
+        if operation_encoding_problem != "": return operation_encoding_problem
+        val operation_events_problem = rt_hal_exact_events_error(request.operation_encoding, request.operation_events, arena.bytes.len(), bounds.max_field_bytes)
+        if operation_events_problem != "": return operation_events_problem
+        if request.operation_encoding == RtHalExactEncoding.DeclaredUtf8Bytes:
+            val utf8_problem = rt_hal_exact_utf8_error(arena.bytes, request.operation_identity)
+            if utf8_problem != "": return utf8_problem
+        val span_problem = rt_hal_exact_span_error(request.input, arena.bytes.len(), bounds.max_field_bytes)
+        if span_problem != "": return span_problem
+        val encoding_problem = rt_hal_exact_encoding_error(request.input_encoding, request.input)
+        if encoding_problem != "": return encoding_problem
+        val input_events_problem = rt_hal_exact_events_error(request.input_encoding, request.input_events, arena.bytes.len(), bounds.max_field_bytes)
+        if input_events_problem != "": return input_events_problem
+        if request.input_encoding == RtHalExactEncoding.DeclaredUtf8Bytes:
+            val utf8_problem = rt_hal_exact_utf8_error(arena.bytes, request.input)
+            if utf8_problem != "": return utf8_problem
+        prior_request_id = request.case_id
+    var prior_receipt_id = -1
+    var prior_provider = -1
+    for receipt in arena.receipts:
+        if receipt.version != RT_HAL_EXACT_IO_VERSION_V2 or receipt.output_domain != RtHalExactIoDomain.Output or receipt.error_domain != RtHalExactIoDomain.Error or receipt.effect_domain != RtHalExactIoDomain.Effect:
+            return "RTHAL-E-IO-SCHEMA"
+        if receipt.case_id < 0 or receipt.request_index < 0 or receipt.request_index >= arena.requests.len() or receipt.provider_ordinal < 0 or receipt.schema_id <= 0:
+            return "RTHAL-E-IO-SCHEMA"
+        if arena.requests[receipt.request_index].case_id != receipt.case_id or arena.requests[receipt.request_index].schema_id != receipt.schema_id:
+            return "RTHAL-E-IO-BATCH"
+        if receipt.case_id < prior_receipt_id or (receipt.case_id == prior_receipt_id and receipt.provider_ordinal <= prior_provider):
+            return "RTHAL-E-CASE-ORDER"
+        val output_type_problem = rt_hal_exact_candidate_error(receipt.output_type, receipt.output_type_descriptor, arena.bytes.len(), bounds.max_field_bytes)
+        if output_type_problem != "": return output_type_problem
+        val error_type_problem = rt_hal_exact_candidate_error(receipt.error_type, receipt.error_type_descriptor, arena.bytes.len(), bounds.max_field_bytes)
+        if error_type_problem != "": return error_type_problem
+        val effect_type_problem = rt_hal_exact_candidate_error(receipt.effect_type, receipt.effect_type_descriptor, arena.bytes.len(), bounds.max_field_bytes)
+        if effect_type_problem != "": return effect_type_problem
+        if not receipt.observed_once or receipt.truncated:
+            return "RTHAL-E-IO-RECEIPT"
+        val output_problem = rt_hal_exact_span_error(receipt.output, arena.bytes.len(), bounds.max_field_bytes)
+        if output_problem != "": return output_problem
+        val error_problem = rt_hal_exact_span_error(receipt.error, arena.bytes.len(), bounds.max_field_bytes)
+        if error_problem != "": return error_problem
+        val effect_problem = rt_hal_exact_span_error(receipt.effect, arena.bytes.len(), bounds.max_field_bytes)
+        if effect_problem != "": return effect_problem
+        val output_encoding_problem = rt_hal_exact_encoding_error(receipt.output_encoding, receipt.output)
+        if output_encoding_problem != "": return output_encoding_problem
+        val error_encoding_problem = rt_hal_exact_encoding_error(receipt.error_encoding, receipt.error)
+        if error_encoding_problem != "": return error_encoding_problem
+        val effect_encoding_problem = rt_hal_exact_encoding_error(receipt.effect_encoding, receipt.effect)
+        if effect_encoding_problem != "": return effect_encoding_problem
+        val output_events_problem = rt_hal_exact_events_error(receipt.output_encoding, receipt.output_events, arena.bytes.len(), bounds.max_field_bytes)
+        if output_events_problem != "": return output_events_problem
+        val error_events_problem = rt_hal_exact_events_error(receipt.error_encoding, receipt.error_events, arena.bytes.len(), bounds.max_field_bytes)
+        if error_events_problem != "": return error_events_problem
+        val effect_events_problem = rt_hal_exact_events_error(receipt.effect_encoding, receipt.effect_events, arena.bytes.len(), bounds.max_field_bytes)
+        if effect_events_problem != "": return effect_events_problem
+        if receipt.output_encoding == RtHalExactEncoding.DeclaredUtf8Bytes:
+            val utf8_problem = rt_hal_exact_utf8_error(arena.bytes, receipt.output)
+            if utf8_problem != "": return utf8_problem
+        if receipt.error_encoding == RtHalExactEncoding.DeclaredUtf8Bytes:
+            val utf8_problem = rt_hal_exact_utf8_error(arena.bytes, receipt.error)
+            if utf8_problem != "": return utf8_problem
+        if receipt.effect_encoding == RtHalExactEncoding.DeclaredUtf8Bytes:
+            val utf8_problem = rt_hal_exact_utf8_error(arena.bytes, receipt.effect)
+            if utf8_problem != "": return utf8_problem
+        if receipt.outcome == RtHalExactOutcomeKind.Value and receipt.error.length != 0:
+            return "RTHAL-E-IO-RECEIPT"
+        if receipt.outcome == RtHalExactOutcomeKind.Error and receipt.output.length != 0:
+            return "RTHAL-E-IO-RECEIPT"
+        if receipt.outcome != RtHalExactOutcomeKind.Value and receipt.outcome != RtHalExactOutcomeKind.Error and (receipt.output.length != 0 or receipt.error.length != 0):
+            return "RTHAL-E-IO-RECEIPT"
+        prior_receipt_id = receipt.case_id
+        prior_provider = receipt.provider_ordinal
+    ""
+
+fn rt_hal_exact_span_equal(left_bytes: [u8], left: RtHalExactByteSpan, right_bytes: [u8], right: RtHalExactByteSpan) -> bool:
+    if left.length != right.length: return false
+    var index = 0
+    while index < left.length:
+        if left_bytes[left.offset + index] != right_bytes[right.offset + index]: return false
+        index = index + 1
+    true
+
+# Caller must first validate both arenas with rt_hal_exact_io_arena_error.
+# Comparison performs no allocation and preserves byte-exact NaN/text/error and
+# effect receipts instead of normalizing them through host-language values.
+fn rt_hal_exact_io_receipt_equal_owned(arena: RtHalExactIoArena, left_index: i64, right_index: i64) -> bool:
+    if left_index < 0 or right_index < 0 or left_index >= arena.receipts.len() or right_index >= arena.receipts.len():
+        return false
+    val left = arena.receipts[left_index]
+    val right = arena.receipts[right_index]
+    if not left.observed_once or not right.observed_once or left.truncated or right.truncated: return false
+    if left.version != right.version or left.version != RT_HAL_EXACT_IO_VERSION_V2:
+        return false
+    if left.case_id != right.case_id or left.schema_id != right.schema_id:
+        return false
+    if left.output_type != right.output_type or left.output_encoding != right.output_encoding or left.outcome != right.outcome:
+        return false
+    if left.error_type != right.error_type or left.error_encoding != right.error_encoding or left.effect_type != right.effect_type or left.effect_encoding != right.effect_encoding:
+        return false
+    if left.output_domain != right.output_domain or left.error_domain != right.error_domain or left.effect_domain != right.effect_domain:
+        return false
+    rt_hal_exact_span_equal(arena.bytes, left.output, arena.bytes, right.output)
+        and rt_hal_exact_span_equal(arena.bytes, left.error, arena.bytes, right.error)
+        and rt_hal_exact_span_equal(arena.bytes, left.effect, arena.bytes, right.effect)
+
+# Parent-side request/receipt binding. Foreign providers may replay the frozen
+# Pure effect bytes but cannot change request identity or claim Pure ownership.
+pub fn rt_hal_exact_io_request_receipt_match(request: RtHalExactIoRequestRow, receipt: RtHalExactIoReceiptRow) -> bool:
+    request.version == RT_HAL_EXACT_IO_VERSION_V2
+        and receipt.version == RT_HAL_EXACT_IO_VERSION_V2
+        and request.case_id == receipt.case_id
+        and request.schema_id == receipt.schema_id
+
+pub fn rt_hal_exact_io_batch_error(arena: RtHalExactIoArena) -> text:
+    var index = 0
+    while index < arena.receipts.len():
+        val receipt = arena.receipts[index]
+        if receipt.request_index < 0 or receipt.request_index >= arena.requests.len(): return "RTHAL-E-IO-BATCH"
+        if not rt_hal_exact_io_request_receipt_match(arena.requests[receipt.request_index], receipt):
+            return "RTHAL-E-IO-BATCH"
+        index = index + 1
+    ""
+
+# Hold directly in the parent controller. `me` prevents receiver-copy loss;
+# callers pass scalar row indices, never arenas or byte buffers, on comparison.
+pub class RtHalExactIoOwner:
+    arena: RtHalExactIoArena
+
+    me receipts_equal(left_index: i64, right_index: i64) -> bool:
+        # Compatibility owner has no admitted type authority. V2 callers must
+        # use RtHalExactIoAdmittedOwner; candidate equality is never trusted.
+        false
+
+    # Cold admission accounting for every retained owner: canonical input
+    # rows/payload, one receipt arena per provider, result rows, and wave
+    # scratch. Returns -1 rather than allowing arithmetic wrap or a partial
+    # batch. The caller allocates only after this succeeds.
+    me retained_bytes(bounds: RtHalExactIoBounds, provider_count: i64, worker_count: i64, max_retained_bytes: i64) -> i64:
+        if provider_count <= 0 or worker_count <= 0 or max_retained_bytes <= 0:
+            return -1
+        val validation = rt_hal_exact_io_arena_error(self.arena, bounds)
+        if validation != "": return -1
+        val request_count = self.arena.requests.len()
+        if request_count <= 0 or provider_count > max_retained_bytes / RT_HAL_EXACT_IO_JOIN_CHARGE:
+            return -1
+        var retained = provider_count * RT_HAL_EXACT_IO_JOIN_CHARGE
+        if request_count > (max_retained_bytes - retained) / RT_HAL_EXACT_IO_REQUEST_CHARGE:
+            return -1
+        retained = retained + request_count * RT_HAL_EXACT_IO_REQUEST_CHARGE
+        if request_count > max_retained_bytes / provider_count:
+            return -1
+        val receipt_count = request_count * provider_count
+        if self.arena.receipts.len() != receipt_count: return -1
+        if receipt_count > (max_retained_bytes - retained) / RT_HAL_EXACT_IO_RECEIPT_CHARGE:
+            return -1
+        retained = retained + receipt_count * RT_HAL_EXACT_IO_RECEIPT_CHARGE
+        if receipt_count > (max_retained_bytes - retained) / RT_HAL_EXACT_IO_ADMISSION_CHARGE:
+            return -1
+        retained = retained + receipt_count * RT_HAL_EXACT_IO_ADMISSION_CHARGE
+        # Each provider owns a bounded payload arena of the admitted size.
+        if self.arena.bytes.len() > 0:
+            if provider_count > (max_retained_bytes - retained) / self.arena.bytes.len():
+                return -1
+            retained = retained + provider_count * self.arena.bytes.len()
+        val wave_width = if worker_count < provider_count: worker_count else: provider_count
+        if wave_width > (max_retained_bytes - retained) / 16: return -1
+        retained = retained + wave_width * 16
+        retained
+
+# Cold import owner. It compares canonical descriptor bytes against the framed
+# text, then asks the identity owner to admit all five domains atomically.
+# Batches are published in case order only after the five-way call succeeds.
+pub class RtHalExactIoAdmissionBuilder:
+    arena: RtHalExactIoArena
+    batches: [RtHalExactTypeAdmissionBatch]
+    poisoned: bool
+
+    me descriptor_matches(span: RtHalExactByteSpan, canonical: text) -> bool:
+        if span.offset < 0 or span.length != canonical.len(): return false
+        if span.offset > self.arena.bytes.len() or span.length > self.arena.bytes.len() - span.offset: return false
+        var index = 0
+        while index < span.length:
+            if self.arena.bytes[span.offset + index] as i64 != canonical.byte_at(index): return false
+            index = index + 1
+        true
+
+    me readmit_case(registry: RtHalExactTypeRegistryOwner, receipt_index: i64,
+                    operation_text: text, input_text: text, output_text: text,
+                    error_text: text, effect_text: text) -> bool:
+        if self.poisoned: return false
+        if receipt_index != self.batches.len() or receipt_index < 0 or receipt_index >= self.arena.receipts.len():
+            self.poisoned = true
+            return false
+        val receipt = self.arena.receipts[receipt_index]
+        if receipt.request_index < 0 or receipt.request_index >= self.arena.requests.len():
+            self.poisoned = true
+            return false
+        val request = self.arena.requests[receipt.request_index]
+        if not self.descriptor_matches(request.operation_type_descriptor, operation_text) or
+           not self.descriptor_matches(request.input_type_descriptor, input_text) or
+           not self.descriptor_matches(receipt.output_type_descriptor, output_text) or
+           not self.descriptor_matches(receipt.error_type_descriptor, error_text) or
+           not self.descriptor_matches(receipt.effect_type_descriptor, effect_text):
+            self.poisoned = true
+            return false
+        val batch = rt_hal_exact_type_registry_readmit_five(registry,
+            request.operation_type, operation_text,
+            request.input_type, input_text,
+            receipt.output_type, output_text,
+            receipt.error_type, error_text,
+            receipt.effect_type, effect_text)
+        if not batch.valid:
+            self.poisoned = true
+            return false
+        self.batches.push(batch)
+        true
+
+    me complete() -> bool:
+        not self.poisoned and self.batches.len() == self.arena.receipts.len()
+
+# Frozen parent authority. Foreign wire candidates are no longer consulted by
+# comparison: every type check uses only owner-issued admissions and one seal.
+pub class RtHalExactIoAdmittedOwner:
+    arena: RtHalExactIoArena
+    batches: [RtHalExactTypeAdmissionBatch]
+    seal: RtHalExactTypeRegistrySeal
+
+    me batch_valid(index: i64) -> bool:
+        if index < 0 or index >= self.batches.len(): return false
+        val batch = self.batches[index]
+        batch.valid and
+            rt_hal_exact_type_registry_validates(self.seal, batch.operation) and
+            rt_hal_exact_type_registry_validates(self.seal, batch.input) and
+            rt_hal_exact_type_registry_validates(self.seal, batch.output) and
+            rt_hal_exact_type_registry_validates(self.seal, batch.error) and
+            rt_hal_exact_type_registry_validates(self.seal, batch.effect)
+
+    me receipts_equal(left_index: i64, right_index: i64) -> bool:
+        if not self.batch_valid(left_index) or not self.batch_valid(right_index): return false
+        if left_index >= self.arena.receipts.len() or right_index >= self.arena.receipts.len(): return false
+        val left_types = self.batches[left_index]
+        val right_types = self.batches[right_index]
+        if not rt_hal_exact_type_admission_equal(self.seal, left_types.operation, right_types.operation): return false
+        if not rt_hal_exact_type_admission_equal(self.seal, left_types.input, right_types.input): return false
+        if not rt_hal_exact_type_admission_equal(self.seal, left_types.output, right_types.output): return false
+        if not rt_hal_exact_type_admission_equal(self.seal, left_types.error, right_types.error): return false
+        if not rt_hal_exact_type_admission_equal(self.seal, left_types.effect, right_types.effect): return false
+        val left = self.arena.receipts[left_index]
+        val right = self.arena.receipts[right_index]
+        if left.version != RT_HAL_EXACT_IO_VERSION_V2 or right.version != RT_HAL_EXACT_IO_VERSION_V2: return false
+        if left.case_id != right.case_id or left.schema_id != right.schema_id or left.outcome != right.outcome: return false
+        if left.request_index != right.request_index: return false
+        if left.output_encoding != right.output_encoding or left.error_encoding != right.error_encoding or left.effect_encoding != right.effect_encoding: return false
+        if left.output.length != right.output.length or left.error.length != right.error.length or left.effect.length != right.effect.length: return false
+        if left.output_events.length != right.output_events.length or left.error_events.length != right.error_events.length or left.effect_events.length != right.effect_events.length: return false
+        val byte_count = self.arena.bytes.len()
+        if rt_hal_exact_span_error(left.output, byte_count, byte_count) != "" or rt_hal_exact_span_error(right.output, byte_count, byte_count) != "": return false
+        if rt_hal_exact_span_error(left.error, byte_count, byte_count) != "" or rt_hal_exact_span_error(right.error, byte_count, byte_count) != "": return false
+        if rt_hal_exact_span_error(left.effect, byte_count, byte_count) != "" or rt_hal_exact_span_error(right.effect, byte_count, byte_count) != "": return false
+        if rt_hal_exact_span_error(left.output_events, byte_count, byte_count) != "" or rt_hal_exact_span_error(right.output_events, byte_count, byte_count) != "": return false
+        if rt_hal_exact_span_error(left.error_events, byte_count, byte_count) != "" or rt_hal_exact_span_error(right.error_events, byte_count, byte_count) != "": return false
+        if rt_hal_exact_span_error(left.effect_events, byte_count, byte_count) != "" or rt_hal_exact_span_error(right.effect_events, byte_count, byte_count) != "": return false
+        var index = 0
+        while index < left.output.length:
+            if self.arena.bytes[left.output.offset + index] != self.arena.bytes[right.output.offset + index]: return false
+            index = index + 1
+        index = 0
+        while index < left.error.length:
+            if self.arena.bytes[left.error.offset + index] != self.arena.bytes[right.error.offset + index]: return false
+            index = index + 1
+        index = 0
+        while index < left.effect.length:
+            if self.arena.bytes[left.effect.offset + index] != self.arena.bytes[right.effect.offset + index]: return false
+            index = index + 1
+        index = 0
+        while index < left.output_events.length:
+            if self.arena.bytes[left.output_events.offset + index] != self.arena.bytes[right.output_events.offset + index]: return false
+            index = index + 1
+        index = 0
+        while index < left.error_events.length:
+            if self.arena.bytes[left.error_events.offset + index] != self.arena.bytes[right.error_events.offset + index]: return false
+            index = index + 1
+        index = 0
+        while index < left.effect_events.length:
+            if self.arena.bytes[left.effect_events.offset + index] != self.arena.bytes[right.effect_events.offset + index]: return false
+            index = index + 1
+        true
+
+    me snapshots_equal(left_index: i64, right_index: i64,
+                       left: RtHalExactIoCodecSnapshot,
+                       right: RtHalExactIoCodecSnapshot) -> bool:
+        if not self.batch_valid(left_index) or not self.batch_valid(right_index): return false
+        rt_hal_codec_parent_snapshot_compare(left, right) == 0
+
+pub fn rt_hal_exact_io_finalize_snapshot(codec_generation: i64,
+                                         max_retained_bytes: i64) -> RtHalExactIoCodecSnapshot:
+    val snapshot = rt_hal_codec_snapshot_finalize(codec_generation)
+    if rt_hal_codec_snapshot_error(snapshot) != RtHalCodecError.None: return snapshot
+    val span = rt_hal_codec_snapshot_span(snapshot)
+    if span.event_count < 0 or span.byte_length < 0 or max_retained_bytes <= 0:
+        rt_hal_codec_snapshot_release(snapshot)
+        return rt_hal_codec_snapshot_finalize(0)
+    if span.event_count > max_retained_bytes / 16 or span.byte_length > max_retained_bytes - span.event_count * 16:
+        rt_hal_codec_snapshot_release(snapshot)
+        return rt_hal_codec_snapshot_finalize(0)
+    snapshot
+
+# Scalar façade over the package-private deterministic parent transaction.
+# It retains no snapshot arrays and consumes every lease on commit or abort.
+pub class RtHalExactIoParentBatch:
+    token: i64
+    expected: i64
+    next_index: i64
+    active: bool
+    max_retained_bytes: i64
+    retained_bytes: i64
+
+    static fn begin(expected: i64, max_retained_bytes: i64) -> RtHalExactIoParentBatch:
+        val token = rt_hal_codec_parent_batch_begin(expected)
+        RtHalExactIoParentBatch(token: token, expected: expected,
+            next_index: 0, active: token > 0 and max_retained_bytes > 0,
+            max_retained_bytes: max_retained_bytes, retained_bytes: 0)
+
+    me add(snapshot: RtHalExactIoCodecSnapshot, ordinal: i64) -> bool:
+        if not self.active or self.next_index >= self.expected:
+            rt_hal_codec_snapshot_release(snapshot)
+            return false
+        if rt_hal_codec_snapshot_error(snapshot) != RtHalCodecError.None:
+            rt_hal_codec_snapshot_release(snapshot)
+            self.abort()
+            return false
+        val span = rt_hal_codec_snapshot_span(snapshot)
+        if span.event_count < 0 or span.byte_length < 0 or
+           span.event_count > (self.max_retained_bytes - self.retained_bytes) / 16:
+            rt_hal_codec_snapshot_release(snapshot)
+            self.abort()
+            return false
+        val event_bytes = span.event_count * 16
+        if span.byte_length > self.max_retained_bytes - self.retained_bytes - event_bytes:
+            rt_hal_codec_snapshot_release(snapshot)
+            self.abort()
+            return false
+        if not rt_hal_codec_parent_batch_add(
+                self.token, self.next_index, snapshot, ordinal):
+            rt_hal_codec_snapshot_release(snapshot)
+            self.abort()
+            return false
+        self.next_index = self.next_index + 1
+        self.retained_bytes = self.retained_bytes + event_bytes + span.byte_length
+        true
+
+    me abort() -> bool:
+        if not self.active: return false
+        val result = rt_hal_codec_parent_batch_abort(self.token)
+        self.active = false
+        result
+
+    me commit() -> bool:
+        if not self.active or self.next_index != self.expected:
+            self.abort()
+            return false
+        if not rt_hal_codec_parent_batch_commit(self.token):
+            self.abort()
+            return false
+        self.active = false
+        true

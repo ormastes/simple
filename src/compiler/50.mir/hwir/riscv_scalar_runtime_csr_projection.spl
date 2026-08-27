@@ -1,0 +1,171 @@
+# Plan-bound combinational capture projection for the V8 dynamic Zicsr owner.
+# It has no state and deliberately samples its service inputs only when the
+# future owner uses request_handshake to capture its outputs.
+
+use compiler.mir.hwir.types.{CoreConfig, HwClockDomain, HwCombOp, HwCompareOp, HwConstant,
+    HwCostModel, HwModule, HwModuleDef, HwNodeId, HwOrigin, HwPort, HwSelectOp,
+    HwSignal}
+use compiler.mir.hwir.riscv_scalar_runtime_csr_admission.{
+    RiscvScalarRuntimeCsrAdmissionContract, strict_riscv_scalar_runtime_csr_admission}
+use lib.hardware.riscv_common.isa.scalar_database.{RiscvScalarDecoderPlan}
+
+fn csr_projection_ports(x: i32, row_width: i32) -> [HwPort]:
+    [HwPort.input("request_handshake", "Bits", 1),
+        HwPort.input("request_provider_tag", "Bits", 3),
+        HwPort.input("decode_legal", "Bits", 1), HwPort.input("decoded_row_index", "Bits", row_width),
+        HwPort.input("decoded_execution_class", "Bits", 3), HwPort.input("decoded_memory_effect", "Bits", 3),
+        HwPort.input("decoded_semantic_opcode", "Bits", 6),
+        HwPort.input("decoded_declared_operand_width_is_32", "Bits", 1),
+        HwPort.input("canonical_instruction", "Bits", 32), HwPort.input("original_instruction", "Bits", 32),
+        HwPort.input("instruction_length_bytes", "Bits", 3),
+        HwPort.input("instruction_rd_field", "Bits", 5), HwPort.input("instruction_rs1_field", "Bits", 5),
+        HwPort.input("instruction_rs2_field", "Bits", 5), HwPort.input("rs1_value", "Bits", x),
+        HwPort.input("pc_before", "Bits", x), HwPort.input("fallthrough_pc", "Bits", x),
+        HwPort.input("privilege", "Bits", 2), HwPort.input("provider_event_id", "Bits", 64),
+        HwPort.input("decode_event_id", "Bits", 64), HwPort.input("lineage_valid", "Bits", 1),
+        HwPort.input("illegal_valid", "Bits", 1), HwPort.input("csr_present", "Bits", 1),
+        HwPort.input("csr_read_value", "Bits", x),
+        HwPort.output("admitted", "Bits", 1), HwPort.output("protocol_fault_candidate", "Bits", 1),
+        HwPort.output("csr_lookup_valid", "Bits", 1), HwPort.output("csr_lookup_address", "Bits", 12),
+        HwPort.output("csr_lookup_read_enable", "Bits", 1), HwPort.output("access_allowed", "Bits", 1),
+        HwPort.output("execute_trap_valid", "Bits", 1), HwPort.output("execute_trap_cause", "Bits", x),
+        HwPort.output("legal_commit_intent", "Bits", 1), HwPort.output("legal_commit_address", "Bits", 12),
+        HwPort.output("legal_commit_value", "Bits", x)]
+
+fn add_signal(signals: [HwSignal], name: text, width: i32) -> [HwSignal]:
+    var next = signals; next.push(HwSignal.comb(name, "Bits", width)); next
+
+pub fn strict_riscv_scalar_runtime_csr_projection(module_name: text, config: CoreConfig,
+    plan: RiscvScalarDecoderPlan) -> Result<HwModuleDef, text>:
+    if module_name == "": return Err("HWIR-E-RISCV-RUNTIME-CSR-PROJECTION-ID: CSR projection requires a module name")
+    val contract = strict_riscv_scalar_runtime_csr_admission(config, plan)?
+    val x = config.xlen; val row_width = contract.decoded_row_width
+    var constants = [HwConstant.bits("zero1", 1, 0), HwConstant.bits("one1", 1, 1),
+        HwConstant.bits("zero2", 2, 0), HwConstant.bits("zero3", 3, 0), HwConstant.bits("zero5", 5, 0),
+        HwConstant.bits("zero12", 12, 0), HwConstant.bits("zero_xlen", x, 0),
+        HwConstant.bits("tag_csr", 3, 3), HwConstant.bits("class_csr", 3, 6),
+        HwConstant.bits("effect_csr", 3, 3), HwConstant.bits("length4", 3, 4),
+        HwConstant.bits("four_xlen", x, 4), HwConstant.bits("cause2", x, 2),
+        HwConstant.bits("shift7", 32, 7), HwConstant.bits("shift15", 32, 15),
+        HwConstant.bits("shift20", 32, 20), HwConstant.bits("shift8", 12, 8),
+        HwConstant.bits("shift10", 12, 10), HwConstant.bits("form0", 3, 0),
+        HwConstant.bits("form1", 3, 1), HwConstant.bits("form2", 3, 2),
+        HwConstant.bits("form3", 3, 3), HwConstant.bits("form4", 3, 4), HwConstant.bits("form5", 3, 5)]
+    constants.push(HwConstant.bits("two2", 2, 2)); constants.push(HwConstant.bits("three2", 2, 3))
+    var signals: [HwSignal] = []
+    # Common proof schedule: every field extraction is shift then trunc.
+    for item in [("tag_ok", 1), ("tag_bad", 1), ("rd_shift", 32), ("rs1_shift", 32), ("rs2_shift", 32),
+            ("csr_shift", 32), ("canonical_rd", 5), ("canonical_rs1", 5), ("canonical_rs2", 5), ("csr_address_raw", 12),
+            ("rd_ok", 1), ("rs1_ok", 1), ("rs2_ok", 1), ("raw01", 1), ("raw_fields_ok", 1),
+            ("original_ok", 1), ("length_ok", 1), ("events_ok", 1), ("fallthrough_expected", x), ("fallthrough_ok", 1),
+            ("illegal_clear", 1), ("class_ok", 1), ("effect_ok", 1), ("width_ok", 1), ("common01", 1),
+            ("common23", 1), ("common45", 1), ("common67", 1), ("common_a", 1), ("common_b", 1), ("common_c", 1)]:
+        signals = add_signal(signals, item[0], item[1])
+    var compares: [HwCompareOp] = [HwCompareOp.equal("tag_ok", "request_provider_tag", "tag_csr", 3)]
+    var ops = [HwCombOp.binary("xor", "tag_bad", "tag_ok", "one1", 1),
+        HwCombOp.binary("shr", "rd_shift", "canonical_instruction", "shift7", 32),
+        HwCombOp.binary("shr", "rs1_shift", "canonical_instruction", "shift15", 32),
+        HwCombOp.binary("shr", "rs2_shift", "canonical_instruction", "shift20", 32),
+        HwCombOp.binary("shr", "csr_shift", "canonical_instruction", "shift20", 32),
+        HwCombOp.unary("trunc", "canonical_rd", "rd_shift", 5), HwCombOp.unary("trunc", "canonical_rs1", "rs1_shift", 5),
+        HwCombOp.unary("trunc", "canonical_rs2", "rs2_shift", 5), HwCombOp.unary("trunc", "csr_address_raw", "csr_shift", 12),
+        HwCombOp.binary("and", "raw01", "rd_ok", "rs1_ok", 1), HwCombOp.binary("and", "raw_fields_ok", "raw01", "rs2_ok", 1),
+        HwCombOp.binary("add", "fallthrough_expected", "pc_before", "four_xlen", x),
+        HwCombOp.binary("and", "common01", "decode_legal", "raw_fields_ok", 1), HwCombOp.binary("and", "common23", "original_ok", "length_ok", 1),
+        HwCombOp.binary("and", "common45", "events_ok", "lineage_valid", 1), HwCombOp.binary("and", "common67", "fallthrough_ok", "illegal_clear", 1),
+        HwCombOp.binary("and", "common_a", "class_ok", "effect_ok", 1), HwCombOp.binary("and", "common_b", "width_ok", "common01", 1),
+        HwCombOp.binary("and", "common_c", "common23", "common45", 1)]
+    compares.push(HwCompareOp.equal("rd_ok", "canonical_rd", "instruction_rd_field", 5))
+    compares.push(HwCompareOp.equal("rs1_ok", "canonical_rs1", "instruction_rs1_field", 5))
+    compares.push(HwCompareOp.equal("rs2_ok", "canonical_rs2", "instruction_rs2_field", 5))
+    compares.push(HwCompareOp.equal("original_ok", "original_instruction", "canonical_instruction", 32))
+    compares.push(HwCompareOp.equal("length_ok", "instruction_length_bytes", "length4", 3))
+    compares.push(HwCompareOp.equal("events_ok", "provider_event_id", "decode_event_id", 64))
+    compares.push(HwCompareOp.equal("fallthrough_ok", "fallthrough_pc", "fallthrough_expected", x))
+    compares.push(HwCompareOp.equal("illegal_clear", "illegal_valid", "zero1", 1))
+    compares.push(HwCompareOp.equal("class_ok", "decoded_execution_class", "class_csr", 3))
+    compares.push(HwCompareOp.equal("effect_ok", "decoded_memory_effect", "effect_csr", 3))
+    compares.push(HwCompareOp.equal("width_ok", "decoded_declared_operand_width_is_32", "zero1", 1))
+    var selects: [HwSelectOp] = []
+    var prior_match = "zero1"; var prior_form = "form0"; var index = 0
+    for row in contract.rows:
+        val suffix = row.form_code.to_text(); val mask = "mask_" + suffix; val value = "value_" + suffix
+        val row_const = "row_" + suffix; val semantic = "semantic_" + suffix; val form_const = "form_" + suffix
+        constants.push(HwConstant.bits(mask, 32, row.encoding_mask as i64)); constants.push(HwConstant.bits(value, 32, row.encoding_value as i64))
+        constants.push(HwConstant.bits(row_const, row_width, row.decoded_row_index as i64)); constants.push(HwConstant.bits(semantic, 6, row.semantic_opcode))
+        constants.push(HwConstant.bits(form_const, 3, row.form_code as i64))
+        for item in [("masked_" + suffix, 32), ("form_encoding_" + suffix, 1), ("row_ok_" + suffix, 1), ("semantic_ok_" + suffix, 1),
+                ("meta01_" + suffix, 1), ("meta23_" + suffix, 1), ("meta45_" + suffix, 1), ("meta_a_" + suffix, 1),
+                ("row_match_" + suffix, 1), ("select_match_" + suffix, 1), ("select_form_" + suffix, 3)]: signals = add_signal(signals, item[0], item[1])
+        ops.push(HwCombOp.binary("and", "masked_" + suffix, "canonical_instruction", mask, 32))
+        compares.push(HwCompareOp.equal("form_encoding_" + suffix, "masked_" + suffix, value, 32))
+        compares.push(HwCompareOp.equal("row_ok_" + suffix, "decoded_row_index", row_const, row_width))
+        compares.push(HwCompareOp.equal("semantic_ok_" + suffix, "decoded_semantic_opcode", semantic, 6))
+        ops.push(HwCombOp.binary("and", "meta01_" + suffix, "form_encoding_" + suffix, "row_ok_" + suffix, 1))
+        ops.push(HwCombOp.binary("and", "meta23_" + suffix, "semantic_ok_" + suffix, "class_ok", 1))
+        ops.push(HwCombOp.binary("and", "meta45_" + suffix, "effect_ok", "width_ok", 1))
+        ops.push(HwCombOp.binary("and", "meta_a_" + suffix, "meta01_" + suffix, "meta23_" + suffix, 1))
+        ops.push(HwCombOp.binary("and", "row_match_" + suffix, "meta_a_" + suffix, "meta45_" + suffix, 1))
+        selects.push(HwSelectOp.mux("select_match_" + suffix, "row_match_" + suffix, "one1", prior_match, 1))
+        selects.push(HwSelectOp.mux("select_form_" + suffix, "row_match_" + suffix, form_const, prior_form, 3))
+        prior_match = "select_match_" + suffix; prior_form = "select_form_" + suffix; index = index + 1
+    if index != 6: return Err("HWIR-E-RISCV-RUNTIME-CSR-PROJECTION-SCOPE: projection requires all six frozen CSR rows")
+    for item in [("formed01", 1), ("formed23", 1), ("formed", 1), ("admitted_gate", 1), ("admitted_capture", 1), ("admission_present", 1), ("admission_missing", 1), ("fault01", 1), ("fault_pre", 1),
+            ("form_is0", 1), ("form_is1", 1), ("form_is2", 1), ("form_is3", 1), ("form_is4", 1), ("form_is5", 1),
+            ("immediate01", 1), ("immediate", 1), ("set_form", 1), ("clear_form", 1), ("write_always", 1), ("read_suppress", 1),
+            ("source_from_rs1", x), ("source_from_zimm", x), ("source_pre", x), ("source_value", x), ("rs1_zero", 1), ("rs1_nonzero", 1), ("write_requested", 1),
+            ("old_or_source", x), ("old_and_source", x), ("old_clear_value", x), ("write_value_set", x), ("write_value_clear", x),
+            ("write_value", x), ("rd_zero", 1), ("not_rd_zero", 1), ("read_requested", 1), ("priv_shift", 12), ("required_privilege", 2),
+            ("ro_shift", 12), ("read_only_class", 2), ("current_reserved", 1), ("required_reserved", 1), ("privilege_sufficient", 1),
+            ("readonly", 1), ("readonly_write", 1), ("not_current_reserved", 1), ("not_required_reserved", 1),
+            ("not_readonly_write", 1), ("policy01", 1), ("policy23", 1), ("policy45", 1), ("policy_ok", 1), ("access_pre", 1),
+            ("legal_commit_pre", 1), ("access_present", 1), ("not_access", 1), ("trap_pre", 1)]: signals = add_signal(signals, item[0], item[1])
+    ops.push(HwCombOp.binary("and", "formed01", "common_b", "common_c", 1)); ops.push(HwCombOp.binary("and", "formed23", "common67", "common_a", 1))
+    ops.push(HwCombOp.binary("and", "formed", "formed01", "formed23", 1)); ops.push(HwCombOp.binary("and", "admitted_gate", "formed", prior_match, 1))
+    ops.push(HwCombOp.binary("and", "admitted_capture", "request_handshake", "tag_ok", 1))
+    compares.push(HwCompareOp.equal("admission_present", "admitted_gate", "one1", 1))
+    ops.push(HwCombOp.binary("xor", "admission_missing", "admission_present", "one1", 1))
+    ops.push(HwCombOp.binary("and", "fault01", "admitted_capture", "admission_missing", 1))
+    ops.push(HwCombOp.unary("passthrough", "fault_pre", "fault01", 1))
+    compares.push(HwCompareOp.equal("form_is0", prior_form, "form0", 3)); compares.push(HwCompareOp.equal("form_is1", prior_form, "form1", 3))
+    compares.push(HwCompareOp.equal("form_is2", prior_form, "form2", 3)); compares.push(HwCompareOp.equal("form_is3", prior_form, "form3", 3))
+    compares.push(HwCompareOp.equal("form_is4", prior_form, "form4", 3)); compares.push(HwCompareOp.equal("form_is5", prior_form, "form5", 3))
+    ops.push(HwCombOp.binary("and", "immediate01", "form_is3", "form_is4", 1)); ops.push(HwCombOp.binary("or", "immediate", "immediate01", "form_is5", 1))
+    ops.push(HwCombOp.binary("or", "set_form", "form_is1", "form_is4", 1)); ops.push(HwCombOp.binary("or", "clear_form", "form_is2", "form_is5", 1))
+    ops.push(HwCombOp.binary("or", "write_always", "form_is0", "form_is3", 1)); ops.push(HwCombOp.binary("or", "read_suppress", "form_is0", "form_is3", 1))
+    ops.push(HwCombOp.unary("zext", "source_from_rs1", "canonical_rs1", x)); ops.push(HwCombOp.unary("zext", "source_from_zimm", "canonical_rs1", x))
+    selects.push(HwSelectOp.mux("source_pre", "immediate", "source_from_zimm", "rs1_value", x))
+    compares.push(HwCompareOp.equal("rs1_zero", "canonical_rs1", "zero5", 5)); selects.push(HwSelectOp.mux("source_value", "rs1_zero", "zero_xlen", "source_pre", x))
+    ops.push(HwCombOp.binary("xor", "rs1_nonzero", "rs1_zero", "one1", 1)); ops.push(HwCombOp.binary("or", "write_requested", "write_always", "rs1_nonzero", 1))
+    ops.push(HwCombOp.binary("or", "old_or_source", "csr_read_value", "source_value", x)); ops.push(HwCombOp.binary("and", "old_and_source", "csr_read_value", "source_value", x))
+    ops.push(HwCombOp.unary("not", "old_clear_value", "source_value", x)); ops.push(HwCombOp.binary("and", "write_value_clear", "csr_read_value", "old_clear_value", x))
+    selects.push(HwSelectOp.mux("write_value_set", "set_form", "old_or_source", "source_value", x)); selects.push(HwSelectOp.mux("write_value", "clear_form", "write_value_clear", "write_value_set", x))
+    compares.push(HwCompareOp.equal("rd_zero", "canonical_rd", "zero5", 5)); ops.push(HwCombOp.binary("xor", "not_rd_zero", "rd_zero", "one1", 1))
+    selects.push(HwSelectOp.mux("read_requested", "read_suppress", "not_rd_zero", "one1", 1))
+    ops.push(HwCombOp.binary("shr", "priv_shift", "csr_address_raw", "shift8", 12)); ops.push(HwCombOp.unary("trunc", "required_privilege", "priv_shift", 2))
+    ops.push(HwCombOp.binary("shr", "ro_shift", "csr_address_raw", "shift10", 12)); ops.push(HwCombOp.unary("trunc", "read_only_class", "ro_shift", 2))
+    compares.push(HwCompareOp.equal("current_reserved", "privilege", "two2", 2)); compares.push(HwCompareOp.equal("required_reserved", "required_privilege", "two2", 2))
+    ops.push(HwCombOp.binary("uge", "privilege_sufficient", "privilege", "required_privilege", 2)); compares.push(HwCompareOp.equal("readonly", "read_only_class", "three2", 2))
+    ops.push(HwCombOp.binary("and", "readonly_write", "readonly", "write_requested", 1)); ops.push(HwCombOp.binary("xor", "not_current_reserved", "current_reserved", "one1", 1))
+    ops.push(HwCombOp.binary("xor", "not_required_reserved", "required_reserved", "one1", 1)); ops.push(HwCombOp.binary("xor", "not_readonly_write", "readonly_write", "one1", 1))
+    ops.push(HwCombOp.binary("and", "policy01", "not_current_reserved", "not_required_reserved", 1)); ops.push(HwCombOp.binary("and", "policy23", "privilege_sufficient", "not_readonly_write", 1))
+    ops.push(HwCombOp.binary("and", "policy45", "policy01", "policy23", 1)); ops.push(HwCombOp.binary("and", "policy_ok", "policy45", "csr_present", 1))
+    ops.push(HwCombOp.binary("and", "access_pre", "admitted_gate", "policy_ok", 1)); ops.push(HwCombOp.binary("and", "legal_commit_pre", "access_pre", "write_requested", 1))
+    compares.push(HwCompareOp.equal("access_present", "access_pre", "one1", 1)); ops.push(HwCombOp.binary("xor", "not_access", "access_present", "one1", 1)); ops.push(HwCombOp.binary("and", "trap_pre", "admitted_gate", "not_access", 1))
+    # Every public output has one distinct producer.
+    ops.push(HwCombOp.binary("and", "admitted", "admitted_capture", "admitted_gate", 1)); ops.push(HwCombOp.unary("passthrough", "protocol_fault_candidate", "fault_pre", 1))
+    selects.push(HwSelectOp.mux("csr_lookup_valid", "admitted", "one1", "zero1", 1)); selects.push(HwSelectOp.mux("csr_lookup_address", "admitted", "csr_address_raw", "zero12", 12))
+    selects.push(HwSelectOp.mux("csr_lookup_read_enable", "admitted", "read_requested", "zero1", 1)); selects.push(HwSelectOp.mux("access_allowed", "admitted", "access_pre", "zero1", 1))
+    selects.push(HwSelectOp.mux("execute_trap_valid", "admitted", "trap_pre", "zero1", 1)); selects.push(HwSelectOp.mux("execute_trap_cause", "execute_trap_valid", "cause2", "zero_xlen", x))
+    selects.push(HwSelectOp.mux("legal_commit_intent", "admitted", "legal_commit_pre", "zero1", 1)); selects.push(HwSelectOp.mux("legal_commit_address", "legal_commit_intent", "csr_address_raw", "zero12", 12))
+    selects.push(HwSelectOp.mux("legal_commit_value", "legal_commit_intent", "write_value", "zero_xlen", x))
+    val ports = csr_projection_ports(x, row_width)
+    var origins = [HwOrigin(node_id: HwNodeId.child(module_name, "csr-plan." + contract.structural_sha256()),
+        source_name: "riscv.scalar.runtime.csr.capture-projection." + contract.structural_sha256())]
+    for row in contract.rows:
+        origins.push(HwOrigin(node_id: HwNodeId.child(module_name, "csr-row." + row.id), source_name: row.id))
+    val module = HwModuleDef(summary: HwModule(name: module_name, profile: config.profile, port_count: ports.len(), signal_count: signals.len(), register_count: 0, comb_op_count: ops.len() + compares.len() + selects.len(), memory_count: 0, clock_domain_count: 1, fallback_function: "", cost: HwCostModel.empty()),
+        config: config, node_id: HwNodeId.module_root(module_name), origins: origins,
+        ports: ports, signals: signals, constants: constants, comb_ops: ops, compare_ops: compares, select_ops: selects, clock_domains: [HwClockDomain.default_domain()])
+    val diagnostic = module.shape_diagnostic(); if diagnostic != "": return Err(diagnostic)
+    Ok(module)

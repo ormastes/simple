@@ -1,0 +1,102 @@
+# Single migration bridge from legacy DebugBackend into DebugServiceV1.
+# DAP/MCP clients keep only DebugSessionId; this owner retains the backend.
+
+use std.common.debug.contracts_v1.{
+    DebugSessionId, DebugRootOperationV1, DebugPerturbationV1,
+    debug_policy_development_v1,
+}
+use std.common.debug.service_v1.{
+    central_debug_service_v1_open, central_debug_service_v1_authorize,
+    central_debug_service_v1_record, central_debug_service_v1_close,
+}
+use std.nogc_async_mut.debug.coordinator.{DebugBackend, FrameInfo, VarInfo, LocationInfo}
+
+pub class LegacyDebugBackendAdapterV1:
+    backend: DebugBackend
+    session_id: DebugSessionId
+    initialized: bool
+
+    static fn create(backend: DebugBackend) -> LegacyDebugBackendAdapterV1:
+        LegacyDebugBackendAdapterV1(
+            backend: backend,
+            session_id: DebugSessionId(value: ""),
+            initialized: false,
+        )
+
+    me open(build_id: text, program_path: text, args: [text]) -> Result<DebugSessionId, text>:
+        if self.initialized:
+            return Err("legacy debug adapter already owns a session")
+        val opened = central_debug_service_v1_open(build_id, debug_policy_development_v1())?
+        val authorization = central_debug_service_v1_authorize(opened, DebugRootOperationV1.Control, DebugPerturbationV1.Cooperative, "legacy.attach")
+        if not authorization.allowed:
+            central_debug_service_v1_close(opened)
+            return Err(authorization.reason)
+        val attached = self.backend.attach(program_path, args)
+        match attached:
+            case Err(reason):
+                central_debug_service_v1_record(opened, DebugRootOperationV1.Control, DebugPerturbationV1.Cooperative, "legacy.attach", false, false, reason)
+                central_debug_service_v1_close(opened)
+                return Err(reason)
+            case Ok(_):
+                pass_do_nothing("legacy backend attached")
+        self.session_id = opened
+        self.initialized = true
+        central_debug_service_v1_record(opened, DebugRootOperationV1.Control, DebugPerturbationV1.Cooperative, "legacy.attach", true, true, "")
+        Ok(opened)
+
+    me run(session_id: DebugSessionId) -> Result<Nil, text>:
+        self.require_session(session_id)?
+        val receipt = central_debug_service_v1_authorize(session_id, DebugRootOperationV1.Control, DebugPerturbationV1.Cooperative, "legacy.run")
+        if not receipt.allowed:
+            return Err(receipt.reason)
+        val result = self.backend.run()
+        match result:
+            case Ok(_): central_debug_service_v1_record(session_id, DebugRootOperationV1.Control, DebugPerturbationV1.Cooperative, "legacy.run.outcome", true, true, "")
+            case Err(reason): central_debug_service_v1_record(session_id, DebugRootOperationV1.Control, DebugPerturbationV1.Cooperative, "legacy.run.outcome", false, false, reason)
+        result
+
+    me stack_trace(session_id: DebugSessionId) -> Result<[FrameInfo], text>:
+        self.require_session(session_id)?
+        val receipt = central_debug_service_v1_authorize(session_id, DebugRootOperationV1.Inspect, DebugPerturbationV1.Passive, "legacy.stack_trace")
+        if not receipt.allowed:
+            return Err(receipt.reason)
+        self.backend.stack_trace()
+
+    me locals(session_id: DebugSessionId) -> Result<[VarInfo], text>:
+        self.require_session(session_id)?
+        val receipt = central_debug_service_v1_authorize(session_id, DebugRootOperationV1.Inspect, DebugPerturbationV1.Passive, "legacy.locals")
+        if not receipt.allowed:
+            return Err(receipt.reason)
+        self.backend.locals()
+
+    me evaluate(session_id: DebugSessionId, expression: text) -> Result<text, text>:
+        self.require_session(session_id)?
+        val receipt = central_debug_service_v1_authorize(session_id, DebugRootOperationV1.Control, DebugPerturbationV1.Mutating, "legacy.evaluate")
+        if not receipt.allowed:
+            return Err(receipt.reason)
+        self.backend.evaluate(expression)
+
+    me location(session_id: DebugSessionId) -> Result<LocationInfo, text>:
+        self.require_session(session_id)?
+        val receipt = central_debug_service_v1_authorize(session_id, DebugRootOperationV1.Inspect, DebugPerturbationV1.Passive, "legacy.location")
+        if not receipt.allowed:
+            return Err(receipt.reason)
+        self.backend.current_location()
+
+    me close(session_id: DebugSessionId) -> Result<Nil, text>:
+        self.require_session(session_id)?
+        val authorization = central_debug_service_v1_authorize(session_id, DebugRootOperationV1.Control, DebugPerturbationV1.Cooperative, "legacy.detach")
+        if not authorization.allowed:
+            return Err(authorization.reason)
+        self.backend.detach()?
+        central_debug_service_v1_record(session_id, DebugRootOperationV1.Control, DebugPerturbationV1.Cooperative, "legacy.detach.outcome", true, true, "")
+        central_debug_service_v1_close(session_id)?
+        self.initialized = false
+        Ok(nil)
+
+    fn require_session(session_id: DebugSessionId) -> Result<Nil, text>:
+        if not self.initialized:
+            return Err("legacy debug adapter has no open session")
+        if self.session_id.value != session_id.value:
+            return Err("debug session id does not own this legacy backend")
+        Ok(nil)

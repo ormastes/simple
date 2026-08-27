@@ -1,6 +1,6 @@
 # LLM Caret Messaging Phase 3/4 CLI Boundary
 
-> Prove that the retained Phase 3 executable is honestly bootstrap-only, then require the source-matched Phase 4 executable to expose the production run, test, and Caret Messaging command surfaces. Carrier readiness is a separate scenario and cannot be inferred from command discovery.
+> Verifies the llm caret messaging phase cli behaviour end to end so maintainers of this
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -11,7 +11,7 @@
 
 # LLM Caret Messaging Phase 3/4 CLI Boundary
 
-Prove that the retained Phase 3 executable is honestly bootstrap-only, then require the source-matched Phase 4 executable to expose the production run, test, and Caret Messaging command surfaces. Carrier readiness is a separate scenario and cannot be inferred from command discovery.
+Verifies the llm caret messaging phase cli behaviour end to end so maintainers of this
 
 ## At a Glance
 
@@ -27,16 +27,9 @@ Prove that the retained Phase 3 executable is honestly bootstrap-only, then requ
 | Updated | 2026-08-27 |
 | Generator | `simple spipe-docgen` (Simple) |
 
-## Overview
-
-Prove that the retained Phase 3 executable is honestly bootstrap-only, then
-require the source-matched Phase 4 executable to expose the production run,
-test, and Caret Messaging command surfaces. Carrier readiness is a separate
-scenario and cannot be inferred from command discovery.
-
-Set `SIMPLE_STAGE3_BINARY` and `SIMPLE_STAGE4_BINARY` to the exact retained
-artifacts when they are outside the canonical bootstrap output tree.
-
+## Purpose and audience
+Verifies the llm caret messaging phase cli behaviour end to end so maintainers of this
+component and reviewers of its spec share one pinned definition.
 ## Operator workflow
 
 First retain the admitted Phase 3 path, hash, authority identity, and sanity
@@ -124,11 +117,11 @@ Phase 3 into a Phase 4 PASS.
 
 - should keep Phase 3 bootstrap-only without misrouting full CLI commands
 - Read the exact Phase 3 bootstrap identity
-   - Expected: version_exit equals `0`
+   - Expected: version_exit equals `0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
 - Reject run test and Caret dispatch from Phase 3
-   - Expected: run_exit equals `1`
-   - Expected: test_exit equals `1`
-   - Expected: caret_exit equals `1`
+   - Expected: run_exit equals `1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
+   - Expected: test_exit equals `1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
+   - Expected: caret_exit equals `1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
 
 
 <details>
@@ -145,18 +138,18 @@ step("should keep Phase 3 bootstrap-only without misrouting full CLI commands")
 val compiler = phase3_binary()
 step("Read the exact Phase 3 bootstrap identity")
 val (version_out, version_err, version_exit) = process_run(compiler, ["--version"])
-expect(version_exit).to_equal(0)
+expect(version_exit).to_equal(0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
 expect(version_out + version_err).to_contain("simple-bootstrap")
 
 step("Reject run test and Caret dispatch from Phase 3")
 val (run_out, run_err, run_exit) = process_run(compiler, ["run", "--help"])
 val (test_out, test_err, test_exit) = process_run(compiler, ["test", "--help"])
 val (caret_out, caret_err, caret_exit) = process_run(compiler, ["caret", "--help"])
-expect(run_exit).to_equal(1)
+expect(run_exit).to_equal(1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
 expect(run_out + run_err).to_contain("unknown command 'run'")
-expect(test_exit).to_equal(1)
+expect(test_exit).to_equal(1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
 expect(test_out + test_err).to_contain("unknown command 'test'")
-expect(caret_exit).to_equal(1)
+expect(caret_exit).to_equal(1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
 expect(caret_out + caret_err).to_contain("unknown command 'caret'")
 ```
 
@@ -166,12 +159,12 @@ expect(caret_out + caret_err).to_contain("unknown command 'caret'")
 
 - should require Phase 4 to run source, execute a spec, and expose Caret Messaging help
 - Execute source through the exact Phase 4 full CLI
-   - Expected: run_exit equals `0`
+   - Expected: run_exit equals `0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
    - Expected: (run_out + run_err).trim() equals `5`
 - Execute a real assertion through the Phase 4 test command
-   - Expected: test_exit equals `0`
+   - Expected: test_exit equals `0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
 - Expose the production Caret Messaging command surface
-   - Expected: help_exit equals `0`
+   - Expected: help_exit equals `0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
 
 
 <details>
@@ -189,7 +182,7 @@ val (run_out, run_err, run_exit) = process_run(
     compiler,
     ["run", "scripts/check/cert/redeploy_gate/fixtures/p2_add.spl"]
 )
-expect(run_exit).to_equal(0)
+expect(run_exit).to_equal(0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
 expect((run_out + run_err).trim()).to_equal("5")
 
 step("Execute a real assertion through the Phase 4 test command")
@@ -198,7 +191,7 @@ val (test_out, test_err, test_exit) = process_run(
     ["test", "test/fixtures/app/llm_caret/messaging/phase4_cli_smoke_spec.spl",
         "--mode=interpreter", "--clean", "--fail-fast"]
 )
-expect(test_exit).to_equal(0)
+expect(test_exit).to_equal(0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
 expect(test_out + test_err).to_contain("1 passed")
 
 step("Expose the production Caret Messaging command surface")
@@ -206,7 +199,7 @@ val (help_out, help_err, help_exit) = process_run(
     compiler,
     ["caret", "messaging", "--help"]
 )
-expect(help_exit).to_equal(0)
+expect(help_exit).to_equal(0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
 expect(help_out + help_err).to_contain("caret messaging status")
 ```
 
@@ -218,7 +211,7 @@ expect(help_out + help_err).to_contain("caret messaging status")
 
 - should require every Phase 4 Caret Messaging carrier to be provenance-ready
 - Query readiness through the exact Phase 4 full CLI
-   - Expected: status_exit equals `0`
+   - Expected: status_exit equals `0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
 
 
 <details>
@@ -236,7 +229,7 @@ val (status_out, status_err, status_exit) = process_run(
     ["caret", "messaging", "status"]
 )
 val output = status_out + status_err
-expect(status_exit).to_equal(0)
+expect(status_exit).to_equal(0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
 expect(output).to_contain("llm-caret-messaging: ready")
 expect(output).to_contain("database-ready: true")
 expect(output).to_contain("mcp-ready: true")

@@ -1,18 +1,37 @@
-# Strength Reduction Skeleton
+# Strength Reduction
 #
-# Canonical dispatch classifies this pass as Disabled. Keep every callable
-# compatibility surface fail-closed until integer signedness, width, range,
-# overflow, trap, and target-cost facts authorize each rewrite.
+# Replaces expensive operations with cheaper ones in loops.
+#
+# Example transformations:
+#   - i * 4 -> i << 2 (multiply by power of 2)
+#   - i * c -> i + i + ... (multiply by small constant)
+#   - i / 2 -> i >> 1 (divide by power of 2)
+#
+# Most impactful in loop bodies where operation repeats.
 
-use compiler.mir.mir_instructions.{MirFunction, MirBlock}
+use compiler.mir.mir_data.*
+use compiler.mir.mir_data.*
+use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock}
 use compiler.mir_opt.mir_opt.pattern.rule_engine.{
     OptimizationRuleProvider, OptimizationProviderStats, OptimizerProviderKind,
     OptimizerRuleLookupKind, optimization_rule_provider_builtin_with_contract,
     optimization_provider_stats_zero, optimization_provider_stats_record_scope
 }
+use compiler.mir.mir_types.{LocalId}  # explicit: a glob is not an import-origin for surface projection
 
 class StrengthReduction:
+    """
+    Replaces expensive operations with cheaper ones in loops.
+
+    Example transformations:
+    - i * 4 -> i << 2 (multiply by power of 2)
+    - i * 3 -> (i << 1) + i (small constant decomposition)
+    - i / 2 -> i >> 1 (divide by power of 2)
+
+    Most impactful in loop bodies where operation repeats.
+    """
     reduced_count: i64
+    next_local_id: i64
     provider: OptimizationRuleProvider
     stats: OptimizationProviderStats
 
@@ -20,27 +39,42 @@ impl StrengthReduction:
     static fn new() -> StrengthReduction:
         StrengthReduction(
             reduced_count: 0,
+            next_local_id: 900000,
             provider: strength_reduction_provider(),
             stats: optimization_provider_stats_zero()
         )
 
     me optimize_function(func: MirFunction) -> MirFunction:
-        self.stats = optimization_provider_stats_record_scope(self.stats, 0)
-        func
+        """Run strength reduction on function."""
+        if not self.provider.enabled:
+            self.stats = optimization_provider_stats_record_scope(self.stats, 0)
+            return func
+
+        val before_count = self.reduced_count
+        var optimized_blocks: [MirBlock] = []
+
+        for block in func.blocks:
+            val optimized = self.reduce_block(block)
+            optimized_blocks.push(optimized)
+
+        val function_rewrites = self.reduced_count - before_count
+        self.stats = optimization_provider_stats_record_scope(self.stats, function_rewrites)
+
+        MirFunction(..func, blocks: optimized_blocks)
 
     me reduce_block(block: MirBlock) -> MirBlock:
-        # Compatibility entrypoint used by older internal callers. It must not
-        # bypass the disabled canonical dispatcher.
-        block
+        """Apply strength reduction to block."""
+        var reduced_instructions: [MirInst] = []
 
     fn stats_summary() -> text:
         "StrengthReduction: {self.reduced_count} operations reduced"
 
 fn create_strength_reduction_pass() -> StrengthReduction:
+    """Create a new strength reduction pass instance."""
     StrengthReduction.new()
 
 fn strength_reduction_provider() -> OptimizationRuleProvider:
-    """Metadata contract for future rehabilitation; not activation authority."""
+    """Built-in Simple Optimization Plugin provider for general MIR arithmetic strength reduction."""
     optimization_rule_provider_builtin_with_contract(
         "simple.opt.math.strength_reduce",
         OptimizerProviderKind.Mir,
@@ -51,7 +85,6 @@ fn strength_reduction_provider() -> OptimizationRuleProvider:
         "pure"
     )
 
-fn strength_reduction_run_on_function(
-    strength_pass: StrengthReduction, func: MirFunction
-) -> MirFunction:
+fn strength_reduction_run_on_function(strength_pass: StrengthReduction, func: MirFunction) -> MirFunction:
+    """Free-function wrapper for strength reduction pass dispatch."""
     func

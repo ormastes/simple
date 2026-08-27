@@ -2,6 +2,29 @@
 
 > Tests stackless coroutines which provide lightweight concurrency without allocating stack space for each coroutine. Covers generator functions (creation, lazy evaluation, state preservation), async/await semantics (stubbed due to parser limitations), yield operations (single/multiple/computed/conditional), coroutine scheduling with multiple generators, and the full coroutine lifecycle including creation, completion, and state transitions.
 
+<!-- sdn-diagram:id=stackless_coroutines_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=stackless_coroutines_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+stackless_coroutines_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=stackless_coroutines_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 24 | 24 | 0 | 0 |
@@ -20,7 +43,7 @@ Tests stackless coroutines which provide lightweight concurrency without allocat
 | Category | Runtime |
 | Status | In Progress |
 | Source | `test/03_system/feature/usage/stackless_coroutines_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -40,18 +63,19 @@ transitions.
 
 #### creates generator that yields values
 
-- creates generator that yields values
+1. fn simple gen
+2. results push
+3. check
+4. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("creates generator that yields values")
 fn simple_gen() -> List<i64>:
     [1, 2, 3]
 
@@ -67,18 +91,18 @@ check(results.len() == 3)
 
 #### generator evaluates lazily
 
-- generator evaluates lazily
+1. fn counting gen
+2. result push
+3. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("generator evaluates lazily")
 fn counting_gen() -> List<i64>:
     var count = 0
     var result = []
@@ -97,18 +121,20 @@ check(generated.len() == 3)
 
 #### preserves state across iterations
 
-- preserves state across iterations
+1. fn stateful gen
+2. result push
+3. check
+4. check
+5. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("preserves state across iterations")
 fn stateful_gen() -> List<i64>:
     var n = 0
     var result = []
@@ -127,18 +153,19 @@ check(values[2] == 4)
 
 #### generator with multiple yields
 
-- generator with multiple yields
+1. fn multi yield
+2. var results = multi yield
+3. check
+4. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("generator with multiple yields")
 fn multi_yield() -> List<i64>:
     [10, 20, 30]
 
@@ -155,18 +182,18 @@ check(results.len() == 3)
 
 #### defines async function
 
-- defines async function
+1. fn get value
+2. var result = get value
+3. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("defines async function")
 # Using synchronous alternative
 fn get_value() -> i64:
     42
@@ -179,18 +206,18 @@ check(result == 42)
 
 #### handles async computation
 
-- handles async computation
+1. fn async add
+2. var result = async add
+3. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("handles async computation")
 fn async_add(a: i64, b: i64) -> i64:
     a + b
 
@@ -204,18 +231,16 @@ check(result == 7)
 
 #### returns error from async
 
-- returns error from async
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns error from async")
 check(true)
 ```
 
@@ -223,18 +248,17 @@ check(true)
 
 #### chains async operations
 
-- chains async operations
+1. fn safe divide
+2. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("chains async operations")
 fn safe_divide(a: i64, b: i64) -> i64:
     if b == 0:
         -1
@@ -251,18 +275,16 @@ check(r1 == 5)
 
 #### manages resources in async context
 
-- manages resources in async context
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("manages resources in async context")
 check(true)
 ```
 
@@ -274,18 +296,18 @@ check(true)
 
 #### yields single value
 
-- yields single value
+1. fn yield one
+2. check
+3. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("yields single value")
 fn yield_one() -> List<i64>:
     [42]
 
@@ -298,18 +320,18 @@ check(values.len() == 1)
 
 #### yields multiple values
 
-- yields multiple values
+1. fn yield range
+2. check
+3. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("yields multiple values")
 fn yield_range() -> List<i64>:
     [1, 2, 3, 4, 5]
 
@@ -324,18 +346,19 @@ check(values.len() == 5)
 
 #### yields computed expressions
 
-- yields computed expressions
+1. fn computed yields
+2. result push
+3. check
+4. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("yields computed expressions")
 fn computed_yields() -> List<i64>:
     var result = []
     for i in 0..3:
@@ -351,18 +374,19 @@ check(values.len() == 3)
 
 #### yields based on conditions
 
-- yields based on conditions
+1. fn conditional yields
+2. result push
+3. check
+4. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("yields based on conditions")
 fn conditional_yields() -> List<i64>:
     var result = []
     for i in 0..10:
@@ -383,18 +407,21 @@ check(values.len() == 5)
 
 #### runs multiple generators
 
-- runs multiple generators
+1. fn gen1
+2. fn gen2
+3. check
+4. check
+5. check
+6. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("runs multiple generators")
 fn gen1() -> List<i64>:
     [1, 2]
 
@@ -414,18 +441,16 @@ check(g2[0] == 3)
 
 #### interleaves coroutine execution
 
-- interleaves coroutine execution
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("interleaves coroutine execution")
 # Lambda closure variable capture crashes runtime
 check(true)
 ```
@@ -436,18 +461,17 @@ check(true)
 
 #### avoids stack allocation overhead
 
-- avoids stack allocation overhead
+1. generators push
+2. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("avoids stack allocation overhead")
 var generators = []
 for i in 0..5:
     generators.push([i, i + 1])
@@ -459,18 +483,17 @@ check(generators.len() == 5)
 
 #### handles many coroutines
 
-- handles many coroutines
+1. results push
+2. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("handles many coroutines")
 var results = []
 for i in 0..100:
     results.push(i)
@@ -486,18 +509,17 @@ check(results.len() == 100)
 
 #### creates coroutine in initial state
 
-- creates coroutine in initial state
+1. fn create coro
+2. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("creates coroutine in initial state")
 fn create_coro() -> List<i64>:
     [1, 2, 3]
 
@@ -509,18 +531,16 @@ check(coro.len() == 3)
 
 #### coroutine starts in suspended state
 
-- coroutine starts in suspended state
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("coroutine starts in suspended state")
 # Function closure variable capture crashes runtime
 check(true)
 ```
@@ -531,18 +551,17 @@ check(true)
 
 #### completes after yielding all values
 
-- completes after yielding all values
+1. fn finite gen
+2. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("completes after yielding all values")
 fn finite_gen() -> List<i64>:
     [1, 2, 3]
 
@@ -554,18 +573,17 @@ check(values.len() == 3)
 
 #### cleanup happens on completion
 
-- cleanup happens on completion
+1. fn cleanup gen
+2. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("cleanup happens on completion")
 var cleaned = false
 
 fn cleanup_gen() -> List<i64>:
@@ -581,18 +599,17 @@ check(cleaned == false)
 
 #### transitions from created to running
 
-- transitions from created to running
+1. fn transitions
+2. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("transitions from created to running")
 fn transitions() -> List<i64>:
     [1]
 
@@ -604,18 +621,17 @@ check(coro.len() == 1)
 
 #### transitions through suspend and resume
 
-- transitions through suspend and resume
+1. fn suspend resume
+2. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("transitions through suspend and resume")
 fn suspend_resume() -> List<i64>:
     [1, 2, 3]
 
@@ -628,18 +644,17 @@ check(first == 1)
 
 #### transitions to completed
 
-- transitions to completed
+1. fn completes
+2. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("transitions to completed")
 fn completes() -> List<i64>:
     [1, 2]
 
@@ -661,51 +676,3 @@ check(coro.len() == 2)
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `6433bd7924e254ebce9922d552f88f2f10da839ba8d050c01ba1ff79298197f1`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `6433bd7924e254ebce9922d552f88f2f10da839ba8d050c01ba1ff79298197f1`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `6433bd7924e254ebce9922d552f88f2f10da839ba8d050c01ba1ff79298197f1`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/03_system/feature/usage/stackless_coroutines_spec.spl
-mirror: doc/06_spec/03_system/feature/usage/stackless_coroutines_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/feature/usage/stackless_coroutines_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/feature/usage/stackless_coroutines_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/feature/usage/stackless_coroutines_spec.spl:46:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates generator that yields values' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/usage/stackless_coroutines_spec.spl:59:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'generator evaluates lazily' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/usage/stackless_coroutines_spec.spl:74:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'preserves state across iterations' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

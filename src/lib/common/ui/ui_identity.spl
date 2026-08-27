@@ -1,0 +1,90 @@
+# Typed UI identity (phase 1, typed-UI-interface plan).
+#
+# UiNodeKey / UiQualifiedId / UiScopePath / UiLocalId with canonical
+# encoding helpers. The wire format stays exactly "surface#widget"
+# (see common.ui.access_types.ui_access_canonical_id); scope_path is
+# additive and only appears in the extended "full" encoding.
+
+struct UiLocalId:
+    value: text
+
+struct UiScopePath:
+    segments: [text]
+
+struct UiQualifiedId:
+    surface_id: text
+    scope_path: UiScopePath
+    local_id: text
+
+struct UiNodeKey:
+    qualified: UiQualifiedId
+    kind: text
+
+fn ui_empty_scope_path() -> UiScopePath:
+    return UiScopePath(segments: [])
+
+fn ui_scope_path_encode(path: UiScopePath) -> text:
+    return path.segments.join("/")
+
+fn ui_scope_path_decode(blob: text) -> UiScopePath:
+    if blob == "":
+        return ui_empty_scope_path()
+    val parts = blob.split("/")
+    var seg_count = 0
+    for part in parts:
+        if part != "":
+            seg_count = seg_count + 1
+    if seg_count == 0:
+        return ui_empty_scope_path()
+    var segments: [text] = [""; seg_count]
+    var write_idx = 0
+    for part in parts:
+        if part != "":
+            segments[write_idx] = part
+            write_idx = write_idx + 1
+    return UiScopePath(segments: segments)
+
+fn ui_qualified_id(surface_id: text, local_id: text) -> UiQualifiedId:
+    return UiQualifiedId(surface_id: surface_id, scope_path: ui_empty_scope_path(), local_id: local_id)
+
+fn ui_qualified_id_scoped(surface_id: text, scope_segments: [text], local_id: text) -> UiQualifiedId:
+    return UiQualifiedId(surface_id: surface_id, scope_path: UiScopePath(segments: scope_segments), local_id: local_id)
+
+fn _ui_identity_find_hash(blob: text) -> i32:
+    var i = 0
+    while i < blob.len():
+        if blob.substring(i, i + 1) == "#":
+            return i
+        i = i + 1
+    return -1
+
+# Canonical wire encoding: exactly "surface#widget". Matches
+# ui_access_canonical_id semantics: an already-canonical local id
+# (containing '#') passes through unchanged.
+fn ui_qualified_id_wire(id: UiQualifiedId) -> text:
+    if _ui_identity_find_hash(id.local_id) >= 0:
+        return id.local_id
+    return "{id.surface_id}#{id.local_id}"
+
+fn ui_qualified_id_from_wire(wire: text) -> UiQualifiedId:
+    val idx = _ui_identity_find_hash(wire)
+    if idx < 0:
+        return ui_qualified_id("", wire)
+    return ui_qualified_id(wire.substring(0, idx), wire.substring(idx + 1))
+
+# Additive extended encoding: "surface#scope/segments/local". Only used
+# where callers opt into scope paths; plain ids keep the wire format.
+fn ui_qualified_id_full(id: UiQualifiedId) -> text:
+    val scope = ui_scope_path_encode(id.scope_path)
+    if scope == "":
+        return ui_qualified_id_wire(id)
+    return "{id.surface_id}#{scope}/{id.local_id}"
+
+fn ui_node_key(surface_id: text, scope_segments: [text], local_id: text, kind: text) -> UiNodeKey:
+    return UiNodeKey(qualified: ui_qualified_id_scoped(surface_id, scope_segments, local_id), kind: kind)
+
+fn ui_node_key_wire(key: UiNodeKey) -> text:
+    return ui_qualified_id_wire(key.qualified)
+
+fn ui_node_key_full(key: UiNodeKey) -> text:
+    return ui_qualified_id_full(key.qualified)

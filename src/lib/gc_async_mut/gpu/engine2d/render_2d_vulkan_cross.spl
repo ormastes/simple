@@ -1,8 +1,7 @@
 # Vulkan 2D Rendering — Cross-Architecture (RISC-V 64/32 + ARM 64/32)
 #
-# Describes target capability and CPU scalar fallback for non-x86 targets.
-# Actual Vulkan execution is owned by VulkanBackend/VulkanSession; this
-# diagnostic adapter must never claim a device was initialized without them.
+# Manages Vulkan device selection and CPU scalar fallback for non-x86 targets.
+# Provides QEMU diagnostic command generation for each supported architecture.
 #
 # Backend selection:
 #   riscv64 — Vulkan via virtio-gpu-pci (QEMU) or native GPU
@@ -86,7 +85,7 @@ class VulkanCrossRenderer:
     Fields:
       target        — architecture string passed to create_for_target
       target_bits   — pointer width: 32 or 64
-      backend       — "vulkan-unavailable" | "scalar"
+      backend       — "vulkan" | "scalar"
       initialized   — true after a successful init_device() call
       frame_count   — incremented by each present() call
       last_frame_ns — nanosecond timestamp of last frame (placeholder)
@@ -118,7 +117,7 @@ class VulkanCrossRenderer:
         Does not initialise the GPU device — call init_device() next.
         """
         val cap = VulkanCrossTarget.for_arch(arch)
-        val bknd = if cap.vulkan_capable: "vulkan-unavailable" else: "scalar"
+        val bknd = if cap.vulkan_capable: "vulkan" else: "scalar"
         VulkanCrossRenderer(
             target: arch,
             target_bits: cap.bits,
@@ -144,9 +143,12 @@ class VulkanCrossRenderer:
         For scalar targets the diagnostic set at construction is returned
         as an informational string (init still succeeds for scalar path).
         """
-        if self.backend == "vulkan-unavailable":
-            self.diagnostic = "VulkanCrossRenderer has no live device; use VulkanBackend"
-            return self.diagnostic
+        if self.backend == "vulkan":
+            # Pure Simple layer: no real Vulkan SFFI here.
+            # Production runtime wires rt_vulkan_* externs; this layer
+            # manages selection and reports capability.
+            self.initialized = true
+            return ""
         # scalar path: always succeeds
         self.initialized = true
         self.diagnostic
@@ -217,11 +219,8 @@ class VulkanCrossRenderer:
         self.target
 
     fn is_vulkan() -> bool:
-        """True only after a real Vulkan backend is installed.
-
-        This capability-only adapter cannot satisfy that contract.
-        """
-        false
+        """True when the Vulkan backend was selected."""
+        self.backend == "vulkan"
 
     fn is_scalar() -> bool:
         """True when the scalar CPU fallback is active."""

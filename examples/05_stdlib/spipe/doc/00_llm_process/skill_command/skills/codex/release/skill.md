@@ -1,15 +1,19 @@
-<!-- generated-from: doc/00_llm_process/skill_command/command/release.md -->
-# Protected Software Release
+<!-- llm-process-gen: managed source=codex_release_skill source_sha256=3d68961d63bc7661657f37fcf006fd8ba9990dfa5e64bcde7f06662736755a7d content_sha256=5768dc8cf053a260fc589004b44f7b1af24bd0bc4278317abde464b108b89ae1 -->
+---
+name: release
+description: "Codex release skill. Version bump (major/minor/patch/exact), CHANGELOG update, commit, tag, push (ask before push). Prerequisite: verify PASS."
+---
 
 Release contract: isolated-session; reviewed-beta-backport; immutable-candidate; promote-without-rebuild; protected-ref-guard; non-destructive-release-identity.
 
-Use the canonical semantic source at `doc/00_llm_process/skill_command/command/release.md`.
+**Cooperative Phase:** Release (after verification passes)
+**Self-sufficient.** Can be run by any LLM independently.
 
-Start one isolated release branch/worktree, read `release/version.sdn`, and require verified evidence. Beta maintenance accepts only explicit reviewed bug-fix backports with exact provenance and renewed post-application evidence. Create an immutable candidate, build once, and promote exact admitted artifacts through one signed annotated exact tag after approval.
+## Tools
 
-Never update protected refs directly, rebuild during promotion, select fixes automatically, push all tags, delete/move/reuse a published tag, or use fallback artifacts. Rollback redeploys a prior admitted release; corrections get a new version.
+- **Simple MCP** — read/write project files
 
-## Normalized contract clauses
+## Usage
 
 - One isolated release session owns one work branch and one non-main worktree.
 - `release/version.sdn` is the sole version authority and all other version locations are checked projections.

@@ -29,88 +29,247 @@
 
 set -eu
 
+internal_error() {
+    exit 2
+}
+
+internal_record_residue() {
+    internal_path=$1
+    internal_pattern=$2
+    internal_path_id=$3
+    internal_report="$internal_scratch/residue_report.txt"
+    set +e
+    LC_ALL=C awk -v marker="$internal_pattern" -v file="$internal_path" '
+        index($0, marker) {
+            if (lines == "") lines = NR
+            else lines = lines "," NR
+            if (!have_snippet) {
+                snippet = $0
+                sub(/^[[:space:]]*/, "", snippet)
+                sub(/[[:space:]]*$/, "", snippet)
+                have_snippet = 1
+            }
+        }
+        END {
+            if (!have_snippet) exit 1
+            printf "%s:%s: %s\n", file, lines, snippet
+        }
+    ' "$internal_path" >"$internal_report"
+    internal_status=$?
+    set -e
+    [ "$internal_status" -eq 0 ] || internal_error
+    cat "$internal_report" >>"$internal_scratch/residue_list.txt" ||
+        internal_error
+    printf '%s\n' "$internal_path_id" \
+        >>"$internal_scratch/residue_paths.txt" || internal_error
+}
+
+internal_check_candidate() {
+    internal_pattern=$1
+    internal_scratch=$2
+    internal_path=$3
+    [ -n "${SABOTAGE_RESIDUE_INTERNAL:-}" ] &&
+        [ "$SABOTAGE_RESIDUE_INTERNAL" = "$internal_scratch" ] &&
+        [ -d "$internal_scratch" ] || internal_error
+    [ -f "$internal_path" ] || internal_error
+
+    # Hash the raw pathname bytes into a newline-safe accounting identifier.
+    # Candidate transport itself remains NUL-delimited; this hash is only for
+    # unique counts and never for source/origin lookup.
+    internal_path_bytes="$internal_scratch/path_bytes"
+    printf '%s' "$internal_path" >"$internal_path_bytes" || internal_error
+    internal_path_id=$(git hash-object "$internal_path_bytes") || internal_error
+    printf '%s\n' "$internal_path_id" \
+        >>"$internal_scratch/checked_files.txt" || internal_error
+
+    # Query origin with an explicit literal pathspec. Glob-like filename bytes
+    # (`*`, `?`, `[`) must never select a sibling path.
+    internal_origin_listing="$internal_scratch/origin_listing.z"
+    internal_expected_path="$internal_scratch/expected_path.z"
+    git ls-tree -r -z --name-only origin/main -- \
+        ":(literal)$internal_path" >"$internal_origin_listing" || internal_error
+    printf '%s\0' "$internal_path" >"$internal_expected_path" || internal_error
+    set +e
+    cmp -s "$internal_origin_listing" "$internal_expected_path"
+    internal_listing_status=$?
+    set -e
+    case "$internal_listing_status" in
+        0) ;;
+        1)
+            internal_record_residue "$internal_path" "$internal_pattern" \
+                "$internal_path_id"
+            return 0 ;;
+        *) internal_error ;;
+    esac
+
+    internal_origin_file="$internal_scratch/origin_file.txt"
+    git show "origin/main:$internal_path" >"$internal_origin_file" 2>/dev/null ||
+        internal_error
+
+    internal_origin_matches="$internal_scratch/origin_matches.txt"
+    internal_working_matches="$internal_scratch/working_matches.txt"
+    internal_origin_sorted="$internal_scratch/origin_matches.sorted"
+    internal_working_sorted="$internal_scratch/working_matches.sorted"
+    internal_added_matches="$internal_scratch/added_matches.txt"
+    set +e
+    /usr/bin/grep -F -- "$internal_pattern" "$internal_origin_file" \
+        >"$internal_origin_matches" 2>/dev/null
+    internal_origin_grep_status=$?
+    /usr/bin/grep -F -- "$internal_pattern" "$internal_path" \
+        >"$internal_working_matches" 2>/dev/null
+    internal_working_grep_status=$?
+    set -e
+    case "$internal_origin_grep_status" in
+        0) ;;
+        1) : >"$internal_origin_matches" ;;
+        *) internal_error ;;
+    esac
+    [ "$internal_working_grep_status" -eq 0 ] || internal_error
+
+    LC_ALL=C sort "$internal_origin_matches" >"$internal_origin_sorted" ||
+        internal_error
+    LC_ALL=C sort "$internal_working_matches" >"$internal_working_sorted" ||
+        internal_error
+    # Directional multiset containment: working-copy marker lines may be
+    # removed, but every remaining/added occurrence must already be admitted
+    # by origin with at least the same duplicate count.
+    LC_ALL=C comm -23 "$internal_working_sorted" "$internal_origin_sorted" \
+        >"$internal_added_matches" || internal_error
+    if [ -s "$internal_added_matches" ]; then
+        internal_record_residue "$internal_path" "$internal_pattern" \
+            "$internal_path_id"
+    fi
+}
+
+# Internal candidate mode is reachable only from the full-scan parent through
+# a per-run scratch token. Ordinary hook arguments never enter this branch and
+# therefore cannot narrow the scan.
+if [ "${1:-}" = --internal-candidate ] && [ "$#" -eq 4 ]; then
+    internal_check_candidate "$2" "$3" "$4"
+    exit 0
+fi
+
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 cd "$ROOT_DIR"
 
-# Verify we're in a git repo
-if [ ! -d .git ]; then
+# Verify this is a real working tree. Linked worktrees intentionally have a
+# `.git` file, not a directory, so filesystem-shape checks reject valid push
+# contexts. The semantic probes also reject bare repositories and broken Git
+# metadata without guessing from layout.
+inside_work_tree=$(git rev-parse --is-inside-work-tree 2>/dev/null) ||
+    inside_work_tree=""
+git_dir=$(git rev-parse --git-dir 2>/dev/null) || git_dir=""
+if [ "$inside_work_tree" != true ] || [ -z "$git_dir" ] || [ ! -d "$git_dir" ]; then
     printf 'ERROR — nothing was checked\n'
     exit 2
 fi
 
-# Verify origin/main exists
-if ! git rev-parse --verify origin/main >/dev/null 2>&1; then
+# Verify origin/main exists and names a commit.
+if ! git rev-parse --verify 'origin/main^{commit}' >/dev/null 2>&1; then
     printf 'ERROR — nothing was checked\n'
     exit 2
 fi
 
-SCRATCH_DIR=$(mktemp -d)
+scan_error() {
+    printf 'ERROR — nothing was checked\n'
+    exit 2
+}
+
+SCRATCH_DIR=$(mktemp -d) || scan_error
 trap 'rm -rf "$SCRATCH_DIR"' EXIT INT TERM
 
 RESIDUE_FILE="$SCRATCH_DIR/residue_list.txt"
+RESIDUE_PATH_FILE="$SCRATCH_DIR/residue_paths.txt"
 CHECKED_FILE="$SCRATCH_DIR/checked_files.txt"
-touch "$RESIDUE_FILE" "$CHECKED_FILE"
+SCANNED_FILE="$SCRATCH_DIR/scanned_files.z"
+TRACKED_FILE="$SCRATCH_DIR/tracked_files.z"
+touch "$RESIDUE_FILE" "$RESIDUE_PATH_FILE" "$CHECKED_FILE" \
+    "$SCANNED_FILE" "$TRACKED_FILE" || scan_error
 
 # Markers to search for (each gets its own pass)
 # Use explicit literal strings, not regexes, for precision
 MARKERS="SABOTAGE MARKER- MARKER_ TEMP-PROBE XXX-DEBUG DEBUGME"
 
-# Scan tracked files in src/** and test/fixtures/**
-# Use /usr/bin/grep explicitly, NOT bare grep (which is wrapped ugrep honoring .gitignore)
-for pattern in $MARKERS; do
-    # Find all tracked files containing this marker
-    # We must scan WC files, not origin, to detect residue
-    marker_files=$(/usr/bin/grep -r --include='*.spl' --include='*.shs' "$pattern" src test/fixtures 2>/dev/null | cut -d: -f1 | sort -u || true)
-
-    for filepath in $marker_files; do
-        # Record that we checked this file
-        echo "$filepath" >>"$CHECKED_FILE"
-
-        # Skip if file doesn't exist (deleted in WC or not tracked)
-        [ -f "$filepath" ] || continue
-
-        # Check if file exists in origin/main
-        if ! git show origin/main:"$filepath" >/dev/null 2>&1; then
-            # File is new (not in origin) — the marker is not "residue",
-            # it's part of new work. Don't flag it.
-            continue
+# Scan tracked Simple and shell sources in src/** and test/fixtures/**. Record
+# the complete admitted scan set separately from marker-hit candidates: a
+# marker-free tree is a successful scan of N files, not "nothing checked".
+set -- \
+    ':(glob)src/**/*.spl' ':(glob)src/**/*.shs' \
+    ':(glob)test/fixtures/**/*.spl' ':(glob)test/fixtures/**/*.shs'
+# Pathnames remain NUL-delimited from Git through the regular-file filter.
+# Besides avoiding Git's newline-mode C quoting, passing each name as a shell
+# argument keeps every byte literal: no path text is reparsed as syntax.
+git ls-files -z -- "$@" >"$TRACKED_FILE" 2>/dev/null || scan_error
+set +e
+xargs -0 sh -c '
+    scanned_file=$1
+    shift
+    for filepath do
+        if [ -f "$filepath" ]; then
+            printf "\000" >>"$scanned_file" || exit 1
         fi
-
-        # File exists in both WC and origin. Check if the marker exists in origin's version.
-        # Use git show + /usr/bin/grep to search the origin version.
-        if git show origin/main:"$filepath" 2>/dev/null | /usr/bin/grep -F "$pattern" >/dev/null 2>&1; then
-            # Marker exists in origin too — this is committed, legitimate content.
-            # Do not flag.
-            continue
-        fi
-
-        # Marker is in WC but NOT in origin — this is unrestored residue.
-        # Extract and report line numbers
-        line_numbers=$(/usr/bin/grep -n -F "$pattern" "$filepath" | cut -d: -f1 | tr '\n' ',' | sed 's/,$//')
-        snippet=$(/usr/bin/grep -F "$pattern" "$filepath" | head -1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-
-        printf '%s:%s: %s\n' "$filepath" "$line_numbers" "$snippet" >>"$RESIDUE_FILE"
     done
+' sh "$SCANNED_FILE" <"$TRACKED_FILE"
+tracked_filter_status=$?
+set -e
+[ "$tracked_filter_status" -eq 0 ] || scan_error
+
+# The scan ledger contains exactly one NUL byte per admitted file. Counting
+# bytes therefore cannot be confused by newlines or any other pathname byte.
+num_scanned=$(LC_ALL=C wc -c <"$SCANNED_FILE") || scan_error
+if [ "$num_scanned" -le 0 ]; then
+    scan_error
+fi
+
+# Use Git's tracked-file grep so untracked build/debug artifacts cannot become
+# scan candidates. Exit 1 means no marker matches; any other nonzero status is
+# a real scan failure and must remain ERROR.
+for pattern in $MARKERS; do
+    marker_file="$SCRATCH_DIR/marker_files.z"
+    marker_error="$SCRATCH_DIR/marker_error.txt"
+    set +e
+    git grep -z -l -F -- "$pattern" -- "$@" \
+        >"$marker_file" 2>"$marker_error"
+    marker_status=$?
+    set -e
+    case "$marker_status" in
+        0)
+            SELF_PATH="$ROOT_DIR/scripts/check/check-no-sabotage-residue.shs"
+            set +e
+            SABOTAGE_RESIDUE_INTERNAL="$SCRATCH_DIR" \
+                xargs -0 -n 1 sh "$SELF_PATH" --internal-candidate \
+                    "$pattern" "$SCRATCH_DIR" <"$marker_file"
+            candidate_status=$?
+            set -e
+            [ "$candidate_status" -eq 0 ] || scan_error
+            ;;
+        1) : >"$marker_file" ;;
+        *) scan_error ;;
+    esac
 done
 
-# Count unique files checked
-num_checked=$(sort -u "$CHECKED_FILE" | wc -l)
+# Count unique marker-candidate files checked. This can honestly be zero while
+# num_scanned remains positive.
+UNIQUE_CHECKED_FILE="$SCRATCH_DIR/checked_files.unique"
+LC_ALL=C sort -u "$CHECKED_FILE" >"$UNIQUE_CHECKED_FILE" || scan_error
+num_checked=$(LC_ALL=C awk 'END { print NR + 0 }' "$UNIQUE_CHECKED_FILE") ||
+    scan_error
 
 # Check for residue
 if [ -s "$RESIDUE_FILE" ]; then
     # Residue found
-    num_residue_files=$(cut -d: -f1 "$RESIDUE_FILE" | sort -u | wc -l)
-    cat "$RESIDUE_FILE"
+    UNIQUE_RESIDUE_PATH_FILE="$SCRATCH_DIR/residue_paths.unique"
+    LC_ALL=C sort -u "$RESIDUE_PATH_FILE" >"$UNIQUE_RESIDUE_PATH_FILE" ||
+        scan_error
+    num_residue_files=$(LC_ALL=C awk 'END { print NR + 0 }' \
+        "$UNIQUE_RESIDUE_PATH_FILE") || scan_error
+    cat "$RESIDUE_FILE" || scan_error
     printf 'FAIL — residue found in %d file(s)\n' "$num_residue_files"
     exit 1
 fi
 
-# No residue found
-if [ "$num_checked" -le 0 ]; then
-    # No files matched any scan
-    printf 'ERROR — nothing was checked\n'
-    exit 2
-fi
-
-printf 'PASS — %d file(s) checked, no residue\n' "$num_checked"
+# No residue found. Explicitly report both the non-vacuous scan denominator and
+# the candidate count so a marker-free PASS cannot be confused with fail-open.
+printf 'PASS — %d tracked source file(s) scanned, %d marker candidate file(s) checked, no residue\n' \
+    "$num_scanned" "$num_checked"
 exit 0

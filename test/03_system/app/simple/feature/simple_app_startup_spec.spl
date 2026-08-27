@@ -5,8 +5,6 @@
 #
 # Simple app startup policy system spec.
 
-use std.spec.step
-
 use std.spec.*
 use app.startup.launch_metadata.{
     LaunchMetadata,
@@ -17,6 +15,7 @@ use app.startup.launch_metadata.{
     render_native_launch_metadata_trailer,
     parse_launch_metadata_sidecar,
     parse_launch_metadata_from_smf_bytes,
+    retained_smf_launch_metadata_v1,
     parse_launch_metadata_from_native_bytes,
     has_native_launch_metadata_trailer,
     launch_metadata_sidecar_path,
@@ -24,7 +23,45 @@ use app.startup.launch_metadata.{
     startup_plan_from_metadata,
     startup_feature_summary
 }
+use app.startup.load_policy_wiring.{startup_load_policy_for_retained_smf_v1}
 use compiler.driver.smf_writer.{SmfBuildOptions, Target, generate_smf_with_options}
+
+fn _test_le_u64(bytes: [u8], offset: i64) -> i64:
+    (bytes[offset] as i64) |
+    ((bytes[offset + 1] as i64) << 8) |
+    ((bytes[offset + 2] as i64) << 16) |
+    ((bytes[offset + 3] as i64) << 24) |
+    ((bytes[offset + 4] as i64) << 32) |
+    ((bytes[offset + 5] as i64) << 40) |
+    ((bytes[offset + 6] as i64) << 48) |
+    ((bytes[offset + 7] as i64) << 56)
+
+fn _test_write_le_u32(mut bytes: [u8], offset: i64, value: i64) -> [u8]:
+    # concat([]) makes the mutation fixture-local even on runtimes where an
+    # array argument aliases the caller's backing storage.
+    var out = bytes.concat([])
+    out[offset] = (value & 0xFF).to_u8()
+    out[offset + 1] = ((value >> 8) & 0xFF).to_u8()
+    out[offset + 2] = ((value >> 16) & 0xFF).to_u8()
+    out[offset + 3] = ((value >> 24) & 0xFF).to_u8()
+    out
+
+fn _test_write_le_u64(mut bytes: [u8], offset: i64, value: i64) -> [u8]:
+    var out = bytes.concat([])
+    out[offset] = (value & 0xFF).to_u8()
+    out[offset + 1] = ((value >> 8) & 0xFF).to_u8()
+    out[offset + 2] = ((value >> 16) & 0xFF).to_u8()
+    out[offset + 3] = ((value >> 24) & 0xFF).to_u8()
+    out[offset + 4] = ((value >> 32) & 0xFF).to_u8()
+    out[offset + 5] = ((value >> 40) & 0xFF).to_u8()
+    out[offset + 6] = ((value >> 48) & 0xFF).to_u8()
+    out[offset + 7] = ((value >> 56) & 0xFF).to_u8()
+    out
+
+fn _retained_smf_for_payload(payload: text) -> [u8]:
+    var opts = SmfBuildOptions.create(Target.x86_64_unknown_linux_gnu())
+    opts.launch_metadata_bytes = payload.bytes()
+    generate_smf_with_options([0xC3], opts)
 
 fn _metadata(kind: text, uses_args: bool, mmap_hint: bool, native_dynlibs: [text], smf_dynlibs: [text]) -> LaunchMetadata:
     LaunchMetadata(
@@ -39,7 +76,6 @@ fn _metadata(kind: text, uses_args: bool, mmap_hint: bool, native_dynlibs: [text
     )
 
 describe "simple app startup metadata":
-    # @manual scenario evidence
     describe "REQ-001: launch kind detection":
         it "should classify SMF files as SMF launches":
             # @req REQ-001
@@ -90,7 +126,6 @@ describe "simple app startup metadata":
             step("should use host mmap when metadata requests cache and host supports mmap")
             val metadata = _metadata("script", true, true, [], [])
             val plan = startup_plan_from_metadata("main.spl", [], metadata, true, false)
-            expect(plan.executable_source).to_equal("filesystem")
             expect(plan.include_mmap_cache).to_equal(true)
             expect(plan.cache_strategy).to_equal("mmap")
 
@@ -228,10 +263,13 @@ describe "simple app startup metadata":
             opts.launch_metadata_bytes = sidecar.bytes()
 
             val smf = generate_smf_with_options([0xC3], opts)
+            val retained = retained_smf_launch_metadata_v1(smf, "smf")
             val metadata = parse_launch_metadata_from_smf_bytes(smf, "smf")
             val plan = startup_plan_from_metadata("/sys/apps/simple.smf", ["--open", "doc.spl"], metadata, false, true)
 
             expect(metadata.entry_kind).to_equal("smf")
+            expect(retained.present).to_equal(true)
+            expect(retained.ok).to_equal(true)
             expect(metadata.target_os).to_equal("simpleos")
             expect(plan.include_arg_parser).to_equal(true)
             expect(plan.include_mmap_cache).to_equal(true)
@@ -239,6 +277,126 @@ describe "simple app startup metadata":
             expect(plan.include_dynlib_loader).to_equal(true)
             expect(plan.load_smf_dynlibs[0]).to_equal("/sys/lib/gui_hot.smf")
             expect(plan.program_args[0]).to_equal("/sys/apps/simple.smf")
+
+            val policy = startup_load_policy_for_retained_smf_v1(
+                smf, false, true)
+            expect(policy.applicable).to_equal(true)
+            expect(policy.ok).to_equal(true)
+            expect(policy.decision.cache_strategy).to_equal("simpleos_vfs_prewarm")
+
+        it "distinguishes absent metadata from malformed retained tables":
+            val absent_bytes = generate_smf_with_options(
+                [0xC3], SmfBuildOptions.create(Target.x86_64_unknown_linux_gnu()))
+            val absent = retained_smf_launch_metadata_v1(absent_bytes, "smf")
+            expect(absent.present).to_equal(false)
+            expect(absent.ok).to_equal(true)
+            val absent_policy = startup_load_policy_for_retained_smf_v1(
+                absent_bytes, true, false)
+            expect(absent_policy.applicable).to_equal(false)
+            expect(absent_policy.ok).to_equal(true)
+
+            var opts = SmfBuildOptions.create(Target.x86_64_unknown_linux_gnu())
+            opts.launch_metadata_bytes =
+                "simple_launch_metadata:\n  entry_kind: \"smf\"\n  load_policy: \"normal\"\n".bytes()
+            var malformed = generate_smf_with_options([0xC3], opts)
+            val header = malformed.len() - 128
+            malformed[header + 16] = 0xFF
+            malformed[header + 17] = 0xFF
+            val rejected = retained_smf_launch_metadata_v1(malformed, "smf")
+            expect(rejected.ok).to_equal(false)
+            val rejected_policy = startup_load_policy_for_retained_smf_v1(
+                malformed, true, false)
+            expect(rejected_policy.applicable).to_equal(true)
+            expect(rejected_policy.ok).to_equal(false)
+            expect(rejected_policy.reason).to_contain("section_count_invalid")
+
+            var bad_magic = absent_bytes
+            val bad_header = bad_magic.len() - 128
+            bad_magic[bad_header] = 0
+            expect(retained_smf_launch_metadata_v1(bad_magic, "smf").reason).to_equal(
+                "smf_magic_invalid")
+
+            var empty_payload = generate_smf_with_options([0xC3], opts)
+            val empty_header = empty_payload.len() - 128
+            val empty_table = _test_le_u64(empty_payload, empty_header + 20)
+            val launch_entry = empty_table + 64
+            var size_byte = 0
+            while size_byte < 8:
+                empty_payload[launch_entry + 16 + size_byte] = 0
+                size_byte = size_byte + 1
+            expect(retained_smf_launch_metadata_v1(empty_payload, "smf").reason).to_equal(
+                "launch_metadata_payload_invalid")
+
+        it "keeps the sidecar compatibility parser permissive but rejects malformed retained payload grammar":
+            # Existing sidecars remain compatibility-parsed: unknown fields and
+            # noncanonical booleans retain their pre-existing interpretation.
+            val compat = parse_launch_metadata_sidecar(
+                "ignored: true\nuses_arg_parser: yes\n", "smf")
+            expect(compat.uses_arg_parser).to_equal(false)
+
+            val bad_root = _retained_smf_for_payload(
+                "launch_metadata:\n  uses_arg_parser: true\n")
+            expect(retained_smf_launch_metadata_v1(bad_root, "smf").reason).to_equal(
+                "launch_metadata_root_invalid")
+
+            val bad_bool = _retained_smf_for_payload(
+                "simple_launch_metadata:\n  uses_arg_parser: yes\n")
+            expect(retained_smf_launch_metadata_v1(bad_bool, "smf").reason).to_equal(
+                "launch_metadata_uses_arg_parser_invalid")
+
+            val unknown_key = _retained_smf_for_payload(
+                "simple_launch_metadata:\n  future_policy: \"yes\"\n")
+            expect(retained_smf_launch_metadata_v1(unknown_key, "smf").reason).to_equal(
+                "launch_metadata_key_unknown")
+
+            val duplicate_scalar = _retained_smf_for_payload(
+                "simple_launch_metadata:\n" +
+                "  entry_kind: \"smf\"\n" +
+                "  entry_kind: \"smf\"\n")
+            expect(retained_smf_launch_metadata_v1(duplicate_scalar, "smf").reason).to_equal(
+                "launch_metadata_entry_kind_invalid")
+
+            val missing_required = _retained_smf_for_payload(
+                "simple_launch_metadata:\n  entry_kind: \"smf\"\n")
+            expect(retained_smf_launch_metadata_v1(missing_required, "smf").reason).to_equal(
+                "launch_metadata_required_field_missing")
+
+        it "rejects retained SMF header ambiguity and malformed canonical geometry":
+            val canonical_payload = render_launch_metadata_sidecar(
+                _metadata("smf", true, true, [], []))
+            val valid = _retained_smf_for_payload(canonical_payload)
+            expect(retained_smf_launch_metadata_v1(valid, "smf").ok).to_equal(true)
+            val header = valid.len() - 128
+            val table = _test_le_u64(valid, header + 20)
+
+            var v10 = valid
+            v10[header + 5] = 0
+            expect(retained_smf_launch_metadata_v1(v10, "smf").reason).to_equal(
+                "smf_version_unsupported")
+
+            var ambiguous = valid
+            ambiguous[0] = 83
+            ambiguous[1] = 77
+            ambiguous[2] = 70
+            ambiguous[3] = 0
+            expect(retained_smf_launch_metadata_v1(ambiguous, "smf").reason).to_equal(
+                "smf_header_ambiguous")
+
+            val bad_data_offset = _test_write_le_u32(valid, header + 56, 1)
+            expect(retained_smf_launch_metadata_v1(bad_data_offset, "smf").reason).to_equal(
+                "smf_data_offset_invalid")
+
+            val bad_alignment = _test_write_le_u32(valid, table + 32, 3)
+            expect(retained_smf_launch_metadata_v1(bad_alignment, "smf").reason).to_equal(
+                "launch_metadata_section_alignment_invalid")
+
+            val overlapping_symbol_table = _test_write_le_u64(valid, header + 28, table)
+            expect(retained_smf_launch_metadata_v1(overlapping_symbol_table, "smf").reason).to_equal(
+                "launch_metadata_symbol_table_overlap")
+
+            val overlapping_section = _test_write_le_u64(valid, table + 64 + 8, 0)
+            expect(retained_smf_launch_metadata_v1(overlapping_section, "smf").reason).to_equal(
+                "launch_metadata_section_overlap")
 
     describe "REQ-007: embedded native launch metadata":
         it "should parse native launch metadata from the binary trailer":

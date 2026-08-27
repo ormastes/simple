@@ -1,10 +1,10 @@
 # Async Buffer Specification
 
-> Tests covering AsyncBufferedReader, AsyncBufferedWriter, Async Buffer Composition.
+> Tests covering AsyncBufferedReader byte conversion, AsyncBufferedReader, AsyncBufferedWriter, Async Buffer Composition.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 12 | 12 | 0 | 0 |
+| 14 | 14 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -12,6 +12,76 @@
 # Async Buffer Specification
 
 ## Scenarios
+
+### AsyncBufferedReader byte conversion
+
+#### decodes text without text.from_bytes
+
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- decodes text without text.from_bytes
+   - Expected: text_value equals `ok?`
+   - Expected: err.message equals ``
+   - Expected: "pending" equals ``
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 13 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("decodes text without text.from_bytes")
+val raw = AsyncMemoryReader.new([111u8, 107u8, 255u8])
+val reader = AsyncBufferedReader.with_capacity(raw, 2)
+match reader.read_text().poll():
+    Poll.Ready(result):
+        match result:
+            Ok(text_value):
+                expect(text_value).to_equal("ok?")
+            Err(err):
+                expect(err.message).to_equal("")
+    Poll.Pending:
+        expect("pending").to_equal("")
+```
+
+</details>
+
+#### preserves line controls while decoding buffered lines
+
+- preserves line controls while decoding buffered lines
+   - Expected: text_value equals `ok\n`
+   - Expected: err.message equals ``
+   - Expected: "pending" equals ``
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 13 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("preserves line controls while decoding buffered lines")
+val raw = AsyncMemoryReader.new([111u8, 107u8, 10u8])
+val reader = AsyncBufferedReader(inner: raw, buf: [111u8, 107u8, 10u8], buf_size: 4, pos: 0, filled: 3)
+match reader.read_line().poll():
+    Poll.Ready(result):
+        match result:
+            Ok(text_value):
+                expect(text_value).to_equal("ok\n")
+            Err(err):
+                expect(err.message).to_equal("")
+    Poll.Pending:
+        expect("pending").to_equal("")
+```
+
+</details>
 
 ### AsyncBufferedReader
 
@@ -311,12 +381,13 @@ pass
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/unit/lib/nogc_async_mut/io/async_buffer_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-08-27 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering AsyncBufferedReader, AsyncBufferedWriter, Async Buffer Composition.
+Tests covering AsyncBufferedReader byte conversion, AsyncBufferedReader, AsyncBufferedWriter, Async Buffer Composition.
+- AsyncBufferedReader byte conversion
 - AsyncBufferedReader
 - AsyncBufferedWriter
 - Async Buffer Composition
@@ -325,8 +396,8 @@ Tests covering AsyncBufferedReader, AsyncBufferedWriter, Async Buffer Compositio
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 12 |
-| Active scenarios | 12 |
+| Total scenarios | 14 |
+| Active scenarios | 14 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
@@ -345,43 +416,42 @@ Requirements covered by the scenarios in this manual:
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `22da624be9a6b638ca2685cf3b8fa4d8fffe19ef432cf80b35cd6e0163e16f1d`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `9c255aae43313b7fe66b78fae5777631d40719309bb12a9c494a7532c93de155`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `22da624be9a6b638ca2685cf3b8fa4d8fffe19ef432cf80b35cd6e0163e16f1d`.
+Source SHA-256: `9c255aae43313b7fe66b78fae5777631d40719309bb12a9c494a7532c93de155`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `22da624be9a6b638ca2685cf3b8fa4d8fffe19ef432cf80b35cd6e0163e16f1d`  
+Source SHA-256: `9c255aae43313b7fe66b78fae5777631d40719309bb12a9c494a7532c93de155`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **82/100**; effective score: **49/100**; blockers: **1**.
+Raw score: **89/100**; effective score: **89/100**; blockers: **0**.
 
-SSpec documentization score: 49/100
+SSpec documentization score: 89/100
 source: test/unit/lib/nogc_async_mut/io/async_buffer_spec.spl
 mirror: doc/06_spec/unit/lib/nogc_async_mut/io/async_buffer_spec.md (current)
-findings: 6 blockers: 1
-  narrative=100 structure=100 oracle=50
+findings: 6 blockers: 0
+  narrative=80 structure=100 oracle=100
   traceability=100 evidence=70 coverage=100 maintainability=70
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-  raw=82; blocker cap makes effective=49
 doc/06_spec/unit/lib/nogc_async_mut/io/async_buffer_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/unit/lib/nogc_async_mut/io/async_buffer_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+doc/06_spec/unit/lib/nogc_async_mut/io/async_buffer_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/unit/lib/nogc_async_mut/io/async_buffer_spec.spl:1:1: blocker SSDOC-ORA-001 [oracle] (-50): no real executed assertion or compiler oracle
-  why: A passing-looking document without an oracle is not conformance evidence.
-  improve: Replace placeholders with an observable production assertion.
-test/unit/lib/nogc_async_mut/io/async_buffer_spec.spl:74:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'documents default construction' has no retained capture or evidence
+test/unit/lib/nogc_async_mut/io/async_buffer_spec.spl:1:1: warning SSDOC-NAR-001 [narrative] (-20): missing authored purpose and audience
+  why: Readers need scope, audience, and intent before executable detail.
+  improve: Add authored purpose, scope, and audience facts.
+test/unit/lib/nogc_async_mut/io/async_buffer_spec.spl:101:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'decodes text without text.from_bytes' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/unit/lib/nogc_async_mut/io/async_buffer_spec.spl:82:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'documents custom capacity' has no retained capture or evidence
+test/unit/lib/nogc_async_mut/io/async_buffer_spec.spl:116:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'preserves line controls while decoding buffered lines' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/unit/lib/nogc_async_mut/io/async_buffer_spec.spl:93:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'documents read_text' has no retained capture or evidence
+test/unit/lib/nogc_async_mut/io/async_buffer_spec.spl:142:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'documents default construction' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
 <!-- sspec-maintain:scorecard:end -->

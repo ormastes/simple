@@ -1,7 +1,6 @@
 # Bug: JIT (`bin/simple run`) route blockers for the editor
 
-Status: OPEN (P2)
-Status re-verified 2026-08-17 by source inspection (triage shard 01).
+Status: - partial (item 3 fixed; item 1 diagnostic tooling added; item 2 deferred)
 
 - **ID:** editor_jit_run_route_blockers
 - **Severity:** P2

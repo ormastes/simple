@@ -1,0 +1,108 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-APP
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+
+
+
+
+
+"""Focused behavior and branch matrix for the legacy Simple i18n CLI."""
+# @req: REQ-SSPEC-APP
+# @cover src/app/i18n/main.spl 100%
+
+use std.spec.step
+
+use std.spec.{describe, it, expect}
+use app.i18n.main.{
+    I18nString, clean_args, extract_i18n_strings, generate_locale_catalog,
+    generate_locale_template, handle_extract, handle_generate, is_ident_char}
+use app.io.mod.{file_exists, file_read, file_write, dir_create}
+
+val EMPTY_FIXTURE_DIR = "build/test/i18n_cli_branch/empty_source"
+val POPULATED_FIXTURE_DIR = "build/test/i18n_cli_branch/populated_source"
+val OUTPUT_DIR = "build/test/i18n_cli_branch/output"
+
+fn fixture_strings() -> [I18nString]:
+    [
+        I18nString(key: "Welcome", default_text: "Hello", file: "a.spl", line: 1),
+        I18nString(key: "Welcome", default_text: "Duplicate", file: "b.spl", line: 2),
+        I18nString(key: "Farewell", default_text: "Bye", file: "b.spl", line: 3)
+    ]
+
+describe "i18n CLI branch matrix":
+    # @manual scenario evidence
+    it "removes every logging option form and its split value":
+        # @req REQ-SSPEC-APP
+        step("removes every logging option form and its split value")
+        step("Verify flags, key-value options, and ordinary arguments")
+        expect(clean_args(["extract", "--human", "--json", "--tui", "--stdout",
+            "--quiet", "--verbose", "--dots", "--count", "--no-progress",
+            "--log-mode", "llm", "--surface", "stderr", "--progress", "count",
+            "--log-mode=json", "--surface=stdout", "--progress=dots",
+            "--dir=src", "--output=out"])).to_equal(
+                ["extract", "--dir=src", "--output=out"])
+
+    it "classifies identifier characters and rejects punctuation and Unicode":
+        # @req REQ-SSPEC-APP
+        step("classifies identifier characters and rejects punctuation and Unicode")
+        step("Verify all ASCII identifier ranges and fallthrough")
+        expect(is_ident_char("a")).to_be(true)
+        expect(is_ident_char("Z")).to_be(true)
+        expect(is_ident_char("5")).to_be(true)
+        expect(is_ident_char("_")).to_be(true)
+        expect(is_ident_char("-")).to_be(false)
+        expect(is_ident_char("한")).to_be(false)
+
+    it "extracts keys lines escapes and ignores malformed patterns":
+        # @req REQ-SSPEC-APP
+        step("extracts keys lines escapes and ignores malformed patterns")
+        step("Verify scanner success, escaping, unterminated input, and empty key")
+        val source = "Welcome_\"Hello\"\n" +
+            "val x = Prefix_Key_\"A \\\"quote\\\"\"\n" +
+            "_\"empty key\"\n" +
+            "Broken_\"unterminated\n" +
+            "val ordinary = \"not localized\""
+        val found = extract_i18n_strings(source, "fixture.spl")
+        expect(found.len()).to_equal(2)
+        expect(found[0].key).to_equal("Welcome")
+        expect(found[0].default_text).to_equal("Hello")
+        expect(found[0].line).to_equal(1)
+        expect(found[1].key).to_equal("Prefix_Key")
+        expect(found[1].default_text).to_equal("A \\\"quote\\\"")
+        expect(found[1].line).to_equal(2)
+
+    it "deduplicates catalogs and locale templates by stable key":
+        # @req REQ-SSPEC-APP
+        step("deduplicates catalogs and locale templates by stable key")
+        step("Verify first occurrence wins and output stays deterministic")
+        val catalog = generate_locale_catalog(fixture_strings())
+        expect(catalog).to_contain("Welcome, \"Hello\", a.spl, 1")
+        expect(catalog.contains("Duplicate")).to_be(false)
+        expect(catalog).to_contain("Farewell, \"Bye\", b.spl, 3")
+        val template = generate_locale_template("ko-KR", fixture_strings())
+        expect(template).to_contain("# Locale: ko-KR")
+        expect(template).to_contain("Welcome = \"Hello\"")
+        expect(template.contains("Duplicate")).to_be(false)
+
+    it "handles missing empty and populated source directories":
+        # @req REQ-SSPEC-APP
+        step("handles missing empty and populated source directories")
+        step("Verify filesystem errors, no-message success, and generated artifacts")
+        expect(handle_extract("build/test/i18n_cli_branch/missing", OUTPUT_DIR)).to_equal(1)
+        expect(handle_generate("ko-KR", "build/test/i18n_cli_branch/missing", OUTPUT_DIR)).to_equal(1)
+        dir_create(EMPTY_FIXTURE_DIR, true)
+        file_write("{EMPTY_FIXTURE_DIR}/ignore.txt", "Ignored_\"Not Simple\"")
+        file_write("{EMPTY_FIXTURE_DIR}/empty.spl", "val ordinary = \"plain\"")
+        expect(handle_extract(EMPTY_FIXTURE_DIR, OUTPUT_DIR)).to_equal(0)
+        expect(handle_generate("ko-KR", EMPTY_FIXTURE_DIR, OUTPUT_DIR)).to_equal(0)
+        dir_create(POPULATED_FIXTURE_DIR, true)
+        file_write("{POPULATED_FIXTURE_DIR}/ignore.txt", "Ignored_\"Not Simple\"")
+        file_write("{POPULATED_FIXTURE_DIR}/messages.spl", "Welcome_\"안녕하세요\"\nFarewell_\"Bye\"")
+        expect(handle_extract(POPULATED_FIXTURE_DIR, OUTPUT_DIR)).to_equal(0)
+        expect(handle_generate("ko-KR", POPULATED_FIXTURE_DIR, OUTPUT_DIR)).to_equal(0)
+        expect(file_exists("{OUTPUT_DIR}/strings.sdn")).to_be(true)
+        expect(file_exists("{OUTPUT_DIR}/__init__.ko-KR.spl")).to_be(true)
+        expect(file_read("{OUTPUT_DIR}/strings.sdn")).to_contain("Welcome")
+        expect(file_read("{OUTPUT_DIR}/strings.sdn")).to_contain("안녕하세요")
+        expect(file_read("{OUTPUT_DIR}/__init__.ko-KR.spl")).to_contain("안녕하세요")

@@ -24,31 +24,14 @@
 # process main thread (winit requirement); the cdylib performs explicit
 # NSApplication activation so the window is frontmost and receives input.
 
-use std.sffi.dynamic.{DynLib, spl_dlclose}
+use std.sffi.dynamic.{DynLib}
 use std.diag.{dbg_stage, dbg_event_hop, dbg_events_on}
 
-@unsafe(reason: "raw function address and dynamic integer ABI remain caller-owned", capabilities: [ffi, raw_ptr])
 extern fn spl_wffi_call_i64(fptr: i64, args: [i64], nargs: i64) -> i64
-@unsafe(reason: "borrows an untyped foreign string pointer", capabilities: [ffi, raw_ptr])
 extern fn spl_str_ptr(s: text) -> i64
-@unsafe(reason: "nonnull raw store; staging buffer owner validates bounds", capabilities: [ffi, raw_ptr])
 extern fn rt_ptr_write_i64(addr: i64, offset: i64, value: i64)
-@unsafe(reason: "nonnull raw store; staging buffer owner validates bounds", capabilities: [ffi, raw_ptr])
-extern fn rt_ptr_write_i32(addr: i64, offset: i64, value: i32)
+extern fn rt_ptr_write_i32(addr: i64, offset: i64, value: i64)
 use std.io_runtime.{env_get}
-
-fn _gui_renderer_resolve(lib: DynLib, name: text) -> i64:
-    val result = unsafe(capabilities: [ffi, raw_ptr]):
-        lib.sym_checked(name)
-    match result:
-        case Ok(symbol): symbol
-        case Err(_): 0
-
-@always_inline
-fn _gui_frame_extent_valid(w: i64, h: i64, pixel_count: i64) -> bool:
-    if w <= 0 or h <= 0 or pixel_count < 0:
-        return false
-    pixel_count % w == 0 and pixel_count / w == h
 
 # Event kind codes — identical to the seed interpreter's winit_sffi constants.
 val GUI_EVT_NONE: i64 = 0
@@ -65,7 +48,6 @@ val GUI_EVT_MOUSE_WHEEL: i64 = 22
 
 # Typed event record. kind == GUI_EVT_NONE means "no event pending".
 class GuiEvent:
-    native_id: i64
     kind: i64
     scancode: i64
     keycode: i64
@@ -76,11 +58,10 @@ class GuiEvent:
 
 impl GuiEvent:
     static fn none() -> GuiEvent:
-        GuiEvent(native_id: 0, kind: GUI_EVT_NONE, scancode: 0, keycode: 0, btn: 0, pressed: false, x: 0.0, y: 0.0)
+        GuiEvent(kind: GUI_EVT_NONE, scancode: 0, keycode: 0, btn: 0, pressed: false, x: 0.0, y: 0.0)
 
 class GuiRenderer:
     engine: text
-    lib_handle: i64
     el: i64
     win: i64
     width: i64
@@ -110,7 +91,7 @@ class GuiRenderer:
 # detection via env vars is unreliable — OSTYPE is usually not exported).
 fn gui_renderer_lib_candidates() -> [text]:
     var out: [text] = []
-    val override = env_get("SIMPLE_SPL_WINIT_PATH") ?? ""
+    val override = rt_env_get("SIMPLE_SPL_WINIT_PATH") ?? ""
     if override != "":
         out.push(override)
     out.push("build/sffi/libspl_winit.dylib")
@@ -122,7 +103,7 @@ impl GuiRenderer:
     # Sentinel instance (win == 0) for non-optional storage slots.
     static fn empty() -> GuiRenderer:
         GuiRenderer(
-            engine: "", lib_handle: 0, el: 0, win: 0, width: 0, height: 0,
+            engine: "", el: 0, win: 0, width: 0, height: 0,
             fp_poll: 0, fp_type: 0,
             fp_key_scancode: 0, fp_key_keycode: 0, fp_key_pressed: 0,
             fp_mouse_button: 0, fp_mouse_pressed: 0,
@@ -133,95 +114,47 @@ impl GuiRenderer:
         )
 
     # Open a real window. Returns nil (with one clear log line) on failure.
-    @unsafe(reason: "loads a foreign provider and retains raw library, object, and function handles", capabilities: [ffi, raw_ptr])
     static fn create(engine: text, w: i32, h: i32, title: text) -> GuiRenderer?:
-        dbg_stage("gui", "renderer_create_start")
         if engine == "electron":
             print "GuiRenderer: engine 'electron' is an API stub (not implemented) — no window opened"
-            dbg_stage("gui", "renderer_create_failed_electron_stub")
             return nil
         if engine != "winit" and engine != "auto" and engine != "":
             print "GuiRenderer: unknown engine '{engine}' (supported: winit, auto, electron-stub)"
-            dbg_stage("gui", "renderer_create_failed_unknown_engine")
             return nil
 
-        dbg_stage("gui", "winit_dylib_open_start")
         val candidates = gui_renderer_lib_candidates()
-        var loaded: DynLib? = nil
+        var l = DynLib(handle: 0, path: "")
         var i = 0
-        while i < candidates.len() and loaded == nil:
-            loaded = unsafe(capabilities: [ffi]):
-                DynLib.load(candidates[i])
+        while i < candidates.len() and l.handle == 0:
+            val attempt = DynLib.open(candidates[i])
+            if attempt.handle != 0:
+                l = attempt
             i = i + 1
-        if loaded == nil:
+        if l.handle == 0:
             print "GuiRenderer: cannot load build/sffi/libspl_winit.<dylib|so|dll> — build it with: sh scripts/build/build_spl_winit.shs (or set SIMPLE_SPL_WINIT_PATH)"
-            dbg_stage("gui", "winit_dylib_open_failed")
             return nil
-        var l = loaded.unwrap()
         dbg_stage("gui", "winit_dylib_open_done")
 
-        val fp_loop_new = _gui_renderer_resolve(l, "rt_winit_event_loop_new")
-        val fp_window_new = _gui_renderer_resolve(l, "rt_winit_window_new")
-        val fp_poll = _gui_renderer_resolve(l, "rt_winit_event_loop_poll_events")
-        val fp_type = _gui_renderer_resolve(l, "rt_winit_event_get_type")
-        val fp_key_scancode = _gui_renderer_resolve(l, "rt_winit_event_key_scancode")
-        val fp_key_keycode = _gui_renderer_resolve(l, "rt_winit_event_key_keycode")
-        val fp_key_pressed = _gui_renderer_resolve(l, "rt_winit_event_key_pressed")
-        val fp_mouse_button = _gui_renderer_resolve(l, "rt_winit_event_mouse_button")
-        val fp_mouse_pressed = _gui_renderer_resolve(l, "rt_winit_event_mouse_pressed")
-        val fp_mouse_x = _gui_renderer_resolve(l, "rt_winit_event_mouse_x_milli")
-        val fp_mouse_y = _gui_renderer_resolve(l, "rt_winit_event_mouse_y_milli")
-        val fp_wheel_x = _gui_renderer_resolve(l, "rt_winit_event_wheel_x_milli")
-        val fp_wheel_y = _gui_renderer_resolve(l, "rt_winit_event_wheel_y_milli")
-        val fp_inner_width = _gui_renderer_resolve(l, "rt_winit_window_inner_width")
-        val fp_inner_height = _gui_renderer_resolve(l, "rt_winit_window_inner_height")
-        val fp_staging = _gui_renderer_resolve(l, "rt_winit_window_staging_ptr")
-        val fp_stage_clear = _gui_renderer_resolve(l, "rt_winit_window_stage_clear")
-        val fp_stage_fill_rect = _gui_renderer_resolve(l, "rt_winit_window_stage_fill_rect")
-        val fp_present = _gui_renderer_resolve(l, "rt_winit_window_present_staged")
-        val fp_event_free = _gui_renderer_resolve(l, "rt_winit_event_free")
-        val fp_window_free = _gui_renderer_resolve(l, "rt_winit_window_free")
-        val fp_loop_free = _gui_renderer_resolve(l, "rt_winit_event_loop_free")
+        val fp_loop_new = l.sym("rt_winit_event_loop_new")
+        val fp_window_new = l.sym("rt_winit_window_new")
         if fp_loop_new == 0 or fp_window_new == 0:
             print "GuiRenderer: '{l.path}' is missing rt_winit_* exports — rebuild with scripts/build/build_spl_winit.shs"
             dbg_stage("gui", "winit_symbols_missing")
-            unsafe(capabilities: [ffi]):
-                l.close()
-            return nil
-        if fp_poll == 0 or fp_type == 0 or fp_key_scancode == 0 or
-            fp_key_keycode == 0 or fp_key_pressed == 0 or fp_mouse_button == 0 or
-            fp_mouse_pressed == 0 or fp_mouse_x == 0 or fp_mouse_y == 0 or
-            fp_wheel_x == 0 or fp_wheel_y == 0 or fp_staging == 0 or
-            fp_present == 0 or fp_event_free == 0 or fp_window_free == 0 or
-            fp_loop_free == 0:
-            print "GuiRenderer: '{l.path}' has an incomplete mandatory rt_winit_* ABI"
-            dbg_stage("gui", "winit_symbols_incomplete")
-            unsafe(capabilities: [ffi]):
-                l.close()
             return nil
         dbg_stage("gui", "winit_event_loop_create_start")
         val el = spl_wffi_call_i64(fp_loop_new, [], 0)
         if el == 0:
             print "GuiRenderer: event loop creation failed (macOS needs SIMPLE_GUI=1 for main-thread execution)"
             dbg_stage("gui", "winit_event_loop_create_failed")
-            unsafe(capabilities: [ffi]):
-                l.close()
             return nil
-        dbg_stage("gui", "winit_event_loop_create_done")
         val title_ptr = spl_str_ptr(title)
-        dbg_stage("gui", "winit_window_create_start")
         val win = spl_wffi_call_i64(fp_window_new, [el, w.to_i64(), h.to_i64(), title_ptr], 4)
         if win == 0:
             print "GuiRenderer: window creation failed"
             dbg_stage("gui", "winit_window_create_failed")
-            spl_wffi_call_i64(fp_loop_free, [el], 1)
-            unsafe(capabilities: [ffi]):
-                l.close()
             return nil
-        dbg_stage("gui", "winit_window_create_done")
         GuiRenderer(
             engine: "winit-dyn",
-            lib_handle: l.handle,
             el: el,
             win: win,
             width: w.to_i64(),
@@ -258,7 +191,6 @@ impl GuiRenderer:
     # Poll one pending event. kind == GUI_EVT_NONE when the queue is empty.
     # The native event handle is freed before returning — callers only ever
     # see the typed record.
-    @unsafe(reason: "invokes cached foreign event functions with raw object handles", capabilities: [ffi, raw_ptr])
     fn poll_event() -> GuiEvent:
         if self.win == 0:
             return GuiEvent.none()
@@ -266,14 +198,12 @@ impl GuiRenderer:
         if ev == 0:
             return GuiEvent.none()
         val ty = spl_wffi_call_i64(self.fp_type, [ev], 1)
-        if dbg_events_on():
-            dbg_event_hop("native-{ev}", "winit_poll", "kind={ty}")
         var out = GuiEvent.none()
         if ty == GUI_EVT_KEYBOARD:
             val sc = spl_wffi_call_i64(self.fp_key_scancode, [ev], 1)
             val kc = spl_wffi_call_i64(self.fp_key_keycode, [ev], 1)
             val kp = spl_wffi_call_i64(self.fp_key_pressed, [ev], 1)
-            out = GuiEvent(native_id: ev, kind: ty, scancode: sc, keycode: kc, btn: 0, pressed: kp == 1, x: 0.0, y: 0.0)
+            out = GuiEvent(kind: ty, scancode: sc, keycode: kc, btn: 0, pressed: kp == 1, x: 0.0, y: 0.0)
         elif ty == GUI_EVT_MOUSE_BUTTON:
             val btn = spl_wffi_call_i64(self.fp_mouse_button, [ev], 1)
             val mp = spl_wffi_call_i64(self.fp_mouse_pressed, [ev], 1)
@@ -288,7 +218,7 @@ impl GuiRenderer:
         elif ty == GUI_EVT_MOUSE_MOVED:
             val mx = spl_wffi_call_i64(self.fp_mouse_x, [ev], 1)
             val my = spl_wffi_call_i64(self.fp_mouse_y, [ev], 1)
-            out = GuiEvent(native_id: ev, kind: ty, scancode: 0, keycode: 0, btn: 0, pressed: false, x: mx.to_f64() / 1000.0, y: my.to_f64() / 1000.0)
+            out = GuiEvent(kind: ty, scancode: 0, keycode: 0, btn: 0, pressed: false, x: mx.to_f64() / 1000.0, y: my.to_f64() / 1000.0)
         elif ty == GUI_EVT_MOUSE_WHEEL:
             val wx = spl_wffi_call_i64(self.fp_wheel_x, [ev], 1)
             val wy = spl_wffi_call_i64(self.fp_wheel_y, [ev], 1)
@@ -306,17 +236,14 @@ impl GuiRenderer:
                 rh = spl_wffi_call_i64(self.fp_inner_height, [self.win], 1)
             out = GuiEvent(native_id: ev, kind: ty, scancode: 0, keycode: 0, btn: 0, pressed: false, x: rw.to_f64(), y: rh.to_f64())
         else:
-            out = GuiEvent(native_id: ev, kind: ty, scancode: 0, keycode: 0, btn: 0, pressed: false, x: 0.0, y: 0.0)
-        if dbg_events_on():
-            dbg_event_hop("native-{ev}", "gui_event_decode", "kind={out.kind} keycode={out.keycode} button={out.btn} pressed={out.pressed} x={out.x} y={out.y}")
+            out = GuiEvent(kind: ty, scancode: 0, keycode: 0, btn: 0, pressed: false, x: 0.0, y: 0.0)
         spl_wffi_call_i64(self.fp_event_free, [ev], 1)
         out
 
     # Present an XRGB frame (one i64 per pixel, 0x00RRGGBB). The staging
     # buffer is filled two pixels per poke, then blitted by the cdylib.
-    @unsafe(reason: "writes a validated frame into a foreign staging pointer", capabilities: [ffi, raw_ptr])
     fn present_rgba(w: i64, h: i64, pixels: [i64]) -> bool:
-        if self.win == 0 or not _gui_frame_extent_valid(w, h, pixels.len().to_i64()):
+        if self.win == 0:
             return false
         val sp = spl_wffi_call_i64(self.fp_staging, [self.win, w, h], 3)
         if sp == 0:
@@ -328,12 +255,11 @@ impl GuiRenderer:
             rt_ptr_write_i64(sp, (i * 4).to_i64(), packed)
             i = i + 2
         if i < count:
-            rt_ptr_write_i32(sp, (i * 4).to_i64(), pixels[i] as i32)
+            rt_ptr_write_i32(sp, (i * 4).to_i64(), pixels[i])
         spl_wffi_call_i64(self.fp_present, [self.win, w, h], 3) == 1
 
-    @unsafe(reason: "writes a validated frame into a foreign staging pointer", capabilities: [ffi, raw_ptr])
     fn present_argb_u32(w: i64, h: i64, pixels: [u32]) -> bool:
-        if self.win == 0 or not _gui_frame_extent_valid(w, h, pixels.len().to_i64()):
+        if self.win == 0:
             return false
         val sp = spl_wffi_call_i64(self.fp_staging, [self.win, w, h], 3)
         if sp == 0:
@@ -345,13 +271,11 @@ impl GuiRenderer:
             rt_ptr_write_i64(sp, (i * 4).to_i64(), packed)
             i = i + 2
         if i < count:
-            rt_ptr_write_i32(sp, (i * 4).to_i64(), pixels[i])
+            rt_ptr_write_i32(sp, (i * 4).to_i64(), pixels[i].to_i64())
         spl_wffi_call_i64(self.fp_present, [self.win, w, h], 3) == 1
 
-    @unsafe(reason: "writes a bounded source rectangle into a foreign staging pointer", capabilities: [ffi, raw_ptr])
     fn stage_blit_argb_u32(x: i64, y: i64, w: i64, h: i64, dst_w: i64, dst_h: i64, pixels: [u32]) -> bool:
-        if (self.win == 0 or dst_w <= 0 or dst_h <= 0 or
-            not _gui_frame_extent_valid(w, h, pixels.len().to_i64())):
+        if self.win == 0:
             return false
         val sp = spl_wffi_call_i64(self.fp_staging, [self.win, dst_w, dst_h], 3)
         if sp == 0 or w <= 0 or h <= 0:
@@ -370,33 +294,29 @@ impl GuiRenderer:
                 var dst_idx = dy * dst_w + x + col0
                 while col < col1:
                     if src_idx >= 0 and src_idx < src_len and dst_idx >= 0:
-                        rt_ptr_write_i32(sp, dst_idx * 4, pixels[src_idx.to_i32()])
+                        rt_ptr_write_i32(sp, dst_idx * 4, pixels[src_idx.to_i32()].to_i64())
                     src_idx = src_idx + 1
                     dst_idx = dst_idx + 1
                     col = col + 1
             row = row + 1
         true
 
-    @unsafe(reason: "invokes a cached foreign staging function with raw window authority", capabilities: [ffi, raw_ptr])
     fn stage_clear(w: i64, h: i64, color: u32) -> bool:
         if self.win == 0 or self.fp_stage_clear == 0:
             return false
         spl_wffi_call_i64(self.fp_stage_clear, [self.win, w, h, color.to_i64()], 4) == 1
 
-    @unsafe(reason: "invokes a cached foreign staging function with raw window authority", capabilities: [ffi, raw_ptr])
     fn stage_fill_rect(x: i64, y: i64, w: i64, h: i64, color: u32) -> bool:
         if self.win == 0 or self.fp_stage_fill_rect == 0:
             return false
         spl_wffi_call_i64(self.fp_stage_fill_rect, [self.win, x, y, w, h, color.to_i64()], 6) == 1
 
-    @unsafe(reason: "invokes a cached foreign presentation function with raw window authority", capabilities: [ffi, raw_ptr])
     fn present_staged(w: i64, h: i64) -> bool:
         if self.win == 0:
             return false
         spl_wffi_call_i64(self.fp_present, [self.win, w, h], 3) == 1
 
     # Destroy the window and event loop. Safe to call twice.
-    @unsafe(reason: "destroys raw foreign objects and closes their provider library", capabilities: [ffi, raw_ptr])
     me close():
         if self.win != 0:
             spl_wffi_call_i64(self.fp_window_free, [self.win], 1)
@@ -404,10 +324,6 @@ impl GuiRenderer:
         if self.el != 0:
             spl_wffi_call_i64(self.fp_loop_free, [self.el], 1)
             self.el = 0
-        if self.lib_handle != 0:
-            unsafe(capabilities: [ffi]):
-                spl_dlclose(self.lib_handle)
-            self.lib_handle = 0
 
 export GUI_EVT_NONE
 export GUI_EVT_RESIZED

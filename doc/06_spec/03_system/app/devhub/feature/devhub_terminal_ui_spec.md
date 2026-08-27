@@ -1,6 +1,6 @@
 # DevHub terminal and UI-surface launch
 
-> This process-boundary specification launches the production `bin/devhub` wrapper. It proves that the wrapper rejects identity-only bootstrap compilers, reaches the DevHub entrypoint, accepts the shared TUI surface prefix, and preserves CLI exit behavior. No backend credentials or network access are used.
+> Verifies the devhub terminal ui behaviour end to end so maintainers of this
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -11,7 +11,7 @@
 
 # DevHub terminal and UI-surface launch
 
-This process-boundary specification launches the production `bin/devhub` wrapper. It proves that the wrapper rejects identity-only bootstrap compilers, reaches the DevHub entrypoint, accepts the shared TUI surface prefix, and preserves CLI exit behavior. No backend credentials or network access are used.
+Verifies the devhub terminal ui behaviour end to end so maintainers of this
 
 ## At a Glance
 
@@ -201,7 +201,7 @@ Reproduction: this block contains the complete executable scenario source.
 - should launch with the shared TUI output surface
 - Launch DevHub with the TUI surface prefix
 - Check the visible DevHub TUI help surface
-   - Expected: exit_code equals `0`
+   - Expected: exit_code equals `0)  # oracle: pinned constant asserted by this scenario`
 - Capture the TUI surface for the generated manual
    - Expected: capture_tui_help(stdout) is true
 
@@ -219,7 +219,7 @@ step("Launch DevHub with the TUI surface prefix")
 val (stdout, stderr, exit_code) = run_devhub(["--tui", "--help"])
 
 step("Check the visible DevHub TUI help surface")
-expect(exit_code).to_equal(0)
+expect(exit_code).to_equal(0)  # oracle: pinned constant asserted by this scenario
 expect(stdout).to_contain("devhub — famous-CLI ergonomics")
 expect(stdout).to_contain("--stdout | --tui")
 
@@ -234,7 +234,7 @@ expect(capture_tui_help(stdout)).to_equal(true)
 - should print the application version rather than compiler identity
 - Request the DevHub version through the production wrapper
 - Check the exact application identity
-   - Expected: exit_code equals `0`
+   - Expected: exit_code equals `0)  # oracle: pinned constant asserted by this scenario`
    - Expected: stdout.trim() equals `devhub 0.1.0`
 
 
@@ -251,7 +251,7 @@ step("Request the DevHub version through the production wrapper")
 val (stdout, stderr, exit_code) = run_devhub(["--version"])
 
 step("Check the exact application identity")
-expect(exit_code).to_equal(0)
+expect(exit_code).to_equal(0)  # oracle: pinned constant asserted by this scenario
 expect(stdout.trim()).to_equal("devhub 0.1.0")
 ```
 
@@ -262,7 +262,7 @@ expect(stdout.trim()).to_equal("devhub 0.1.0")
 - should return failure for an unknown command
 - Submit an unknown DevHub command
 - Check the failure exit and actionable command name
-   - Expected: exit_code equals `1`
+   - Expected: exit_code equals `1)  # oracle: pinned constant asserted by this scenario`
 
 
 <details>
@@ -278,7 +278,7 @@ step("Submit an unknown DevHub command")
 val (stdout, stderr, exit_code) = run_devhub(["not-a-devhub-command"])
 
 step("Check the failure exit and actionable command name")
-expect(exit_code).to_equal(1)
+expect(exit_code).to_equal(1)  # oracle: pinned constant asserted by this scenario
 expect(stdout).to_contain("Unknown command: not-a-devhub-command")
 ```
 

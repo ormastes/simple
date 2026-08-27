@@ -1,6 +1,8 @@
 # SPipe Phase 6: Refactor -- Tech Lead
 
 **Role:** Tech Lead -- Refactor for quality: deduplication, file splitting, clean code
+Revalidate the knowledge receipt against touched paths and registry hashes;
+private wiki knowledge cannot override public architecture policy.
 **Blinders:** ONLY code quality. No new features, no behavior changes.
 **Context budget:** sub-40% -- load only implementation files + their specs.
 
@@ -18,21 +20,14 @@
 ## Process
 
 1. Read `.spipe/<feature>/state.md` to get implementation file paths
-2. Run duplication check: `bin/simple duplicate-check <impl-file-or-dir>` for each implementation scope
-3. Run linter: `bin/simple lint <impl .spl files>`
+2. Run duplication check: `bin/simple duplicate-check` on impl files
+3. Run linter: `bin/simple build lint` on impl files
 4. For each issue found (max 10 refactor-test cycles total; stop after 10 even if issues remain):
    a. **Duplication:** Extract shared logic into helper functions
-   b. **Large files/classes (>800 lines):** Split by methodology — (1) try to
-      extract a real class first; (2) divide by the semantic of the class
-      description; (3) cut along the lowest-coupling / highest-cohesion seam
-      (confirm with LCOM/CBO/fan-out); (4) name each piece by meaning. Use the
-      highest-capability model to decide (or review+accept) the division and
-      record which model decided it.
-   c. **`_ClassName/` folder:** When splitting one class, move the pieces into a
-      `_ClassName/` folder (leading `_` = transparent package; files resolve as
-      if in the parent, siblings still see the class with no new `use`). Move
-      existing numbered splits into `_ClassName/` and rename by semantic meaning.
-      Never `*_1`, `*_2`, `part1`, `ver1`, `v1`, or numbered copy/version names.
+   b. **Large files (>800 lines):** Split into focused modules
+   c. **Naming:** Ensure consistency with project conventions. Split files must
+      get meaningful domain/module names, never `*_1`, `*_2`, `part1`, `ver1`,
+      `v1`, or similar numbered copy/version names.
    d. **Dead code:** Remove unused functions, imports, variables
 5. After EVERY change, run specs to verify no behavior change:
    `set -o pipefail; bin/simple test <spec_file> 2>&1 | tail -40` for each spec from Phase 4
@@ -46,7 +41,7 @@
 8. Run numbered artifact guard:
    `sh scripts/audit/numbered-artifact-guard.shs --working`
    `sh scripts/audit/numbered-artifact-guard.shs --staged`
-9. Run final lint pass: `bin/simple lint <impl .spl files>`
+9. Run final lint pass: `set -o pipefail; bin/simple build lint 2>&1 | tail -30`
 10. Update state file with refactor status and doc/wiki refactor status
 
 ## Rules
@@ -69,8 +64,8 @@ If a refactoring risks breaking behavior, skip it and note in state file.
 
 ## Exit Criteria
 
-- [ ] No duplications reported by `bin/simple duplicate-check <impl-file-or-dir>`
-- [ ] Lint clean: `bin/simple lint <impl .spl files>` passes
+- [ ] No duplications reported by `bin/simple duplicate-check`
+- [ ] Lint clean: `bin/simple build lint` passes with no warnings
 - [ ] No file exceeds 800 lines
 - [ ] All specs still pass: `bin/simple test <spec_file>` green for each
 - [ ] Doc/wiki refactor pass recorded in state file
@@ -85,9 +80,3 @@ If a refactoring risks breaking behavior, skip it and note in state file.
 
 - Cleaned implementation files (same paths or split into new modules)
 - Updated `.spipe/<feature>/state.md`
-
-For changed SSpec, include `simple sspec-maintain scan` in the refactor
-inventory. Review all seven scores, stable findings, blocker cap, mirror state,
-and REQ traceability. Preview improvements, obtain explicit confirmation before
-apply, retain rollback material, and record the post-change scorecard/mirror
-state. Suppressions require rule, owner, reason, and bounded scope.

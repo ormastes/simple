@@ -1,6 +1,29 @@
-# feature_gen_log_modes_spec
+# Feature Gen Log Modes Specification
 
-> Purpose: shows shared log options in help
+> 1.  setup fixture
+
+<!-- sdn-diagram:id=feature_gen_log_modes_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=feature_gen_log_modes_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+feature_gen_log_modes_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=feature_gen_log_modes_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -38,7 +61,7 @@ Audience: compiler and tooling engineers who maintain this spec
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -58,9 +81,9 @@ Reproduction: this block contains the complete executable scenario source.
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -86,9 +109,9 @@ expect(out).to_contain("\"features\":2")
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -113,9 +136,9 @@ expect(out).to_contain("Done. Generated tracking docs for 2 features")
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -129,6 +152,21 @@ expect(code).to_equal(1)  # oracle: value fixed by the spec contract
 ```
 
 </details>
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Application |
+| Status | Active |
+| Source | `test/02_integration/app/feature_gen_log_modes_spec.spl` |
+| Updated | 2026-06-01 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Tests covering:
+- feature-gen log mode CLI options
 
 ## Scenario Summary
 

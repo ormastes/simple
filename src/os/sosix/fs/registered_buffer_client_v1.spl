@@ -10,15 +10,10 @@ use os.sosix.core.operation.SosixOperationId
 use os.sosix.core.capability_ref.{SosixCapabilityRef, SosixBufferRef}
 use os.sosix.fs.client_adapter_v1.{SosixFsClientPlanV1, sosix_fs_client_plan_registered_v1}
 use os.sosix.fs.operation_adapter.{SOSIX_FS_READ_AT, SOSIX_FS_WRITE_AT}
-use os.sosix.fs.ipc_codec_v1.SOSIX_FS_IPC_MAX_REGISTERED_BUFFER_BYTES_V1
 
 extern fn syscall(id: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> i64
 
 pub val SOSIX_FS_CLIENT_MAX_REGISTERED_BUFFERS_V1: u64 = 64
-# Owned-copy registrations are request windows, not whole-file images.  Keep
-# their retained value and every later value-semantic table copy within the
-# same ceiling as one positioned filesystem transfer.
-pub val SOSIX_FS_CLIENT_MAX_REGISTERED_BUFFER_BYTES_V1: u64 = SOSIX_FS_IPC_MAX_REGISTERED_BUFFER_BYTES_V1
 pub val SOSIX_FS_CLIENT_BUFFER_READ_V1: u32 = 1
 pub val SOSIX_FS_CLIENT_BUFFER_WRITE_V1: u32 = 2
 pub val SOSIX_FS_CLIENT_MEMORY_OWNED_COPY_V1: u32 = 1
@@ -71,7 +66,6 @@ pub struct SosixFsClientExecuteResultV1:
     status: i64
 
 export SOSIX_FS_CLIENT_MAX_REGISTERED_BUFFERS_V1
-export SOSIX_FS_CLIENT_MAX_REGISTERED_BUFFER_BYTES_V1
 export SOSIX_FS_CLIENT_BUFFER_READ_V1, SOSIX_FS_CLIENT_BUFFER_WRITE_V1
 export SOSIX_FS_CLIENT_MEMORY_OWNED_COPY_V1
 export SosixFsClientBufferEntryV1, SosixFsClientBufferTableV1
@@ -107,8 +101,6 @@ fn _buffer_table_valid_v1(table: SosixFsClientBufferTableV1) -> bool:
             if (entry.bytes.len() == 0 or entry.access == 0 or
                 (entry.access & ~known_access) != 0):
                 return false
-            if entry.bytes.len().to_u64() > SOSIX_FS_CLIENT_MAX_REGISTERED_BUFFER_BYTES_V1:
-                return false
         else if entry.access != 0 or entry.bytes.len() != 0:
             return false
         index = index + 1
@@ -132,10 +124,6 @@ pub fn sosix_fs_client_register_buffer_v1(
     if bytes.len() == 0:
         return SosixFsClientBufferTransitionV1(
             accepted: false, reason: "empty-buffer",
-            ref_: _invalid_ref_v1(), table: table)
-    if bytes.len().to_u64() > SOSIX_FS_CLIENT_MAX_REGISTERED_BUFFER_BYTES_V1:
-        return SosixFsClientBufferTransitionV1(
-            accepted: false, reason: "buffer-too-large",
             ref_: _invalid_ref_v1(), table: table)
     val known_access = SOSIX_FS_CLIENT_BUFFER_READ_V1 | SOSIX_FS_CLIENT_BUFFER_WRITE_V1
     if access == 0 or (access & ~known_access) != 0:

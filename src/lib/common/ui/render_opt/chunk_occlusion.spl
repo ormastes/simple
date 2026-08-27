@@ -1,0 +1,282 @@
+# Conservative paint-chunk occlusion for the shared DrawIR preparation lane.
+#
+# Only an upstream exact-opaque proof may contribute coverage. Candidates are
+# tested against the union of later same-surface occluders by bounded rectangle
+# subtraction. Workspace exhaustion fails open and disables earlier culls.
+
+use common.ui.render_opt.property_trees.PaintChunks
+use common.ui.render_opt.paint_chunk_rasterizer.PaintChunkRects
+
+const CHUNK_OPAQUE_UNKNOWN: u32 = 0
+const CHUNK_OPAQUE_EXACT_RECT: u32 = 1
+
+class ChunkVisibility:
+    present: [u32]
+    opaque_proof: [u32]
+    count: i64
+
+    static fn create() -> ChunkVisibility:
+        ChunkVisibility(present: [], opaque_proof: [], count: 0)
+
+    me add(is_present: bool, proof: u32):
+        self.present.push(if is_present: 1u32 else: 0u32)
+        self.opaque_proof.push(proof)
+        self.count = self.count + 1
+
+class OcclusionWorkspace:
+    rect_a: [i64]
+    rect_b: [i64]
+    chunk_visible: [u32]
+    next_occluder: [i64]
+    suffix_min_x: [i64]
+    suffix_min_y: [i64]
+    suffix_max_x: [i64]
+    suffix_max_y: [i64]
+    surface_keys: [u32]
+    surface_used: [u32]
+    surface_heads: [i64]
+    surface_capacity: i64
+    rect_capacity: i64
+    chunk_capacity: i64
+    chunks_visible: i64
+    chunks_occluded: i64
+    chunks_hidden: i64
+    occluders_examined: i64
+    chunk_slots_examined: i64
+    disjoint_chains_rejected: i64
+    subtractions_executed: i64
+    overflow_count: i64
+    proof_incomplete: bool
+
+    static fn create(chunk_capacity: i64, rect_capacity: i64) -> OcclusionWorkspace:
+        var safe_chunks = chunk_capacity
+        if safe_chunks < 0:
+            safe_chunks = 0
+        var safe_rects = rect_capacity
+        if safe_rects < 1:
+            safe_rects = 1
+        val surface_capacity = safe_chunks * 2 + 1
+        OcclusionWorkspace(
+            rect_a: [0; (safe_rects * 4).to_i32()],
+            rect_b: [0; (safe_rects * 4).to_i32()],
+            chunk_visible: [1u32; safe_chunks.to_i32()],
+            next_occluder: [-1; safe_chunks.to_i32()],
+            suffix_min_x: [0; safe_chunks.to_i32()],
+            suffix_min_y: [0; safe_chunks.to_i32()],
+            suffix_max_x: [0; safe_chunks.to_i32()],
+            suffix_max_y: [0; safe_chunks.to_i32()],
+            surface_keys: [0u32; surface_capacity.to_i32()],
+            surface_used: [0u32; surface_capacity.to_i32()],
+            surface_heads: [-1; surface_capacity.to_i32()],
+            surface_capacity: surface_capacity,
+            rect_capacity: safe_rects, chunk_capacity: safe_chunks,
+            chunks_visible: 0, chunks_occluded: 0, chunks_hidden: 0,
+            occluders_examined: 0, chunk_slots_examined: 0,
+            disjoint_chains_rejected: 0,
+            subtractions_executed: 0,
+            overflow_count: 0, proof_incomplete: false)
+
+fn _occ_put(dst: [i64], index: i64, x: i64, y: i64, w: i64, h: i64):
+    val o = index * 4
+    dst[o] = x
+    dst[o + 1] = y
+    dst[o + 2] = w
+    dst[o + 3] = h
+
+fn _occ_emit(dst: [i64], count: i64, capacity: i64,
+             x: i64, y: i64, w: i64, h: i64) -> i64:
+    if w <= 0 or h <= 0:
+        return count
+    if count >= capacity:
+        return -1
+    _occ_put(dst, count, x, y, w, h)
+    count + 1
+
+# Subtract `cut` from every rectangle in src. The result is exact, disjoint,
+# and never widened. -1 means capacity exhaustion.
+fn _occ_subtract(src: [i64], src_count: i64, dst: [i64], capacity: i64,
+                 cx: i64, cy: i64, cw: i64, ch: i64) -> i64:
+    val cx1 = cx + cw
+    val cy1 = cy + ch
+    var out_count: i64 = 0
+    var i: i64 = 0
+    while i < src_count:
+        val o = i * 4
+        val x0 = src[o]
+        val y0 = src[o + 1]
+        val x1 = x0 + src[o + 2]
+        val y1 = y0 + src[o + 3]
+        var ix0 = if x0 > cx: x0 else: cx
+        var iy0 = if y0 > cy: y0 else: cy
+        var ix1 = if x1 < cx1: x1 else: cx1
+        var iy1 = if y1 < cy1: y1 else: cy1
+        if ix1 <= ix0 or iy1 <= iy0:
+            out_count = _occ_emit(dst, out_count, capacity, x0, y0, x1 - x0, y1 - y0)
+        else:
+            out_count = _occ_emit(dst, out_count, capacity, x0, y0, x1 - x0, iy0 - y0)
+            if out_count >= 0:
+                out_count = _occ_emit(dst, out_count, capacity, x0, iy1, x1 - x0, y1 - iy1)
+            if out_count >= 0:
+                out_count = _occ_emit(dst, out_count, capacity, x0, iy0, ix0 - x0, iy1 - iy0)
+            if out_count >= 0:
+                out_count = _occ_emit(dst, out_count, capacity, ix1, iy0, x1 - ix1, iy1 - iy0)
+        if out_count < 0:
+            return -1
+        i = i + 1
+    out_count
+
+fn _occ_clipped_rect(rects: PaintChunkRects, index: i64,
+                     viewport_w: i64, viewport_h: i64) -> (i64, i64, i64, i64):
+    var x0 = rects.rect_x[index]
+    var y0 = rects.rect_y[index]
+    var x1 = x0 + rects.rect_w[index]
+    var y1 = y0 + rects.rect_h[index]
+    if x0 < 0:
+        x0 = 0
+    if y0 < 0:
+        y0 = 0
+    if x1 > viewport_w:
+        x1 = viewport_w
+    if y1 > viewport_h:
+        y1 = viewport_h
+    (x0, y0, x1 - x0, y1 - y0)
+
+fn _occ_surface_slot(workspace: OcclusionWorkspace, surface: u32) -> i64:
+    val capacity = workspace.surface_capacity
+    var slot = (surface as i64) % capacity
+    var examined: i64 = 0
+    while examined < capacity:
+        if workspace.surface_used[slot] == 0u32:
+            workspace.surface_used[slot] = 1u32
+            workspace.surface_keys[slot] = surface
+            workspace.surface_heads[slot] = -1
+            return slot
+        if workspace.surface_keys[slot] == surface:
+            return slot
+        slot = slot + 1
+        if slot == capacity:
+            slot = 0
+        examined = examined + 1
+    -1
+
+fn occlusion_prepare(chunks: PaintChunks, rects: PaintChunkRects,
+                     visibility: ChunkVisibility, viewport_w: i64,
+                     viewport_h: i64, workspace: OcclusionWorkspace):
+    workspace.chunks_visible = 0
+    workspace.chunks_occluded = 0
+    workspace.chunks_hidden = 0
+    workspace.occluders_examined = 0
+    workspace.chunk_slots_examined = 0
+    workspace.disjoint_chains_rejected = 0
+    workspace.subtractions_executed = 0
+    workspace.overflow_count = 0
+    workspace.proof_incomplete = false
+    var surface_slot: i64 = 0
+    while surface_slot < workspace.surface_capacity:
+        workspace.surface_used[surface_slot] = 0u32
+        workspace.surface_heads[surface_slot] = -1
+        surface_slot = surface_slot + 1
+    # Do not truncate mismatched producer columns and then treat untouched
+    # slots as hidden. The visibility proof covers the complete lockstep
+    # PaintChunk/PaintChunkRects set or it covers nothing: fail open before
+    # examining any candidate.
+    if (rects.rect_count != chunks.chunk_count or
+        visibility.count != chunks.chunk_count or
+        workspace.chunk_capacity < chunks.chunk_count):
+        workspace.proof_incomplete = true
+        workspace.overflow_count = workspace.overflow_count + 1
+        var open_index: i64 = 0
+        while open_index < workspace.chunk_capacity:
+            workspace.chunk_visible[open_index] = 1u32
+            open_index = open_index + 1
+        workspace.chunks_visible = workspace.chunk_capacity
+        return
+    var count = chunks.chunk_count
+    # Build a reverse linked index while processing. Candidates traverse only
+    # later chunks carrying an exact opaque proof, not every later paint chunk.
+    # The storage is workspace-owned and reused across frames.
+    var i = count - 1
+    while i >= 0:
+        val owner_slot = _occ_surface_slot(workspace, chunks.surface[i])
+        if owner_slot < 0:
+            workspace.proof_incomplete = true
+            workspace.overflow_count = workspace.overflow_count + 1
+            workspace.next_occluder[i] = -1
+        else:
+            workspace.next_occluder[i] = workspace.surface_heads[owner_slot]
+        workspace.chunk_visible[i] = 1u32
+        val (x, y, w, h) = _occ_clipped_rect(rects, i, viewport_w, viewport_h)
+        if visibility.present[i] == 0u32 or w <= 0 or h <= 0:
+            workspace.chunk_visible[i] = 0u32
+            workspace.chunks_hidden = workspace.chunks_hidden + 1
+        elif not workspace.proof_incomplete:
+            _occ_put(workspace.rect_a, 0, x, y, w, h)
+            var fragment_count: i64 = 1
+            var use_a = true
+            var j = workspace.next_occluder[i]
+            if (j >= 0 and
+                (workspace.suffix_max_x[j] <= x or
+                 workspace.suffix_max_y[j] <= y or
+                 workspace.suffix_min_x[j] >= x + w or
+                 workspace.suffix_min_y[j] >= y + h)):
+                workspace.disjoint_chains_rejected = workspace.disjoint_chains_rejected + 1
+                j = -1
+            while j >= 0 and fragment_count > 0 and not workspace.proof_incomplete:
+                workspace.chunk_slots_examined = workspace.chunk_slots_examined + 1
+                if workspace.chunk_visible[j] != 0u32 and
+                   visibility.present[j] != 0u32 and
+                   visibility.opaque_proof[j] == CHUNK_OPAQUE_EXACT_RECT and
+                   chunks.surface[j] == chunks.surface[i]:
+                    workspace.occluders_examined = workspace.occluders_examined + 1
+                    val (ox, oy, ow, oh) = _occ_clipped_rect(
+                        rects, j, viewport_w, viewport_h)
+                    # Every surviving fragment is contained by the original
+                    # candidate. A disjoint occluder therefore cannot affect
+                    # any fragment and need not enter exact subtraction.
+                    if (ow > 0 and oh > 0 and ox < x + w and oy < y + h and
+                        ox + ow > x and oy + oh > y):
+                        workspace.subtractions_executed = workspace.subtractions_executed + 1
+                        var next_count: i64 = 0
+                        if use_a:
+                            next_count = _occ_subtract(workspace.rect_a, fragment_count,
+                                                       workspace.rect_b, workspace.rect_capacity,
+                                                       ox, oy, ow, oh)
+                        else:
+                            next_count = _occ_subtract(workspace.rect_b, fragment_count,
+                                                       workspace.rect_a, workspace.rect_capacity,
+                                                       ox, oy, ow, oh)
+                        if next_count < 0:
+                            workspace.proof_incomplete = true
+                            workspace.overflow_count = workspace.overflow_count + 1
+                        else:
+                            fragment_count = next_count
+                            use_a = not use_a
+                j = workspace.next_occluder[j]
+            if not workspace.proof_incomplete and fragment_count == 0:
+                workspace.chunk_visible[i] = 0u32
+                workspace.chunks_occluded = workspace.chunks_occluded + 1
+        if workspace.chunk_visible[i] != 0u32:
+            workspace.chunks_visible = workspace.chunks_visible + 1
+        if (workspace.chunk_visible[i] != 0u32 and
+            visibility.present[i] != 0u32 and
+            visibility.opaque_proof[i] == CHUNK_OPAQUE_EXACT_RECT):
+            if owner_slot >= 0:
+                val later = workspace.surface_heads[owner_slot]
+                workspace.suffix_min_x[i] = x
+                workspace.suffix_min_y[i] = y
+                workspace.suffix_max_x[i] = x + w
+                workspace.suffix_max_y[i] = y + h
+                if later >= 0:
+                    if workspace.suffix_min_x[later] < workspace.suffix_min_x[i]:
+                        workspace.suffix_min_x[i] = workspace.suffix_min_x[later]
+                    if workspace.suffix_min_y[later] < workspace.suffix_min_y[i]:
+                        workspace.suffix_min_y[i] = workspace.suffix_min_y[later]
+                    if workspace.suffix_max_x[later] > workspace.suffix_max_x[i]:
+                        workspace.suffix_max_x[i] = workspace.suffix_max_x[later]
+                    if workspace.suffix_max_y[later] > workspace.suffix_max_y[i]:
+                        workspace.suffix_max_y[i] = workspace.suffix_max_y[later]
+                workspace.surface_heads[owner_slot] = i
+        i = i - 1
+
+export ChunkVisibility, OcclusionWorkspace, occlusion_prepare,
+       CHUNK_OPAQUE_UNKNOWN, CHUNK_OPAQUE_EXACT_RECT

@@ -71,7 +71,7 @@ simple verify check
 simple verify list
 ```
 
-### Minimal Verified Function
+### Minimal Model-Proof Candidate
 
 ```simple
 @verify
@@ -91,7 +91,11 @@ produces a Lean 4 file with:
 - A `theorem factorial_post_0` for the postcondition `ret > 0`
 - A `decreases` annotation for termination
 
-Running `simple verify check` invokes Lean/Lake to check these theorems. Unproven obligations use `sorry` and are reported as **admitted** (proof debt).
+Running `simple verify check` invokes Lean/Lake and transitive `#print axioms`
+auditing for its declared proof roots. A successful result is **model proven**;
+unproven obligations use `sorry` and are reported as **admitted** (proof debt).
+Do not label this sample implementation-verified until FV2 binds its actual
+execution semantics and final artifact.
 
 ---
 
@@ -397,12 +401,12 @@ Every proof unit (file-level for v1) has exactly one of six states:
 ### State Transitions
 
 ```
-not_checked  -->  verified | failed | admitted | trusted   (after proof check)
-verified     -->  stale                                    (on source/dep change)
+not_checked  -->  model_proven | failed | admitted_development | trusted_boundary   (after proof check)
+model_proven -->  stale                                    (on source/dep change)
 failed       -->  stale                                    (on source/dep change)
-admitted     -->  stale                                    (on source/dep change)
-trusted      -->  stale                                    (on source/dep change)
-stale        -->  verified | failed | admitted | trusted   (after re-check)
+admitted_development --> stale                             (on source/dep change)
+trusted_boundary --> stale                                 (on source/dep change)
+stale        -->  model_proven | failed | admitted_development | trusted_boundary   (after re-check)
 any state    -->  not_checked                              (on cache clear)
 ```
 
@@ -410,7 +414,7 @@ any state    -->  not_checked                              (on cache clear)
 
 When rolling up states from file level to project level, the most severe state wins:
 
-`failed` > `admitted` > `trusted` > `stale` > `not_checked` > `verified`
+`failed` > `admitted_development` > `trusted_boundary` > `stale` > `not_checked` > `model_proven`
 
 A legacy project reports `verified` only when **every** proof unit is
 individually `verified`; the FV2-facing claim remains `model_proven` until the
@@ -418,11 +422,11 @@ refinement and artifact evidence chain is closed.
 
 ### Admitted and Trusted are Proof Debt
 
-**Admitted** means the obligation contains `sorry` or `admit` -- Lean accepts the file but the theorem is not actually proven. This is proof debt that must be resolved before claiming full verification.
+**Admitted development** means the obligation contains `sorry` or `admit` -- Lean accepts the file but the theorem is not actually proven. This is proof debt that blocks FV2 release evidence.
 
-**Trusted** means the obligation is axiomatically assumed via `@trusted` or `assume`. The function's contracts are not checked by Lean. This is appropriate for FFI boundaries but is still proof debt.
+**Trusted boundary** means the obligation is axiomatically assumed via `@trusted` or `assume`. The function's contracts are not checked by Lean. This can be an explicit bounded-TCB boundary, but never silently becomes a closed verified claim.
 
-Reports always show admitted and trusted counts prominently. Neither state is ever rendered as "verified" or displayed with success styling.
+Reports always show admitted and trusted counts prominently. Neither state is ever rendered as a closed verification result.
 
 ---
 
@@ -488,7 +492,7 @@ Verification reports are available at four levels of detail:
 
 | Level | Shows |
 |-------|-------|
-| **Project** | One-line summary: "3 verified, 1 failed, 2 admitted" |
+| **Project** | One-line Lean-model summary: "3 model proven, 1 failed, 2 admitted" |
 | **File** | Per-file state with obligation counts and debt markers |
 | **Symbol** | Per-function/type verification state |
 | **Theorem** | Individual theorem detail with source origin and Lean file path |
@@ -555,10 +559,7 @@ On a Simple-code change that touches a verified/mirrored path:
 
 `simple gen-lean generate|write|compare|verify` operate on a **fixed inventory** of `src/.../verification/regenerate/*.spl` modules — they do **not** scan arbitrary `@verify` user files and cannot emit algorithm Lean for an arbitrary `.spl` (only `gen-lean memory-safety --file <p>` consumes a user file, and only for memory-safety obligations). So for code outside that inventory — the NVMe firmware/emulator, for example — the mirror defs are **hand-transcribed** under the marked `gen lean` section, not machine-generated. `gen-lean write --force` overwrites whole files with **no** manual-edit preservation, so never hand-edit a file the regeneration tree owns; edit its source module instead.
 
-> The prior `bin/simple gen-lean` self-recursion has a source fix: the CLI now
-> dispatches a distinct worker. Canonical self-hosted runtime evidence is still
-> unavailable, so the fix is not release-admitted; see
-> `doc/08_tracking/bug/gen_lean_cli_infinite_recursion_2026-06-30.md`.
+> The `bin/simple gen-lean` CLI is currently broken (the wrapper re-spawns itself and infinitely recurses; the Rust codegen is unreachable through the CLI) — see `doc/08_tracking/bug/gen_lean_cli_infinite_recursion_2026-06-30.md`. Until that is fixed, the regeneration tree is reachable only by internal callers, and the hand-transcribed in-file split above is the working path for example/firmware proofs.
 
 ---
 

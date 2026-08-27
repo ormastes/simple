@@ -2,6 +2,29 @@
 
 > Unit tests for the BDD Registry module.
 
+<!-- sdn-diagram:id=registry_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=registry_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+registry_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=registry_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 14 | 14 | 0 | 0 |
@@ -20,7 +43,7 @@ Unit tests for the BDD Registry module.
 | Category | Other |
 | Status | Active |
 | Source | `test/01_unit/spec/registry_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 Unit tests for the BDD Registry module.
@@ -40,18 +63,16 @@ Uses mock implementations to isolate registry logic from the actual test framewo
 
 #### creates a new example with description and block
 
-- creates a new example with description and block
+1. expect example tags len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SPEC
-step("creates a new example with description and block")
 val example = Example.create("test description", \: ())
 expect example.description == "test description"
 expect example.is_skipped == false
@@ -62,18 +83,16 @@ expect example.tags.len() == 0
 
 #### can be marked as skipped
 
-- can be marked as skipped
+1. expect example is pending
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SPEC
-step("can be marked as skipped")
 val example = Example.create("test", \: ()).skip()
 expect example.is_skipped == true
 expect example.is_pending() == true
@@ -83,18 +102,16 @@ expect example.is_pending() == true
 
 #### can be marked as slow
 
-- can be marked as slow
+1. expect example has tag
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SPEC
-step("can be marked as slow")
 val example = Example.create("test", \: ()).slow()
 expect example.has_tag("slow") == true
 ```
@@ -103,18 +120,13 @@ expect example.has_tag("slow") == true
 
 #### can have a timeout set
 
-- can have a timeout set
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SPEC
-step("can have a timeout set")
 val example = Example.create("test", \: ()).with_timeout(30)
 match example.timeout_seconds:
     case Some(timeout): expect timeout == 30
@@ -125,18 +137,18 @@ match example.timeout_seconds:
 
 #### can have tags added
 
-- can have tags added
+1. expect example has tag
+2. expect example has tag
+3. expect example has tag
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SPEC
-step("can have tags added")
 val example = Example.create("test", \: ()).with_tag("integration").with_tag("database")
 expect example.has_tag("integration") == true
 expect example.has_tag("database") == true
@@ -147,18 +159,16 @@ expect example.has_tag("nonexistent") == false
 
 #### should_run returns false for skipped examples
 
-- should_run returns false for skipped examples
+1. expect example should run
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SPEC
-step("should_run returns false for skipped examples")
 val example = Example.create("test", \: ()).skip()
 expect example.should_run(true) == false
 ```
@@ -167,18 +177,16 @@ expect example.should_run(true) == false
 
 #### should_run returns false for slow examples when run_slow is false
 
-- should_run returns false for slow examples when run_slow is false
+1. expect example should run
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SPEC
-step("should_run returns false for slow examples when run_slow is false")
 val example = Example.create("test", \: ()).slow()
 expect example.should_run(false) == false
 ```
@@ -187,18 +195,16 @@ expect example.should_run(false) == false
 
 #### should_run returns true for slow examples when run_slow is true
 
-- should_run returns true for slow examples when run_slow is true
+1. expect example should run
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SPEC
-step("should_run returns true for slow examples when run_slow is true")
 val example = Example.create("test", \: ()).slow()
 expect example.should_run(true) == true
 ```
@@ -209,18 +215,17 @@ expect example.should_run(true) == true
 
 #### creates a new group with description
 
-- creates a new group with description
+1. expect group children len
+2. expect group test examples len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SPEC
-step("creates a new group with description")
 val group = ExampleGroup.create("MyClass", nil)
 expect group.description == "MyClass"
 expect group.children.len() == 0
@@ -231,18 +236,17 @@ expect group.test_examples.len() == 0
 
 #### can add examples
 
-- can add examples
+1. group add example
+2. expect group test examples len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SPEC
-step("can add examples")
 val group = ExampleGroup.create("Test", nil)
 val example = Example.create("does something", \: ())
 group.add_example(example)
@@ -254,7 +258,27 @@ expect group.test_examples[0].description == "does something"
 
 #### full_description returns description for top-level group
 
-- full_description returns description for top-level group
+1. expect group full description
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val group = ExampleGroup.create("Calculator", nil)
+expect group.full_description() == "Calculator"
+```
+
+</details>
+
+#### example_count returns count of direct examples
+
+1. group add example
+2. group add example
+3. expect group example count
 
 
 <details>
@@ -264,28 +288,6 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SPEC
-step("full_description returns description for top-level group")
-val group = ExampleGroup.create("Calculator", nil)
-expect group.full_description() == "Calculator"
-```
-
-</details>
-
-#### example_count returns count of direct examples
-
-- example_count returns count of direct examples
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 6 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-SPEC
-step("example_count returns count of direct examples")
 val group = ExampleGroup.create("Test", nil)
 group.add_example(Example.create("test 1", \: ()))
 group.add_example(Example.create("test 2", \: ()))
@@ -298,18 +300,18 @@ expect group.example_count() == 2
 
 #### can register example groups
 
-- can register example groups
+1. reset registry
+2. register group
+3. expect groups len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SPEC
-step("can register example groups")
 reset_registry()
 val group = ExampleGroup.create("Test", nil)
 register_group(group)
@@ -322,18 +324,19 @@ expect groups[0].description == "Test"
 
 #### can clear all groups
 
-- can clear all groups
+1. reset registry
+2. register group
+3. clear groups
+4. expect get all groups
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SPEC
-step("can clear all groups")
 reset_registry()
 register_group(ExampleGroup.create("Test", nil))
 clear_groups()
@@ -354,69 +357,3 @@ expect get_all_groups().len() == 0
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SPEC`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `dcff78dce19fbf71253467de9c24fcda777c6aa3ab9e57b4653634158be0be6c`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `dcff78dce19fbf71253467de9c24fcda777c6aa3ab9e57b4653634158be0be6c`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `dcff78dce19fbf71253467de9c24fcda777c6aa3ab9e57b4653634158be0be6c`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **88/100**; effective score: **88/100**; blockers: **0**.
-
-SSpec documentization score: 88/100
-source: test/01_unit/spec/registry_spec.spl
-mirror: doc/06_spec/01_unit/spec/registry_spec.md (current)
-findings: 11 blockers: 0
-  narrative=100 structure=70 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/spec/registry_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/spec/registry_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/spec/registry_spec.spl:117:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates a new example with description and block' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/spec/registry_spec.spl:125:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'can be marked as skipped' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/01_unit/spec/registry_spec.spl:125:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'can be marked as skipped' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/spec/registry_spec.spl:132:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'can be marked as slow' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/01_unit/spec/registry_spec.spl:132:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'can be marked as slow' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/spec/registry_spec.spl:138:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'can have a timeout set' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/01_unit/spec/registry_spec.spl:146:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'can have tags added' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/01_unit/spec/registry_spec.spl:181:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'can add examples' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/01_unit/spec/registry_spec.spl:205:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'can register example groups' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-<!-- sspec-maintain:scorecard:end -->

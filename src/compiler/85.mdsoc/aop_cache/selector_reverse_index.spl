@@ -1,0 +1,53 @@
+# Reverse dependency table: descriptor field -> pointcuts that read it.
+#
+# This is the `{ from: candidate_descriptor_field, to: pointcut_groups_reading_field }`
+# entry of the frozen schema's `reverse_indexes`. It is the only reverse index
+# that is backable today, because it depends solely on the read set — not on
+# candidate partitioning (which does not exist; every join point is global) nor
+# on a visible-aspect catalog.
+#
+# The `{ from: pointcut_group, to: candidate_partitions_read }` entry stays
+# UNBACKED: with no partitioning there is exactly one implicit global
+# partition, so recording it would assert a precision the tree does not have.
+
+use compiler.mdsoc.aop_index.pointcut_query.{
+    PointcutQuery, pointcut_query_read_set, selector_read_set_field_names
+}
+use compiler.mdsoc.aop_cache.pointcut_digest.{pointcut_normalized_query_digest}
+
+struct SelectorFieldWatchers:
+    """One descriptor field and the query digests that read it."""
+    field_name: text
+    query_digests: [text]
+
+fn selector_reverse_index(queries: [PointcutQuery]) -> [SelectorFieldWatchers]:
+    """Build field -> reading-query-digests, in canonical field order.
+
+    A field absent from every read set still appears, with an empty watcher
+    list: an explicit empty is a claim we can check, a missing row is not.
+    """
+    val all_fields = [
+        "qualified_name", "owning_scope", "signature", "attributes", "effects"
+    ]
+    var out: [SelectorFieldWatchers] = []
+    for field in all_fields:
+        var watchers: [text] = []
+        for query in queries:
+            val rs = pointcut_query_read_set(query)
+            for name in selector_read_set_field_names(rs):
+                if name == field:
+                    watchers = watchers.push(pointcut_normalized_query_digest(query))
+        out = out.push(SelectorFieldWatchers(field_name: field, query_digests: watchers))
+    out
+
+fn selector_field_is_read_by_any(index: [SelectorFieldWatchers], field_name: text) -> bool:
+    """True when at least one query reads `field_name`.
+
+    False means a change to that field cannot affect any selection — the whole
+    point of tracking the read set.
+    """
+    for row in index:
+        if row.field_name == field_name:
+            return not row.query_digests.is_empty()
+    # Unknown field: conservative, assume it matters.
+    true

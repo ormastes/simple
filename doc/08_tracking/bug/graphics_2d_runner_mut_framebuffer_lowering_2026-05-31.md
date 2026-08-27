@@ -1,7 +1,6 @@
 # Bug: graphics_2d full runner could not JIT/native lower framebuffer mutation
 
-Status: FIXED
-Status re-verified 2026-08-17 by source inspection (triage shard 01).
+Status: likely-fixed (triaged 2026-06-11, evidence: resolved/fixed content in body)
 
 ## Date
 

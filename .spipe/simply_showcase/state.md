@@ -40,7 +40,19 @@ recursion guard between simply and simple.
 
 ## Open
 
-- Delete `examples/` from simple via a deliberate `--expect-files` landing.
+- ~~Delete `examples/` from simple via a deliberate `--expect-files` landing.~~
+  **Partly done 2026-08-27.** Migration verified first: after simply sync commit
+  `9dca83d` (102 files simple had moved forward on since the 08-25 import — the
+  freeze was violated by commits on 08-26/08-27), 1,798 of 1,799 tracked entries
+  are byte-identical; the last is the `simple_cuda_example` gitlink, already
+  vendored in simply as 96 files. **Full retirement is blocked:** 732 non-doc
+  files (364 `test/`, 182 `scripts/`, 132 `src/`) build/test/execute
+  `examples/**` — `examples/09_embedded/` is SimpleOS boot/arch product code,
+  `examples/05_stdlib/spipe/` is the SPipe source mirror. Only 118 unreferenced
+  files were deleted (+ the gitlink and its `.gitmodules` stanza), and
+  `examples/README.md` now points at simply and explains what remains. Follow-up
+  is a MOVE task: relocate the load-bearing trees out of `examples/` and update
+  their referrers, then the rest can go. Landed as PR (see below).
 - Sibling repos adopt `data/registry.sdn` + `tests.sdn` format.
 - Replace simply's POSIX generator with a `.spl` generator once a released
   binary runs in its CI.
@@ -58,7 +70,15 @@ around: `bin/simple test --json <many files>` stops permanently at the first
 spec that hangs (the run died at file 1,340,
 `test/01_unit/app/ui/semantic_backend_helpers_spec.spl`, and no later file ever
 got a verdict). `--timeout <seconds>` gives each file its own budget, emits
-`UNVERIFIED <path>: TIMEOUT`, and continues. Do not combine it with
-`--no-session-daemon`: with both flags the runner processes only the first path
-and exits 0. The 42 hangs cluster in `lib/crypto/*_kat` and `lib/common/crypto`
+`UNVERIFIED <path>: TIMEOUT`, and continues. Separately — and **not** caused by
+`--timeout`, as this note previously claimed — `--no-session-daemon` with two or
+more positional paths runs only the FIRST one and exits 0: `parse_child_run` in
+`src/app/test_runner_new/test_runner_single.spl` did
+`if not arg.starts_with("-") and path == "": path = arg`, so later paths fell
+through with no branch and no warning, and the lane's greenwash hardening is all
+per-file so none of it could fire for a path discarded at parse time. Every
+in-tree caller passes exactly one path, so no CI or gate green was invalidated;
+the exposure was interactive/agent batching. Record:
+`doc/08_tracking/bug/test_runner_single_lane_drops_extra_paths_2026-08-27.md`;
+fixed to fail closed in PR #66. The 42 hangs cluster in `lib/crypto/*_kat` and `lib/common/crypto`
 perf specs.

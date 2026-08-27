@@ -13,7 +13,7 @@ use compiler.common.diagnostics.span.{Span}
 use compiler.common.dependency.visibility.{Visibility}
 use compiler.common.config.{Logger}
 use compiler.frontend.frontend.{parse_full_frontend}
-use compiler.hir.hir_definitions.{HirCallArg, HirExpr, HirExprKind}
+use compiler.hir.hir_definitions.{HirCallArg}
 use compiler.hir.hir_lowering.items.*
 use compiler.hir.hir_lowering.types.{HirLowering}
 use compiler.hir.hir_types.{HirType, HirTypeKind, MethodResolution, SymbolId, SymbolKind, SymbolTable}
@@ -100,8 +100,9 @@ fn symbol_is_text_callable(symbols: SymbolTable, id: SymbolId, param_count: i64,
         case _:
             false
 
+use std.spec.step
+
 describe "MethodResolver nil guards":
-    # @manual scenario evidence
     it "keeps module resolution methods owned by MethodResolver":
         # @req REQ-SSPEC-COMPILER
         step("keeps module resolution methods owned by MethodResolver")
@@ -132,7 +133,7 @@ describe "MethodResolver nil guards":
 
         val resolved = resolver.resolve_call_args([arg])
 
-        expect(resolved.len()).to_equal(1)
+        expect(resolved.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(resolved[0].has_name).to_be(true)
         expect(resolved[0].name).to_equal("value")
         match resolved[0].value.kind:
@@ -141,16 +142,97 @@ describe "MethodResolver nil guards":
             case _:
                 expect(false).to_be(true)
 
+    it "stores the resolved method return payload instead of its Option container":
+        # @req: REQ-COMPILER-SEMANTICS-001
+        step("Verify: stores the resolved method return payload instead of its Option container")
+        var symbols = SymbolTable.new()
+        val text_type = HirType(kind: HirTypeKind.Str, span: Span.empty())
+        val callable_type = HirType(
+            kind: HirTypeKind.Function([], text_type, []),
+            span: Span.empty()
+        )
+        val callable = symbols.define(
+            "answer",
+            SymbolKind.Function,
+            Some(callable_type),
+            Span.empty(),
+            Visibility.Public,
+            false,
+            nil
+        )
+        val receiver = HirExpr(
+            kind: HirExprKind.IntLit(0, nil),
+            has_type_: true,
+            type_: HirType.named("i64"),
+            span: Span.empty()
+        )
+        val call = HirExpr(
+            kind: HirExprKind.MethodCall(receiver, "answer", [], MethodResolution.FreeFunction(callable)),
+            has_type_: false,
+            type_: HirType(kind: HirTypeKind.Infer(0, 0), span: Span.empty()),
+            span: Span.empty()
+        )
+        var resolver = MethodResolver.new(symbols)
+
+        val resolved = resolver.resolve_expr(call)
+
+        expect(resolved.has_type_).to_be(true)
+        match resolved.type_.kind:
+            case HirTypeKind.Str: expect(true).to_be(true)
+            case _: expect(false).to_be(true)
+
+    it "preserves a valid unresolved-method fallback type":
+        # @req: REQ-COMPILER-SEMANTICS-001
+        step("Verify: preserves a valid unresolved-method fallback type")
+        val receiver = HirExpr(
+            kind: HirExprKind.IntLit(0, nil),
+            has_type_: true,
+            type_: HirType.named("i64"),
+            span: Span.empty()
+        )
+        val call = HirExpr(
+            kind: HirExprKind.MethodCall(receiver, "definitely_missing", [], MethodResolution.Unresolved),
+            has_type_: true,
+            type_: HirType(kind: HirTypeKind.Str, span: Span.empty()),
+            span: Span.empty()
+        )
+        var resolver = MethodResolver.new(SymbolTable.new())
+
+        val resolved = resolver.resolve_expr(call)
+
+        expect(resolved.has_type_).to_be(true)
+        match resolved.type_.kind:
+            case HirTypeKind.Str: expect(true).to_be(true)
+            case _: expect(false).to_be(true)
+
+    it "rejects a malformed present-but-nil unresolved-method type":
+        # @req: REQ-COMPILER-SEMANTICS-001
+        step("Verify: rejects a malformed present-but-nil unresolved-method type")
+        val receiver = HirExpr(
+            kind: HirExprKind.IntLit(0, nil),
+            has_type_: true,
+            type_: HirType.named("i64"),
+            span: Span.empty()
+        )
+        val call = HirExpr(
+            kind: HirExprKind.MethodCall(receiver, "definitely_missing", [], MethodResolution.Unresolved),
+            has_type_: true,
+            type_: nil,
+            span: Span.empty()
+        )
+        var resolver = MethodResolver.new(SymbolTable.new())
+
+        val resolved = resolver.resolve_expr(call)
+
+        expect(resolved.has_type_).to_be(false)
+
     it "keeps UFCS working when current_fn_sym is Some(nil)":
         # @req REQ-SSPEC-COMPILER
         step("keeps UFCS working when current_fn_sym is Some(nil)")
         var symbols = SymbolTable.new()
         val i64_type = HirType.named("i64")
         val ping_type = HirType(
-            # The second parameter models a trailing default. UFCS resolution
-            # sees only this callable shape and must leave missing args to the
-            # normal default-argument path.
-            kind: HirTypeKind.Function([i64_type, i64_type], i64_type, []),
+            kind: HirTypeKind.Function([i64_type], i64_type, []),
             span: Span.empty()
         )
         symbols.define(
@@ -169,7 +251,7 @@ describe "MethodResolver nil guards":
         val args: [HirCallArg] = []
         val result = resolver.try_ufcs(i64_type, "ping", args)
 
-        expect(result != nil).to_equal(true)
+        expect(result.?).to_equal(true)
 
     it "rejects a same-named UFCS function with the wrong arity":
         # @req REQ-SSPEC-COMPILER
@@ -200,7 +282,7 @@ describe "MethodResolver nil guards":
         val args = [HirCallArg(has_name: false, name: "", value: separator, span: Span.empty())]
         var resolver = MethodResolver.new(symbols)
 
-        expect(resolver.try_ufcs(array_type, "join", args) != nil).to_equal(false)
+        expect(resolver.try_ufcs(array_type, "join", args).?).to_equal(false)
 
     it "keeps array join owned by the collection builtin":
         # @req REQ-SSPEC-COMPILER
@@ -231,7 +313,7 @@ describe "MethodResolver nil guards":
         val args = [HirCallArg(has_name: false, name: "", value: separator, span: Span.empty())]
         var resolver = MethodResolver.new(symbols)
 
-        expect(resolver.try_ufcs(array_type, "join", args) != nil).to_equal(false)
+        expect(resolver.try_ufcs(array_type, "join", args).?).to_equal(false)
 
     it "keeps UFCS optional bindings visible to HIR lowering":
         # @req REQ-SSPEC-COMPILER
@@ -264,7 +346,7 @@ describe "MethodResolver nil guards":
         val parsed = parse_full_frontend(source, "method_owner", "method_owner", Logger(level: 0))
         var lowering = HirLowering.with_filename("method_owner.spl")
         val hir = lowering.lower_module(parsed)
-        expect(lowering.errors.len()).to_equal(0)
+        expect(lowering.errors.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
         val codegen_owner = hir.symbols.lookup("CodegenCompiledModule").unwrap()
         val jit_owner = hir.symbols.lookup("TieredJitManager").unwrap()
         val codegen_cleanup = hir.symbols.lookup("method_owner.CodegenCompiledModule::cleanup").unwrap()
@@ -276,7 +358,7 @@ describe "MethodResolver nil guards":
         var resolver = MethodResolver.new(hir.symbols)
 
         val resolved = resolver.try_instance_method(codegen_type, "cleanup")
-        expect(resolved != nil).to_equal(true)
+        expect(resolved.?).to_equal(true)
         if resolved.?:
             match resolved.unwrap():
                 case MethodResolution.InstanceMethod(owner, method):
@@ -290,7 +372,7 @@ describe "MethodResolver nil guards":
             expect(false).to_equal(true)
 
         val (resolved_hir, resolve_errors) = resolve_methods(hir)
-        expect(resolve_errors.len()).to_equal(0)
+        expect(resolve_errors.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
         var mir_lowering = MirLowering.new(resolved_hir.symbols)
         val mir = mir_lowering.lower_module(resolved_hir)
         var mir_names: [text] = []
@@ -321,7 +403,7 @@ describe "MethodResolver nil guards":
         val parsed = parse_full_frontend(source, "method_text", "method_text", Logger(level: 0))
         var lowering = HirLowering.with_filename("method_text.spl")
         val hir = lowering.lower_module(parsed)
-        expect(lowering.errors.len()).to_equal(0)
+        expect(lowering.errors.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
         val owner = hir.symbols.lookup("Widget").unwrap()
         val instance_id = hir.symbols.lookup("method_text.Widget::describe").unwrap()
         val static_id = hir.symbols.lookup("method_text.Widget::category").unwrap()
@@ -331,7 +413,7 @@ describe "MethodResolver nil guards":
         expect(symbol_is_text_callable(hir.symbols, inherited_id, 1, owner.id)).to_equal(true)
 
         val (resolved_hir, resolve_errors) = resolve_methods(hir)
-        expect(resolve_errors.len()).to_equal(0)
+        expect(resolve_errors.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
         var mir_lowering = MirLowering.new(resolved_hir.symbols)
         val mir = mir_lowering.lower_module(resolved_hir)
         expect(mir_call_has_text_return(mir, "method_text.Widget.describe")).to_equal(true)
@@ -356,9 +438,9 @@ describe "MethodResolver nil guards":
         var consumer_lowering = HirLowering.with_filename("consumer.spl")
         consumer_lowering.modules_by_name = modules
         val consumer_hir = consumer_lowering.lower_module(consumer)
-        expect(consumer_lowering.errors.len()).to_equal(0)
+        expect(consumer_lowering.errors.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
         val (resolved_consumer, consumer_errors) = resolve_methods(consumer_hir)
-        expect(consumer_errors.len()).to_equal(0)
+        expect(consumer_errors.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
         var consumer_mir_lowering = MirLowering.new(resolved_consumer.symbols)
         val consumer_mir = consumer_mir_lowering.lower_module(resolved_consumer)
         val imported_calls = mir_call_names(consumer_mir)
@@ -383,7 +465,7 @@ describe "MethodResolver nil guards":
         var lowering = HirLowering.with_filename("consumer_text.spl")
         lowering.modules_by_name = modules
         val hir = lowering.lower_module(consumer)
-        expect(lowering.errors.len()).to_equal(0)
+        expect(lowering.errors.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
         val alias_owner = hir.symbols.lookup("Alias").unwrap()
         val instance_id = hir.symbols.lookup("owner_text.Shared::describe").unwrap()
         val static_id = hir.symbols.lookup("owner_text.Shared::category").unwrap()
@@ -393,7 +475,7 @@ describe "MethodResolver nil guards":
         expect(symbol_is_text_callable(hir.symbols, inherited_id, 1, alias_owner.id)).to_equal(true)
 
         val (resolved_hir, resolve_errors) = resolve_methods(hir)
-        expect(resolve_errors.len()).to_equal(0)
+        expect(resolve_errors.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
         var mir_lowering = MirLowering.new(resolved_hir.symbols)
         val mir = mir_lowering.lower_module(resolved_hir)
         expect(mir_call_has_text_return(mir, "owner_text.Shared.describe")).to_equal(true)

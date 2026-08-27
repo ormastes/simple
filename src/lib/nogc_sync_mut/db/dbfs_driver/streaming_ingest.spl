@@ -1,0 +1,729 @@
+# Bounded private DBFS streaming-ingest foundation.
+use nogc_sync_mut.db.dbfs_driver.dbfs_driver.{DbFsDriver, DbFsInode, DbFsKind, _dbfs_inodes, _find_inode_idx_locked, _alloc_inode_id_locked, _dbfs_persist_namespace_locked, _dbfs_namespace_entries_locked}
+use nogc_sync_mut.db.dbfs_driver.device_commit_owner.{DbfsBlobBinding, DbfsBlobReservationLease, DbfsNamespacePublication, dbfs_owner_transaction_begin, dbfs_owner_transaction_end, dbfs_owner_quarantine_locked, dbfs_device_blob_binding_locked, dbfs_device_restore_blob_locked, dbfs_device_v4_namespace_ready_locked, dbfs_device_reserve_blob_locked, dbfs_device_write_reserved_blob_locked, dbfs_device_read_reserved_blob_locked, dbfs_device_bind_reserved_blob_locked, dbfs_device_release_reservation_locked, dbfs_device_abandon_pending_namespace_locked, dbfs_device_flush_locked, dbfs_device_namespace_generation_preflight_locked, dbfs_device_commit_namespace_locked}
+use nogc_sync_mut.db.dbfs_driver.namespace_io.{_reclaim_unlinked_inode_locked}
+use std.common.crypto.sha256.{Sha256StreamV1, sha256_stream_v1_new, sha256_stream_v1_update, sha256_stream_v1_finish_hex}
+use std.common.encoding.sha256_contract.{sha256_lower_hex_valid}
+use std.fs_driver.error.{FsError}
+use std.fs_driver.types.{ArtifactPublicationStateV1, ArtifactPublicationReceiptV1, ArtifactPublicationOutcomeV1, ArtifactBundleObjectReceiptV1, ArtifactBundlePublicationReceiptV1, ArtifactBundlePublicationOutcomeV1}
+
+pub val DBFS_STREAM_INGEST_CAPACITY: i32 = 64
+pub val DBFS_STREAM_INGEST_MAX_CHUNK_BYTES: i64 = 65536
+pub val DBFS_ARTIFACT_PATH_MAX_BYTES: i64 = 4096
+pub val DBFS_ARTIFACT_TARGET_MAX_BYTES: i64 = 256
+
+pub struct DbfsStreamIngestLease:
+    _slot: i32
+    _generation: u32
+    _inst_id: i64
+
+pub struct DbfsStreamIngestEvidence:
+    inode_id: u64
+    exact_size: i64
+    written_size: i64
+    sha256: text
+
+pub enum DbfsPublicationStateV1:
+    NotPublished
+    Published
+    Indeterminate
+
+pub struct DbfsPublicationOutcomeV1:
+    state: DbfsPublicationStateV1
+    evidence: Option<DbfsStreamIngestEvidence>
+    error_code: text
+
+impl DbfsPublicationOutcomeV1:
+    pub fn publication_state() -> DbfsPublicationStateV1: self.state
+    pub fn publication_evidence() -> Option<DbfsStreamIngestEvidence>:
+        self.evidence
+    pub fn publication_error_code() -> text: self.error_code
+
+impl DbfsStreamIngestEvidence:
+    pub fn published_inode_id() -> u64: self.inode_id
+    pub fn size() -> i64: self.exact_size
+    pub fn bytes_written() -> i64: self.written_size
+    pub fn stored_sha256() -> text: self.sha256
+
+struct DbfsStreamIngestSlot:
+    active: bool
+    generation: u32
+    inst_id: i64
+    path: text
+    exact_size: i64
+    written_size: i64
+    reservation: Option<DbfsBlobReservationLease>
+
+fn _empty_stream_slot(generation: u32) -> DbfsStreamIngestSlot:
+    DbfsStreamIngestSlot(active: false, generation: generation, inst_id: 0, path: "", exact_size: 0, written_size: 0, reservation: nil)
+
+var _stream_slots: [DbfsStreamIngestSlot] = [DbfsStreamIngestSlot(
+    active: false, generation: 1u32, inst_id: 0, path: "",
+    exact_size: 0, written_size: 0, reservation: nil); 64]
+
+fn _stream_slot_idx_locked(lease: DbfsStreamIngestLease, inst_id: i64) -> i32:
+    if lease._slot < 0 or lease._slot >= DBFS_STREAM_INGEST_CAPACITY or lease._inst_id != inst_id: return -1
+    val slot = _stream_slots[lease._slot]
+    if not slot.active or slot.generation != lease._generation or slot.inst_id != inst_id: return -1
+    lease._slot
+
+fn _stream_path_active_locked(inst_id: i64, path: text) -> bool:
+    var i: i32 = 0
+    while i < DBFS_STREAM_INGEST_CAPACITY:
+        val slot = _stream_slots[i]
+        if slot.active and slot.inst_id == inst_id and slot.path == path: return true
+        i = i + 1
+    false
+
+fn _stream_retire_locked(idx: i32) -> Result<bool, FsError>:
+    val slot = _stream_slots[idx]
+    if slot.generation == 0xFFFFFFFFu32: return Err(FsError.TooLarge)
+    _stream_slots[idx] = _empty_stream_slot(slot.generation + 1u32)
+    Ok(true)
+
+fn dbfs_stream_ingest_active_locked(inst_id: i64) -> bool:
+    var i: i32 = 0
+    while i < DBFS_STREAM_INGEST_CAPACITY:
+        if _stream_slots[i].active and _stream_slots[i].inst_id == inst_id: return true
+        i = i + 1
+    false
+
+fn _stream_finish<T>(result: Result<T, FsError>) -> Result<T, FsError>:
+    if dbfs_owner_transaction_end(): return result
+    Err(FsError.IoError(code: 0u32))
+
+fn _publication_finish_v1(
+    outcome: DbfsPublicationOutcomeV1,
+) -> DbfsPublicationOutcomeV1:
+    if dbfs_owner_transaction_end(): return outcome
+    DbfsPublicationOutcomeV1(
+        state: DbfsPublicationStateV1.Indeterminate,
+        evidence: outcome.evidence,
+        error_code: "dbfs-publication-owner-release-failed")
+
+fn _not_published_v1(code: text) -> DbfsPublicationOutcomeV1:
+    DbfsPublicationOutcomeV1(
+        state: DbfsPublicationStateV1.NotPublished, evidence: nil,
+        error_code: code)
+
+fn _indeterminate_v1(code: text) -> DbfsPublicationOutcomeV1:
+    DbfsPublicationOutcomeV1(
+        state: DbfsPublicationStateV1.Indeterminate, evidence: nil,
+        error_code: code)
+
+fn _artifact_not_published_v1(code: text) -> ArtifactPublicationOutcomeV1:
+    ArtifactPublicationOutcomeV1(
+        state: ArtifactPublicationStateV1.NotPublished,
+        receipt: nil, error_code: code)
+
+fn _artifact_indeterminate_v1(code: text) -> ArtifactPublicationOutcomeV1:
+    ArtifactPublicationOutcomeV1(
+        state: ArtifactPublicationStateV1.Indeterminate,
+        receipt: nil, error_code: code)
+
+fn _artifact_finish_v1(outcome: ArtifactPublicationOutcomeV1) -> ArtifactPublicationOutcomeV1:
+    if dbfs_owner_transaction_end(): return outcome
+    ArtifactPublicationOutcomeV1(
+        state: ArtifactPublicationStateV1.Indeterminate,
+        receipt: outcome.receipt,
+        error_code: "dbfs-artifact-owner-release-failed")
+
+fn _bundle_outcome_v1(state: ArtifactPublicationStateV1, code: text) -> ArtifactBundlePublicationOutcomeV1:
+    ArtifactBundlePublicationOutcomeV1(state: state, receipt: nil, error_code: code)
+
+fn _bundle_finish_v1(outcome: ArtifactBundlePublicationOutcomeV1) -> ArtifactBundlePublicationOutcomeV1:
+    if dbfs_owner_transaction_end(): return outcome
+    ArtifactBundlePublicationOutcomeV1(
+        state: ArtifactPublicationStateV1.Indeterminate,
+        receipt: outcome.receipt,
+        error_code: "dbfs-artifact-bundle-owner-release-failed")
+
+fn _canonical_artifact_path_v1(path: text) -> bool:
+    if path == "" or path == "/" or path.len() > DBFS_ARTIFACT_PATH_MAX_BYTES or
+            not path.starts_with("/") or path.ends_with("/") or
+            path.contains("\\") or path.contains("//") or
+            path.contains("/./") or path.contains("/../") or
+            path.ends_with("/.") or path.ends_with("/.."):
+        return false
+    not path.contains("\x00")
+
+fn _remove_inode_identity_locked(inst_id: i64, inode_id: u64):
+    var i: i32 = 0
+    while i < _dbfs_inodes.len() as i32:
+        if _dbfs_inodes[i].inst_id == inst_id and _dbfs_inodes[i].id == inode_id:
+            _dbfs_inodes.remove(i)
+            return
+        i = i + 1
+
+fn _restore_bundle_row_locked(inst_id: i64, new_inode_id: u64,
+        old: Option<DbFsInode>, prior_binding: DbfsBlobBinding):
+    _remove_inode_identity_locked(inst_id, new_inode_id)
+    dbfs_device_restore_blob_locked(inst_id, new_inode_id, prior_binding)
+    match old:
+        Some(inode):
+            _remove_inode_identity_locked(inst_id, inode.id)
+            _dbfs_inodes.push(inode)
+        None: ()
+
+struct DbfsPreparedBundleRowV1:
+    inode_id: u64
+    content_generation: u64
+    old_inode: Option<DbFsInode>
+    prior_binding: DbfsBlobBinding
+    stored_sha256: text
+    size: i64
+    path: text
+
+fn _bundle_prepare_row_locked(driver: DbFsDriver, slot: DbfsStreamIngestSlot,
+        expected_sha256: text) -> Result<DbfsPreparedBundleRowV1, FsError>:
+    if slot.written_size != slot.exact_size or slot.reservation.is_none() or
+            not sha256_lower_hex_valid(expected_sha256):
+        return Err(FsError.InvalidArg)
+    val stored = _stored_evidence_locked(
+        driver, slot.reservation.unwrap(), slot.exact_size)
+    if stored.is_err(): return Err(stored.unwrap_err())
+    val stored_values = stored.unwrap()
+    if stored_values.0 != expected_sha256: return Err(FsError.InvalidArg)
+    val replaced_idx = _find_inode_idx_locked(driver.inst_id, slot.path)
+    val old = if replaced_idx >= 0: Some(_dbfs_inodes[replaced_idx]) else: None
+    if old.is_some() and old.unwrap().kind == DbFsKind.Dir:
+        return Err(FsError.InvalidArg)
+    val inode_id = _alloc_inode_id_locked(driver.inst_id)
+    val prior_binding = dbfs_device_blob_binding_locked(driver.inst_id, inode_id)
+    val bound = dbfs_device_bind_reserved_blob_locked(
+        driver.inst_id, driver.arena_block_count, inode_id,
+        slot.reservation.unwrap(), stored_values.1)
+    if bound.is_err(): return Err(bound.unwrap_err())
+    if replaced_idx >= 0:
+        val replaced = _dbfs_inodes[replaced_idx]
+        _dbfs_inodes.remove(replaced_idx)
+        _dbfs_inodes.push(DbFsInode(
+            inst_id: replaced.inst_id, id: replaced.id,
+            content_generation: replaced.content_generation,
+            kind: replaced.kind, name: replaced.name, content: replaced.content,
+            content_bytes: replaced.content_bytes, parent: replaced.parent,
+            size: replaced.size, unlinked: true))
+    _dbfs_inodes.push(DbFsInode(
+        inst_id: driver.inst_id, id: inode_id, content_generation: 1u64,
+        kind: DbFsKind.File, name: slot.path, content: "",
+        content_bytes: [], parent: 1u64, size: slot.exact_size,
+        unlinked: false))
+    Ok(DbfsPreparedBundleRowV1(
+        inode_id: inode_id, content_generation: 1u64, old_inode: old,
+        prior_binding: prior_binding, stored_sha256: stored_values.0,
+        size: slot.exact_size, path: slot.path))
+
+fn _bundle_rollback_row_locked(inst_id: i64, row: DbfsPreparedBundleRowV1):
+    _restore_bundle_row_locked(
+        inst_id, row.inode_id, row.old_inode, row.prior_binding)
+
+fn _bundle_release_row_locked(slot_idx: i32) -> bool:
+    val slot = _stream_slots[slot_idx]
+    if slot.reservation.is_some():
+        val released = dbfs_device_release_reservation_locked(slot.reservation.unwrap())
+        if released.is_err() or not released.unwrap(): return false
+    val retired = _stream_retire_locked(slot_idx)
+    retired.is_ok() and retired.unwrap()
+
+fn _bundle_receipt_row_v1(row: DbfsPreparedBundleRowV1) -> ArtifactBundleObjectReceiptV1:
+    ArtifactBundleObjectReceiptV1(
+        object_identity: row.inode_id,
+        content_generation: row.content_generation,
+        size: row.size as u64, sha256: row.stored_sha256, path: row.path)
+
+fn _stored_evidence_locked(driver: DbFsDriver, reservation: DbfsBlobReservationLease, exact_size: i64) -> Result<(text, i64), FsError>:
+    val sha: Sha256StreamV1 = sha256_stream_v1_new()
+    var adler_a: u64 = 1u64
+    var adler_b: u64 = 0u64
+    var offset: i64 = 0
+    while offset < exact_size:
+        val remaining = exact_size - offset
+        val count = if remaining < DBFS_STREAM_INGEST_MAX_CHUNK_BYTES: remaining else: DBFS_STREAM_INGEST_MAX_CHUNK_BYTES
+        val read = dbfs_device_read_reserved_blob_locked(driver.inst_id, driver.arena_base, driver.arena_block_count, reservation, offset, count)
+        if read.is_err(): return Err(read.unwrap_err())
+        val bytes = read.unwrap()
+        if bytes.len() as i64 != count or not sha256_stream_v1_update(sha, bytes): return Err(FsError.IoError(code: 0u32))
+        var i: i32 = 0
+        while i < bytes.len() as i32:
+            adler_a = (adler_a + bytes[i].to_u64()) % 65521u64
+            adler_b = (adler_b + adler_a) % 65521u64
+            i = i + 1
+        offset = offset + count
+    val digest = sha256_stream_v1_finish_hex(sha)
+    if digest.is_none(): return Err(FsError.IoError(code: 0u32))
+    Ok((digest.unwrap(), ((adler_b << 16u64) | adler_a).to_i64()))
+
+impl DbFsDriver:
+    fn _artifact_publication_begin_locked(
+        output_path: text, exact_size: i64
+    ) -> Result<DbfsStreamIngestLease, FsError>:
+        """Reserve an owner-private sibling object; it is unreachable until commit."""
+        if self.arena_base < 0 or not dbfs_device_v4_namespace_ready_locked(
+                self.inst_id, self.arena_block_count):
+            return Err(FsError.Unsupported)
+        if output_path == "" or output_path == "/" or
+                output_path.len() > DBFS_ARTIFACT_PATH_MAX_BYTES or exact_size < 0:
+            return Err(FsError.InvalidArg)
+        val existing_idx = _find_inode_idx_locked(self.inst_id, output_path)
+        if existing_idx >= 0 and _dbfs_inodes[existing_idx].kind == DbFsKind.Dir:
+            return Err(FsError.InvalidArg)
+        if _stream_path_active_locked(self.inst_id, output_path):
+            return Err(FsError.Busy)
+        var idx: i32 = 0
+        while idx < DBFS_STREAM_INGEST_CAPACITY and
+                (_stream_slots[idx].active or
+                 _stream_slots[idx].generation == 0xFFFFFFFFu32):
+            idx = idx + 1
+        if idx >= DBFS_STREAM_INGEST_CAPACITY: return Err(FsError.Busy)
+        val reserved = dbfs_device_reserve_blob_locked(
+            self.inst_id, self.arena_block_count, exact_size)
+        if reserved.is_err(): return Err(reserved.unwrap_err())
+        val generation = _stream_slots[idx].generation
+        _stream_slots[idx] = DbfsStreamIngestSlot(
+            active: true, generation: generation, inst_id: self.inst_id,
+            path: output_path, exact_size: exact_size, written_size: 0,
+            reservation: Some(reserved.unwrap()))
+        Ok(DbfsStreamIngestLease(
+            _slot: idx, _generation: generation, _inst_id: self.inst_id))
+
+    fn artifact_publication_begin_v1(
+        output_path: text, exact_size: i64
+    ) -> Result<DbfsStreamIngestLease, FsError>:
+        """Begin bounded compiler output staging on a durable DBFS mount."""
+        if not dbfs_owner_transaction_begin(): return Err(FsError.Unsupported)
+        _stream_finish(self._artifact_publication_begin_locked(
+            output_path, exact_size))
+
+    fn _artifact_publication_finish_locked(
+        lease: DbfsStreamIngestLease, expected_sha256: text, target: text
+    ) -> ArtifactPublicationOutcomeV1:
+        val idx = _stream_slot_idx_locked(lease, self.inst_id)
+        if idx < 0: return _artifact_not_published_v1("dbfs-artifact-stale-lease")
+        val slot = _stream_slots[idx]
+        if target == "" or target.len() > DBFS_ARTIFACT_TARGET_MAX_BYTES or
+                slot.written_size != slot.exact_size or
+                slot.reservation.is_none() or
+                not sha256_lower_hex_valid(expected_sha256):
+            return _artifact_not_published_v1("dbfs-artifact-invalid-finish")
+        val preflight = dbfs_device_namespace_generation_preflight_locked(self.inst_id)
+        if preflight.is_err():
+            return _artifact_not_published_v1("dbfs-artifact-preflight-failed")
+        val reservation = slot.reservation.unwrap()
+        val stored = _stored_evidence_locked(self, reservation, slot.exact_size)
+        if stored.is_err():
+            return _artifact_not_published_v1("dbfs-artifact-stored-read-failed")
+        val stored_values = stored.unwrap()
+        if stored_values.0 != expected_sha256:
+            return _artifact_not_published_v1("dbfs-artifact-sha-mismatch")
+
+        val replaced_idx = _find_inode_idx_locked(self.inst_id, slot.path)
+        val replaced = if replaced_idx >= 0:
+            Some(_dbfs_inodes[replaced_idx])
+        else:
+            None
+        if replaced.is_some() and replaced.unwrap().kind == DbFsKind.Dir:
+            return _artifact_not_published_v1("dbfs-artifact-target-is-directory")
+        val inode_id = _alloc_inode_id_locked(self.inst_id)
+        val prior_binding = dbfs_device_blob_binding_locked(self.inst_id, inode_id)
+        val bound = dbfs_device_bind_reserved_blob_locked(
+            self.inst_id, self.arena_block_count, inode_id, reservation,
+            stored_values.1)
+        if bound.is_err():
+            return _artifact_not_published_v1("dbfs-artifact-bind-failed")
+        if replaced_idx >= 0:
+            val old = _dbfs_inodes[replaced_idx]
+            _dbfs_inodes.remove(replaced_idx)
+            _dbfs_inodes.push(DbFsInode(
+                inst_id: old.inst_id, id: old.id,
+                content_generation: old.content_generation, kind: old.kind,
+                name: old.name, content: old.content,
+                content_bytes: old.content_bytes, parent: old.parent,
+                size: old.size, unlinked: true))
+        _dbfs_inodes.push(DbFsInode(
+            inst_id: self.inst_id, id: inode_id, content_generation: 1u64,
+            kind: DbFsKind.File, name: slot.path, content: "",
+            content_bytes: [], parent: 1u64, size: slot.exact_size,
+            unlinked: false))
+        val entries = _dbfs_namespace_entries_locked(self.inst_id)
+        if entries.is_err():
+            _dbfs_inodes.remove(_dbfs_inodes.len() as i32 - 1)
+            match replaced:
+                Some(old):
+                    _dbfs_inodes.remove(_dbfs_inodes.len() as i32 - 1)
+                    _dbfs_inodes.push(old)
+                None: ()
+            dbfs_device_restore_blob_locked(self.inst_id, inode_id, prior_binding)
+            return _artifact_not_published_v1("dbfs-artifact-namespace-encode-failed")
+        val publication = dbfs_device_commit_namespace_locked(
+            self.inst_id, self.arena_base, self.arena_block_count,
+            entries.unwrap())
+        match publication:
+            case DbfsNamespacePublication.NotPublished(_):
+                _dbfs_inodes.remove(_dbfs_inodes.len() as i32 - 1)
+                match replaced:
+                    Some(old):
+                        _dbfs_inodes.remove(_dbfs_inodes.len() as i32 - 1)
+                        _dbfs_inodes.push(old)
+                    None: ()
+                dbfs_device_restore_blob_locked(self.inst_id, inode_id, prior_binding)
+                val _ = dbfs_device_release_reservation_locked(reservation)
+                val _ = _stream_retire_locked(idx)
+                _artifact_not_published_v1("dbfs-artifact-not-published")
+            case DbfsNamespacePublication.Indeterminate(_):
+                val _ = dbfs_device_release_reservation_locked(reservation)
+                val _ = _stream_retire_locked(idx)
+                _artifact_indeterminate_v1("dbfs-artifact-publication-indeterminate")
+            case DbfsNamespacePublication.Published(namespace_generation):
+                var published_error = ""
+                match replaced:
+                    Some(old):
+                        val reclaimed = _reclaim_unlinked_inode_locked(
+                            self, old.id, old.content_generation)
+                        if reclaimed.is_err():
+                            published_error = "dbfs-artifact-published-reclaim-failed"
+                    None: ()
+                val released = dbfs_device_release_reservation_locked(reservation)
+                val retired = _stream_retire_locked(idx)
+                ArtifactPublicationOutcomeV1(
+                    state: ArtifactPublicationStateV1.Published,
+                    receipt: Some(ArtifactPublicationReceiptV1(
+                        contract_version: 1u32,
+                        filesystem_instance: self.inst_id,
+                        object_identity: inode_id,
+                        content_generation: 1u64,
+                        namespace_generation: namespace_generation,
+                        size: slot.exact_size as u64,
+                        sha256: stored_values.0, output_path: slot.path,
+                        target: target)),
+                    error_code: if published_error != "":
+                        published_error
+                    else if released.is_err() or retired.is_err():
+                        "dbfs-artifact-published-bookkeeping-failed"
+                    else:
+                        "")
+
+    fn artifact_publication_finish_v1(
+        lease: DbfsStreamIngestLease, expected_sha256: text, target: text
+    ) -> ArtifactPublicationOutcomeV1:
+        """Flush staged bytes, atomically replace the name, then flush its root.
+
+        DBFS's checkpoint owner performs the content/payload flush before the
+        single-sector namespace-root write and its second flush.  Unsupported
+        hosted or non-v4 mounts fail closed instead of fabricating durability.
+        """
+        if not dbfs_owner_transaction_begin():
+            return _artifact_indeterminate_v1("dbfs-artifact-owner-unavailable")
+        _artifact_finish_v1(self._artifact_publication_finish_locked(
+            lease, expected_sha256, target))
+
+    fn _artifact_bundle_finish_locked(payload_lease: DbfsStreamIngestLease,
+            scr2_lease: DbfsStreamIngestLease,
+            sbe2_lease: DbfsStreamIngestLease,
+            payload_sha256: text, scr2_sha256: text, sbe2_sha256: text,
+            target: text) -> ArtifactBundlePublicationOutcomeV1:
+        val payload_idx = _stream_slot_idx_locked(payload_lease, self.inst_id)
+        val scr2_idx = _stream_slot_idx_locked(scr2_lease, self.inst_id)
+        val sbe2_idx = _stream_slot_idx_locked(sbe2_lease, self.inst_id)
+        if payload_idx < 0 or scr2_idx < 0 or sbe2_idx < 0:
+            return _bundle_outcome_v1(
+                ArtifactPublicationStateV1.NotPublished,
+                "dbfs-artifact-bundle-stale-lease")
+        if payload_idx == scr2_idx or payload_idx == sbe2_idx or scr2_idx == sbe2_idx:
+            return _bundle_outcome_v1(
+                ArtifactPublicationStateV1.NotPublished,
+                "dbfs-artifact-bundle-duplicate-lease")
+        val payload_slot = _stream_slots[payload_idx]
+        val scr2_slot = _stream_slots[scr2_idx]
+        val sbe2_slot = _stream_slots[sbe2_idx]
+        if target == "" or target.len() > DBFS_ARTIFACT_TARGET_MAX_BYTES or
+                not _canonical_artifact_path_v1(payload_slot.path) or
+                not _canonical_artifact_path_v1(scr2_slot.path) or
+                not _canonical_artifact_path_v1(sbe2_slot.path) or
+                payload_slot.path == scr2_slot.path or
+                payload_slot.path == sbe2_slot.path or
+                scr2_slot.path == sbe2_slot.path or
+                scr2_slot.path != payload_slot.path + ".scr2" or
+                sbe2_slot.path != payload_slot.path + ".sbe2":
+            return _bundle_outcome_v1(
+                ArtifactPublicationStateV1.NotPublished,
+                "dbfs-artifact-bundle-invalid-authority")
+        val preflight = dbfs_device_namespace_generation_preflight_locked(self.inst_id)
+        if preflight.is_err():
+            return _bundle_outcome_v1(
+                ArtifactPublicationStateV1.NotPublished,
+                "dbfs-artifact-bundle-preflight-failed")
+
+        val payload = _bundle_prepare_row_locked(
+            self, payload_slot, payload_sha256)
+        if payload.is_err():
+            return _bundle_outcome_v1(
+                ArtifactPublicationStateV1.NotPublished,
+                "dbfs-artifact-bundle-payload-invalid")
+        val payload_row = payload.unwrap()
+        val scr2 = _bundle_prepare_row_locked(self, scr2_slot, scr2_sha256)
+        if scr2.is_err():
+            _bundle_rollback_row_locked(self.inst_id, payload_row)
+            return _bundle_outcome_v1(
+                ArtifactPublicationStateV1.NotPublished,
+                "dbfs-artifact-bundle-scr2-invalid")
+        val scr2_row = scr2.unwrap()
+        val sbe2 = _bundle_prepare_row_locked(self, sbe2_slot, sbe2_sha256)
+        if sbe2.is_err():
+            _bundle_rollback_row_locked(self.inst_id, scr2_row)
+            _bundle_rollback_row_locked(self.inst_id, payload_row)
+            return _bundle_outcome_v1(
+                ArtifactPublicationStateV1.NotPublished,
+                "dbfs-artifact-bundle-sbe2-invalid")
+        val sbe2_row = sbe2.unwrap()
+        val entries = _dbfs_namespace_entries_locked(self.inst_id)
+        if entries.is_err():
+            _bundle_rollback_row_locked(self.inst_id, sbe2_row)
+            _bundle_rollback_row_locked(self.inst_id, scr2_row)
+            _bundle_rollback_row_locked(self.inst_id, payload_row)
+            return _bundle_outcome_v1(
+                ArtifactPublicationStateV1.NotPublished,
+                "dbfs-artifact-bundle-namespace-encode-failed")
+        val publication = dbfs_device_commit_namespace_locked(
+            self.inst_id, self.arena_base, self.arena_block_count,
+            entries.unwrap())
+        match publication:
+            case DbfsNamespacePublication.NotPublished(_):
+                _bundle_rollback_row_locked(self.inst_id, sbe2_row)
+                _bundle_rollback_row_locked(self.inst_id, scr2_row)
+                _bundle_rollback_row_locked(self.inst_id, payload_row)
+                val payload_released = _bundle_release_row_locked(payload_idx)
+                val scr2_released = _bundle_release_row_locked(scr2_idx)
+                val sbe2_released = _bundle_release_row_locked(sbe2_idx)
+                if not payload_released or not scr2_released or not sbe2_released:
+                    dbfs_owner_quarantine_locked()
+                    _bundle_outcome_v1(
+                        ArtifactPublicationStateV1.Indeterminate,
+                        "dbfs-artifact-bundle-rollback-cleanup-indeterminate")
+                else:
+                    _bundle_outcome_v1(
+                        ArtifactPublicationStateV1.NotPublished,
+                        "dbfs-artifact-bundle-not-published")
+            case DbfsNamespacePublication.Indeterminate(_):
+                # The owner quarantines ambiguous root publication.  Keep the
+                # runtime image matching the possibly durable root and merely
+                # retire capability leases; append-only extents are not reused.
+                val payload_released = _bundle_release_row_locked(payload_idx)
+                val scr2_released = _bundle_release_row_locked(scr2_idx)
+                val sbe2_released = _bundle_release_row_locked(sbe2_idx)
+                _bundle_outcome_v1(
+                    ArtifactPublicationStateV1.Indeterminate,
+                    if not payload_released or not scr2_released or
+                            not sbe2_released:
+                        "dbfs-artifact-bundle-publication-and-cleanup-indeterminate"
+                    else:
+                        "dbfs-artifact-bundle-publication-indeterminate")
+            case DbfsNamespacePublication.Published(namespace_generation):
+                var published_error = ""
+                match payload_row.old_inode:
+                    Some(old):
+                        if _reclaim_unlinked_inode_locked(
+                                self, old.id, old.content_generation).is_err():
+                            published_error = "dbfs-artifact-bundle-reclaim-failed"
+                    None: ()
+                match scr2_row.old_inode:
+                    Some(old):
+                        if _reclaim_unlinked_inode_locked(
+                                self, old.id, old.content_generation).is_err():
+                            published_error = "dbfs-artifact-bundle-reclaim-failed"
+                    None: ()
+                match sbe2_row.old_inode:
+                    Some(old):
+                        if _reclaim_unlinked_inode_locked(
+                                self, old.id, old.content_generation).is_err():
+                            published_error = "dbfs-artifact-bundle-reclaim-failed"
+                    None: ()
+                val payload_released = _bundle_release_row_locked(payload_idx)
+                val scr2_released = _bundle_release_row_locked(scr2_idx)
+                val sbe2_released = _bundle_release_row_locked(sbe2_idx)
+                if not payload_released or not scr2_released or not sbe2_released:
+                    dbfs_owner_quarantine_locked()
+                    published_error = if published_error == "":
+                        "dbfs-artifact-bundle-published-bookkeeping-failed"
+                    else:
+                        "dbfs-artifact-bundle-published-reclaim-and-bookkeeping-failed"
+                ArtifactBundlePublicationOutcomeV1(
+                    state: ArtifactPublicationStateV1.Published,
+                    receipt: Some(ArtifactBundlePublicationReceiptV1(
+                        contract_version: 1u32,
+                        filesystem_instance: self.inst_id,
+                        namespace_generation: namespace_generation,
+                        bundle_identity: payload_slot.path,
+                        target: target,
+                        payload: _bundle_receipt_row_v1(payload_row),
+                        scr2_receipt: _bundle_receipt_row_v1(scr2_row),
+                        sbe2_policy: _bundle_receipt_row_v1(sbe2_row))),
+                    error_code: published_error)
+
+    fn artifact_bundle_finish_v1(payload_lease: DbfsStreamIngestLease,
+            scr2_lease: DbfsStreamIngestLease,
+            sbe2_lease: DbfsStreamIngestLease,
+            payload_sha256: text, scr2_sha256: text, sbe2_sha256: text,
+            target: text) -> ArtifactBundlePublicationOutcomeV1:
+        """Publish a payload, its SCR2 receipt, and SBE2 policy in one root."""
+        if not dbfs_owner_transaction_begin():
+            return _bundle_outcome_v1(
+                ArtifactPublicationStateV1.Indeterminate,
+                "dbfs-artifact-bundle-owner-unavailable")
+        _bundle_finish_v1(self._artifact_bundle_finish_locked(
+            payload_lease, scr2_lease, sbe2_lease,
+            payload_sha256, scr2_sha256, sbe2_sha256, target))
+
+    fn _stream_ingest_begin_locked(path: text, exact_size: i64) -> Result<DbfsStreamIngestLease, FsError>:
+        if self.arena_base < 0 or not dbfs_device_v4_namespace_ready_locked(self.inst_id, self.arena_block_count): return Err(FsError.Unsupported)
+        if path == "" or path == "/" or exact_size < 0: return Err(FsError.InvalidArg)
+        if _find_inode_idx_locked(self.inst_id, path) >= 0 or _stream_path_active_locked(self.inst_id, path): return Err(FsError.AlreadyExists)
+        var idx: i32 = 0
+        while idx < DBFS_STREAM_INGEST_CAPACITY and
+                (_stream_slots[idx].active or _stream_slots[idx].generation == 0xFFFFFFFFu32):
+            idx = idx + 1
+        if idx >= DBFS_STREAM_INGEST_CAPACITY: return Err(FsError.Busy)
+        val reserved = dbfs_device_reserve_blob_locked(self.inst_id, self.arena_block_count, exact_size)
+        if reserved.is_err(): return Err(reserved.unwrap_err())
+        val generation = _stream_slots[idx].generation
+        _stream_slots[idx] = DbfsStreamIngestSlot(active: true, generation: generation, inst_id: self.inst_id, path: path, exact_size: exact_size, written_size: 0, reservation: Some(reserved.unwrap()))
+        Ok(DbfsStreamIngestLease(_slot: idx, _generation: generation, _inst_id: self.inst_id))
+
+    fn stream_ingest_begin(path: text, exact_size: i64) -> Result<DbfsStreamIngestLease, FsError>:
+        if not dbfs_owner_transaction_begin(): return Err(FsError.Unsupported)
+        _stream_finish(self._stream_ingest_begin_locked(path, exact_size))
+
+    fn _stream_ingest_append_locked(lease: DbfsStreamIngestLease, exact_offset: i64, data: [u8]) -> Result<i64, FsError>:
+        val idx = _stream_slot_idx_locked(lease, self.inst_id)
+        if idx < 0: return Err(FsError.StaleHandle)
+        val slot = _stream_slots[idx]
+        val count = data.len() as i64
+        if count <= 0 or count > DBFS_STREAM_INGEST_MAX_CHUNK_BYTES or exact_offset != slot.written_size or exact_offset > slot.exact_size or count > slot.exact_size - exact_offset or slot.reservation.is_none(): return Err(FsError.InvalidArg)
+        val written = dbfs_device_write_reserved_blob_locked(self.inst_id, self.arena_base, self.arena_block_count, slot.reservation.unwrap(), exact_offset, data)
+        if written.is_err(): return Err(written.unwrap_err())
+        if written.unwrap() != count: return Err(FsError.IoError(code: 0u32))
+        var updated = slot
+        updated.written_size = exact_offset + count
+        _stream_slots[idx] = updated
+        Ok(count)
+
+    fn stream_ingest_append(lease: DbfsStreamIngestLease, exact_offset: i64, data: [u8]) -> Result<i64, FsError>:
+        if not dbfs_owner_transaction_begin(): return Err(FsError.Unsupported)
+        _stream_finish(self._stream_ingest_append_locked(lease, exact_offset, data))
+
+    fn _stream_ingest_finish_outcome_locked(lease: DbfsStreamIngestLease,
+        expected_sha256: text) -> DbfsPublicationOutcomeV1:
+        val idx = _stream_slot_idx_locked(lease, self.inst_id)
+        if idx < 0: return _not_published_v1("dbfs-stream-stale-handle")
+        val slot = _stream_slots[idx]
+        if slot.written_size != slot.exact_size or slot.reservation.is_none() or not sha256_lower_hex_valid(expected_sha256):
+            return _not_published_v1("dbfs-stream-invalid-finish")
+        if _find_inode_idx_locked(self.inst_id, slot.path) >= 0:
+            return _not_published_v1("dbfs-stream-path-exists")
+        val reservation = slot.reservation.unwrap()
+        val stored = _stored_evidence_locked(self, reservation, slot.exact_size)
+        if stored.is_err(): return _not_published_v1("dbfs-stream-stored-read-failed")
+        val evidence_values = stored.unwrap()
+        if evidence_values.0 != expected_sha256:
+            return _not_published_v1("dbfs-stream-sha-mismatch")
+        val inode_id = _alloc_inode_id_locked(self.inst_id)
+        val prior_binding: DbfsBlobBinding = dbfs_device_blob_binding_locked(self.inst_id, inode_id)
+        val bound = dbfs_device_bind_reserved_blob_locked(self.inst_id, self.arena_block_count, inode_id, reservation, evidence_values.1)
+        if bound.is_err(): return _not_published_v1("dbfs-stream-bind-failed")
+        _dbfs_inodes.push(DbFsInode(inst_id: self.inst_id, id: inode_id, content_generation: 1u64, kind: DbFsKind.File, name: slot.path, content: "", content_bytes: [], parent: 1u64, size: slot.exact_size, unlinked: false))
+        val persisted = _dbfs_persist_namespace_locked(self.inst_id, self.arena_base, self.arena_block_count)
+        if persisted.is_err():
+            val abandoned = dbfs_device_abandon_pending_namespace_locked(self.inst_id)
+            if abandoned.is_ok() and abandoned.unwrap():
+                _dbfs_inodes.remove(_dbfs_inodes.len() as i32 - 1)
+                dbfs_device_restore_blob_locked(self.inst_id, inode_id, prior_binding)
+                return _not_published_v1("dbfs-stream-namespace-persist-failed")
+            return _indeterminate_v1("dbfs-stream-namespace-persist-indeterminate")
+        val flushed = dbfs_device_flush_locked(self.inst_id)
+        if flushed.is_err() or not flushed.unwrap():
+            val abandoned = dbfs_device_abandon_pending_namespace_locked(self.inst_id)
+            if abandoned.is_ok() and abandoned.unwrap():
+                _dbfs_inodes.remove(_dbfs_inodes.len() as i32 - 1)
+                dbfs_device_restore_blob_locked(self.inst_id, inode_id, prior_binding)
+                return _not_published_v1("dbfs-stream-flush-failed")
+            else:
+                val _ = dbfs_device_release_reservation_locked(reservation)
+                val _ = _stream_retire_locked(idx)
+            return _indeterminate_v1("dbfs-stream-flush-indeterminate")
+        val evidence = DbfsStreamIngestEvidence(
+            inode_id: inode_id, exact_size: slot.exact_size,
+            written_size: slot.written_size, sha256: evidence_values.0)
+        val released = dbfs_device_release_reservation_locked(reservation)
+        val retired = _stream_retire_locked(idx)
+        DbfsPublicationOutcomeV1(
+            state: DbfsPublicationStateV1.Published, evidence: Some(evidence),
+            error_code: if released.is_err() or retired.is_err():
+                "dbfs-stream-published-bookkeeping-failed"
+            else:
+                "")
+
+    fn stream_ingest_finish_outcome_v1(lease: DbfsStreamIngestLease,
+        expected_sha256: text) -> DbfsPublicationOutcomeV1:
+        if not dbfs_owner_transaction_begin():
+            return _indeterminate_v1("dbfs-publication-owner-unavailable")
+        _publication_finish_v1(
+            self._stream_ingest_finish_outcome_locked(lease, expected_sha256))
+
+    fn stream_ingest_finish(lease: DbfsStreamIngestLease, expected_sha256: text) -> Result<DbfsStreamIngestEvidence, FsError>:
+        val outcome = self.stream_ingest_finish_outcome_v1(lease, expected_sha256)
+        if outcome.state == DbfsPublicationStateV1.Published and outcome.evidence.is_some():
+            return Ok(outcome.evidence.unwrap())
+        Err(FsError.IoError(code: 0u32))
+
+    fn mkdir_publication_outcome_v1(path: text, mode: u32) -> DbfsPublicationOutcomeV1:
+        if not dbfs_owner_transaction_begin():
+            return _indeterminate_v1("dbfs-publication-owner-unavailable")
+        if self.arena_base < 0 or
+            not dbfs_device_v4_namespace_ready_locked(
+                self.inst_id, self.arena_block_count):
+            return _publication_finish_v1(
+                _not_published_v1("dbfs-mkdir-device-namespace-unavailable"))
+        if path == "" or path == "/" or _find_inode_idx_locked(self.inst_id, path) >= 0:
+            return _publication_finish_v1(
+                _not_published_v1("dbfs-mkdir-invalid-or-existing"))
+        val inode_id = _alloc_inode_id_locked(self.inst_id)
+        _dbfs_inodes.push(DbFsInode(
+            inst_id: self.inst_id, id: inode_id, content_generation: 1u64,
+            kind: DbFsKind.Dir, name: path, content: "", content_bytes: [],
+            parent: 1u64, size: 0, unlinked: false))
+        val persisted = _dbfs_persist_namespace_locked(
+            self.inst_id, self.arena_base, self.arena_block_count)
+        if persisted.is_err():
+            val abandoned = dbfs_device_abandon_pending_namespace_locked(self.inst_id)
+            if abandoned.is_ok() and abandoned.unwrap():
+                _dbfs_inodes.remove(_dbfs_inodes.len() as i32 - 1)
+                return _publication_finish_v1(
+                    _not_published_v1("dbfs-mkdir-persist-failed"))
+            return _publication_finish_v1(
+                _indeterminate_v1("dbfs-mkdir-persist-indeterminate"))
+        val flushed = dbfs_device_flush_locked(self.inst_id)
+        if flushed.is_err() or not flushed.unwrap():
+            val abandoned = dbfs_device_abandon_pending_namespace_locked(self.inst_id)
+            if abandoned.is_ok() and abandoned.unwrap():
+                _dbfs_inodes.remove(_dbfs_inodes.len() as i32 - 1)
+                return _publication_finish_v1(
+                    _not_published_v1("dbfs-mkdir-flush-failed"))
+            return _publication_finish_v1(
+                _indeterminate_v1("dbfs-mkdir-flush-indeterminate"))
+        _publication_finish_v1(DbfsPublicationOutcomeV1(
+            state: DbfsPublicationStateV1.Published,
+            evidence: nil, error_code: ""))
+
+    fn _stream_ingest_abort_locked(lease: DbfsStreamIngestLease) -> Result<bool, FsError>:
+        val idx = _stream_slot_idx_locked(lease, self.inst_id)
+        if idx < 0: return Err(FsError.StaleHandle)
+        val slot = _stream_slots[idx]
+        if slot.reservation.is_none(): return Err(FsError.Corrupt)
+        val released = dbfs_device_release_reservation_locked(slot.reservation.unwrap())
+        if released.is_err(): return Err(released.unwrap_err())
+        _stream_retire_locked(idx)
+
+    fn stream_ingest_abort(lease: DbfsStreamIngestLease) -> Result<bool, FsError>:
+        if not dbfs_owner_transaction_begin(): return Err(FsError.Unsupported)
+        _stream_finish(self._stream_ingest_abort_locked(lease))
+
+export dbfs_stream_ingest_active_locked

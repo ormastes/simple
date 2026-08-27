@@ -12,12 +12,12 @@ requests with the reason pure Simple was not possible.
 - FR-MACLINK-001: The macOS host-link flag set — libraries `z, ffi, edit, zstd,
   xml2, ncurses, objc, iconv`; frameworks `Metal, CoreGraphics`; search path
   `/opt/homebrew/lib` — shall be owned by the pure-Simple backend. **Done:**
-  `src/compiler/70.backend/linker/_LinkerWrapper/native_linking.spl` `link_native_unix`
+  `src/compiler/70.backend/linker/linker_wrapper_part1.spl` `link_native_unix`
   macOS branch (+ `link_native_cc` bootstrap fallback), gated to `os == "macos"`.
 - FR-MACLINK-002: The bootstrap seed-wrapper C shall emit Mach-O section syntax
   (`__DATA,__data`) on Apple targets, not ELF `.data`. **Done in pure Simple:**
   `src/app/cli/bootstrap_main.spl`, `src/compiler/80.driver/driver_bootstrap.spl`,
-  `src/os/port/_BootstrapCross/cross_compile_stages.spl` (`__APPLE__`/`__MACH__` preprocessor
+  `src/os/port/bootstrap_cross_part1.spl` (`__APPLE__`/`__MACH__` preprocessor
   branch).
 
 ## Could not be done in pure Simple — Rust seed only (feature requests)

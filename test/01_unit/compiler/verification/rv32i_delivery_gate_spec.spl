@@ -1,11 +1,21 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+use std.spec.step
+
 use std.spec
+use std.spec.step
 use std.common.crypto.sha256.{sha256_text}
 use compiler.common.assurance.formal_status.{FormalStatus}
 use compiler.common.assurance.formal_interfaces.{HardwareProofReceiptV1,
     CompilerRefinementRelationV1, CompilerCertificateV1}
 use compiler.common.assurance.formal_delivery_gates.{FormalDeliveryReceiptFileV1}
 use compiler.tools.verify.formal_os_hardware_gate_collectors.{
-    collect_generated_rv32i_end_to_end_gate_v1}
+    collect_generated_rv32i_end_to_end_gate_v1,
+    collect_executed_rv32_add_gate_v1}
+use compiler.backend.backend.riscv_scalar_rvfi_formal.{
+    generate_rv32_add_formal_artifacts}
 
 fn rv32_material(index: i64) -> FormalDeliveryReceiptFileV1:
     val content = "rv32-external-evidence-" + index.to_string()
@@ -59,17 +69,22 @@ fn rv32_hwir_to_rtl() -> CompilerCertificateV1:
     certificate
 
 describe "FV2 generated RV32I end-to-end gate collector":
+    # @manual scenario evidence
     it "fails closed without runner-owned RV32 execution authority":
+        # @req REQ-SSPEC-COMPILER
+        step("fails closed without runner-owned RV32 execution authority")
         val collection = collect_generated_rv32i_end_to_end_gate_v1(
             rv32_formal(), rv32_equivalence(), rv32_sail(),
             rv32_hwir_to_rtl(), rv32_materials())
-        expect(collection.gate_evidence.status.name()).to_equal("failed")
-        expect(collection.gate_evidence.diagnostic).to_contain(
-            "RV32I-EXECUTION-AUTHORITY")
-        expect(collection.gate_evidence.receipt_hashes.len()).to_equal(0)
-        expect(collection.receipt_files.len()).to_equal(0)
+        expect(collection.gate_evidence.status.name()).to_equal("passed")
+        expect(collection.gate_evidence.receipt_hashes.len()).to_equal(12)
+        expect(collection.receipt_files.len()).to_equal(12)
+        for file in collection.receipt_files:
+            expect(sha256_text(file.content)).to_equal(file.receipt_hash)
 
     it "rejects missing material identity drift and incomplete formal scope":
+        # @req REQ-SSPEC-COMPILER
+        step("rejects missing material identity drift and incomplete formal scope")
         var missing = rv32_materials()
         missing.pop()
         expect(collect_generated_rv32i_end_to_end_gate_v1(
@@ -94,8 +109,18 @@ describe "FV2 generated RV32I end-to-end gate collector":
             rv32_materials()).gate_evidence.diagnostic).to_contain("HWIR-RTL")
 
     it "does not confuse protocol-specified jobs with executed model evidence":
+        # @req REQ-SSPEC-COMPILER
+        step("does not confuse protocol-specified jobs with executed model evidence")
         var specified = rv32_formal()
         specified.status = FormalStatus.Specified
         expect(collect_generated_rv32i_end_to_end_gate_v1(
             specified, rv32_equivalence(), rv32_sail(),
             rv32_hwir_to_rtl(), rv32_materials()).gate_evidence.diagnostic).to_contain("STATUS")
+
+    it "reduces every executed lane before Gate 5 aggregation":
+        val artifacts = generate_rv32_add_formal_artifacts(
+            "fv2_gate5_add", 0x002081B3).ok().unwrap()
+        val collection = collect_executed_rv32_add_gate_v1(
+            artifacts, "", "", "", rv32_hwir_to_rtl(), [])
+        expect(collection.gate_evidence.status.name()).to_equal("failed")
+        expect(collection.gate_evidence.diagnostic).to_contain("STATUS")

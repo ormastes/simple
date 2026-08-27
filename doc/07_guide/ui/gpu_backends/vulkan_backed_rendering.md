@@ -13,7 +13,7 @@ single backend, or a CPU fallback. Relevant backend keys:
 
 | key | renders via | notes |
 |-----|-------------|-------|
-| `vulkan` | `VulkanBackend` (`backend_vulkan.spl`) through the Vulkan SFFI facades | checked copy/src-over plus nearest-neighbor IMAGE blit wired |
+| `vulkan` | `VulkanBackend` (`backend_vulkan.spl`) through the Vulkan SFFI facades | 9/10 primitives wired (blit pending) |
 | `metal` | native `MetalBackend` (macOS); else **Vulkan emulation** → name `metal-on-vulkan` | non-macOS hosts serve the Metal API request through Vulkan |
 | `directx-on-vulkan` | `VulkanBackend` (vkd3d/DXVK concept) | additive alias; the legacy `directx` key stays CPU-raster gated by a real vkd3d/Vulkan ICD probe |
 | `software` / `cpu` | `SoftwareBackend` | the bit-exact reference oracle |
@@ -55,11 +55,25 @@ SPIR-V blobs. To recover a kernel's real algorithm:
 4. Verify `pixel_mismatches == 0`, then wire the kernel in `backend_vulkan.spl`.
 
 This is how `line` (divisor is `steps+1`, not `steps`) and `gradient` (integer,
-divisor `rh` not `rh-1`) were fixed. The shared two-buffer blit now handles
-exact copy, src-over, and nearest-neighbor scaled COPY/src-over; the `line` blob still
-ignores thickness (1px only).
+divisor `rh` not `rh-1`) were fixed. Known remaining: `blit` needs a two-buffer
+descriptor layout; the `line` blob ignores thickness (1px only).
 
 ## Verification harnesses
+
+### SimpleOS four-lane mission showcase
+
+For the headless QEMU/container mission lane, use
+`scripts/check/check-render-lane-mission-showcase.shs`. It is stricter than a
+backend enumeration or a single Engine2D readback: it requires four distinct
+WM/GUI/Web/Engine2D captures, live guest markers for all production lanes, and
+one `backend=vulkan` receipt that binds every capture SHA-256. The contract
+spec is `test/03_system/check/render_lane_mission_showcase_spec.spl`; its
+fixtures exercise rejection semantics and are not live Vulkan evidence. See
+`doc/03_plan/sys_test/render_lane_mission_showcase.md` for the resume command.
+The receipt schema also binds producer receipts, admitted compiler, guest image,
+and serial log, requires Vulkan submit/fence/readback fields, and compares a
+measured allocation peak with an operator-supplied cap. Real producer and
+allocator receipts are still a blocked implementation dependency.
 
 ### Cross-backend parity (in test suite)
 - `test/01_unit/lib/gc_async_mut/gpu/engine2d/vulkan_compute_oracle_spec.spl`
@@ -84,9 +98,9 @@ its `RDOC` magic). Requires the interpreter binary built WITH these externs
 (`src/compiler_rust/target/release/simple`); it does not replace the
 self-hosted `bin/release/<triple>/simple`.
 
-### GUI/web/2D Vulkan comparison
-The top-level GUI/web/2D Vulkan comparison wrapper is
-`scripts/setup/setup-gui-web-2d-vulkan-env.shs`. It records host Vulkan
+### macOS-only GUI/web/2D Vulkan comparison
+The top-level GUI/web/2D Vulkan comparison wrapper is macOS-only for now:
+`scripts/setup/setup-gui-web-2d-vulkan-env.shs`. It records host MoltenVK
 readiness, direct Electron/Chrome launch evidence, Simple Engine2D Vulkan
 readback, and optional RenderDoc captures in
 `build/gui-web-2d-vulkan-env/evidence.env`:
@@ -97,19 +111,8 @@ scripts/setup/setup-gui-web-2d-vulkan-env.shs --run
 sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
 ```
 
-On Linux, current completion evidence is summarized by
-`doc/09_report/linux_vulkan_render_log_compare_current_2026-07-02.md` and the
-SimpleOS hardening aggregate:
-`BUILD_DIR=build/simpleos_hardening_evidence_matrix_current REPORT_PATH=doc/09_report/simpleos_hardening_evidence_matrix_2026-07-03.md sh scripts/check/check-simpleos-hardening-evidence-matrix.shs`.
-That aggregate must report `simpleos_hardening_matrix_passed=18/18` and
-`simpleos_hardening_gui_renderdoc_vulkan_status=pass` plus
-`simpleos_hardening_formal_lean_proofs_status=pass` plus
-`simpleos_hardening_formal_riscv_dual_track_status=pass` plus
-`simpleos_hardening_formal_critical_concurrency_status=pass` plus
-`simpleos_hardening_formal_memory_safety_status=pass` plus
-`simpleos_hardening_formal_storage_integrity_status=pass` before claiming the
-SimpleOS Vulkan/RenderDoc lane. Windows and macOS still require their
-platform-specific runbooks before claiming native platform closure.
+Do not report Windows or Linux status from this top-level workflow; those
+runbooks are intentionally deferred until they have their own host evidence.
 The aggregate audit reads setup/readiness evidence from `GUI_WEB_2D_VULKAN_ENV`
 and direct runtime comparison evidence from `GUI_WEB_2D_VULKAN_RUN_EVIDENCE_ENV`
 when set, otherwise from existing `build/gui-web-2d-vulkan-env-run-*` evidence.
@@ -146,6 +149,7 @@ the reference oracle. Requires `tools/electron-shell/node_modules` + `xvfb-run`;
 skips cleanly otherwise.
 
 ## Known gaps
+- `blit` Vulkan kernel (two-buffer descriptor layout) — not yet wired.
 - `line` GPU kernel is 1px-only (thickness not implemented in the blob).
 - The web-render path's GPU provenance fix (legacy `simple_web_*` stamp) remains
   diagnosed but unconverted; the new `web_render_html_via_engine2d` is the

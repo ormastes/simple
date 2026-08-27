@@ -1,7 +1,6 @@
 # Scheduler task lifecycle & dispatch — task creation/exit, block/unblock,
 # yield, schedule, timer tick, topology, and green-carrier scheduling methods.
 use os.kernel.scheduler.scheduler.*
-use os.kernel.scheduler.process_execution_observation.{scheduler_execution_observe_exit_v1}
 # Preemptive Scheduler — Computation Dimension
 #
 # Priority-based preemptive scheduler with round-robin within same priority.
@@ -54,14 +53,18 @@ use os.kernel.scheduler.scheduler_types.{
     wait_collect_result_pid, wait_collect_result_status, wait_collect_result_error,
     _priority_to_index, _affinity_allows_cpu, _deadline_util,
     _account_task_tick, _account_fair_tick,
-    Scheduler, SchedulerBootstrapUserTaskResult
+    Scheduler, SchedulerBootstrapUserTaskResult, SchedulerBootCurrentStageV1,
+    scheduler_next_task_lifecycle_identity_take_v1
 }
+use os.kernel.types.capability_types.{capability_set_bind_owner}
+use os.kernel.types.arm32_mapping_handle_v1.{scheduler_arm32_mapping_handle_absent_v1}
+use os.kernel.types.riscv32_mapping_handle_v1.{scheduler_riscv32_mapping_handle_absent_v1}
+use os.kernel.types.x86_32_mapping_handle_v1.{scheduler_x86_32_mapping_handle_absent_v1}
 
 # Task management free functions
 use os.kernel.scheduler.scheduler_task_mgmt.{
     sched_create_task_impl,
-    sched_prepare_exit_task_by_id_impl,
-    sched_finalize_exit_task_by_id_with_code_impl,
+    sched_exit_task_by_id_with_code_impl,
     sched_block_task_impl, sched_unblock_task_impl,
     sched_wake_expired_sleepers_impl,
     sched_set_task_name_impl,
@@ -87,7 +90,6 @@ use os.kernel.scheduler.scheduler_algorithm.{
 use os.kernel.scheduler.scheduler_exec.{
     sched_new_with_topology_impl,
     sched_create_user_task_pid_impl,
-    sched_create_user_task_from_bytes_pid_impl,
     sched_create_bootstrap_user_task_pid_impl,
     sched_clone_task_impl,
     sched_exec_image_impl
@@ -148,15 +150,91 @@ impl Scheduler:
             self._enqueue_ready(id)
         id
 
+    pub(package) me stage_boot_current_task_v1(
+        caps: CapabilitySet
+    ) -> SchedulerBootCurrentStageV1?:
+        """Reserve, but do not run, the finite-capability boot context.
+
+        The caller must install the returned TCB pouch into the persistent IPC
+        manager before activation.  No ready-queue entry is created here, so a
+        partially-installed boot task cannot receive syscalls or execution.
+        """
+        if self.current.id != 0u64 or self.current_slot >= 0 or
+            self.current_by_cpu.len() == 0 or not caps.is_pledged or
+            caps.caps.len() == 0:
+            return nil
+        val slot = self._find_empty_slot()
+        if slot < 0: return nil
+        val identity = scheduler_next_task_lifecycle_identity_take_v1()
+        if not identity.?: return nil
+        val reserved = identity.unwrap()
+        val id = TaskId(id: reserved.task_id)
+        val bound = capability_set_bind_owner(caps, id.id)
+        if bound.caps.len() == 0:
+            return nil
+        val context = TaskContext(
+            rax: 0, rbx: 0, rcx: 0, rdx: 0, rsi: 0, rdi: 0, rbp: 0, rsp: 0,
+            r8: 0, r9: 0, r10: 0, r11: 0, r12: 0, r13: 0, r14: 0, r15: 0,
+            rip: 0, rflags: 0x202, cs: 0x08, ss: 0x10, fpu_state: 0)
+        self.tasks[slot] = TaskControlBlock(
+            id: id, name: "boot-service", state: TaskState.Ready,
+            priority: TaskPriority.High, is_user: false, entry_point: 0u64,
+            context: context, user_context: nil, address_space: 0u64,
+            kernel_stack: 0u64, user_stack: 0u64, capabilities: bound,
+            parent: nil, schedule: default_task_schedule(TaskPriority.High),
+            isolation: default_task_isolation(0u64), assigned_cpu: 0u32,
+            exit_code: 0, ticks_remaining: TIME_SLICE_TICKS,
+            lifecycle_generation: reserved.lifecycle_generation,
+            arm32_mapping_handle: scheduler_arm32_mapping_handle_absent_v1(),
+            riscv32_mapping_handle: scheduler_riscv32_mapping_handle_absent_v1(),
+            x86_32_mapping_handle: scheduler_x86_32_mapping_handle_absent_v1(),
+            exec_generation: 1u64)
+        Some(SchedulerBootCurrentStageV1(
+            _task_id: id.id,
+            _lifecycle_generation: reserved.lifecycle_generation, _slot: slot))
+
+    pub(package) me activate_boot_current_task_v1(
+        stage: SchedulerBootCurrentStageV1
+    ) -> TaskId?:
+        """Make an exactly staged, IPC-installed boot context current."""
+        if self.current.id != 0u64 or self.current_slot >= 0 or
+            stage._slot < 0 or stage._slot >= self.tasks.len() or
+            self.current_by_cpu.len() == 0:
+            return nil
+        val staged = self.tasks[stage._slot]
+        if staged == nil: return nil
+        var task = staged.unwrap()
+        if task.id.id == 0u64 or task.id.id != stage._task_id or
+            task.lifecycle_generation != stage._lifecycle_generation or
+            task.state != TaskState.Ready or not task.capabilities.is_pledged or
+            task.capabilities.caps.len() == 0:
+            return nil
+        task.state = TaskState.Running
+        self.tasks[stage._slot] = task
+        self.current = task.id
+        self.current_slot = stage._slot
+        self.current_by_cpu[0] = task.id
+        Some(task.id)
+
+    pub(package) me abort_boot_current_task_v1(
+        stage: SchedulerBootCurrentStageV1
+    ) -> bool:
+        """Discard only an unactivated stage after IPC/policy failure."""
+        if self.current.id != 0u64 or stage._slot < 0 or
+            stage._slot >= self.tasks.len():
+            return false
+        val staged = self.tasks[stage._slot]
+        if staged == nil: return false
+        val task = staged.unwrap()
+        if task.id.id != stage._task_id or
+            task.lifecycle_generation != stage._lifecycle_generation or
+            task.state != TaskState.Ready:
+            return false
+        self.tasks[stage._slot] = nil
+        true
+
     me create_user_task_pid(image: UserProcessImage, priority: TaskPriority, caps: CapabilitySet) -> u64:
         val (pid, new_tasks, slot) = sched_create_user_task_pid_impl(self.tasks, self.current, image, priority, caps)
-        self.tasks = new_tasks
-        if pid != 0 and slot >= 0:
-            self._enqueue_ready_at_slot(TaskId(id: pid), slot)
-        pid
-
-    me create_user_task_from_bytes_pid(path: text, bytes: [u8], arch: Architecture, priority: TaskPriority, caps: CapabilitySet) -> u64:
-        val (pid, new_tasks, slot) = sched_create_user_task_from_bytes_pid_impl(self.tasks, self.current, path, bytes, arch, priority, caps)
         self.tasks = new_tasks
         if pid != 0 and slot >= 0:
             self._enqueue_ready_at_slot(TaskId(id: pid), slot)
@@ -227,17 +305,15 @@ impl Scheduler:
         task.isolation = isolation
         self.tasks[slot] = task
         true
+
     me exit_task(code: i32):
         self.exit_task_by_id(self.current, code)
 
     me exit_task_by_id(id: TaskId, code: i32):
         scheduler_execution_observe_exit_v1(id.id, code)
-        # The scheduler is the canonical TCB/ready-queue owner. Publish the
-        # non-runnable admission fence before any external cleanup owner runs.
-        self.tasks = sched_prepare_exit_task_by_id_impl(self.tasks, id)
+        val new_tasks = sched_exit_task_by_id_with_code_impl(self.tasks, id, code)
+        self.tasks = new_tasks
         self._remove_ready(id)
-        self.tasks = sched_finalize_exit_task_by_id_with_code_impl(
-            self.tasks, id, code)
         self._wake_exit_waiters(id)
 
     me yield_current():
@@ -311,7 +387,6 @@ impl Scheduler:
                     self.tasks[slot] = task
                     val old_tid_v = self.current.id as i64
                     self.current = task_id
-                    self.current_slot = slot
                     self.current_by_cpu[cpu as i64] = task_id
                     self.preempt_pending_by_cpu[cpu as i64] = nil
                     replay_hook_schedule(old_tid_v, task_id.id as i64, self.tick_count as i64)

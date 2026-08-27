@@ -28,14 +28,15 @@ fn lower_mcdc_source(mode: i64) -> text:
             return serialize_mir_function(function)
     ""
 
-fn lower_mcdc_main(mode: i64) -> text:
+fn lower_mcdc_main(mode: i64, dynamic_dormant: bool = false) -> text:
     val module = parse_full_frontend(
         "fn main() -> i64:\n    0\n", "mcdc_main.spl", "mcdc_main.spl",
         Logger(level: 0))
     var hir_lowering = HirLowering.with_filename("mcdc_main.spl")
     val hir = hir_lowering.lower_module(module)
     var mir_lowering = MirLowering.new(hir.symbols)
-    mir_lowering.configure_mcdc_mode(mode)
+    mir_lowering.configure_mcdc_mode(
+        mode, dynamic_dormant: dynamic_dormant)
     val mir = mir_lowering.lower_module(hir)
     for function in mir.functions.values():
         if function.name == "main" or function.name.ends_with(".main"):
@@ -74,12 +75,17 @@ describe "MC/DC control-decision MIR lowering", tag: ["only-compiled"]:
         expect(mir.contains("DecisionProbe")).to_equal(false)
         expect(mir.contains("ConditionProbe")).to_equal(false)
 
-    it "configures dynamic main dormant without publishing an owner":
+    it "cold-loads and fails closed for an explicitly selected dynamic main":
         val mir = lower_mcdc_main(2)
         val configure = mir.index_of("mcdc_dynamic_probe_configure")
-        val load = mir.index_of("mcdc_dynamic_probe_controller_load_builtin_current_owner")
+        val load = mir.index_of("mcdc_dynamic_probe_controller_load_builtin_current_owner_or_fail")
         expect(configure).to_be_greater_than(-1)
-        expect(load).to_equal(-1)
+        expect(load).to_be_greater_than(configure)
+
+    it "keeps dynamic configuration dormant only under the explicit option":
+        val mir = lower_mcdc_main(2, dynamic_dormant: true)
+        expect(mir.contains("mcdc_dynamic_probe_configure")).to_equal(true)
+        expect(mir.contains("mcdc_dynamic_probe_controller_load_builtin_current_owner_or_fail")).to_equal(false)
 
     it "keeps static main configuration and omits all off-mode setup":
         expect(lower_mcdc_main(1).contains("mcdc_static_probe_configure_bytes")).to_equal(true)

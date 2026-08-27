@@ -45,9 +45,10 @@ use compiler.core.ast.{decl_use_import, decl_export_names, decl_enum_def, decl_s
 use compiler.core.ast.{decl_impl_block}
 use compiler.core.ast.{decl_set_comptime}
 use compiler.core.ast.{decl_set_visibility_text}
-use compiler.core.ast.{decl_is_gpu_kernel, decl_is_simd, decl_is_packed, decl_set_packed, decl_derives}
+use compiler.core.ast.{decl_is_gpu_kernel, decl_is_simd, decl_is_packed, decl_derives}
 use compiler.core.ast.{decl_get_name, decl_get_fields, decl_get_derives, decl_set_derives}
 use compiler.core.ast.{module_set_path, module_add_decl}
+use compiler.frontend.core.lexer.{lex_pos_get, lex_pos_set, lex_line_get, lex_line_set, lex_col_get, lex_col_set}
 use compiler.frontend.core.lexer.{lex_source_char_at, lex_source_len, lex_source_slice}
 use compiler.core.types.{TYPE_I64, TYPE_F64, TYPE_TEXT, TYPE_BOOL, TYPE_VOID}
 use compiler.core.types.{TYPE_OPTION, TYPE_OPTION_I64, TYPE_OPTION_F64, TYPE_OPTION_TEXT, TYPE_OPTION_BOOL}
@@ -70,7 +71,6 @@ use compiler.frontend.core.parser_decls_use.*
 
 # Import CLI parser
 use compiler.core.parser_cli.{parse_cli_decl}
-use compiler.frontend.core._Ast.decl_nodes.{decl_aop_advice, decl_arch_rule}
 
 # ===== Helper Functions =====
 
@@ -85,27 +85,13 @@ fn parse_bitfield_decl() -> i64:
     val bitfield_type_id = named_type_register(bf_name, [], [])
 
     # Parse backing type: bitfield Name(u32):
-    # Capture the raw backing-type name BEFORE parser_parse_type() consumes
-    # it: uN/iN width names (u8/u16/u32/u64) are not registered anywhere as
-    # named types, so parser_parse_type() falls through its "unknown type"
-    # path and returns TYPE_VOID for them. Round-tripping that tag back to a
-    # name via type_tag_name() then yields "void", which spuriously fails the
-    # u8/u16/u32/u64 backing-type check below even for perfectly valid
-    # backing types. Validate directly against the name we already have.
     parser_expect(140)
-    val backing_type_name = par_text_get()
-    var backing_type = parser_parse_type()
+    val backing_type = parser_parse_type()
     parser_expect(141)
-    val backing_bits = bitfield_backing_bits_from_name(backing_type_name)
+    val backing_name = type_tag_name(backing_type)
+    val backing_bits = bitfield_backing_bits_from_name(backing_name)
     if backing_bits == 0:
         parser_error("bitfield backing type must be u8, u16, u32, or u64")
-    if backing_type == TYPE_VOID and backing_bits > 0:
-        # uN width names have no dedicated type tag; represent the backing
-        # storage as the native i64 register type (same convention newtype/
-        # newunit use for their wrapped "value" field: the wrapper gets its
-        # own named-type tag, but the field holding the raw value is typed
-        # as its real underlying primitive, never left as TYPE_VOID/Unit).
-        backing_type = TYPE_I64
 
     parser_expect(161)
     parser_skip_newlines()
@@ -121,9 +107,7 @@ fn parse_bitfield_decl() -> i64:
     var seen_names: [text] = []
     var used_bits: i64 = 0
 
-    var bf_i: i64 = 0 - 1
-    while true:
-        bf_i = bf_i + 1
+    for bf_i in 0..200:
         parser_skip_newlines()
         if par_kind_get() == 182:
             parser_advance()
@@ -145,24 +129,15 @@ fn parse_bitfield_decl() -> i64:
         else:
             parser_expect(6)
         parser_expect(161)
-        val field_type_name = par_text_get()
-        var field_type = parser_parse_type()
+        val field_type = parser_parse_type()
+        val field_type_name = type_tag_name(field_type)
         val bit_count = bitfield_field_bits_from_name(field_type_name)
         if bit_count == 0:
             parser_error("bitfield field type must be bool, uN, or iN")
         used_bits = used_bits + bit_count
-        if field_type == TYPE_VOID and bit_count > 0:
-            field_type = TYPE_I64
 
-        # Reserved (`_: uN`) fields are kept (with a synthetic unique name)
-        # so downstream packed-width/bit-offset computation stays correct;
-        # the flat-AST bridge marks "_reserved_"-prefixed names is_reserved.
-        if is_underscore:
-            field_names.push("_reserved_" + int_to_str(bf_i))
-            field_types.push(field_type)
-            field_defaults.push(-1)
-            field_bits.push(bit_count)
-        else:
+        # Skip reserved fields (don't add to struct)
+        if not is_underscore:
             if has_seen_name(seen_names, field_name):
                 parser_error("duplicate bitfield field name: " + field_name)
             seen_names.push(field_name)
@@ -177,11 +152,7 @@ fn parse_bitfield_decl() -> i64:
         parser_error("bitfield '" + bf_name + "' uses " + int_to_str(used_bits) + " bits but backing type allows only " + int_to_str(backing_bits))
 
     named_type_update(bitfield_type_id, field_names, field_types)
-    val bf_decl_idx = decl_struct_def(bf_name, field_names, field_types, field_defaults, field_bits, 0)
-    # Route this decl into Module.bitfields (not Module.structs) in the
-    # flat-AST bridge: tag "3" + is_packed is the bitfield marker there.
-    decl_set_packed(bf_decl_idx, 1)
-    bf_decl_idx
+    decl_struct_def(bf_name, field_names, field_types, field_defaults, field_bits, 0)
 
 # ===== AOP Declaration Parsing =====
 
@@ -199,7 +170,7 @@ fn parse_pointcut_text() -> text:
     parser_expect(142)
     var depth = 1
     var result = ""
-    while true:
+    for j in 0..10000:
         if par_kind_get() == 190:
             parser_error("unexpected EOF in pointcut expression")
             break
@@ -248,5 +219,3 @@ fn parse_arch_rule_decl(kind: text) -> i64:
         message = par_text_get()
         parser_advance()
     decl_arch_rule(kind, pointcut, message, 0)
-
-export parse_bitfield_decl

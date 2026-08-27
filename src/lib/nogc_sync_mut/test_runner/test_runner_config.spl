@@ -8,7 +8,6 @@ use std.io.{file_read}
 use std.sffi.cli.{cli_get_args}
 
 use std.test_runner.test_runner_types.{TestExecutionMode, TestOptions}
-use std.test_runner.test_runner_args.{normalize_profile_name}
 
 # =========================================================================
 # CLI Args Helper (inlined to avoid extra module load)
@@ -18,14 +17,11 @@ fn get_cli_args() -> [text]:
     val all_args = cli_get_args()
     var args: [text] = []
     var start_idx = 1
-    var scan_idx = 0
-    while scan_idx < all_args.len():
-        if all_args[scan_idx].ends_with("/app/test_runner_new/main.spl") or all_args[scan_idx] == "src/app/test_runner_new/main.spl":
-            start_idx = scan_idx + 1
-        scan_idx = scan_idx + 1
+    if all_args.len() > 1 and (all_args[1].ends_with("/test_runner_new/main.spl") or all_args[1] == "src/app/test_runner_new/main.spl"):
+        start_idx = 2
     var i = start_idx
     while i < all_args.len():
-        args.push(all_args[i])
+        args = args.push(all_args[i])
         i = i + 1
     args
 
@@ -235,19 +231,6 @@ fn propagate_env_vars(options: TestOptions):
     if resolved_profile != "":
         env_set("SIMPLE_SAFETY_PROFILE", resolved_profile)
 
-    val effective_mcdc_mode = resolve_mcdc_mode_for_profile(
-        env_get("SIMPLE_MCDC_MODE") ?? "",
-        resolved_profile,
-        env_get("SIMPLE_MCDC_OFF_WAIVER_REASON") ?? "",
-        env_get("SIMPLE_MCDC_OFF_WAIVER_REVIEWER") ?? "",
-        env_get("SIMPLE_MCDC_OFF_WAIVER_REVIEW_ID") ?? "",
-        env_get("SIMPLE_MCDC_OFF_WAIVER_VERSION") ?? "")
-    if effective_mcdc_mode == "invalid-off" or effective_mcdc_mode == "invalid-mode":
-        env_set("SIMPLE_MCDC_MODE_ERROR", effective_mcdc_mode)
-    else:
-        env_set("SIMPLE_MCDC_MODE_ERROR", "")
-        env_set("SIMPLE_MCDC_MODE", effective_mcdc_mode)
-
     if options.only_slow:
         env_set("SIMPLE_TEST_FILTER", "slow")
     elif options.only_skipped:
@@ -321,12 +304,9 @@ fn get_flag_value(args: [text], flag: text) -> text?:
     nil
 
 fn has_run_management_flag(args: [text]) -> bool:
-    var i = 0
-    while i < args.len():
-        val arg = args[i]
+    for arg in args:
         if arg == "--list-runs" or arg == "--cleanup-runs" or arg == "--prune-runs" or arg.starts_with("--prune-runs="):
             return true
-        i = i + 1
     false
 
 # MEMORY DEBUG: entire body commented out (uses GROUP 4)
@@ -334,12 +314,11 @@ fn handle_run_management(args: [text]) -> i64:
     print "DISABLED: handle_run_management (memory debug)"
     return 1
     # val db_result = load_test_db_compat()
-    # match db_result:
-    #     case Err(err):
-    #         print "Error: Could not load test database: {err}"
-    #         return 1
-    #     case Ok(db):
-    #         pass
+    # if not db_result.is_ok():
+    #     print "Error: Could not load test database: {db_result.unwrap_err()}"
+    #     return 1
+    #
+    # val db = db_result.unwrap()
     #
     # for arg in args:
     #     if arg == "--list-runs":
@@ -356,12 +335,9 @@ fn handle_run_management(args: [text]) -> i64:
     #     if arg == "--cleanup-runs":
     #         db.cleanup_stale_runs(2)
     #         val save_result = db.save()
-    #         match save_result:
-    #             case Err(err):
-    #                 print "Error saving: {err}"
-    #                 return 1
-    #             case Ok(_):
-    #                 pass
+    #         if not save_result.is_ok():
+    #             print "Error saving: {save_result.unwrap_err()}"
+    #             return 1
     #         print "Stale runs cleaned up."
     #         return 0
     #
@@ -370,12 +346,9 @@ fn handle_run_management(args: [text]) -> i64:
     #         val keep = count_str.to_int_or(50)
     #         db.prune_runs(keep)
     #         val save_result = db.save()
-    #         match save_result:
-    #             case Err(err):
-    #                 print "Error saving: {err}"
-    #                 return 1
-    #             case Ok(_):
-    #                 pass
+    #         if not save_result.is_ok():
+    #             print "Error saving: {save_result.unwrap_err()}"
+    #             return 1
     #         print "Runs pruned (keeping {keep})."
     #         return 0
     #
@@ -388,15 +361,13 @@ fn handle_run_management(args: [text]) -> i64:
 fn report_free_mem(label: text):
     val avail_line = file_read("/proc/meminfo") ?? ""
     val lines = avail_line.split("\n")
-    var i = 0
-    while i < lines.len():
-        val line = lines[i]
+    for line in lines:
         if line.starts_with("MemAvailable"):
             print "[MEM] {label}: {line}"
             return
-        i = i + 1
     print "[MEM] {label}: (could not read /proc/meminfo)"
 
 # =========================================================================
 # Exports
 # =========================================================================
+

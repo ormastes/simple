@@ -9,7 +9,6 @@ use compiler.hir.hir_definitions.*
 use compiler.frontend.parser_types.*
 use compiler.frontend.parser_types.{ParserFunction, ImportItem, Param}
 use compiler.frontend.parser_types_expr.*
-use compiler.hir.hir_lowering.hir_phase_profile.{hir_phase_profile_count_imported_symbol, hir_phase_profile_count_imported_symbol_skip, hir_phase_profile_now, hir_phase_profile_add, HIR_PROF_RIS_FIELD_DEP, HIR_PROF_RIS_SIGTYPE, HIR_PROF_RIS_DEFINE, HIR_PROF_RIS_SCAN, HIR_PROF_RIS_FIELDS, HIR_PROF_RIS_PROJECT}
 use compiler.frontend.flat_ast_bridge.{flat_bootstrap_function_count, flat_bootstrap_function_at, flat_bootstrap_function_decl_at}
 use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_lowering.types.HirLowering
@@ -20,18 +19,19 @@ use compiler.common.attributes.{parse_layout_attrs, parse_function_attrs, parse_
 use compiler.types.type_layout.{LayoutAttr, TypeLayoutKind, PlatformParseResult, PlatformDiagnosticLevel, PlatformLayoutDiagnostic}
 use compiler.common.dependency.visibility.{Visibility}
 use compiler.common.module_path_naming.{module_logical_name_from_path}
-use compiler.core.{decl_get_body, decl_get_name, decl_get_param_names, decl_get_param_types, decl_get_ret_type}
-use compiler.core.{STMT_EXPR, STMT_VAL_DECL, STMT_VAR_DECL, STMT_RETURN, stmt_get_tag, stmt_get_expr, stmt_get_name, stmt_get_type}
+use compiler.core.ast.{decl_get_body, decl_get_name, decl_get_param_names, decl_get_param_types, decl_get_ret_type, STMT_EXPR, STMT_VAL_DECL, STMT_VAR_DECL, STMT_RETURN}
+use compiler.core.ast_stmt.{stmt_get_tag, stmt_get_expr, stmt_get_name, stmt_get_type}
 
 extern fn rt_enum_discriminant(value: Any) -> i64
 extern fn rt_enum_payload(value: StmtKind) -> Expr
-use compiler.core.{EXPR_INT_LIT, EXPR_STRING_LIT, EXPR_INTERPOLATED_STRING, EXPR_BOOL_LIT, EXPR_NIL_LIT, EXPR_IDENT, EXPR_BINARY, EXPR_CALL, EXPR_FIELD_ACCESS, EXPR_METHOD_CALL, EXPR_BLOCK, EXPR_RETURN, expr_get_tag, expr_get_int, expr_get_str, expr_get_left, expr_get_right, expr_get_args, expr_get_arg_names, expr_get_stmts}
+use compiler.core.ast.{EXPR_INT_LIT, EXPR_STRING_LIT, EXPR_INTERPOLATED_STRING, EXPR_BOOL_LIT, EXPR_NIL_LIT, EXPR_IDENT, EXPR_BINARY, EXPR_CALL, EXPR_FIELD_ACCESS, EXPR_METHOD_CALL, EXPR_BLOCK, EXPR_RETURN}
+use compiler.core.ast_expr.{expr_get_tag, expr_get_int, expr_get_str, expr_get_left, expr_get_right, expr_get_args, expr_get_arg_names, expr_get_stmts}
 use compiler.frontend.core._AstExpr.accessors.{expr_get_arg_names}
-use compiler.core.{TOK_MINUS, TOK_STAR, TOK_SLASH, TOK_PERCENT, TOK_EQ, TOK_NOT_EQ, TOK_LT, TOK_LT_EQ, TOK_GT, TOK_GT_EQ}
+use compiler.core.tokens.{TOK_MINUS, TOK_STAR, TOK_SLASH, TOK_PERCENT, TOK_EQ, TOK_NOT_EQ, TOK_LT, TOK_LT_EQ, TOK_GT, TOK_GT_EQ}
 use compiler.frontend.core.types.{TYPE_VOID, TYPE_BOOL, TYPE_I64, TYPE_TEXT, TYPE_DICT, custom_primitive_bind_symbol, custom_primitive_is_name}
 use compiler.frontend.core.types.{is_dict_tag, dict_tag_to_id, dict_type_get_key, dict_type_get_value}
 use compiler.frontend.core.types.{primitive_integer_bit_width_from_name, custom_primitive_integer_bit_width_by_name}
-use compiler.core.{int_to_str}
+use compiler.core.types.{int_to_str}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 
 impl HirLowering:
@@ -122,13 +122,12 @@ impl HirLowering:
         # (a pure function of the frozen registry) it is NOT phase-invariant
         # and must never be shared across importers.
         #
-        # A key is recorded only AFTER the body returns, never before. Marking
-        # on entry would have been a cheap re-entrancy breaker, but it would
-        # also mark tuples whose body bailed out early against an in-progress
-        # guard (`imported_type_methods_in_progress`) without finishing --
-        # those must stay retryable, exactly as they are today. Cycles keep
-        # being broken by the existing guards; this memo only removes repeats
-        # of a registration that already ran to completion.
+        # Completed and in-flight state stay distinct. The completed memo is
+        # still written only AFTER the body returns, so an incomplete tuple is
+        # retryable. The list-based in-flight stack breaks composite FIELD
+        # cycles while the outer invocation remains responsible for finishing
+        # the same exact tuple. The method-only guard cannot cover this outer
+        # register -> field dependency -> register cycle.
         if self.registered_import_memo_owner != self.module_filename:
             val fresh_registered_import_memo: {text: bool} = {}
             self.registered_import_memo = fresh_registered_import_memo
@@ -139,9 +138,15 @@ impl HirLowering:
             self.registered_import_skip_count = self.registered_import_skip_count + 1
             hir_phase_profile_count_imported_symbol_skip()
             return
+        if self.registered_import_in_progress_has(registered_key):
+            self.registered_import_skip_count = self.registered_import_skip_count + 1
+            hir_phase_profile_count_imported_symbol_skip()
+            return
+        self.registered_import_in_progress_push(registered_key)
         self.register_imported_symbol_inner(
             imported_index, imported_mod_name, imported_name, local_name,
             import_span, materialize_enum)
+        self.registered_import_in_progress_pop(registered_key)
         self.registered_import_memo[registered_key] = true
 
     me ensure_surface_name_index(imported_mod: ModuleSurface) -> text:
@@ -227,18 +232,15 @@ impl HirLowering:
             val kind = if composite.kind == "class": SymbolKind.Class else: SymbolKind.Struct
             val composite_define_started = hir_phase_profile_now()
             val imported_type = self.symbols.define(local_name, kind, nil, import_span, Visibility.Public, false, Some(imported_mod.module_name))
-            hir_phase_profile_add(HIR_PROF_RIS_DEFINE, composite_define_started)
             if not already_bound:
                 self.symbols.rename_symbol(imported_type, imported_name)
-            # Repeated visits to the same owner are not a reason to skip its
-            # qualified identity or dependency closure. Package prebinding can
-            # create the short symbol before an explicit/re-export import.
-            self.symbols.bind_qualified_type(imported_mod.module_name, imported_name, imported_type)
+                self.symbols.bind_qualified_type(imported_mod.module_name, imported_name, imported_type)
+            else:
+                return
             # A public composite field can name another type from the same
             # defining module inside a container (`[Cell]`, `Cell?`, ...).
             # Materialize those identities before lowering the field type so
             # resolution is independent of the consumer's import item order.
-            val fields_started = hir_phase_profile_now()
             for field in composite.fields:
                 if field.type_name != "":
                     self.materialize_imported_field_dependency(
@@ -256,54 +258,38 @@ impl HirLowering:
             hir_phase_profile_add(HIR_PROF_RIS_FIELDS, fields_started)
             val project_started = hir_phase_profile_now()
             var imported_field_types: Dict<text, HirType> = {}
-            for field in composite.fields:
-                imported_field_types[field.name] = self.imported_surface_type_projected(
-                    field.type_, field.type_name, field.array_element_name, imported_mod.module_name)
+            val field_offset = composite_projection.field_offsets[
+                imported_composite_index]
+            val field_count = composite_projection.field_counts[
+                imported_composite_index]
+            var field_index = field_offset
+            while field_index < field_offset + field_count:
+                val projected = self.imported_surface_projected_name_type(
+                    composite_projection.field_shapes[field_index],
+                    composite_projection.field_type_names[field_index],
+                    imported_mod.module_name, import_span)
+                val field_type = if val projected_type = projected:
+                    projected_type
+                else:
+                    HirType(kind: HirTypeKind.Any, span: import_span)
+                imported_field_types[composite_projection.field_names[field_index]] = field_type
+                field_index = field_index + 1
             val canonical_composite_name = imported_mod.module_name + "." + imported_name
             self.struct_field_types_by_name[canonical_composite_name] = imported_field_types
             if not self.struct_field_types_by_name.has(imported_name):
                 self.struct_field_types_by_name[imported_name] = imported_field_types
-            hir_phase_profile_add(HIR_PROF_RIS_PROJECT, project_started)
             self.register_imported_type_methods(imported_mod, imported_mod_name, imported_name, imported_type, import_span, materialize_enum)
         elif enum_position >= 0:
             if materialize_enum:
                 val root_origin = HirMaterializedPayloadOrigin(
                     found: true,
-                    module_name: hir_pkg_canonical_module_name(imported_mod.module_name),
+                    module_name: imported_mod.canonical_name,
                     item_name: imported_name,
                     item_kind: "enum",
                     module_key: imported_mod_name)
                 if not self.claim_materialized_payload_binding(local_name, root_origin, import_span):
-                    # Two DISTINCT enums legitimately share one short name.
-                    # `compiler.frontend.core.aop::AdviceForm::enum` and
-                    # `compiler.mdsoc.weaving.advice_form::AdviceForm::enum`
-                    # are separate declarations that a module reaching both
-                    # (src/compiler/80.driver/driver.spl, transitively) must be
-                    # able to import. `materialized_payload_bindings` is keyed
-                    # on the LOCAL short name, so the second claimant could
-                    # only ever lose -- and losing meant a hard
-                    # `enum payload dependency `AdviceForm` conflicts` error
-                    # plus a bare `return` that left the second enum with no
-                    # symbol at all. A short-name collision is not a defect; it
-                    # only means the unqualified name is taken. Retry under the
-                    # module-qualified local name, exactly as
-                    # `materialize_imported_callable_declared_dependency` does
-                    # for signature dependencies -- that path binds
-                    # `{module}::{name}` and then `bind_qualified_type`, so the
-                    # loser stays reachable through the qualified lookup every
-                    # cross-module type resolution already consults.
-                    # Terminates after one retry: the qualified key cannot
-                    # collide with the short key, and the guard below refuses
-                    # to recurse when they are already equal.
-                    val qualified_local = "{imported_mod.module_name}::{imported_name}"
-                    if local_name == qualified_local: return
-                    if (hir_module_env_get("SIMPLE_HIR_PAYLOAD_LOOKUP_TRACE") ?? "") == "1":
-                        eprint("[hir-payload-shortname-collision] local={local_name} requalified={qualified_local} owner={imported_mod.module_name}")
-                    self.register_imported_symbol(
-                        imported_mod.physical_index, imported_mod_name, imported_name,
-                        qualified_local, import_span, materialize_enum)
                     return
-            val already_bound = self.symbols.lookup_or_invalid(local_name).is_valid()
+            val already_bound = self.symbols.lookup(local_name).?
             val imported_type = self.symbols.define(local_name, SymbolKind.Enum, nil, import_span, Visibility.Public, false, Some(imported_mod.module_name))
             if not already_bound:
                 self.symbols.rename_symbol(imported_type, imported_name)
@@ -318,7 +304,7 @@ impl HirLowering:
             # symbol. A later explicit import must still transition the enum
             # into materialized state and close over its payload dependencies.
             if materialize_enum and not self.imported_enums.contains_key(local_name):
-                val surface_enum = imported_mod.enum_values[enum_position]
+                val surface_enum = imported_mod.enums[imported_name]
                 self.imported_enums[local_name] = hir_surface_enum_to_enum(surface_enum, local_name)
                 self.imported_enum_owners[local_name] = imported_mod.module_name
                 self.register_materialized_enum_payload_dependencies(imported_mod, imported_mod_name, surface_enum, import_span)
@@ -331,8 +317,7 @@ impl HirLowering:
                 # collision identity must compare terminal items, not aliases.
                 self.symbols.rename_symbol(imported_trait, imported_name)
             if not self.imported_traits.contains_key(local_name):
-                self.imported_traits[local_name] = hir_surface_trait_to_trait(
-                    imported_mod.trait_values[trait_position], local_name)
+                self.imported_traits[local_name] = hir_surface_trait_to_trait(imported_mod.traits[imported_name], local_name)
             # lower_impl materializes defaults only when this trait is used.
         elif alias_position >= 0:
             # TAL3 (2026-08-04): an IMPORTED `type X = Y` alias was never entered
@@ -383,7 +368,7 @@ impl HirLowering:
             # cycle cannot spin. Generic and compound targets (`type M = {text:
             # V}`, `type Symbol = text`) have no single declared target and keep
             # the plain TypeAlias binding below.
-            val alias_decl = imported_mod.type_alias_values[alias_position]
+            val alias_decl = imported_mod.type_aliases[imported_name]
             val alias_targets = parser_type_named_dependencies(alias_decl.type_)
             if alias_decl.type_params.len() == 0 and alias_targets.len() == 1:
                 val alias_target = alias_targets[0]
@@ -427,22 +412,14 @@ impl HirLowering:
             # before its alias exists.
             self.materialize_imported_callable_type_dependencies(
                 imported_mod, imported_mod_name,
-                imported_mod.callable_values[callable_position], import_span,
+                imported_mod.callables[imported_name], import_span,
                 materialize_enum)
-            val sig_started = hir_phase_profile_now()
             val fn_type = self.declared_imported_surface_callable_type(
-                imported_mod.callable_values[callable_position],
-                imported_mod.module_name, nil)
-            hir_phase_profile_add(HIR_PROF_RIS_SIGTYPE, sig_started)
-            val define_started = hir_phase_profile_now()
+                imported_mod.callables[imported_name], imported_mod.module_name, nil)
             val imported_fn_sym = self.symbols.define(local_name, SymbolKind.Function, fn_type, import_span, Visibility.Public, false, Some(imported_mod.module_name))
-            hir_phase_profile_add(HIR_PROF_RIS_DEFINE, define_started)
             self.qualify_imported_function_symbol(imported_fn_sym, imported_mod.module_name, imported_name)
-        elif constant_position >= 0:
-            val imported_constant = imported_mod.constant_values[constant_position]
-            self.symbols.define(local_name, SymbolKind.Const, nil, import_span,
-                Visibility.Public, imported_constant.is_mutable,
-                Some(imported_mod.module_name))
+        elif imported_mod.constants.contains_key(imported_name):
+            self.symbols.define(local_name, SymbolKind.Const, nil, import_span, Visibility.Public, false, Some(imported_mod.module_name))
         else:
             # Re-export facade chase: the imported module does not declare
             # `imported_name` itself — it may re-export it (`export use
@@ -451,15 +428,14 @@ impl HirLowering:
             # import silently registered NOTHING and every use site died
             # later with "unresolved name: rt_env_get" (native-build
             # entry-closure path; parity case dynload_tagged_text).
-            val hop = self.find_reexport_source(
-                imported_mod.physical_index, imported_name)
+            val hop = self.find_reexport_source(imported_mod, imported_mod_name, imported_name)
             if (rt_env_get("SIMPLE_BOOTSTRAP_DIAG") ?? "") == "1":
-                eprint("[reexport-chase] mod={imported_mod_name} wanted={imported_name} imports={imported_mod.imports.len()} exports={imported_mod.exports.len()} found={hop.found} mname={imported_mod.module_name} fns={imported_mod.callable_names.len()}")
+                eprint("[reexport-chase] mod={imported_mod_name} wanted={imported_name} imports={imported_mod.imports.len()} exports={imported_mod.exports.len()} found={hop.found} mname={imported_mod.module_name} fns={imported_mod.callables.keys().len()}")
             if hop.found:
                 val source_index = hop.module_index
                 if source_index >= 0:
                     self.register_imported_symbol(
-                        source_index,
+                        self.module_surfaces.surfaces[source_index],
                         self.module_surfaces.surfaces[source_index].preferred_registry_name,
                         hop.item_name, local_name, import_span, materialize_enum)
                     # Field/callable projection remains expressed in the
@@ -486,25 +462,25 @@ impl HirLowering:
             return
         if (hir_module_env_get("SIMPLE_HIR_REEXPORT_STATS") ?? "") != "1":
             return
-        eprint("[reexport-chase] calls={self.reexport_chase_calls} memo_hits={self.reexport_chase_memo_hits} memo={self.reexport_root_memo_index.len()}\n")
+        eprint("[reexport-chase] calls={self.reexport_chase_calls} memo_hits={self.reexport_chase_memo_hits} memo={self.reexport_root_surface_indices.len()}\n")
 
     me try_register_bootstrap_global_symbol(name: text, span: Span) -> bool:
         """Resolve one uniquely owned flat-global bootstrap declaration."""
-        if self.try_register_glob_reachable_symbol(name, span):
-            return true
-        if not self.ambient_bootstrap_enabled():
+        if (hir_module_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1":
             return false
-        if self.symbols.lookup_or_invalid(name).is_valid():
+        if self.symbols.lookup(name).?:
             return true
-        # PKGIDX (2026-08-21): this runs per UNBOUND NAME in every function
-        # body, and the sweep it replaces had no early exit (it must prove the
-        # owner is unique), so the pass was O(bodies x names x registry). The
-        # index answers the same question from the name alone; a non-singleton
-        # owner list is exactly the old "ambiguous -> give up".
-        val owner_indices: [i64] = self.surface_decl_owner_indices(name)
-        if owner_indices.len() != 1:
+        var matching_index: i64 = -1
+        var surface_index: i64 = 0
+        while surface_index < self.module_surfaces.surfaces.len():
+            val surface = self.module_surfaces.surfaces[surface_index]
+            if hir_module_declares_item(surface, name):
+                if matching_index >= 0:
+                    return false
+                matching_index = surface_index
+            surface_index = surface_index + 1
+        if matching_index < 0:
             return false
-        val matching_index: i64 = owner_indices[0]
         val owner = self.module_surfaces.surfaces[matching_index]
         # BGS1 (2026-08-06): this is an IMPORT REGISTRATION performed LAZILY,
         # from BODY lowering (types.spl:673 in lower_named_kind, and
@@ -535,9 +511,9 @@ impl HirLowering:
         # doc/08_tracking/bug/t3_full_bootstrap_stage3_unresolved_type_byteorder_cache_validator_2026-08-06.md
         val saved_registering_import_symbols = self.registering_import_symbols
         self.registering_import_symbols = true
-        self.register_imported_symbol(matching_index, owner.module_name, name, name, span, true)
+        self.register_imported_symbol(owner, owner.module_name, name, name, span, true)
         self.registering_import_symbols = saved_registering_import_symbols
-        self.symbols.lookup_or_invalid(name).is_valid()
+        self.symbols.lookup(name).?
 
     me resolve_module_key(name: text) -> text:
         """Canonical modules_by_name key for an import path, or "".
@@ -547,7 +523,7 @@ impl HirLowering:
         say std.io_runtime / nogc_sync_mut.io_runtime / std.common.json.
         Try the literal key, then the package facade, the lib.-prefix mirror,
         and the std.->lib. swap (each with .__init__)."""
-        if self.surface_index_for_name(name) >= 0:
+        if self.module_surfaces.index_by_name.contains_key(name):
             return name
         var cands: [text] = []
         cands = cands.push(name + ".__init__")
@@ -573,7 +549,7 @@ impl HirLowering:
                 cands = cands.push(tier_std_key + ".__init__")
         var ci = 0
         while ci < cands.len():
-            if self.surface_index_for_name(cands[ci]) >= 0:
+            if self.module_surfaces.index_by_name.contains_key(cands[ci]):
                 return cands[ci]
             ci = ci + 1
         ""
@@ -610,7 +586,7 @@ impl HirLowering:
             rel_pkg = hir_module_package_name(rel_pkg)
             rel_i = rel_i + 1
         val rel_abs = if rel_pkg == "": rel_tail else: rel_pkg + "." + rel_tail
-        if self.surface_index_for_name(rel_abs) >= 0:
+        if self.module_surfaces.index_by_name.contains_key(rel_abs):
             return rel_abs
         # The spliced path can still need the canonical-key fallbacks: a
         # relative hop landing on a package directory resolves via .__init__.
@@ -631,159 +607,111 @@ impl HirLowering:
         var resolved = self.resolve_module_key_relative(name, facade_name)
         if resolved == "":
             return ""
-        val resolved_index = self.surface_index_for_name(resolved)
+        val resolved_index = hir_module_surface_index(self.module_surfaces, resolved)
         if resolved_index < 0 or
            self.module_surfaces.surfaces[resolved_index].canonical_path != facade_mod.canonical_path:
             return resolved
         val package_key = self.resolve_module_key(facade_name + ".__init__")
         if package_key == "" or package_key == resolved:
             return resolved
-        val package_index = self.surface_index_for_name(package_key)
+        val package_index = hir_module_surface_index(self.module_surfaces, package_key)
         if package_index < 0 or
            self.module_surfaces.surfaces[package_index].canonical_path == facade_mod.canonical_path:
             return resolved
         package_key
 
-    me find_reexport_source(facade_index: i64, wanted: text) -> HirReexportSource:
-        """Resolve one root query from its retained physical surface index."""
+    me find_reexport_source(facade_mod: ModuleSurface, facade_name: text, wanted: text) -> HirReexportSource:
+        """Resolve one root query using physical-surface scalar caches."""
         val generation = self.module_surfaces.generation
         if self.reexport_generation != generation:
+            var root_surface_indices = self.reexport_root_surface_indices
+            var root_wanted = self.reexport_root_wanted
+            var root_found = self.reexport_root_found
+            var root_terminal_indices = self.reexport_root_terminal_indices
+            var root_items = self.reexport_root_items
+            root_surface_indices.clear()
+            root_wanted.clear()
+            root_found.clear()
+            root_terminal_indices.clear()
+            root_items.clear()
+            self.reexport_root_surface_indices = root_surface_indices
+            self.reexport_root_wanted = root_wanted
+            self.reexport_root_found = root_found
+            self.reexport_root_terminal_indices = root_terminal_indices
+            self.reexport_root_items = root_items
             self.reexport_generation = generation
             self.reexport_registry_valid = module_surfaces_frozen_alignment(self.module_surfaces)
-            # REXMEMO: a new frozen registry can answer every root differently.
-            self.reexport_root_memo_index = {}
-            self.reexport_root_memo_item = {}
 
         self.reexport_walk_complete = true
         self.reexport_walk_valid = true
         if not self.reexport_registry_valid:
-            if (rt_env_get("SIMPLE_BOOTSTRAP_DIAG") ?? "") == "1":
-                eprint("[reexport-root-reject] reason=registry-invalid index={facade_index} wanted={wanted}")
             self.reexport_walk_valid = false
             return HirReexportSource(found: false, module_index: -1, module_name: "", item_name: "")
+        if self.reexport_root_surface_indices.len() != self.reexport_root_wanted.len() or
+           self.reexport_root_surface_indices.len() != self.reexport_root_found.len() or
+           self.reexport_root_surface_indices.len() != self.reexport_root_terminal_indices.len() or
+           self.reexport_root_surface_indices.len() != self.reexport_root_items.len():
+            self.reexport_walk_valid = false
+            return HirReexportSource(found: false, module_index: -1, module_name: "", item_name: "")
+
+        val facade_index = facade_mod.physical_index
         if facade_index < 0 or facade_index >= self.module_surfaces.surfaces.len():
-            if (rt_env_get("SIMPLE_BOOTSTRAP_DIAG") ?? "") == "1":
-                eprint("[reexport-root-reject] reason=index-bounds index={facade_index} wanted={wanted} surfaces={self.module_surfaces.surfaces.len()}")
             self.reexport_walk_valid = false
             return HirReexportSource(found: false, module_index: -1, module_name: "", item_name: "")
         val current_facade = self.module_surfaces.surfaces[facade_index]
-        if current_facade.physical_index != facade_index:
-            if (rt_env_get("SIMPLE_BOOTSTRAP_DIAG") ?? "") == "1":
-                eprint("[reexport-root-reject] reason=physical-index index={facade_index} actual={current_facade.physical_index} wanted={wanted}")
-            self.reexport_walk_valid = false
-            return HirReexportSource(found: false, module_index: -1, module_name: "", item_name: "")
-        if current_facade.generation != self.module_surfaces.generation:
-            if (rt_env_get("SIMPLE_BOOTSTRAP_DIAG") ?? "") == "1":
-                eprint("[reexport-root-reject] reason=generation index={facade_index} surface_generation={current_facade.generation} registry_generation={self.module_surfaces.generation} wanted={wanted}")
+        if current_facade.physical_index != facade_index or
+           facade_mod.generation != self.module_surfaces.generation or
+           facade_mod.generation != current_facade.generation or
+           facade_mod.canonical_path != current_facade.canonical_path or
+           facade_mod.preferred_registry_name != current_facade.preferred_registry_name:
             self.reexport_walk_valid = false
             return HirReexportSource(found: false, module_index: -1, module_name: "", item_name: "")
 
-        # REXMEMO (2026-08-21): the walk below reads only the frozen registry,
-        # so one answer per (physical facade, wanted) serves every importer in
-        # the closure. Without it each glob expansion re-walked the facade's
-        # whole reachable import graph per name (a MISS visits all of it), which
-        # is why `glob` grew superlinearly with the closure after d757f7d70d0
-        # deleted the array memo (69 s -> 195 s on driver.spl, same 73 roots).
-        # Bracket-index read after contains_key: Dict.get() on the self-hosted
-        # native path corrupts/mis-reports present values.
-        val memo_key = "{facade_index} {wanted}"
-        if self.reexport_root_memo_index.contains_key(memo_key):
+        val root_entry = hir_reexport_parallel_find(
+            self.reexport_root_surface_indices, self.reexport_root_wanted,
+            facade_index, wanted)
+        if root_entry >= 0:
             self.reexport_chase_memo_hits = self.reexport_chase_memo_hits + 1
-            val terminal_index: i64 = self.reexport_root_memo_index[memo_key]
-            if (rt_env_get("SIMPLE_REXMEMO_VERIFY") ?? "") == "1":
-                val verify_state = HirReexportWalkState.fresh()
-                val verify = self.find_reexport_source_walk(facade_index, wanted, 0, verify_state)
-                val verify_index = if verify.found: verify.module_index else: -1
-                if verify_index != terminal_index:
-                    eprint("[rexmemo-mismatch] facade={facade_index} wanted={wanted} memo={terminal_index} walk={verify_index} complete={verify_state.complete} valid={verify_state.valid}")
-            if terminal_index < 0:
-                return HirReexportSource(found: false, module_index: -1, module_name: "", item_name: "")
-            if terminal_index >= self.module_surfaces.surfaces.len():
+            val terminal_index = self.reexport_root_terminal_indices[root_entry]
+            if terminal_index < -1 or terminal_index >= self.module_surfaces.surfaces.len():
                 self.reexport_walk_valid = false
                 return HirReexportSource(found: false, module_index: -1, module_name: "", item_name: "")
+            var terminal_name = ""
+            if terminal_index >= 0 and
+               terminal_index < self.module_surfaces.surfaces.len():
+                terminal_name = self.module_surfaces.surfaces[terminal_index].preferred_registry_name
             return HirReexportSource(
-                found: true,
+                found: self.reexport_root_found[root_entry],
                 module_index: terminal_index,
-                module_name: self.module_surfaces.surfaces[terminal_index].preferred_registry_name,
-                item_name: self.reexport_root_memo_item[memo_key])
+                module_name: terminal_name,
+                item_name: self.reexport_root_items[root_entry])
 
-        # Keep recursion state on a fresh explicit carrier. HirLowering fields
-        # are shared by nested root queries and native cross-module frame sync
-        # can restore an older visit snapshot after a nested call returns.
-        val state = HirReexportWalkState.fresh()
-        val result = self.find_reexport_source_walk(
-            facade_index, wanted, 0, state)
-        self.reexport_walk_complete = state.complete
-        self.reexport_walk_valid = state.valid
-        if result.found:
-            self.reexport_root_memo_index[memo_key] = result.module_index
-            self.reexport_root_memo_item[memo_key] = result.item_name
-        elif state.complete and state.valid:
-            # Only a COMPLETE, valid miss is a fact about the registry; a
-            # depth-truncated or misaligned walk stays retryable.
-            self.reexport_root_memo_index[memo_key] = -1
-            self.reexport_root_memo_item[memo_key] = ""
+        var visit_surface_indices = self.reexport_visit_surface_indices
+        var visit_wanted = self.reexport_visit_wanted
+        var visit_depths = self.reexport_visit_depths
+        visit_surface_indices.clear()
+        visit_wanted.clear()
+        visit_depths.clear()
+        self.reexport_visit_surface_indices = visit_surface_indices
+        self.reexport_visit_wanted = visit_wanted
+        self.reexport_visit_depths = visit_depths
+
+        val result = self.find_reexport_source_walk(facade_index, wanted, 0)
+        # Array push retains prior backing stores in the no-GC bootstrap.
+        # Bound the cross-module memo so admission remains O(1) after the hot
+        # working set is populated instead of retaining quadratic growth.
+        val admit_root_cache = self.reexport_root_surface_indices.len() < 512
+        if result.found and admit_root_cache:
+            self.reexport_root_surface_indices = self.reexport_root_surface_indices.push(facade_index)
+            self.reexport_root_wanted = self.reexport_root_wanted.push(wanted)
+            self.reexport_root_found = self.reexport_root_found.push(true)
+            self.reexport_root_terminal_indices = self.reexport_root_terminal_indices.push(result.module_index)
+            self.reexport_root_items = self.reexport_root_items.push(result.item_name)
+        elif self.reexport_walk_complete and self.reexport_walk_valid and
+             admit_root_cache:
+            self.reexport_root_surface_indices = self.reexport_root_surface_indices.push(facade_index)
+            self.reexport_root_wanted = self.reexport_root_wanted.push(wanted)
+            self.reexport_root_found = self.reexport_root_found.push(false)
+            self.reexport_root_terminal_indices = self.reexport_root_terminal_indices.push(-1)
+            self.reexport_root_items = self.reexport_root_items.push("")
         result
-
-impl HirLowering:
-    me try_register_glob_reachable_symbol(name: text, span: Span) -> bool:
-        """GLB2-RESIDUAL (2026-08-22): name-directed second-level glob resolution.
-
-        `use m.*` expands only what `m` DECLARES or `export`s; a name `m`
-        itself reaches through its OWN `use n.*` never leaks (the nested-glob
-        expansion is gated on the pure-facade shape -- see GLB2 in
-        module_import_resolution.spl, where ungating cost >13 min / 8.5 GB).
-        Stage 1 run9 died on exactly that residual: `MirType` via
-        mir_data's `use compiler.mir.mir_types.*`, `parser_type_kind_named_name`
-        via parser_types' `use parser_types_expr.*`, `CodegenTarget` /
-        `GpuIntrinsicKind` through package facades. Until now the only rescue
-        was try_register_bootstrap_global_symbol, which is gated on
-        SIMPLE_BOOTSTRAP=1 -- and the stage-1 lane does not export it.
-
-        This is the cheap dual of ungating: it is driven by ONE unbound name,
-        visits only the importer's glob targets, and delegates the
-        second-level hop to find_reexport_source (registry-pure, memoized,
-        depth-capped), so nothing is expanded that the name does not need. No
-        env gate: the route is a user-written glob, not a bootstrap exemption."""
-        if self.symbols.lookup_or_invalid(name).is_valid():
-            return true
-        var importer_key = self.module_filename
-        if importer_key.ends_with(".spl"):
-            importer_key = importer_key[0:importer_key.len() - 4]
-        importer_key = importer_key.replace("/", ".")
-        if importer_key.starts_with("src."):
-            importer_key = importer_key.substring(4)
-        val importer_index = self.surface_index_for_name(importer_key)
-        if importer_index < 0 or importer_index >= self.module_surfaces.surfaces.len():
-            return false
-        val importer = self.module_surfaces.surfaces[importer_index]
-        var import_idx = 0
-        while import_idx < importer.imports.len() and import_idx < importer.import_target_indices.len():
-            val item_start = importer.import_item_offsets[import_idx]
-            val item_end = importer.import_item_offsets[import_idx + 1]
-            if item_start == item_end:
-                val target_index = importer.import_target_indices[import_idx]
-                if target_index >= 0 and target_index < self.module_surfaces.surfaces.len():
-                    val target = self.module_surfaces.surfaces[target_index]
-                    var owner_index = -1
-                    var owner_item = name
-                    if hir_module_declares_item(target, name):
-                        owner_index = target.physical_index
-                    else:
-                        val hop = self.find_reexport_source(target.physical_index, name)
-                        if hop.found:
-                            owner_index = hop.module_index
-                            owner_item = hop.item_name
-                    if owner_index >= 0 and owner_index < self.module_surfaces.surfaces.len():
-                        # Same save/restore discipline as the bootstrap path
-                        # below: Pass 0 may already be registering.
-                        val saved_registering = self.registering_import_symbols
-                        self.registering_import_symbols = true
-                        self.register_imported_symbol(
-                            owner_index, self.module_surfaces.surfaces[owner_index].module_name,
-                            owner_item, name, span, true)
-                        self.registering_import_symbols = saved_registering
-                        if self.symbols.lookup_or_invalid(name).is_valid():
-                            return true
-            import_idx = import_idx + 1
-        false

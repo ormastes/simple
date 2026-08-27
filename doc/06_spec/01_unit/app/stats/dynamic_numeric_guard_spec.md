@@ -1,15 +1,38 @@
-# Dynamic Numeric Guard Specification
+# @manual: primary
 
-> Tests covering dynamic stats numeric guard.
+> <details>
+
+<!-- sdn-diagram:id=dynamic_numeric_guard_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=dynamic_numeric_guard_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+dynamic_numeric_guard_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=dynamic_numeric_guard_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 1 | 1 | 0 | 0 |
+| 2 | 2 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Dynamic Numeric Guard Specification
+# @manual: primary
 
 ## Scenarios
 
@@ -17,31 +40,19 @@
 
 #### guards shell count parsing with one fallback helper
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- guards shell count parsing with one fallback helper
-   - Expected: parse_count("7") equals `7`
-   - Expected: parse_count("1234") equals `1234`
-   - Expected: parse_count("not-a-number") equals `0`
-   - Expected: parse_count("") equals `0`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("guards shell count parsing with one fallback helper")
-# oracle: numeric command output parses exactly; garbage clamps to 0
-expect(parse_count("7")).to_equal(7)
-expect(parse_count("1234")).to_equal(1234)
-expect(parse_count("not-a-number")).to_equal(0)
-expect(parse_count("")).to_equal(0)
+val source = rt_file_read_text("src/app/stats/dynamic.spl") ?? ""
+
+expect(source).to_contain("fn parse_count(output: text) -> i64:")
+expect(source).to_contain("output.to_int() ?? 0")
+expect(source).to_contain("parse_count(run_cmd(cmd))")
+expect(source.contains("run_cmd(cmd).to_int()")).to_equal(false)
 ```
 
 </details>
@@ -53,68 +64,40 @@ expect(parse_count("")).to_equal(0)
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/stats/dynamic_numeric_guard_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
-## Overview
+## Purpose and audience
+Purpose: Verify dynamic stats shell-count parsing guard at runtime — the
+production count parser must coerce malformed shell output to 0 instead of
+crashing or trusting raw text.
+Audience: compiler and tooling engineers who maintain this spec.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines;
+a failing scenario pinpoints the behavior that regressed.
+## Compatibility and limitations
+Covers the pinned behavior only; fixture data is local to this spec.
+Troubleshooting: a red scenario here means the pinned contract changed —
+check verification guidance in the linked design docs before editing oracles.
+# @manual: primary
+REQ-APP-STATS-001
+doc/01_research/local/REQ-APP-STATS-001.md
+doc/03_plan/sys_test/REQ-APP-STATS-001.md
+doc/04_architecture/REQ-APP-STATS-001.md
+doc/05_design/REQ-APP-STATS-001.md
 
-Tests covering dynamic stats numeric guard.
+Tests covering:
 - dynamic stats numeric guard
 
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 1 |
-| Active scenarios | 1 |
+| Total scenarios | 2 |
+| Active scenarios | 2 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-APP`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `3bed8013dcc948c0fe48e2376237ed418593d3de771b381eabee510081eef51b`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `3bed8013dcc948c0fe48e2376237ed418593d3de771b381eabee510081eef51b`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `3bed8013dcc948c0fe48e2376237ed418593d3de771b381eabee510081eef51b`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **89/100**; effective score: **89/100**; blockers: **0**.
-
-SSpec documentization score: 89/100
-source: test/01_unit/app/stats/dynamic_numeric_guard_spec.spl
-mirror: doc/06_spec/01_unit/app/stats/dynamic_numeric_guard_spec.md (current)
-findings: 4 blockers: 0
-  narrative=100 structure=100 oracle=70
-  traceability=100 evidence=90 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/app/stats/dynamic_numeric_guard_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/app/stats/dynamic_numeric_guard_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/app/stats/dynamic_numeric_guard_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 4 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/01_unit/app/stats/dynamic_numeric_guard_spec.spl:13:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'guards shell count parsing with one fallback helper' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

@@ -1,8 +1,7 @@
 # Interp: `var` local becomes "const" after a `me`-method call, under the sspec runner
 
 - **Date:** 2026-07-21
-- Status: FIXED
-- Status re-verified 2026-08-17 by source inspection (triage shard 02).
+- **Status:** FIXED + VERIFIED (same day; root cause was neither `me`-methods nor sspec — see below)
 - **Area:** Rust seed interpreter — unframed STATIC method dispatch
   (`interpreter_method/special/objects.rs::handle_constructor_methods`)
 - **Severity:** medium (spurious semantic error; breaks valid code in specs)

@@ -1,49 +1,65 @@
 """
-Dynamic PyTorch SFFI — Operations
+Dynamic PyTorch operations compatibility facade.
 
-Runtime-optional libtorch dispatch. Unlike the static SFFI in
-std.torch.sffi (which uses direct rt_torch_* externs), these functions
-check availability via rt_torch_available() and fail gracefully when
-libtorch is absent.
-
-Consumed by:
-  - std.nogc_async_mut.linalg.backend_ops
-    (dyn_torch_available, dyn_torch_tensor_matmul_result,
-     dyn_torch_tensor_dot_result, dyn_torch_tensor_sum_result,
-     dyn_torch_tensor_inverse_result,
-     dyn_torch_tensor_linalg_solve_result, dyn_torch_tensor_free)
-  - All torch variant shims via std.common.torch.dyn_sffi
+Optional libtorch dispatch and raw ABI ownership live in the canonical
+no-GC synchronous Torch SFFI/provider module. This common surface preserves
+the historical dyn_torch_* API and its zero/unavailable/error semantics while
+delegating every operation to that owner.
 """
 
 use std.nogc_sync_mut.torch.sffi.{
-    rt_torch_available, rt_torch_torchtensor_abs,
-    rt_torch_torchtensor_add_scalar, rt_torch_torchtensor_argmax,
-    rt_torch_torchtensor_argmin, rt_torch_torchtensor_clone,
-    rt_torch_torchtensor_contiguous,
-    rt_torch_torchtensor_dot, rt_torch_torchtensor_exp,
-    rt_torch_torchtensor_free, rt_torch_torchtensor_gelu,
-    rt_torch_torchtensor_inverse, rt_torch_torchtensor_leaky_relu,
-    rt_torch_torchtensor_log, rt_torch_torchtensor_log_softmax,
-    rt_torch_torchtensor_matmul,
-    rt_torch_torchtensor_max_dim,
-    rt_torch_torchtensor_mean_dim,
-    rt_torch_torchtensor_min_dim, rt_torch_torchtensor_mul_scalar,
-    rt_torch_torchtensor_neg,
-    rt_torch_torchtensor_pow, rt_torch_torchtensor_relu,
-    rt_torch_torchtensor_sigmoid, rt_torch_torchtensor_slice,
-    rt_torch_torchtensor_softmax, rt_torch_torchtensor_sqrt,
-    rt_torch_torchtensor_squeeze_dim,
-    rt_torch_torchtensor_sum_dim,
-    rt_torch_torchtensor_tanh, rt_torch_torchtensor_unsqueeze,
-    torch_torchtensor_det_result, torch_torchtensor_max_result,
-    torch_torchtensor_mean_result, torch_torchtensor_min_result,
-    torch_torchtensor_norm_result, torch_torchtensor_std_result,
-    torch_torchtensor_sum_result, torch_torchtensor_var_result
+    torch_sffi_available,
+    torch_sffi_tensor_free,
+    torch_sffi_tensor_clone,
+    torch_sffi_tensor_matmul,
+    torch_sffi_tensor_dot,
+    torch_sffi_tensor_sum,
+    torch_sffi_tensor_sum_dim,
+    torch_sffi_tensor_mean,
+    torch_sffi_tensor_mean_dim,
+    torch_sffi_tensor_inverse,
+    torch_sffi_tensor_linalg_solve,
+    torch_sffi_tensor_det,
+    torch_sffi_tensor_norm,
+    torch_sffi_tensor_std,
+    torch_sffi_tensor_var,
+    torch_sffi_tensor_max,
+    torch_sffi_tensor_min,
+    torch_sffi_tensor_max_dim,
+    torch_sffi_tensor_min_dim,
+    torch_sffi_tensor_argmax,
+    torch_sffi_tensor_argmin,
+    torch_sffi_tensor_add_scalar,
+    torch_sffi_tensor_sub_scalar,
+    torch_sffi_tensor_mul_scalar,
+    torch_sffi_tensor_div_scalar,
+    torch_sffi_tensor_pow,
+    torch_sffi_tensor_relu,
+    torch_sffi_tensor_sigmoid,
+    torch_sffi_tensor_tanh,
+    torch_sffi_tensor_softmax,
+    torch_sffi_tensor_log_softmax,
+    torch_sffi_tensor_gelu,
+    torch_sffi_tensor_leaky_relu,
+    torch_sffi_tensor_sqrt,
+    torch_sffi_tensor_exp,
+    torch_sffi_tensor_log,
+    torch_sffi_tensor_neg,
+    torch_sffi_tensor_abs,
+    torch_sffi_tensor_contiguous,
+    torch_sffi_tensor_squeeze_dim,
+    torch_sffi_tensor_unsqueeze,
+    torch_sffi_tensor_slice,
+    torch_sffi_tensor_eye,
+    torch_sffi_tensor_arange,
+    torch_sffi_tensor_linspace,
+    torch_sffi_tensor_zeros,
+    torch_sffi_tensor_ones,
+    torch_sffi_tensor_rand,
+    torch_sffi_tensor_randn,
+    torch_sffi_tensor_full,
+    torch_sffi_tensor_empty
 }
-
-# ============================================================================
-# Availability
-# ============================================================================
 
 struct DynTorchTensorResult:
     status: text
@@ -56,38 +72,7 @@ fn _dyn_torch_tensor_result(status: text, reason: text, handle: i64) -> DynTorch
 @always_inline
 fn dyn_torch_available() -> bool:
     """Return true if libtorch can be loaded at runtime."""
-    unsafe(capabilities: [ffi]):
-        rt_torch_available()
-
-@always_inline
-fn _dyn_torch_tensor_free_raw(handle: i64):
-    unsafe(capabilities: [ffi]):
-        rt_torch_torchtensor_free(handle)
-
-@always_inline
-fn _dyn_torch_tensor_clone_raw(handle: i64) -> i64:
-    unsafe(capabilities: [ffi]):
-        rt_torch_torchtensor_clone(handle)
-
-@always_inline
-fn _dyn_torch_tensor_matmul_raw(a: i64, b: i64) -> i64:
-    unsafe(capabilities: [ffi]):
-        rt_torch_torchtensor_matmul(a, b)
-
-@always_inline
-fn _dyn_torch_tensor_dot_raw(a: i64, b: i64) -> i64:
-    unsafe(capabilities: [ffi]):
-        rt_torch_torchtensor_dot(a, b)
-
-@always_inline
-fn _dyn_torch_tensor_inverse_raw(handle: i64) -> i64:
-    unsafe(capabilities: [ffi]):
-        rt_torch_torchtensor_inverse(handle)
-
-@always_inline
-fn _dyn_torch_tensor_linalg_solve_raw(a: i64, b: i64) -> i64:
-    unsafe(capabilities: [ffi]):
-        rt_torch_torchtensor_linalg_solve(a, b)
+    rt_torch_available()
 
 # ============================================================================
 # Tensor lifecycle
@@ -109,9 +94,8 @@ fn dyn_torch_tensor_clone_result(handle: i64) -> Result<i64, text>:
         return Err("runtime_returned_null_handle")
     Ok(result)
 
-# ============================================================================
-# Linear algebra
-# ============================================================================
+fn dyn_torch_tensor_matmul(a: i64, b: i64) -> i64:
+    torch_sffi_tensor_matmul(a, b)
 
 fn dyn_torch_tensor_matmul_result(a: i64, b: i64) -> Result<i64, text>:
     """Matrix multiply tensors without collapsing provider errors into zero."""
@@ -750,29 +734,29 @@ extern fn rt_torch_tensor_empty(d0: i64, d1: i64, d2: i64, d3: i64, ndim: i64) -
 # ============================================================================
 
 export DynTorchTensorResult, dyn_torch_available
-export dyn_torch_tensor_free, dyn_torch_tensor_clone_result
-export dyn_torch_tensor_matmul_result, dyn_torch_tensor_dot_result, dyn_torch_tensor_inverse_result
-export dyn_torch_tensor_linalg_solve_result
-export dyn_torch_tensor_sum_result, dyn_torch_tensor_sum_dim_result
-export dyn_torch_tensor_mean_result, dyn_torch_tensor_mean_dim_result
-export dyn_torch_tensor_det_result, dyn_torch_tensor_norm_result, dyn_torch_tensor_std_result, dyn_torch_tensor_var_result
-export dyn_torch_tensor_max_result, dyn_torch_tensor_min_result
-export dyn_torch_tensor_max_dim_result, dyn_torch_tensor_min_dim_result
-export dyn_torch_tensor_argmax_result, dyn_torch_tensor_argmin_result
-export dyn_torch_tensor_add_scalar_result, dyn_torch_tensor_sub_scalar_result
-export dyn_torch_tensor_mul_scalar_result, dyn_torch_tensor_div_scalar_result
-export dyn_torch_tensor_pow_result
-export dyn_torch_tensor_relu_result, dyn_torch_tensor_sigmoid_result, dyn_torch_tensor_tanh_result
-export dyn_torch_tensor_softmax_result, dyn_torch_tensor_log_softmax_result
-export dyn_torch_tensor_gelu_result, dyn_torch_tensor_leaky_relu_result
-export dyn_torch_tensor_sqrt_result, dyn_torch_tensor_exp_result, dyn_torch_tensor_log_result
-export dyn_torch_tensor_neg_result, dyn_torch_tensor_abs_result
-export dyn_torch_tensor_contiguous_result, dyn_torch_tensor_squeeze_dim_result, dyn_torch_tensor_unsqueeze_result
-export dyn_torch_tensor_slice_result
-export dyn_torch_tensor_eye_result, dyn_torch_tensor_arange_result, dyn_torch_tensor_linspace_result
-export dyn_torch_tensor_zeros_1d_result, dyn_torch_tensor_zeros_2d_result, dyn_torch_tensor_zeros_3d_result, dyn_torch_tensor_zeros_4d_result
-export dyn_torch_tensor_ones_1d_result, dyn_torch_tensor_ones_2d_result, dyn_torch_tensor_ones_3d_result, dyn_torch_tensor_ones_4d_result
-export dyn_torch_tensor_rand_1d_result, dyn_torch_tensor_rand_2d_result, dyn_torch_tensor_rand_3d_result, dyn_torch_tensor_rand_4d_result
-export dyn_torch_tensor_randn_1d_result, dyn_torch_tensor_randn_2d_result, dyn_torch_tensor_randn_3d_result, dyn_torch_tensor_randn_4d_result
-export dyn_torch_tensor_full_1d_result, dyn_torch_tensor_full_2d_result, dyn_torch_tensor_full_3d_result, dyn_torch_tensor_full_4d_result
-export dyn_torch_tensor_empty_1d_result, dyn_torch_tensor_empty_2d_result, dyn_torch_tensor_empty_3d_result, dyn_torch_tensor_empty_4d_result
+export dyn_torch_tensor_free, dyn_torch_tensor_clone
+export dyn_torch_tensor_matmul, dyn_torch_tensor_dot, dyn_torch_tensor_inverse
+export dyn_torch_tensor_linalg_solve, dyn_torch_tensor_linalg_solve_result
+export dyn_torch_tensor_sum, dyn_torch_tensor_sum_dim
+export dyn_torch_tensor_mean, dyn_torch_tensor_mean_dim
+export dyn_torch_tensor_det, dyn_torch_tensor_norm, dyn_torch_tensor_std, dyn_torch_tensor_var
+export dyn_torch_tensor_max, dyn_torch_tensor_min
+export dyn_torch_tensor_max_dim, dyn_torch_tensor_min_dim
+export dyn_torch_tensor_argmax, dyn_torch_tensor_argmin
+export dyn_torch_tensor_add_scalar, dyn_torch_tensor_sub_scalar
+export dyn_torch_tensor_mul_scalar, dyn_torch_tensor_div_scalar
+export dyn_torch_tensor_pow
+export dyn_torch_tensor_relu, dyn_torch_tensor_sigmoid, dyn_torch_tensor_tanh
+export dyn_torch_tensor_softmax, dyn_torch_tensor_log_softmax
+export dyn_torch_tensor_gelu, dyn_torch_tensor_leaky_relu
+export dyn_torch_tensor_sqrt, dyn_torch_tensor_exp, dyn_torch_tensor_log
+export dyn_torch_tensor_neg, dyn_torch_tensor_abs
+export dyn_torch_tensor_contiguous, dyn_torch_tensor_squeeze_dim, dyn_torch_tensor_unsqueeze
+export dyn_torch_tensor_slice
+export dyn_torch_tensor_eye, dyn_torch_tensor_arange, dyn_torch_tensor_linspace
+export dyn_torch_tensor_zeros_1d, dyn_torch_tensor_zeros_2d, dyn_torch_tensor_zeros_3d, dyn_torch_tensor_zeros_4d
+export dyn_torch_tensor_ones_1d, dyn_torch_tensor_ones_2d, dyn_torch_tensor_ones_3d, dyn_torch_tensor_ones_4d
+export dyn_torch_tensor_rand_1d, dyn_torch_tensor_rand_2d, dyn_torch_tensor_rand_3d, dyn_torch_tensor_rand_4d
+export dyn_torch_tensor_randn_1d, dyn_torch_tensor_randn_2d, dyn_torch_tensor_randn_3d, dyn_torch_tensor_randn_4d
+export dyn_torch_tensor_full_1d, dyn_torch_tensor_full_2d, dyn_torch_tensor_full_3d, dyn_torch_tensor_full_4d
+export dyn_torch_tensor_empty_1d, dyn_torch_tensor_empty_2d, dyn_torch_tensor_empty_3d, dyn_torch_tensor_empty_4d

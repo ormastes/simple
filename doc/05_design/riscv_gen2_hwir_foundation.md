@@ -161,44 +161,100 @@
     output names, resource/accounting mismatches, state, and nontransparent
     latency. The disabled path returns the composition verbatim. The weave hash
     sorts attachment identities, so discovery order cannot change provenance.
-22. A standalone or child-bound `HwSequentialModuleDef` may include a typed
-    combinational datapath that feeds guards, assignments, or outputs. Its
-    value namespace includes input ports, registers, child output pins,
-    declared signals, and typed constants; output ports are write-only. Every
-    signal has one driver, operand/result widths are checked per operation, and
-    unsupported operations fail before rendering. The backend emits constants
-    and signals in the architecture declaration area, then typed datapath
-    assignments before sequential output/process logic. `LsuConfig` keeps bus
-    and byte-mask geometry explicit product data rather than deriving it from
-    XLEN. The focused mixed-datapath specification covers positive lowering,
-    unsigned predicates, invalid sources/operations/drivers, LSU geometry, and
-    graph-hash drift.
-23. Parcel/trap compilation validates its fixed interface, decoder, pins,
-    registers, origins, and plan before adapting them into a child-bound
-    `HwSequentialModuleDef`. The compiled decoder digest becomes
-    `child_graph_sha256`; the generic renderer emits the parent and its v3
-    structural digest, and the product helper prepends the decoder once. The
-    compatibility hash helper constructs that same canonical module.
-24. Qualification is a two-phase transaction. The runner stages admitted CLI,
-    coverage, testbench, and GHDL command evidence while the final path is
-    absent. The Simple composer validates a v2 exact-key manifest, copies
-    hash-bound artifacts into a fresh run, and writes its receipt last.
-  - Coverage inventory is compiler-owned: canonical tag-dispatched flat-AST
-    traversal records only reachable semantic decisions, uses span-derived
-    decision/condition keys and runtime-compatible escaping, rejects conflicts
-    or row-cap overflow, and emits exactly one marked zero-count block.
+    Scalar product attachments are sorted before ports and bindings are
+    materialized, carry exact lock/weave SHA-256 receipts in the composition
+    and emitted VHDL header, and are renderable only through the checked
+    plan+lock compile API. They observe the existing retirement owner and add
+    no register, rule, latency, or alternative retirement path.
+22. Scalar execution uses a typed completion interface with valid/ready,
+    complete retirement payload, execute/memory exception triples, and redirect
+    metadata. ALU/control use a registered skid; LSU uses its stateful owner.
+    Atomic arbitration feeds trap normalization and the sole retirement owner.
+    The VHDL renderer declares one canonical signal per child output and one
+    assignment per typed binding, so fanout cannot leave a consumer undriven.
+    A separate fault combiner drives the sole public protocol fault.
+23. `RiscvScalarMulDivProjection` is the M/Zmmul arithmetic identity boundary.
+    Validation reconstructs declarative dispatch and rejects forged profile,
+    provider, instruction, register, operation, and width combinations. Its host
+    evaluator defines signed-high, divide-by-zero, signed-minimum overflow, and
+    RV64 word semantics. It claims no state, latency, or retirement ownership.
+24. `strict_riscv_scalar_csr_projection_hwir` is the Zicsr access identity
+    boundary. Its external state seam is exactly `csr_present`,
+    `csr_read_value`, and typed read/write address/value effects. Denied access
+    drives no state effect and retires as illegal instruction with the original
+    instruction in `tval`. `strict_riscv_scalar_csr_owner` captures that seam,
+    freezes the full completion and identity, and gates `csr_commit_*` with
+    accepted completion. Product composition treats it as a stateful provider;
+    qualification remains separate from implementation.
+25. `strict_riscv_scalar_fence_owner` freezes exactly `rv.i.fence` or
+    `rv.i.fence_i`, validates canonical/original instruction, length, rd, rs1,
+    event lineage, and reserved encodings, and captures one effect. `pending`
+    holds `kind/fm/pred/succ` until `fence_effect_ready`; only the accepted
+    effect transitions to held completion. Illegal events bypass the effect and
+    complete as cause 2 with original instruction `tval`. Scalar composition
+    routes the owner through common arbitration, trap, fault aggregation, and
+    sole retirement; it uses no completion skid and owns no architectural
+    order counter.
+# Runtime scalar ALU pipeline
 
-## Related artifacts
+The runtime integer path is a closed sequence of typed children: declarative
+decoder, decoded-uop skid, shared runtime ALU, atomic acceptance gate,
+completion skid, typed no-effect defaults, and sticky fault owner. The decoded
+uop is consumed only when `retire_valid` and the completion skid's registered
+`upstream_ready` are both asserted, making consumption identical to completion
+capture. A rejected semantic/form/lineage tuple leaves the uop occupied and
+latches a protocol fault until reset.
 
-- Feature and NFR requirements:
-  `doc/02_requirements/feature/riscv_gen2_hwir_foundation.md` and
-  `doc/02_requirements/nfr/riscv_gen2_hwir_foundation.md`
-- Parallel execution and qualification plans:
-  `doc/03_plan/agent_tasks/riscv_gen2_hwir_foundation.md` and
-  `doc/03_plan/sys_test/riscv_gen2_hwir_foundation.md`
-- Architecture: `doc/04_architecture/riscv_gen2_hwir_foundation.md`
-- System-scenario and receipt manuals:
-  `doc/06_spec/03_system/app/hardware/feature/riscv_gen2_hwir_foundation_spec.md`
-  and `doc/06_spec/01_unit/app/riscv_gen2_qualification_receipt_spec.md`
-- Operator guide: `doc/07_guide/hardware/riscv/vhdl_exec_core_generator.md`
-- SPipe state: `.spipe/riscv_gen2_hwir_foundation/state.md`
+The v2 pipeline accepts canonical four-byte base instructions only. It covers
+integer and RV64 integer-word arithmetic, comparisons, U-immediates, and
+masked logical/arithmetic shifts. Illegal instructions select a separate
+normalized provider and produce cause-2 execute-trap completions whose `tval`
+is the original instruction. A typed one-hot selector is the sole completion
+producer and advances only on actual completion capture. Unsupported legal
+provider classes remain fail-stop until their runtime providers are integrated.
+
+The pipeline graph digest binds CoreConfig, decoder plan and descriptor,
+every child structural hash, top port schema, and every ordered typed binding.
+Local validation resolves endpoint existence, direction and width, requires
+one driver per destination, and requires every child input and top output to
+be closed before VHDL emission.
+
+### Dynamic runtime control datapath
+
+`strict_riscv_scalar_runtime_control_datapath` is the combinational arithmetic
+owner for a future one-per-family control provider. It dynamically assembles
+the exact B/J/I immediates, sign-extends them to XLEN, computes wrapping targets,
+applies JALR's low-bit mask, evaluates EQ/NE/signed and unsigned comparisons,
+and checks the resulting targets against fixed IALIGN. The module intentionally
+does not decide whether a uop is a branch or jump and does not emit a completion;
+those are security-relevant admission responsibilities of the plan-bound
+provider layer.
+
+The runtime control lane now closes that provider layer. It admits exactly the
+eight base-I branch/JAL/JALR rows, cross-checks row, semantic code, canonical
+encoding, raw fields, metadata, and event lineage, and normalizes x0 before
+branch comparison or JALR target formation. Aligned transfers emit redirects
+and jump link writes; taken misaligned transfers emit precise cause-0
+completions with no redirect or register write.
+
+Runtime pipeline v3 composes the integer ALU, control lane, and architectural
+illegal lane behind a class-owned three-way completion selector. Completion
+capture and decoded-uop consumption are atomic. Missing, overlapping, stale,
+or wrong-class lanes fail closed through a reset-cleared sticky fault owner.
+The strict VHDL receipt binds every child graph, the nested control composition,
+top schema, and ordered binding. V3 intentionally rejects compressed profiles
+until its lineage contract supports variable instruction length.
+
+Runtime pipeline v4 adds a plan-bound SYSTEM lane without changing the v3 top
+ABI. Exact ECALL and EBREAK rows are selected dynamically from the decoder
+plan. ECALL emits causes 8, 9, or 11 for U/S/M privilege; EBREAK emits cause 3;
+reserved privilege emits a SYSTEM cause-2 trap with the original instruction as
+`tval` while decoder-illegal lineage remains false. The four-lane selector owns
+ALU, control, SYSTEM, and illegal completions by decoded class and accepts only
+one metadata-consistent payload.
+
+Stateful LSU, Mul/Div, CSR, and FENCE lanes are deliberately not forced through
+this same-cycle selector. Their next shared boundary is a pending-provider
+protocol that separates dispatch acceptance from later completion availability,
+retains the selected provider and event identity, and faults stale, overlapping,
+or wrong-provider completions before the common completion skid.

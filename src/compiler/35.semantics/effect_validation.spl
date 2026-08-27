@@ -169,14 +169,26 @@ fn effect_block_grows(block: HirBlock) -> bool:
             case HirStmtKind.Let(_, _, init):
                 if effect_expr_grows(init):
                     return true
-            case HirStmtKind.Assign(_, _, value):
+            case HirStmtKind.Assign(target, _, value):
+                if effect_expr_grows(target):
+                    return true
                 if effect_expr_grows(value):
                     return true
             case HirStmtKind.Block(inner):
                 if effect_block_grows(inner):
                     return true
-            case _:
-                pass_do_nothing("statement kind carries no growth site")
+            case HirStmtKind.SharedVal(_, _, has_init, init):
+                if has_init and effect_expr_grows(init): return true
+            case HirStmtKind.SharedVar(_, _, has_init, init):
+                if has_init and effect_expr_grows(init): return true
+            case HirStmtKind.GpuLaunch(config, body):
+                for dim in config.grid:
+                    if effect_expr_grows(dim): return true
+                for dim in config.block:
+                    if effect_expr_grows(dim): return true
+                if effect_block_grows(body): return true
+            case HirStmtKind.AsmAssert(_):
+                pass_do_nothing("asm target guard carries no growth site")
     if block.has:
         if effect_expr_grows(block.value):
             return true
@@ -184,7 +196,7 @@ fn effect_block_grows(block: HirBlock) -> bool:
 
 fn effect_expr_grows(expr: HirExpr) -> bool:
     match expr.kind:
-        case HirExprKind.MethodCall(receiver, method, args, _):
+        case HirExprKind.MethodCall(receiver, method, args, _, _):
             if effect_is_growth_method(method):
                 return true
             if effect_expr_grows(receiver):
@@ -270,14 +282,33 @@ fn effect_block_loops(block: HirBlock) -> [LoopSite]:
             case HirStmtKind.Let(_, _, init):
                 for lp in effect_expr_loops(init):
                     out = out.push(lp)
-            case HirStmtKind.Assign(_, _, value):
+            case HirStmtKind.Assign(target, _, value):
+                for lp in effect_expr_loops(target):
+                    out = out.push(lp)
                 for lp in effect_expr_loops(value):
                     out = out.push(lp)
             case HirStmtKind.Block(inner):
                 for lp in effect_block_loops(inner):
                     out = out.push(lp)
-            case _:
-                pass_do_nothing("statement kind carries no loop site")
+            case HirStmtKind.SharedVal(_, _, has_init, init):
+                if has_init:
+                    for lp in effect_expr_loops(init):
+                        out = out.push(lp)
+            case HirStmtKind.SharedVar(_, _, has_init, init):
+                if has_init:
+                    for lp in effect_expr_loops(init):
+                        out = out.push(lp)
+            case HirStmtKind.GpuLaunch(config, body):
+                for dim in config.grid:
+                    for lp in effect_expr_loops(dim):
+                        out = out.push(lp)
+                for dim in config.block:
+                    for lp in effect_expr_loops(dim):
+                        out = out.push(lp)
+                for lp in effect_block_loops(body):
+                    out = out.push(lp)
+            case HirStmtKind.AsmAssert(_):
+                pass_do_nothing("asm target guard carries no loop site")
     if block.has:
         for lp in effect_expr_loops(block.value):
             out = out.push(lp)
@@ -346,7 +377,7 @@ fn effect_expr_loops(expr: HirExpr) -> [LoopSite]:
                 val arg: HirCallArg = a
                 for lp in effect_expr_loops(arg.value):
                     out = out.push(lp)
-        case HirExprKind.MethodCall(receiver, _, args, _):
+        case HirExprKind.MethodCall(receiver, _, args, _, _):
             for lp in effect_expr_loops(receiver):
                 out = out.push(lp)
             for a in args:
@@ -418,14 +449,41 @@ fn effect_block_copies(block: HirBlock, sizes: Dict<i64, i64>) -> [CopySite]:
             case HirStmtKind.Expr(e):
                 for c in effect_expr_copies(e, sizes):
                     out = out.push(c)
-            case HirStmtKind.Assign(_, _, value):
+            case HirStmtKind.Assign(target, _, value):
+                for c in effect_expr_copies(target, sizes):
+                    out = out.push(c)
                 for c in effect_expr_copies(value, sizes):
                     out = out.push(c)
             case HirStmtKind.Block(inner):
                 for c in effect_block_copies(inner, sizes):
                     out = out.push(c)
-            case _:
-                pass_do_nothing("statement kind carries no copy site")
+            case HirStmtKind.SharedVal(_, type_, has_init, init):
+                if has_init:
+                    val size = effect_struct_size_of_type(type_, sizes)
+                    if size >= 0 and effect_is_place_expr(init):
+                        out = out.push(CopySite(detail: "shared val binding", bytes: size,
+                            implicit: true, line: s.span.line))
+                    for c in effect_expr_copies(init, sizes):
+                        out = out.push(c)
+            case HirStmtKind.SharedVar(_, type_, has_init, init):
+                if has_init:
+                    val size = effect_struct_size_of_type(type_, sizes)
+                    if size >= 0 and effect_is_place_expr(init):
+                        out = out.push(CopySite(detail: "shared var binding", bytes: size,
+                            implicit: true, line: s.span.line))
+                    for c in effect_expr_copies(init, sizes):
+                        out = out.push(c)
+            case HirStmtKind.GpuLaunch(config, body):
+                for dim in config.grid:
+                    for c in effect_expr_copies(dim, sizes):
+                        out = out.push(c)
+                for dim in config.block:
+                    for c in effect_expr_copies(dim, sizes):
+                        out = out.push(c)
+                for c in effect_block_copies(body, sizes):
+                    out = out.push(c)
+            case HirStmtKind.AsmAssert(_):
+                pass_do_nothing("asm target guard carries no copy site")
     if block.has:
         for c in effect_expr_copies(block.value, sizes):
             out = out.push(c)
@@ -506,14 +564,33 @@ fn effect_block_callees(block: HirBlock, fn_names: Dict<i64, text>) -> [text]:
             case HirStmtKind.Let(_, _, init):
                 for n in effect_expr_callees(init, fn_names):
                     out = out.push(n)
-            case HirStmtKind.Assign(_, _, value):
+            case HirStmtKind.Assign(target, _, value):
+                for n in effect_expr_callees(target, fn_names):
+                    out = out.push(n)
                 for n in effect_expr_callees(value, fn_names):
                     out = out.push(n)
             case HirStmtKind.Block(inner):
                 for n in effect_block_callees(inner, fn_names):
                     out = out.push(n)
-            case _:
-                pass_do_nothing("statement kind carries no call")
+            case HirStmtKind.SharedVal(_, _, has_init, init):
+                if has_init:
+                    for n in effect_expr_callees(init, fn_names):
+                        out = out.push(n)
+            case HirStmtKind.SharedVar(_, _, has_init, init):
+                if has_init:
+                    for n in effect_expr_callees(init, fn_names):
+                        out = out.push(n)
+            case HirStmtKind.GpuLaunch(config, body):
+                for dim in config.grid:
+                    for n in effect_expr_callees(dim, fn_names):
+                        out = out.push(n)
+                for dim in config.block:
+                    for n in effect_expr_callees(dim, fn_names):
+                        out = out.push(n)
+                for n in effect_block_callees(body, fn_names):
+                    out = out.push(n)
+            case HirStmtKind.AsmAssert(_):
+                pass_do_nothing("asm target guard carries no call")
     if block.has:
         for n in effect_expr_callees(block.value, fn_names):
             out = out.push(n)
@@ -530,9 +607,22 @@ fn effect_expr_callees(expr: HirExpr, fn_names: Dict<i64, text>) -> [text]:
                 val arg: HirCallArg = a
                 for n in effect_expr_callees(arg.value, fn_names):
                     out = out.push(n)
-        case HirExprKind.MethodCall(receiver, _, args, _):
+        case HirExprKind.MethodCall(receiver, _, args, _, _):
             for n in effect_expr_callees(receiver, fn_names):
                 out = out.push(n)
+            for a in args:
+                val arg: HirCallArg = a
+                for n in effect_expr_callees(arg.value, fn_names):
+                    out = out.push(n)
+        case HirExprKind.StaticCall(_, _, args, resolution):
+            match resolution.get_symbol_id():
+                Some(symbol):
+                    if fn_names.contains_key(symbol.id):
+                        val resolved_name = fn_names[symbol.id]
+                        if not out.contains(resolved_name):
+                            out = out.push(resolved_name)
+                nil:
+                    pass_do_nothing("unresolved static method is diagnosed by the owning semantic pass")
             for a in args:
                 val arg: HirCallArg = a
                 for n in effect_expr_callees(arg.value, fn_names):
@@ -716,3 +806,4 @@ fn effect_find_index(names: [text], target: text) -> i64:
 export validate_effect_contracts, effect_struct_sizes, effect_fn_names
 export effect_block_loops, effect_block_copies, effect_block_callees
 export effect_while_bound, effect_for_bound, effect_is_growth_method
+use compiler.hir.hir_types.{HirModule}  # explicit: a glob is not an import-origin for surface projection

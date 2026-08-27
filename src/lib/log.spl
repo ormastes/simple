@@ -21,51 +21,62 @@
 # Externs - raw-pointer memory + stderr fallback
 # ---------------------------------------------------------------------------
 extern fn rt_alloc(size: i64) -> i64
-@unsafe(reason: "nonnull raw store; caller owns allocation and bounds", capabilities: [ffi, raw_ptr])
 extern fn rt_ptr_write_i64(addr: i64, offset: i64, value: i64)
-@unsafe(reason: "nonnull raw read; caller owns allocation and bounds", capabilities: [ffi, raw_ptr])
 extern fn rt_ptr_read_i64(addr: i64, offset: i64) -> i64
-@unsafe(reason: "nonnull raw store; caller owns allocation and bounds", capabilities: [ffi, raw_ptr])
-extern fn rt_ptr_write_i32(addr: i64, offset: i64, value: i32)
-@unsafe(reason: "nonnull raw store; caller owns allocation and bounds", capabilities: [ffi, raw_ptr])
+extern fn rt_ptr_write_i32(addr: i64, offset: i64, value: i64)
 extern fn rt_ptr_write_u8(addr: i64, offset: i64, value: i64)
 extern fn rt_stderr_write(s: text)
 extern fn rt_stderr_flush()
 extern fn rt_time_now_unix_micros() -> i64
-extern fn rt_env_get(key: text) -> text
+use std.io_runtime.{env_get}
 
 # ---------------------------------------------------------------------------
 # Level enum (locked: Linux/Zephyr/Rust convention, lower = more verbose)
 # ---------------------------------------------------------------------------
 val LOG_TRACE: i64 = 0
 val LOG_DEBUG: i64 = 1
-val LOG_INFO: i64 = 2
-val LOG_WARN: i64 = 3
+val LOG_INFO:  i64 = 2
+val LOG_WARN:  i64 = 3
 val LOG_ERROR: i64 = 4
 val LOG_FATAL: i64 = 5
-val LOG_OFF: i64 = 6
+val LOG_OFF:   i64 = 6
 
 # Legacy enum (1=FATAL .. 7=VERBOSE) - exported for back-compat callers.
 val LOG_VERBOSE: i64 = 7
-val LOG_ALL: i64 = 10
+val LOG_ALL:     i64 = 10
+
+# Explicit compatibility names for the pre-facade verbosity scale.  The old
+# tier logger used 0=OFF..6=TRACE, the inverse of std.log's severity scale.
+# Keeping the two schemes under different names prevents a legacy threshold
+# from being accepted as a canonical severity while preserving the published
+# numeric values for callers that genuinely need the old contract.
+val LEGACY_LOG_OFF: i64 = 0
+val LEGACY_LOG_FATAL: i64 = 1
+val LEGACY_LOG_ERROR: i64 = 2
+val LEGACY_LOG_WARN: i64 = 3
+val LEGACY_LOG_INFO: i64 = 4
+val LEGACY_LOG_DEBUG: i64 = 5
+val LEGACY_LOG_TRACE: i64 = 6
+val LEGACY_LOG_VERBOSE: i64 = 7
+val LEGACY_LOG_ALL: i64 = 10
 
 # ---------------------------------------------------------------------------
 # Subsystem IDs (Phase 3 §B + §G)
 # ---------------------------------------------------------------------------
-val SUBSYS_KERN: i64 = 0
-val SUBSYS_VMM: i64 = 1
-val SUBSYS_VFS: i64 = 2
-val SUBSYS_NET: i64 = 3
-val SUBSYS_IRQ: i64 = 4
-val SUBSYS_DRIVER_BLOCK: i64 = 5
-val SUBSYS_DRIVER_NET: i64 = 6
-val SUBSYS_DRIVER_INPUT: i64 = 7
-val SUBSYS_DRIVER_GFX: i64 = 8
-val SUBSYS_PKG: i64 = 16
-val SUBSYS_CLI: i64 = 17
-val SUBSYS_TEST: i64 = 18
-val SUBSYS_USER_BASE: i64 = 32
-val MAX_SUBSYS: i64 = 64
+val SUBSYS_KERN:          i64 = 0
+val SUBSYS_VMM:           i64 = 1
+val SUBSYS_VFS:           i64 = 2
+val SUBSYS_NET:           i64 = 3
+val SUBSYS_IRQ:           i64 = 4
+val SUBSYS_DRIVER_BLOCK:  i64 = 5
+val SUBSYS_DRIVER_NET:    i64 = 6
+val SUBSYS_DRIVER_INPUT:  i64 = 7
+val SUBSYS_DRIVER_GFX:    i64 = 8
+val SUBSYS_PKG:           i64 = 16
+val SUBSYS_CLI:           i64 = 17
+val SUBSYS_TEST:          i64 = 18
+val SUBSYS_USER_BASE:     i64 = 32
+val MAX_SUBSYS:           i64 = 64
 
 # ---------------------------------------------------------------------------
 # Backend slot table - up to 4 backends; LogBackendOps carries a self_ptr
@@ -99,7 +110,12 @@ var _g_backend_count: i64 = 0
 # ---------------------------------------------------------------------------
 # Global level + per-subsys level table (255 = fall through to global)
 # ---------------------------------------------------------------------------
-var _g_global_level: i64 = LOG_INFO
+var _g_global_level: i64 = _CANONICAL_LOG_INFO
+var _g_global_level_explicit: bool = false
+# Exact pre-facade threshold selected through the legacy adapter.  Canonical
+# callers deliberately clear this receipt: TRACE=0 cannot otherwise tell
+# whether the legacy caller selected TRACE=6, VERBOSE=7, or ALL=10.
+var _g_compat_legacy_global_level: i64 = -1
 var _g_level_kern: i64 = 255
 var _g_level_vmm: i64 = 255
 var _g_level_vfs: i64 = 255
@@ -114,6 +130,7 @@ var _g_level_cli: i64 = 255
 var _g_level_test: i64 = 255
 
 var _g_subsys_level: [i64] = []
+var _g_compat_legacy_subsys_level: [i64] = []
 var _g_subsys_levels_ready: bool = false
 
 fn _ensure_subsys_levels():
@@ -129,10 +146,40 @@ fn _ensure_subsys_levels():
         255, 255, 255, 255, 255, 255, 255, 255,
         255, 255, 255, 255, 255, 255, 255, 255
     ]
+    _g_compat_legacy_subsys_level = [
+        -1, -1, -1, -1, -1, -1, -1, -1,
+        -1, -1, -1, -1, -1, -1, -1, -1,
+        -1, -1, -1, -1, -1, -1, -1, -1,
+        -1, -1, -1, -1, -1, -1, -1, -1,
+        -1, -1, -1, -1, -1, -1, -1, -1,
+        -1, -1, -1, -1, -1, -1, -1, -1,
+        -1, -1, -1, -1, -1, -1, -1, -1,
+        -1, -1, -1, -1, -1, -1, -1, -1
+    ]
     _g_subsys_levels_ready = true
 
 fn log_set_level(level: i64):
     _g_global_level = level
+    _g_global_level_explicit = true
+    _g_compat_legacy_global_level = -1
+
+# Initialize the shared canonical filter from the legacy facade only when no
+# canonical caller configured it first.  This preserves the legacy
+# SIMPLE_LOG/default contract without allowing the compatibility module to
+# overwrite a level already selected through std.log.
+fn log_compat_init_legacy_level(legacy_default: i64, canonical_default: i64) -> i64:
+    if not _g_global_level_explicit:
+        _g_global_level = canonical_default
+        _g_compat_legacy_global_level = legacy_default
+    _g_global_level
+
+fn log_compat_set_legacy_level(legacy_level: i64, canonical_level: i64):
+    _g_global_level = canonical_level
+    _g_global_level_explicit = true
+    _g_compat_legacy_global_level = legacy_level
+
+fn log_compat_get_legacy_level() -> i64:
+    _g_compat_legacy_global_level
 
 fn log_set_subsys_level(subsys: i64, level: i64):
     _ensure_subsys_levels()
@@ -150,6 +197,24 @@ fn log_set_subsys_level(subsys: i64, level: i64):
     if subsys == SUBSYS_TEST: _g_level_test = level
     if subsys >= 0 and subsys < MAX_SUBSYS:
         _g_subsys_level[subsys] = level
+        _g_compat_legacy_subsys_level[subsys] = -1
+
+fn log_compat_set_legacy_subsys_level(subsys: i64, legacy_level: i64, canonical_level: i64):
+    log_set_subsys_level(subsys, canonical_level)
+    if subsys >= 0 and subsys < MAX_SUBSYS:
+        _g_compat_legacy_subsys_level[subsys] = legacy_level
+
+# Returns -1 when the effective threshold came from a canonical setter.  The
+# legacy adapter then translates canonical 0..6 normally; otherwise it can
+# preserve the exact 7/10 threshold that has no canonical representation.
+fn log_compat_get_legacy_effective_level(subsys: i64) -> i64:
+    _ensure_subsys_levels()
+    val ovr = _subsys_override_level(subsys)
+    if ovr != 255:
+        if subsys >= 0 and subsys < MAX_SUBSYS:
+            return _g_compat_legacy_subsys_level[subsys]
+        return -1
+    _g_compat_legacy_global_level
 
 fn _subsys_override_level(subsys: i64) -> i64:
     if subsys == SUBSYS_KERN: return _g_level_kern
@@ -164,6 +229,8 @@ fn _subsys_override_level(subsys: i64) -> i64:
     if subsys == SUBSYS_PKG: return _g_level_pkg
     if subsys == SUBSYS_CLI: return _g_level_cli
     if subsys == SUBSYS_TEST: return _g_level_test
+    if subsys >= 0 and subsys < MAX_SUBSYS:
+        return _g_subsys_level[subsys]
     255
 
 fn effective_level(subsys: i64) -> i64:
@@ -174,20 +241,20 @@ fn effective_level(subsys: i64) -> i64:
     _g_global_level
 
 fn _level_passes(level: i64, subsys: i64) -> bool:
-    level >= effective_level(subsys) and level < LOG_OFF
+    level >= effective_level(subsys) and level < _CANONICAL_LOG_OFF
 
 # ---------------------------------------------------------------------------
 # EnvFilter parser: "net=debug,vfs=warn,*=info"
 # ---------------------------------------------------------------------------
 fn _parse_level_name(name: text) -> i64:
-    if name == "trace": return LOG_TRACE
-    if name == "debug": return LOG_DEBUG
-    if name == "info":  return LOG_INFO
-    if name == "warn":  return LOG_WARN
-    if name == "error": return LOG_ERROR
-    if name == "fatal": return LOG_FATAL
-    if name == "off":   return LOG_OFF
-    LOG_INFO
+    if name == "trace": return _CANONICAL_LOG_TRACE
+    if name == "debug": return _CANONICAL_LOG_DEBUG
+    if name == "info":  return _CANONICAL_LOG_INFO
+    if name == "warn":  return _CANONICAL_LOG_WARN
+    if name == "error": return _CANONICAL_LOG_ERROR
+    if name == "fatal": return _CANONICAL_LOG_FATAL
+    if name == "off":   return _CANONICAL_LOG_OFF
+    _CANONICAL_LOG_INFO
 
 fn _subsys_id_from_name(name: text) -> i64:
     if name == "kern":         return SUBSYS_KERN
@@ -222,6 +289,7 @@ fn log_init_from_config(cfg: text):
         var i = 0
         while i < MAX_SUBSYS:
             _g_subsys_level[i] = 255
+            _g_compat_legacy_subsys_level[i] = -1
             i = i + 1
         return
     var key:   text = ""
@@ -237,7 +305,7 @@ fn log_init_from_config(cfg: text):
         if end_token:
             if key.len() > 0:
                 if key == "*":
-                    _g_global_level = _parse_level_name(v)
+                    log_set_level(_parse_level_name(v))
                 else:
                     val sid = _subsys_id_from_name(key)
                     if sid >= 0:
@@ -365,21 +433,6 @@ fn ring_backend_seq_at(rb: RingBackend, idx: i64) -> i64:
         return -1
     _g_ring_registry[backend_idx].entries[idx].p0
 
-# NOTE: despite the name, ring_backend_seq_at returns the record's p0 payload
-# (a log_text_from_handle-resolvable text-intern handle for log_dispatch_text
-# callers), not a sequence number — no accessor existed for `.level` before
-# this was added for DS7 crash-bundle capture (crash_bundle.spl needs the
-# severity of each recent log record, not just its subsystem and payload).
-fn ring_backend_level_at(rb: RingBackend, idx: i64) -> i64:
-    val backend_idx = _ring_backend_index(rb.ops.self_ptr)
-    if backend_idx < 0:
-        if idx < 0 or idx >= rb.entries.len():
-            return -1
-        return rb.entries[idx].level
-    if idx < 0 or idx >= _g_ring_registry[backend_idx].entries.len():
-        return -1
-    _g_ring_registry[backend_idx].entries[idx].level
-
 fn ring_backend_first_at_subsys(rb: RingBackend, subsys: i64) -> _RingBackendRecord:
     val backend_idx = _ring_backend_index(rb.ops.self_ptr)
     var entries = rb.entries
@@ -396,18 +449,18 @@ fn ring_backend_first_at_subsys(rb: RingBackend, subsys: i64) -> _RingBackendRec
 # Lite ring (40-byte LogRecord; offsets locked by Phase 4 advisor)
 # ---------------------------------------------------------------------------
 val RING_CAP_DEFAULT_LOG2: i64 = 10
-val RING_CAP_DEFAULT: i64 = 1024
-val LOG_RECORD_SIZE: i64 = 40
+val RING_CAP_DEFAULT:      i64 = 1024
+val LOG_RECORD_SIZE:       i64 = 40
 
-fn record_size_bytes() -> i64: LOG_RECORD_SIZE
-fn record_offset_seq() -> i64: 0
-fn record_offset_ts_ns() -> i64: 8
-fn record_offset_p0() -> i64: 16
-fn record_offset_p1() -> i64: 24
+fn record_size_bytes() -> i64:        LOG_RECORD_SIZE
+fn record_offset_seq() -> i64:        0
+fn record_offset_ts_ns() -> i64:      8
+fn record_offset_p0() -> i64:         16
+fn record_offset_p1() -> i64:         24
 fn record_offset_fmt_handle() -> i64: 32
-fn record_offset_subsys() -> i64: 36
-fn record_offset_level() -> i64: 38
-fn record_offset_flags() -> i64: 39
+fn record_offset_subsys() -> i64:     36
+fn record_offset_level() -> i64:      38
+fn record_offset_flags() -> i64:      39
 
 fn _ring_load_u64(addr: i64) -> i64:
     rt_ptr_read_i64(addr, 0)
@@ -421,7 +474,7 @@ fn _ring_fetch_add_u64(addr: i64, delta: i64) -> i64:
     old
 
 fn _ring_store_u32(addr: i64, value: i64):
-    rt_ptr_write_i32(addr, 0, value as i32)
+    rt_ptr_write_i32(addr, 0, value)
 
 fn _ring_store_u8(addr: i64, value: i64):
     rt_ptr_write_u8(addr, 0, value)
@@ -499,7 +552,7 @@ fn log_ring_push(level: i64, subsys: i64, fmt_handle: i64, p0: i64, p1: i64, fla
     rt_ptr_write_i64(cell, 8,  rt_time_now_unix_micros() * 1000)
     rt_ptr_write_i64(cell, 16, p0)
     rt_ptr_write_i64(cell, 24, p1)
-    rt_ptr_write_i32(cell, 32, fmt_handle as i32)
+    rt_ptr_write_i32(cell, 32, fmt_handle)
     _ring_store_u32(cell + 36, subsys)
     _ring_store_u8(cell + 38, level)
     _ring_store_u8(cell + 39, flags)
@@ -565,69 +618,6 @@ fn alloc_probe_count() -> i64:
     _g_alloc_probe
 
 # ---------------------------------------------------------------------------
-# Text intern table - fixed-capacity handle table for log_dispatch_text().
-#
-# log_dispatch_text() (used by log_trace/debug/info/warn/error/fatal) has no
-# numeric p0/p1 payload of its own - callers pass a `text` directly. Before
-# this fix it called `_dispatch_to_backends(level, subsys, 0)` with a dummy
-# p0=0, so backend consumers (e.g. RingBackend) could never recover the
-# actual message. Fix: store the text in a fixed-size slot table and carry the
-# resulting handle as p0 instead - the same trick `log_ring_push` already uses
-# for `fmt_handle`. No heap growth after warm-up (index writes, not appends).
-#
-# The table WRAPS rather than dropping when full, matching the ring backend it
-# feeds: a record's text stays resolvable exactly as long as the record itself
-# is plausibly alive. A non-wrapping table would go permanently text-blind
-# after LOG_TEXT_INTERN_CAP messages, which any real program passes in
-# seconds. Handles are monotonic (never reused), so a handle whose slot has
-# since been overwritten resolves to "" instead of silently returning some
-# unrelated later message.
-# ---------------------------------------------------------------------------
-val LOG_TEXT_INTERN_CAP: i64 = 4096
-
-var _g_text_intern: [text] = []
-var _g_text_intern_ready: bool = false
-var _g_text_intern_next: i64 = 0
-
-fn _ensure_text_intern():
-    if _g_text_intern_ready:
-        return
-    var slots: [text] = []
-    var i = 0
-    while i < LOG_TEXT_INTERN_CAP:
-        slots.push("")
-        i = i + 1
-    _g_text_intern = slots
-    _g_text_intern_ready = true
-
-# Stores `msg` and returns a 1-based monotonic handle. Writes wrap around the
-# fixed-capacity table, so the hot logging path never allocates and never goes
-# text-blind; the oldest entry is overwritten instead.
-fn _text_intern(msg: text) -> i64:
-    _ensure_text_intern()
-    val slot = _g_text_intern_next % LOG_TEXT_INTERN_CAP
-    _g_text_intern[slot] = msg
-    _g_text_intern_next = _g_text_intern_next + 1
-    _g_text_intern_next
-
-# Resolves a handle from _text_intern() back to its text. Returns "" for an
-# invalid handle (0 or not-yet-issued) or one whose slot has since been
-# overwritten by wrap-around - never a stale unrelated message.
-fn log_text_from_handle(handle: i64) -> text:
-    if handle <= 0 or handle > _g_text_intern_next:
-        return ""
-    if _g_text_intern_next - handle >= LOG_TEXT_INTERN_CAP:
-        return ""
-    _g_text_intern[(handle - 1) % LOG_TEXT_INTERN_CAP]
-
-# Number of stored messages already overwritten by wrap-around, i.e. handles
-# below this watermark no longer resolve.
-fn log_text_intern_overwritten() -> i64:
-    if _g_text_intern_next <= LOG_TEXT_INTERN_CAP:
-        return 0
-    _g_text_intern_next - LOG_TEXT_INTERN_CAP
-
-# ---------------------------------------------------------------------------
 # Dispatch - the heart of the facade
 # ---------------------------------------------------------------------------
 fn _dispatch_to_backends(level: i64, subsys: i64, p0: i64):
@@ -653,12 +643,7 @@ fn log_dispatch_record(level: i64, subsys: i64, fmt_handle: i64, p0: i64, p1: i6
         log_ring_push(level, subsys, fmt_handle, p0, p1, 0)
     _dispatch_to_backends(level, subsys, p0)
 
-fn log_dispatch_text(level: i64, subsys: i64, msg: text):
-    val skip_dispatch = rt_env_get("SIMPLE_BOOTSTRAP_SKIP_LOG_DISPATCH") ?? ""
-    if skip_dispatch == "1":
-        return
-    if not _level_passes(level, subsys):
-        return
+fn _log_dispatch_text_unfiltered(level: i64, subsys: i64, msg: text):
     val handle = _text_intern(msg)
     _dispatch_to_backends(level, subsys, handle)
     # Non-panic stderr decision: backend kind=2 ("console", see
@@ -674,31 +659,49 @@ fn log_dispatch_text(level: i64, subsys: i64, msg: text):
     # (doc/08_tracking/bug/simple_replay_self_spawns_unbounded_process_chain_2026-08-10.md):
     # the diagnostic was written, but never surfaced. Levels below ERROR stay
     # ring-only, so this does not reintroduce log spam.
-    if _g_panic_mode or level >= LOG_ERROR:
+    if _g_panic_mode or level >= _CANONICAL_LOG_ERROR:
         rt_stderr_write(msg)
         rt_stderr_write("\n")
         rt_stderr_flush()
+
+fn log_dispatch_text(level: i64, subsys: i64, msg: text):
+    val skip_dispatch = env_get("SIMPLE_BOOTSTRAP_SKIP_LOG_DISPATCH") ?? ""
+    if skip_dispatch == "1":
+        return
+    if not _level_passes(level, subsys):
+        return
+    _log_dispatch_text_unfiltered(level, subsys, msg)
+
+# Legacy adapter entry point after its exact 0..7/10 string-scope threshold
+# has already admitted the record.  This bypasses only canonical filtering;
+# registration, text interning, ring levels, panic mode, and stderr ownership
+# remain canonical and shared.
+fn log_compat_dispatch_text(level: i64, subsys: i64, msg: text):
+    val skip_dispatch = env_get("SIMPLE_BOOTSTRAP_SKIP_LOG_DISPATCH") ?? ""
+    if skip_dispatch == "1":
+        return
+    _log_dispatch_text_unfiltered(level, subsys, msg)
 
 # ---------------------------------------------------------------------------
 # Public emission API (subsys-keyed)
 # ---------------------------------------------------------------------------
 fn log_trace_subsys(subsys: i64, msg: text):
-    log_dispatch_text(LOG_TRACE, subsys, msg)
+    log_dispatch_text(_CANONICAL_LOG_TRACE, subsys, msg)
 
 fn log_debug_subsys(subsys: i64, msg: text):
-    log_dispatch_text(LOG_DEBUG, subsys, msg)
+    log_dispatch_text(_CANONICAL_LOG_DEBUG, subsys, msg)
 
 fn log_info_subsys(subsys: i64, msg: text):
-    log_dispatch_text(LOG_INFO, subsys, msg)
+    log_dispatch_text(_CANONICAL_LOG_INFO, subsys, msg)
 
 fn log_warn_subsys(subsys: i64, msg: text):
-    log_dispatch_text(LOG_WARN, subsys, msg)
+    log_dispatch_text(_CANONICAL_LOG_WARN, subsys, msg)
 
 fn log_error_subsys(subsys: i64, msg: text):
-    log_dispatch_text(LOG_ERROR, subsys, msg)
+    log_dispatch_text(_CANONICAL_LOG_ERROR, subsys, msg)
 
 fn log_fatal(subsys: i64, msg: text):
-    log_dispatch_text(LOG_FATAL, subsys, msg)
+    log_dispatch_text(_CANONICAL_LOG_FATAL, subsys, msg)
 
 # ---------------------------------------------------------------------------
 # Back-compat: scope-keyed legacy API (preserves info/warn/error/debug/fatal
@@ -717,45 +720,76 @@ fn subsys_from_scope(scope: text) -> i64:
     if scope == "driver_net":   return SUBSYS_DRIVER_NET
     SUBSYS_USER_BASE
 
-fn fatal(scope: text, msg: text):
-    log_dispatch_text(LOG_FATAL, subsys_from_scope(scope), msg)
+fn canonical_compat_fatal(scope: text, msg: text):
+    log_dispatch_text(_CANONICAL_LOG_FATAL, subsys_from_scope(scope), msg)
 
-fn error(scope: text, msg: text):
-    log_dispatch_text(LOG_ERROR, subsys_from_scope(scope), msg)
+fn canonical_compat_error(scope: text, msg: text):
+    log_dispatch_text(_CANONICAL_LOG_ERROR, subsys_from_scope(scope), msg)
 
-fn warn(scope: text, msg: text):
-    log_dispatch_text(LOG_WARN, subsys_from_scope(scope), msg)
+fn canonical_compat_warn(scope: text, msg: text):
+    log_dispatch_text(_CANONICAL_LOG_WARN, subsys_from_scope(scope), msg)
 
-fn info(scope: text, msg: text):
-    log_dispatch_text(LOG_INFO, subsys_from_scope(scope), msg)
+fn canonical_compat_info(scope: text, msg: text):
+    log_dispatch_text(_CANONICAL_LOG_INFO, subsys_from_scope(scope), msg)
 
-fn log(level: i64, scope: text, msg: text):
+fn canonical_compat_log(level: i64, scope: text, msg: text):
     # Generic leveled entry point (legacy callers: log(LOG_INFO, scope, msg))
     log_dispatch_text(level, subsys_from_scope(scope), msg)
 
-fn debug(scope: text, msg: text):
-    log_dispatch_text(LOG_DEBUG, subsys_from_scope(scope), msg)
+fn canonical_compat_debug(scope: text, msg: text):
+    log_dispatch_text(_CANONICAL_LOG_DEBUG, subsys_from_scope(scope), msg)
 
-fn verbose(scope: text, msg: text):
-    log_dispatch_text(LOG_TRACE, subsys_from_scope(scope), msg)
+fn canonical_compat_trace(scope: text, msg: text):
+    log_dispatch_text(_CANONICAL_LOG_TRACE, subsys_from_scope(scope), msg)
 
-fn parse_level(name: text) -> i64:
+fn canonical_compat_verbose(scope: text, msg: text):
+    log_dispatch_text(_CANONICAL_LOG_TRACE, subsys_from_scope(scope), msg)
+
+# Scope-level and single-argument compatibility entry points live here rather
+# than being re-exported from nogc_sync_mut.log.  This keeps registration,
+# filtering and dispatch in one module instance and removes the previous
+# std.log <-> nogc_sync_mut.log load cycle.
+fn canonical_compat_get_log_level() -> i64:
+    _g_global_level
+
+fn canonical_compat_set_scope_level(scope: text, level: i64):
+    log_set_subsys_level(subsys_from_scope(scope), level)
+
+fn canonical_compat_get_level(scope: text) -> i64:
+    effective_level(subsys_from_scope(scope))
+
+fn canonical_compat_clear_scopes():
+    log_init_from_config("")
+
+fn canonical_compat_log_info(msg: text):
+    canonical_compat_info("default", msg)
+
+fn canonical_compat_log_error(msg: text):
+    canonical_compat_error("default", msg)
+
+fn canonical_compat_log_debug(msg: text):
+    canonical_compat_debug("default", msg)
+
+fn canonical_compat_log_verbose(msg: text):
+    canonical_compat_verbose("default", msg)
+
+fn canonical_compat_parse_level(name: text) -> i64:
     _parse_level_name(name)
 
-fn level_name(level: i64) -> text:
-    if level == LOG_TRACE: return "trace"
-    if level == LOG_DEBUG: return "debug"
-    if level == LOG_INFO:  return "info"
-    if level == LOG_WARN:  return "warn"
-    if level == LOG_ERROR: return "error"
-    if level == LOG_FATAL: return "fatal"
-    if level == LOG_OFF:   return "off"
+fn canonical_compat_level_name(level: i64) -> text:
+    if level == _CANONICAL_LOG_TRACE: return "trace"
+    if level == _CANONICAL_LOG_DEBUG: return "debug"
+    if level == _CANONICAL_LOG_INFO:  return "info"
+    if level == _CANONICAL_LOG_WARN:  return "warn"
+    if level == _CANONICAL_LOG_ERROR: return "error"
+    if level == _CANONICAL_LOG_FATAL: return "fatal"
+    if level == _CANONICAL_LOG_OFF:   return "off"
     "unknown"
 
-fn set_level(level: i64):
+fn canonical_compat_set_level(level: i64):
     log_set_level(level)
 
-fn get_global_level() -> i64:
+fn canonical_compat_get_global_level() -> i64:
     _g_global_level
 
 # Public getter mirroring `log_set_level` — reads the active global level.
@@ -763,236 +797,18 @@ fn get_global_level() -> i64:
 pub fn log_get_level() -> i64:
     _g_global_level
 
-fn is_enabled(level: i64, scope: text) -> bool:
+fn log_is_enabled(level: i64, scope: text) -> bool:
     _level_passes(level, subsys_from_scope(scope))
-
-# ---------------------------------------------------------------------------
-# ObserveContext correlation (Lane OBS1, follow-up to DS8's OTLP exporter) —
-# module-level "current context" so the log record path (SyslogRecord, see
-# below) can stamp trace/task/actor correlation ids without every call site
-# threading them through explicitly. Zero behavior change when no context is
-# active: accessors return 0 (absent) and SyslogRecord.new() carries
-# all-zero ids, exactly as before this lane. trace_id halves and
-# task_id/actor_id are plain i64 (never text/struct) — this module is used
-# from kernel/no-alloc tiers that must stay free of text-through-primitive
-# hazards, and callers above the async tier (web_framework.tracing's
-# ObserveContext) convert their own struct/Option-shaped ids to plain i64
-# before calling in here.
-# ---------------------------------------------------------------------------
-var _g_log_ctx_active:     bool = false
-var _g_log_ctx_trace_high: i64 = 0
-var _g_log_ctx_trace_low:  i64 = 0
-var _g_log_ctx_task_id:    i64 = 0
-var _g_log_ctx_actor_id:   i64 = 0
-
-class LogContextSnapshot:
-    """Opaque snapshot of the current log-context state, for nested set/restore."""
-    active:     bool
-    trace_high: i64
-    trace_low:  i64
-    task_id:    i64
-    actor_id:   i64
-
-    static fn new(active: bool, trace_high: i64, trace_low: i64, task_id: i64, actor_id: i64) -> LogContextSnapshot:
-        LogContextSnapshot(active: active, trace_high: trace_high, trace_low: trace_low, task_id: task_id, actor_id: actor_id)
-
-fn log_context_set(trace_high: i64, trace_low: i64, task_id: i64, actor_id: i64):
-    """Activate correlation ids for subsequent SyslogRecord.new() calls.
-
-    Pass 0 for task_id/actor_id when absent — ids are always plain i64,
-    never text (see module note above).
-    """
-    _g_log_ctx_active = true
-    _g_log_ctx_trace_high = trace_high
-    _g_log_ctx_trace_low = trace_low
-    _g_log_ctx_task_id = task_id
-    _g_log_ctx_actor_id = actor_id
-
-fn log_context_clear():
-    """Deactivate the current context. Subsequent SyslogRecord.new() calls
-    carry absent/zero correlation ids again."""
-    _g_log_ctx_active = false
-    _g_log_ctx_trace_high = 0
-    _g_log_ctx_trace_low = 0
-    _g_log_ctx_task_id = 0
-    _g_log_ctx_actor_id = 0
-
-fn log_context_active() -> bool:
-    _g_log_ctx_active
-
-fn log_context_snapshot() -> LogContextSnapshot:
-    """Capture the current context so a caller can restore it later —
-    supports nested set/restore (e.g. an actor handler invoked while a
-    request-scoped context is already active)."""
-    LogContextSnapshot.new(
-        _g_log_ctx_active, _g_log_ctx_trace_high, _g_log_ctx_trace_low,
-        _g_log_ctx_task_id, _g_log_ctx_actor_id
-    )
-
-fn log_context_restore(snap: LogContextSnapshot):
-    """Restore a previously captured snapshot (see log_context_snapshot)."""
-    _g_log_ctx_active = snap.active
-    _g_log_ctx_trace_high = snap.trace_high
-    _g_log_ctx_trace_low = snap.trace_low
-    _g_log_ctx_task_id = snap.task_id
-    _g_log_ctx_actor_id = snap.actor_id
-
-fn log_context_set_actor(actor_id: i64):
-    """Merge-set: activate actor_id while preserving whatever trace/task ids
-    were already active (0 if none). Lets the actor message-processing loop
-    stamp actor_id around a single handler invocation without clobbering an
-    outer request-scoped trace context — pair with log_context_snapshot()/
-    log_context_restore() for the nested set/restore."""
-    log_context_set(_ctx_trace_high(), _ctx_trace_low(), _ctx_task_id(), actor_id)
-
-fn _ctx_trace_high() -> i64:
-    if _g_log_ctx_active: _g_log_ctx_trace_high else: 0
-
-fn _ctx_trace_low() -> i64:
-    if _g_log_ctx_active: _g_log_ctx_trace_low else: 0
-
-fn _ctx_task_id() -> i64:
-    if _g_log_ctx_active: _g_log_ctx_task_id else: 0
-
-fn _ctx_actor_id() -> i64:
-    if _g_log_ctx_active: _g_log_ctx_actor_id else: 0
-
-# ---------------------------------------------------------------------------
-# Structured syslog record (RFC5424-ish) — Lane L observability Phase 1.
-#
-# Field layout mirrors RFC5424 positionally (PRI/VERSION, TIMESTAMP,
-# HOSTNAME, APP-NAME, PROCID, MSGID, STRUCTURED-DATA, MSG) but is simplified:
-#   - PRI = facility*8 + level (severity), like RFC5424.
-#   - TIMESTAMP carries raw ts_nanos (not an ISO-8601 string) — "ish".
-#   - HOSTNAME/MSGID are unused ("-"); APP-NAME carries the subsys id.
-#   - STRUCTURED-DATA is "-" or "[k=v,k2=v2]" (comma-, not space-, separated
-#     so the whole record stays parseable with single-space partitioning).
-# Callers own `pid` (e.g. from rt_getpid() in userland, 0 in-kernel) so this
-# module stays free of an OS-specific pid extern.
-# ---------------------------------------------------------------------------
-class SyslogKv:
-    key:   text
-    value: text
-
-    static fn new(key: text, value: text) -> SyslogKv:
-        SyslogKv(key: key, value: value)
-
-class SyslogRecord:
-    ts_nanos: i64
-    level:    i64   # severity (syslog scale, 0=highest)
-    facility: i64
-    pid:      i64
-    subsys:   i64
-    msg:      text
-    kv:       [SyslogKv]
-    # ObserveContext correlation ids (Lane OBS1) — plain i64, 0 = absent.
-    # Auto-populated from the current log context (log_context_set) at
-    # construction time; untouched (still all-zero) when no context is
-    # active, so this is additive and behavior-preserving for every caller
-    # that predates this lane.
-    trace_id_high: i64
-    trace_id_low:  i64
-    task_id:       i64
-    actor_id:      i64
-
-    static fn new(level: i64, facility: i64, pid: i64, subsys: i64, msg: text) -> SyslogRecord:
-        SyslogRecord(
-            ts_nanos: rt_time_now_unix_micros() * 1000,
-            level: level,
-            facility: facility,
-            pid: pid,
-            subsys: subsys,
-            msg: msg,
-            kv: [],
-            trace_id_high: _ctx_trace_high(),
-            trace_id_low: _ctx_trace_low(),
-            task_id: _ctx_task_id(),
-            actor_id: _ctx_actor_id()
-        )
-
-fn syslog_record_with_kv(rec: SyslogRecord, key: text, value: text) -> SyslogRecord:
-    var kv = rec.kv
-    kv.push(SyslogKv.new(key, value))
-    SyslogRecord(
-        ts_nanos: rec.ts_nanos,
-        level: rec.level,
-        facility: rec.facility,
-        pid: rec.pid,
-        subsys: rec.subsys,
-        msg: rec.msg,
-        kv: kv,
-        trace_id_high: rec.trace_id_high,
-        trace_id_low: rec.trace_id_low,
-        task_id: rec.task_id,
-        actor_id: rec.actor_id
-    )
-
-fn _syslog_format_sd(kv: [SyslogKv]) -> text:
-    if kv.len() == 0:
-        return "-"
-    var s = "["
-    var i = 0
-    while i < kv.len():
-        if i > 0:
-            s = s + ","
-        s = s + kv[i].key + "=" + kv[i].value
-        i = i + 1
-    s + "]"
-
-fn syslog_format(rec: SyslogRecord) -> text:
-    val pri = rec.facility * 8 + rec.level
-    val sd = _syslog_format_sd(rec.kv)
-    "<{pri}>1 {rec.ts_nanos} - {rec.subsys} {rec.pid} - {sd} {rec.msg}"
-
-fn _syslog_parse_sd(sd: text) -> [SyslogKv]:
-    var result: [SyslogKv] = []
-    if sd == "-" or sd.len() < 2:
-        return result
-    val inner = sd.slice(1, sd.len() - 1)
-    if inner.len() == 0:
-        return result
-    val parts = inner.split(",")
-    var i = 0
-    while i < parts.len():
-        val kvp = parts[i].partition("=")
-        result.push(SyslogKv.new(kvp[0], kvp[2]))
-        i = i + 1
-    result
-
-fn syslog_parse(line: text) -> SyslogRecord:
-    val p1 = line.partition(" ")        # [priver, " ", rest]
-    val p2 = p1[2].partition(" ")       # [ts_nanos, " ", rest]
-    val p3 = p2[2].partition(" ")       # [hostname(-), " ", rest]
-    val p4 = p3[2].partition(" ")       # [subsys, " ", rest]
-    val p5 = p4[2].partition(" ")       # [pid, " ", rest]
-    val p6 = p5[2].partition(" ")       # [msgid(-), " ", rest]
-    val p7 = p6[2].partition(" ")       # [structured-data, " ", msg]
-
-    val pri_str = p1[0].partition("<")[2].partition(">")[0]
-    val pri = pri_str.to_int()
-
-    SyslogRecord(
-        ts_nanos: p2[0].to_int(),
-        level: pri % 8,
-        facility: pri / 8,
-        pid: p5[0].to_int(),
-        subsys: p4[0].to_int(),
-        msg: p7[2],
-        kv: _syslog_parse_sd(p7[0]),
-        # The wire format (syslog_format) does not carry correlation ids —
-        # a parsed record never had an active log context, so these stay
-        # absent/zero. Extending the wire format is a separate decision.
-        trace_id_high: 0,
-        trace_id_low: 0,
-        task_id: 0,
-        actor_id: 0
-    )
 
 export log, log_dispatch_text, subsys_from_scope
 export log_text_from_handle, log_text_intern_overwritten, LOG_TEXT_INTERN_CAP
-export debug, error, info, warn, verbose, fatal, log_info_subsys, log_get_level, is_enabled
+export debug, error, info, warn, trace, verbose, fatal, log_info_subsys, log_get_level, log_is_enabled, is_enabled
+export get_log_level, set_scope_level, get_level, clear_scopes
+export log_info, log_error, log_debug, log_verbose
 export parse_level, level_name, set_level, get_global_level
 export LOG_TRACE, LOG_DEBUG, LOG_INFO, LOG_WARN, LOG_ERROR, LOG_FATAL, LOG_OFF, LOG_VERBOSE, LOG_ALL
+export LEGACY_LOG_TRACE, LEGACY_LOG_DEBUG, LEGACY_LOG_INFO, LEGACY_LOG_WARN
+export LEGACY_LOG_ERROR, LEGACY_LOG_FATAL, LEGACY_LOG_OFF, LEGACY_LOG_VERBOSE, LEGACY_LOG_ALL
 export SUBSYS_KERN, SUBSYS_VMM, SUBSYS_VFS, SUBSYS_NET, SUBSYS_IRQ
 export SUBSYS_DRIVER_BLOCK, SUBSYS_DRIVER_NET, SUBSYS_DRIVER_INPUT, SUBSYS_DRIVER_GFX
 export SUBSYS_PKG, SUBSYS_CLI, SUBSYS_TEST, SUBSYS_USER_BASE, MAX_SUBSYS, MAX_BACKENDS
@@ -1007,32 +823,4 @@ export log_context_snapshot, log_context_restore, log_context_set_actor
 export LogBackendOps, log_register_backend, log_remove_backend
 export RingBackend, ring_backend_new, ring_backend_clear, ring_backend_count
 
-# ---------------------------------------------------------------------------
-# Back-compat re-export: nogc_sync_mut/log.spl's scope-level API is otherwise
-# unreachable via `std.log` because this facade shadows it (see
-# doc/08_tracking/bug/std_facade_shadows_tier_module_family_2026-08-08.md,
-# "OPEN 1"). Named narrowly (not `.*`) because nogc_sync_mut/log.spl also
-# defines error/info/warn/debug/trace/fatal/verbose/is_enabled/set_level/
-# get_global_level/parse_level/level_name/log, which collide with this
-# facade's OWN same-named symbols above — a wildcard re-export would poison
-# those. nogc_sync_mut/log.spl does `use lib.log.{...}` (this file), so this
-# `export use` makes the two modules genuinely circular. File position of
-# this block does NOT matter (moving it to the top of the file reproduces
-# the same failure) — what mattered was that nogc_sync_mut/log.spl used to
-# import lib.log's LOG_TRACE..LOG_FATAL `val`s under an alias
-# (`LOG_DEBUG as _F_DEBUG`, etc.): a `val` import across a live circular
-# dependency binds against an empty pre-completion snapshot of the
-# still-loading module, failing at runtime with "variable `_F_DEBUG` not
-# found". Fixed by having nogc_sync_mut/log.spl define those six values as
-# local literals instead of importing them (see the comment there) — plain
-# function/class imports (log_dispatch_text, LogContextSnapshot, etc.) are
-# unaffected because they bind lazily at call time, after both modules have
-# finished loading. The OTHER runtime fault that previously blocked this
-# re-export entirely (unguarded rt_env_get(...).len() on a nil env var) was
-# fixed directly in nogc_sync_mut/log.spl's _ensure_initialized().
-# ---------------------------------------------------------------------------
-export use lib.nogc_sync_mut.log.{
-    clear_scopes, get_level, get_log_level, log_debug, log_error, log_info,
-    log_verbose, set_scope_level, trace
-}
 export ring_backend_subsys_at, ring_backend_seq_at, ring_backend_level_at

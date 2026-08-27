@@ -85,7 +85,7 @@ expect(s.cipher_remark).to_equal(false)
 
 </details>
 
-### run_pattern_idiom_candidate_pass_x86 — cipher_remark=true + AES caps + AES callee
+### run_pattern_idiom_pass_x86 — cipher_remark=true + AES caps + AES callee
 
 #### instruction becomes Intrinsic when cipher_remark=true
 
@@ -98,7 +98,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val m    = make_call_module("std.common.aes.cipher.aes_round_software")
 val caps = make_x86_caps_aes()
-val out  = run_pattern_idiom_candidate_pass_x86(m, caps, true)
+val out  = run_pattern_idiom_pass_x86(m, caps, true)
 val sym  = out.functions.keys()[0]
 val func = out.functions[sym]
 val inst = func.blocks[0].instructions[0]
@@ -121,7 +121,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val m    = make_call_module("std.common.aes.cipher.aes_round_software")
 val caps = make_x86_caps_aes()
-val out  = run_pattern_idiom_candidate_pass_x86(m, caps, true)
+val out  = run_pattern_idiom_pass_x86(m, caps, true)
 val sym  = out.functions.keys()[0]
 val func = out.functions[sym]
 val inst = func.blocks[0].instructions[0]
@@ -133,7 +133,7 @@ expect(intrinsic_name).to_equal("crypto_aes_round")
 
 </details>
 
-### run_pattern_idiom_candidate_pass_x86 — cipher_remark=false + AES caps + AES callee
+### run_pattern_idiom_pass_x86 — cipher_remark=false + AES caps + AES callee
 
 #### instruction still becomes Intrinsic when cipher_remark=false
 
@@ -146,7 +146,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val m    = make_call_module("std.common.aes.cipher.aes_round_software")
 val caps = make_x86_caps_aes()
-val out  = run_pattern_idiom_candidate_pass_x86(m, caps, false)
+val out  = run_pattern_idiom_pass_x86(m, caps, false)
 val sym  = out.functions.keys()[0]
 val func = out.functions[sym]
 val inst = func.blocks[0].instructions[0]
@@ -158,7 +158,7 @@ expect(is_intrinsic).to_equal(true)
 
 </details>
 
-### run_pattern_idiom_candidate_pass_x86 — cipher_remark=true + no caps + AES callee
+### run_pattern_idiom_pass_x86 — cipher_remark=true + no caps + AES callee
 
 #### instruction stays Call when caps lack AES
 
@@ -171,7 +171,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val m    = make_call_module("std.common.aes.cipher.aes_round_software")
 val caps = make_x86_caps_none()
-val out  = run_pattern_idiom_candidate_pass_x86(m, caps, true)
+val out  = run_pattern_idiom_pass_x86(m, caps, true)
 val sym  = out.functions.keys()[0]
 val func = out.functions[sym]
 val inst = func.blocks[0].instructions[0]
@@ -183,7 +183,7 @@ expect(is_call).to_equal(true)
 
 </details>
 
-### run_pattern_idiom_candidate_pass_x86 — cipher_remark=true + AES caps + non-cipher callee
+### run_pattern_idiom_pass_x86 — cipher_remark=true + AES caps + non-cipher callee
 
 #### instruction stays Call for non-cipher callee
 
@@ -196,7 +196,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val m    = make_call_module("std.io.print")
 val caps = make_x86_caps_aes()
-val out  = run_pattern_idiom_candidate_pass_x86(m, caps, true)
+val out  = run_pattern_idiom_pass_x86(m, caps, true)
 val sym  = out.functions.keys()[0]
 val func = out.functions[sym]
 val inst = func.blocks[0].instructions[0]
@@ -208,7 +208,7 @@ expect(is_call).to_equal(true)
 
 </details>
 
-### run_pattern_idiom_candidate_pass_x86 — SHA256 callee + sha_ni caps + cipher_remark=true
+### run_pattern_idiom_pass_x86 — SHA256 callee + sha_ni caps + cipher_remark=true
 
 #### SHA256 call becomes Intrinsic with sha_ni caps and cipher_remark=true
 
@@ -221,7 +221,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val m    = make_call_module("std.common.crypto.sha256.compress_block")
 val caps = make_x86_caps_sha_ni()
-val out  = run_pattern_idiom_candidate_pass_x86(m, caps, true)
+val out  = run_pattern_idiom_pass_x86(m, caps, true)
 val sym  = out.functions.keys()[0]
 val func = out.functions[sym]
 val inst = func.blocks[0].instructions[0]
@@ -233,7 +233,7 @@ expect(is_intrinsic).to_equal(true)
 
 </details>
 
-### run_pattern_idiom_candidate_pass_x86 — CRC32 callee + sse42 caps + cipher_remark=true
+### run_pattern_idiom_pass_x86 — CRC32 callee + sse42 caps + cipher_remark=true
 
 #### CRC32 call becomes Intrinsic with sse42 caps and cipher_remark=true
 
@@ -246,7 +246,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val m    = make_call_module("std.common.crypto.crc32.update_byte")
 val caps = make_x86_caps_sse42()
-val out  = run_pattern_idiom_candidate_pass_x86(m, caps, true)
+val out  = run_pattern_idiom_pass_x86(m, caps, true)
 val sym  = out.functions.keys()[0]
 val func = out.functions[sym]
 val inst = func.blocks[0].instructions[0]
@@ -273,12 +273,12 @@ expect(is_intrinsic).to_equal(true)
 Tests covering:
 - pattern_idiom_stats_with_remark — cipher_remark=true
 - pattern_idiom_stats_zero — cipher_remark=false
-- run_pattern_idiom_candidate_pass_x86 — cipher_remark=true + AES caps + AES callee
-- run_pattern_idiom_candidate_pass_x86 — cipher_remark=false + AES caps + AES callee
-- run_pattern_idiom_candidate_pass_x86 — cipher_remark=true + no caps + AES callee
-- run_pattern_idiom_candidate_pass_x86 — cipher_remark=true + AES caps + non-cipher callee
-- run_pattern_idiom_candidate_pass_x86 — SHA256 callee + sha_ni caps + cipher_remark=true
-- run_pattern_idiom_candidate_pass_x86 — CRC32 callee + sse42 caps + cipher_remark=true
+- run_pattern_idiom_pass_x86 — cipher_remark=true + AES caps + AES callee
+- run_pattern_idiom_pass_x86 — cipher_remark=false + AES caps + AES callee
+- run_pattern_idiom_pass_x86 — cipher_remark=true + no caps + AES callee
+- run_pattern_idiom_pass_x86 — cipher_remark=true + AES caps + non-cipher callee
+- run_pattern_idiom_pass_x86 — SHA256 callee + sha_ni caps + cipher_remark=true
+- run_pattern_idiom_pass_x86 — CRC32 callee + sse42 caps + cipher_remark=true
 
 ## Scenario Summary
 

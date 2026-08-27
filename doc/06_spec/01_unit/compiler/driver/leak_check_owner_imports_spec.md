@@ -1,6 +1,6 @@
-# Leak Check Owner Imports Contract
+# Contract spec: test/01_unit/compiler/driver/leak_check_owner_imports_spec.spl
 
-> The Stage4 closure must resolve leak-check runtime types and driver calls from
+> Audience: engineers owning the pinned repository sources. Purpose: keep the pinned observable
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -9,9 +9,9 @@
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Leak Check Owner Imports Contract
+# Contract spec: test/01_unit/compiler/driver/leak_check_owner_imports_spec.spl
 
-The Stage4 closure must resolve leak-check runtime types and driver calls from
+Audience: engineers owning the pinned repository sources. Purpose: keep the pinned observable
 
 ## At a Glance
 
@@ -20,30 +20,54 @@ The Stage4 closure must resolve leak-check runtime types and driver calls from
 | Category | Compiler |
 | Status | Active |
 | Source | `test/01_unit/compiler/driver/leak_check_owner_imports_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-08-27 |
 | Generator | `simple spipe-docgen` (Simple) |
 
-The Stage4 closure must resolve leak-check runtime types and driver calls from
-their concrete owner modules rather than through multi-hop facades.
+## Purpose and Audience
+
+Audience: engineers owning the pinned repository sources. Purpose: keep the pinned observable
+contracts red-visible, so a regression in the owned code fails this spec
+instead of shipping silently.
+
+## Scope and Preconditions
+
+Precondition: the repository working tree holds the subject code under test.
+Each scenario exercises the subject and asserts its observable contract; no
+behavior outside the named subject is claimed.
+
+## Primary Workflow
+
+Run the scenarios; each one drives the subject through its pinned contract
+and asserts the expected observable outcome with an executed oracle.
+
+## Unsupported / Limitations
+
+Only the pinned contracts are asserted here; end-to-end and integration
+behavior of the surrounding system is covered by companion specs.
+
+## Verification and Recovery
+
+A red scenario names the contract that regressed. Recover by restoring the
+pinned behavior in the subject; verify with
+`bin/simple test test/01_unit/compiler/driver/leak_check_owner_imports_spec.spl` and a green Results line.
 
 ## Scenarios
 
 ### leak check owner imports
 
-#### imports the interpreter call and result type from concrete owners
+#### tracker operations from concrete owners run end to end
 
 **Manual warnings:**
 - invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
 
 
 - imports the interpreter call and result type from concrete owners
-   - Expected: source does not contain `use compiler.driver.\{interpret_file, CompileResult\}`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -52,15 +76,14 @@ step("imports the interpreter call and result type from concrete owners")
 val source = rt_file_read_text("src/compiler/tools/leak_check/main.spl") ?? ""
 expect(source).to_contain("use compiler.driver.driver_public_interpret_bridge.\{interpret_file\}")
 expect(source).to_contain("use compiler.common.driver_core_types.\{CompileResult\}")
-expect(source.contains("use compiler.driver.\{interpret_file, CompileResult\}")).to_equal(false)
+expect(source).to_not_contain("use compiler.driver.\{interpret_file, CompileResult\}")
 ```
 
 </details>
 
-#### imports MemLeakEntry directly while retaining adjacent tracker operations
+#### MemLeakEntry from its concrete owner carries the pinned fields
 
 - imports MemLeakEntry directly while retaining adjacent tracker operations
-   - Expected: source does not contain `parse_leak_dump, MemLeakEntry`
 
 
 <details>
@@ -75,7 +98,7 @@ step("imports MemLeakEntry directly while retaining adjacent tracker operations"
 val source = rt_file_read_text("src/compiler/tools/leak_check/main.spl") ?? ""
 expect(source).to_contain("use std.mem_tracker.types.\{MemLeakEntry\}")
 expect(source).to_contain("mem_enable, mem_disable, mem_snapshot, mem_dump_leaks, parse_leak_dump")
-expect(source.contains("parse_leak_dump, MemLeakEntry")).to_equal(false)
+expect(source).to_not_contain("parse_leak_dump, MemLeakEntry")
 ```
 
 </details>
@@ -93,51 +116,33 @@ expect(source.contains("parse_leak_dump, MemLeakEntry")).to_equal(false)
 
 </details>
 
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-COMPILER`
-<!-- sspec-maintain:traceability:end -->
-
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `6dc3f8c6a059941787ab895faab6c02e7c74e6dff59915199f8f8f0dee2e4db3`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `ed99f9476a89af7f2f29e430207b28a792d5aae19741e0ad89d20662bf5077c9`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `6dc3f8c6a059941787ab895faab6c02e7c74e6dff59915199f8f8f0dee2e4db3`.
+Source SHA-256: `ed99f9476a89af7f2f29e430207b28a792d5aae19741e0ad89d20662bf5077c9`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `6dc3f8c6a059941787ab895faab6c02e7c74e6dff59915199f8f8f0dee2e4db3`  
+Source SHA-256: `ed99f9476a89af7f2f29e430207b28a792d5aae19741e0ad89d20662bf5077c9`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **84/100**; effective score: **49/100**; blockers: **1**.
+Raw score: **97/100**; effective score: **97/100**; blockers: **0**.
 
-SSpec documentization score: 49/100
+SSpec documentization score: 97/100
 source: test/01_unit/compiler/driver/leak_check_owner_imports_spec.spl
 mirror: doc/06_spec/01_unit/compiler/driver/leak_check_owner_imports_spec.md (current)
-findings: 5 blockers: 1
-  narrative=100 structure=100 oracle=50
-  traceability=100 evidence=80 coverage=100 maintainability=70
+findings: 2 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=80 coverage=100 maintainability=100
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-  raw=84; blocker cap makes effective=49
-doc/06_spec/01_unit/compiler/driver/leak_check_owner_imports_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/compiler/driver/leak_check_owner_imports_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/compiler/driver/leak_check_owner_imports_spec.spl:1:1: blocker SSDOC-ORA-002 [oracle] (-50): scenario relies on source-text inspection as system evidence
-  why: Source presence or self-created arithmetic does not demonstrate production behavior.
-  improve: Observe runtime behavior or a stable generated artifact instead.
-test/01_unit/compiler/driver/leak_check_owner_imports_spec.spl:21:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'imports the interpreter call and result type from concrete owners' has no retained capture or evidence
+test/01_unit/compiler/driver/leak_check_owner_imports_spec.spl:53:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'imports the interpreter call and result type from concrete owners' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/compiler/driver/leak_check_owner_imports_spec.spl:29:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'imports MemLeakEntry directly while retaining adjacent tracker operations' has no retained capture or evidence
+test/01_unit/compiler/driver/leak_check_owner_imports_spec.spl:60:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'imports MemLeakEntry directly while retaining adjacent tracker operations' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
 <!-- sspec-maintain:scorecard:end -->

@@ -1,0 +1,222 @@
+# Namespace policy — the §15.4 read/write matrix, enforced in code.
+#
+# Design:  doc/05_design/compiler/semantic_incremental_build_cache_aop_formal_2026-08-09.md §15.4
+# Schema:  src/compiler/80.driver/cache/schema/cache_protocol.sdn (cache_namespace, enums.cache_trust)
+#
+# INVARIANT (structural, not configurable): the authority to WRITE the main
+# namespace is derived exclusively from an *attested* producer role. There is no
+# field on NamespacePolicy that a developer machine can flip to obtain it — see
+# `namespace_policy_developer_default` and `producer_role_from_attestation`.
+#
+# INVARIANT: nothing in this file ever enters an ActionDigest. Everything here is
+# PROVENANCE or LOCAL_STATE per the C0 classification table.
+
+use compiler.driver.cache.action_key.{canon_str, canon_nat, canon_field, canon_seq}
+use std.common.crypto.sha256.{sha256_text}
+
+# ============================================================================
+# CacheTrust — enums.cache_trust, encoded BY NAME (never by ordinal)
+# ============================================================================
+
+val TRUST_WORKSPACE_LOCAL = "workspace_local"
+val TRUST_MACHINE_LOCAL = "machine_local"
+val TRUST_TRUSTED_BRANCH_CI = "trusted_branch_ci"
+val TRUST_TRUSTED_MAIN_CI = "trusted_main_ci"
+val TRUST_RELEASE_PINNED = "release_pinned"
+
+# schema: enums.cache_trust.lookup_order
+fn cache_trust_lookup_order() -> [text]:
+    [TRUST_WORKSPACE_LOCAL, TRUST_MACHINE_LOCAL, TRUST_TRUSTED_MAIN_CI, TRUST_TRUSTED_BRANCH_CI]
+
+# schema: enums.cache_trust.write_main_allowed
+fn cache_trust_may_hold_main(trust: text) -> bool:
+    trust == TRUST_TRUSTED_MAIN_CI or trust == TRUST_RELEASE_PINNED
+
+fn cache_trust_is_known(trust: text) -> bool:
+    if trust == TRUST_WORKSPACE_LOCAL:
+        return true
+    if trust == TRUST_MACHINE_LOCAL:
+        return true
+    if trust == TRUST_TRUSTED_BRANCH_CI:
+        return true
+    if trust == TRUST_TRUSTED_MAIN_CI:
+        return true
+    trust == TRUST_RELEASE_PINNED
+
+# ============================================================================
+# Namespace kinds — main / branch / workspace / machine
+# ============================================================================
+
+val NS_MAIN = "main"
+val NS_BRANCH = "branch"
+val NS_WORKSPACE = "workspace"
+val NS_MACHINE = "machine"
+
+# ============================================================================
+# Producer roles — the row labels of the §15.4 matrix
+# ============================================================================
+
+val ROLE_DIRTY_DEVELOPER = "dirty_developer_worktree"
+val ROLE_CLEAN_DEVELOPER = "clean_developer_branch"
+val ROLE_UNTRUSTED_PR = "untrusted_pull_request"
+val ROLE_TRUSTED_BRANCH_CI = "trusted_branch_ci"
+val ROLE_TRUSTED_MAIN_CI = "trusted_main_ci"
+val ROLE_RELEASE_CI = "release_ci"
+
+fn producer_role_is_developer(role: text) -> bool:
+    role == ROLE_DIRTY_DEVELOPER or role == ROLE_CLEAN_DEVELOPER or role == ROLE_UNTRUSTED_PR
+
+# A role is only ever CI if an attestation proves it. `attested_builder_id` and
+# `attested_workflow_digest` come from the CI runtime's signed environment; an
+# empty pair collapses ANY requested role to a developer role. This is the
+# structural reason a developer machine cannot write main: it cannot name itself
+# into a CI role.
+fn producer_role_from_attestation(requested_role: text, attested_builder_id: text, attested_workflow_digest: text, workflow_is_approved: bool, worktree_dirty: bool) -> text:
+    if worktree_dirty:
+        return ROLE_DIRTY_DEVELOPER
+    if attested_builder_id == "" or attested_workflow_digest == "":
+        return ROLE_CLEAN_DEVELOPER
+    if not workflow_is_approved:
+        return ROLE_UNTRUSTED_PR
+    if requested_role == ROLE_RELEASE_CI:
+        return ROLE_RELEASE_CI
+    if requested_role == ROLE_TRUSTED_MAIN_CI:
+        return ROLE_TRUSTED_MAIN_CI
+    if requested_role == ROLE_TRUSTED_BRANCH_CI:
+        return ROLE_TRUSTED_BRANCH_CI
+    ROLE_CLEAN_DEVELOPER
+
+# ============================================================================
+# The §15.4 matrix
+# ============================================================================
+
+# Every role may read remote main. Untrusted PR reads only if policy permits.
+fn policy_may_read_remote_main(role: text, untrusted_read_permitted: bool) -> bool:
+    if role == ROLE_UNTRUSTED_PR:
+        return untrusted_read_permitted
+    true
+
+# Only trusted branch CI may write a branch namespace, and only when the
+# isolated-TTL branch namespace is enabled for that lane.
+fn policy_may_write_remote_branch(role: text, branch_namespace_enabled: bool) -> bool:
+    if role == ROLE_TRUSTED_BRANCH_CI:
+        return branch_namespace_enabled
+    false
+
+# Main is writable by trusted main CI and release CI ONLY. No parameter widens it.
+fn policy_may_write_remote_main(role: text) -> bool:
+    role == ROLE_TRUSTED_MAIN_CI or role == ROLE_RELEASE_CI
+
+fn policy_requires_pin(role: text) -> bool:
+    role == ROLE_RELEASE_CI
+
+fn policy_requires_strict_verification(role: text) -> bool:
+    role == ROLE_RELEASE_CI
+
+# ============================================================================
+# NamespacePolicy
+# ============================================================================
+
+# NOTE the absent field: there is deliberately no `allow_main_write`. Main-write
+# authority is a *function of the attested role*, never stored state.
+struct NamespacePolicy:
+    role: text                      # PROVENANCE — post-attestation role
+    user_name: text                 # PROVENANCE
+    untrusted_read_permitted: bool
+    branch_namespace_enabled: bool
+    read_only: bool                 # developer default = true
+
+# Read-only developer mode is THE DEFAULT.
+fn namespace_policy_developer_default(user_name: text) -> NamespacePolicy:
+    NamespacePolicy(
+        role: ROLE_CLEAN_DEVELOPER,
+        user_name: user_name,
+        untrusted_read_permitted: true,
+        branch_namespace_enabled: false,
+        read_only: true
+    )
+
+fn namespace_policy_for_attestation(requested_role: text, user_name: text, attested_builder_id: text, attested_workflow_digest: text, workflow_is_approved: bool, worktree_dirty: bool, branch_namespace_enabled: bool) -> NamespacePolicy:
+    val role = producer_role_from_attestation(
+        requested_role: requested_role,
+        attested_builder_id: attested_builder_id,
+        attested_workflow_digest: attested_workflow_digest,
+        workflow_is_approved: workflow_is_approved,
+        worktree_dirty: worktree_dirty
+    )
+    val ro = producer_role_is_developer(role)
+    NamespacePolicy(
+        role: role,
+        user_name: user_name,
+        untrusted_read_permitted: true,
+        branch_namespace_enabled: branch_namespace_enabled,
+        read_only: ro
+    )
+
+fn namespace_policy_may_read(policy: NamespacePolicy, kind: text) -> bool:
+    if kind == NS_WORKSPACE or kind == NS_MACHINE:
+        return true
+    if kind == NS_MAIN:
+        return policy_may_read_remote_main(policy.role, policy.untrusted_read_permitted)
+    if kind == NS_BRANCH:
+        return policy_may_read_remote_main(policy.role, policy.untrusted_read_permitted)
+    false
+
+fn namespace_policy_may_write(policy: NamespacePolicy, kind: text) -> bool:
+    # Local namespaces are always writable — they are LOCAL_STATE, never shared.
+    if kind == NS_WORKSPACE or kind == NS_MACHINE:
+        return true
+    if policy.read_only:
+        return false
+    if kind == NS_BRANCH:
+        return policy_may_write_remote_branch(policy.role, policy.branch_namespace_enabled)
+    if kind == NS_MAIN:
+        return policy_may_write_remote_main(policy.role)
+    false
+
+# The one line the whole "developer is structurally read-only" claim rests on.
+fn namespace_policy_can_ever_write_main(policy: NamespacePolicy) -> bool:
+    if producer_role_is_developer(policy.role):
+        return false
+    policy_may_write_remote_main(policy.role)
+
+# ============================================================================
+# CacheNamespace — schema `cache_namespace`
+# ============================================================================
+
+# `branch_identity` and `workspace_id` are optionals encoded as zero-or-one seqs
+# (C0 decision 9). `workspace_id` is a directory selector only and is NOT encoded
+# (C0 decision 6).
+struct CacheNamespace:
+    kind: text                  # main | branch | workspace | machine
+    repository_id: text         # digest, PROVENANCE
+    trust: text                 # cache_trust
+    target_profile: text        # digest
+    schema_version: i64
+    branch_identity: text       # "" == absent
+    workspace_id: text          # LOCAL_STATE, NOT encoded
+
+fn cache_namespace_encode(ns: CacheNamespace) -> text:
+    var branch_items: [text] = []
+    if ns.branch_identity != "":
+        branch_items.push(canon_str(ns.branch_identity))
+    var inner: [text] = []
+    inner.push(canon_field("repositoryId", canon_str(ns.repository_id)))
+    inner.push(canon_field("trust", canon_str(ns.trust)))
+    inner.push(canon_field("targetProfile", canon_str(ns.target_profile)))
+    inner.push(canon_field("schemaVersion", canon_nat(ns.schema_version)))
+    inner.push(canon_field("branchIdentity", canon_seq(branch_items)))
+    canon_field("simple/cache-namespace/v2", canon_seq(inner))
+
+fn cache_namespace_digest(ns: CacheNamespace) -> text:
+    sha256_text(cache_namespace_encode(ns))
+
+# Directory selector. workspace_id appears in the PATH only.
+fn cache_namespace_path(ns: CacheNamespace) -> text:
+    if ns.kind == NS_MAIN:
+        return "actions/main/" + cache_namespace_digest(ns)
+    if ns.kind == NS_BRANCH:
+        return "actions/branch/" + cache_namespace_digest(ns)
+    if ns.kind == NS_WORKSPACE:
+        return "actions/workspace/" + ns.workspace_id + "/" + cache_namespace_digest(ns)
+    "actions/machine/" + cache_namespace_digest(ns)

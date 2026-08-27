@@ -29,7 +29,12 @@ struct ModuleSurfaceParam:
     is_mutable: bool
     span: Span
 
-struct ModuleSurfaceCallable:
+# Callable surfaces cross the streaming transient boundary and are read from
+# dictionaries by name. Keep the payload reference-semantic: returning this
+# large aggregate as a struct value through staged Dict[] corrupted adjacent
+# signatures, while retaining a second value-array alias double-owned its
+# nested param/type arrays during promotion.
+class ModuleSurfaceCallable:
     name: text
     type_params: [ParserTypeParam]
     params: [ModuleSurfaceParam]
@@ -64,24 +69,6 @@ struct ModuleSurfaceComposite:
     visibility: Visibility
     is_public: bool
     span: Span
-
-pub(package) class ModuleSurfaceCompositeIndex:
-    kinds: [text]
-    field_offsets: [i64]
-    field_counts: [i64]
-    dependency_offsets: [i64]
-    dependency_counts: [i64]
-    field_names: [text]
-    field_shapes: [text]
-    field_type_names: [text]
-    dependency_names: [text]
-
-    static fn empty() -> ModuleSurfaceCompositeIndex:
-        ModuleSurfaceCompositeIndex(
-            kinds: [], field_offsets: [], field_counts: [],
-            dependency_offsets: [], dependency_counts: [],
-            field_names: [], field_shapes: [], field_type_names: [],
-            dependency_names: [])
 
 struct ModuleSurfaceEnum:
     name: text
@@ -256,6 +243,12 @@ class ModuleSurfaceExportOriginIndex:
     owner_modules: [text]
     source_names: [text]
     resolution_kinds: [text]
+    # Native-safe chained-hash metadata. Buckets and chains retain only
+    # scalar indices/hashes; the aggregate-valued origins Dict remains a
+    # builder compatibility projection and is never read by lookup.
+    lookup_bucket_heads: [i64]
+    lookup_next_indices: [i64]
+    lookup_hashes: [i64]
 
 # Registry construction and freeze publication are sequential. A builder must
 # finish its registry before publishing it to lowering or other readers; the
@@ -276,7 +269,39 @@ pub(package) fn module_surface_export_origin_index_empty() -> ModuleSurfaceExpor
     ModuleSurfaceExportOriginIndex(
         origins: {}, index_by_name: {},
         names: [], owner_modules: [], source_names: [],
-        resolution_kinds: [], frozen: false)
+        resolution_kinds: [], frozen: false,
+        lookup_bucket_heads: [], lookup_next_indices: [], lookup_hashes: [])
+
+fn module_surface_export_origin_bucket(hash: i64, bucket_count: i64) -> i64:
+    val remainder = hash % bucket_count
+    if remainder < 0:
+        return -remainder
+    remainder
+
+fn module_surface_export_origin_rebuild_lookup(
+    origin_index: ModuleSurfaceExportOriginIndex, bucket_count: i64
+) -> Result<(), text>:
+    if bucket_count <= 0:
+        return Err("module surface export-origin bucket count is invalid")
+    var bucket_heads: [i64] = []
+    var bucket_index: i64 = 0
+    while bucket_index < bucket_count:
+        bucket_heads = bucket_heads.push(-1)
+        bucket_index = bucket_index + 1
+    var next_indices: [i64] = []
+    var hashes: [i64] = []
+    var row: i64 = 0
+    while row < origin_index.names.len():
+        val hash = rt_hash_text(origin_index.names[row])
+        val bucket = module_surface_export_origin_bucket(hash, bucket_count)
+        hashes = hashes.push(hash)
+        next_indices = next_indices.push(bucket_heads[bucket])
+        bucket_heads[bucket] = row
+        row = row + 1
+    origin_index.lookup_bucket_heads = bucket_heads
+    origin_index.lookup_next_indices = next_indices
+    origin_index.lookup_hashes = hashes
+    Ok(())
 
 pub(package) fn module_surface_export_origin_index_put(
     origin_index: ModuleSurfaceExportOriginIndex,
@@ -292,7 +317,9 @@ pub(package) fn module_surface_export_origin_index_put(
         return Err("module surface export origin index is frozen")
     if origin_index.names.len() != origin_index.owner_modules.len() or
        origin_index.names.len() != origin_index.source_names.len() or
-       origin_index.names.len() != origin_index.resolution_kinds.len():
+       origin_index.names.len() != origin_index.resolution_kinds.len() or
+       origin_index.lookup_next_indices.len() != origin_index.names.len() or
+       origin_index.lookup_hashes.len() != origin_index.names.len():
         return Err("module surface export-origin index arrays are misaligned")
     origin_index.origins[name] = ModuleSurfaceExportOrigin(
         owner_module: owner_module,
@@ -312,35 +339,22 @@ pub(package) fn module_surface_export_origin_index_put(
     origin_index.owner_modules = origin_index.owner_modules.push(owner_module)
     origin_index.source_names = origin_index.source_names.push(source_name)
     origin_index.resolution_kinds = origin_index.resolution_kinds.push(resolution_kind)
+    val required_count = origin_index.names.len()
+    if origin_index.lookup_bucket_heads.len() == 0 or
+       required_count * 4 > origin_index.lookup_bucket_heads.len() * 3:
+        val bucket_count = if origin_index.lookup_bucket_heads.len() == 0:
+            16
+        else:
+            origin_index.lookup_bucket_heads.len() * 2
+        return module_surface_export_origin_rebuild_lookup(origin_index, bucket_count)
+    val hash = rt_hash_text(name)
+    val bucket = module_surface_export_origin_bucket(
+        hash, origin_index.lookup_bucket_heads.len())
+    origin_index.lookup_hashes = origin_index.lookup_hashes.push(hash)
+    origin_index.lookup_next_indices = origin_index.lookup_next_indices.push(
+        origin_index.lookup_bucket_heads[bucket])
+    origin_index.lookup_bucket_heads[bucket] = index
     Ok(())
-
-pub(package) fn module_surface_export_origin_index_position(
-    origin_index: ModuleSurfaceExportOriginIndex,
-    name: text
-) -> i64:
-    val entry_count = origin_index.names.len()
-    if entry_count != origin_index.owner_modules.len() or
-       entry_count != origin_index.source_names.len() or
-       entry_count != origin_index.resolution_kinds.len():
-        return -1
-    var position: i64 = -1
-    # The Dict is a construction-time accelerator. Transient teardown can
-    # invalidate only that carrier while retaining the promoted scalar arrays.
-    if origin_index.index_by_name.len() >= 0:
-        if not origin_index.index_by_name.contains_key(name):
-            return -1
-        position = origin_index.index_by_name[name]
-    else:
-        var scan = 0
-        while scan < entry_count:
-            if origin_index.names[scan] == name:
-                position = scan
-                break
-            scan = scan + 1
-    if position < 0 or position >= entry_count or
-       origin_index.names[position] != name:
-        return -1
-    position
 
 pub(package) fn module_surface_export_origin_index_lookup(origin_index: ModuleSurfaceExportOriginIndex, name: text) -> ModuleSurfaceExportOriginLookup:
     val position = module_surface_export_origin_index_position(origin_index, name)
@@ -396,20 +410,34 @@ class ModuleSurface:
     # expansion reuses these projections instead of allocating Dict.keys()
     # arrays for every root in the no-GC bootstrap.
     composite_names: [text]
-    composite_index: ModuleSurfaceCompositeIndex
     enum_names: [text]
     trait_names: [text]
     callable_names: [text]
+    # Unified frozen callable signatures. Free functions, concrete impl
+    # methods, and trait methods share one scalar projection so Stage 3 never
+    # reopens retained callable/Type aggregates.
+    signature_names: [text]
+    signature_owner_kinds: [text]
+    signature_owner_names: [text]
+    signature_type_param_counts: [i64]
+    signature_has_return_types: [bool]
+    signature_is_static: [bool]
+    signature_param_offsets: [i64]
+    signature_param_counts: [i64]
+    signature_return_shapes: [text]
+    signature_return_type_names: [text]
+    signature_dependency_offsets: [i64]
+    signature_dependency_counts: [i64]
+    signature_param_names: [text]
+    signature_param_has_types: [bool]
+    signature_param_shapes: [text]
+    signature_param_type_names: [text]
+    signature_dependency_names: [text]
+    impl_owner_names: [text]
+    impl_has_traits: [bool]
+    impl_trait_names: [text]
     type_alias_names: [text]
     constant_names: [text]
-    # Retained declaration payloads. Names and values are index-aligned so no
-    # Dict<text, aggregate> crosses the native Stage-3 lifetime boundary.
-    callable_values: [ModuleSurfaceCallable]
-    composite_values: [ModuleSurfaceComposite]
-    enum_values: [ModuleSurfaceEnum]
-    trait_values: [ModuleSurfaceTrait]
-    type_alias_values: [ModuleSurfaceTypeAlias]
-    constant_values: [ModuleSurfaceConst]
     callables: Dict<text, ModuleSurfaceCallable>
     composites: Dict<text, ModuleSurfaceComposite>
     enums: Dict<text, ModuleSurfaceEnum>
@@ -445,8 +473,7 @@ class ModuleSurface:
             export_route_sources: [], export_route_locals: [],
             export_route_target_indices: [], export_route_target_names: [],
             export_route_is_glob: [],
-            composite_names: [], composite_index: ModuleSurfaceCompositeIndex.empty(),
-            enum_names: [], trait_names: [],
+            composite_names: [], enum_names: [], trait_names: [],
             callable_names: [], type_alias_names: [], constant_names: [],
             callable_values: [], composite_values: [], enum_values: [],
             trait_values: [], type_alias_values: [], constant_values: [],
@@ -472,7 +499,7 @@ class ModuleSurfacesByName:
     generation: i64
     frozen: bool
 
-struct ModuleSurfaceBuilder:
+class ModuleSurfaceBuilder:
     surfaces: [ModuleSurface]
     index_by_name: Dict<text, i64>
     index_by_path: Dict<text, i64>

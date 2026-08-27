@@ -1,0 +1,300 @@
+# AopWeaveArtifact — durable per-target AOP weave artifact + AopWeaveKey.
+#
+# Semantic Incremental Build v2 blocker #1: mir_aop_injection replaces the
+# MirFunction inline, so nothing durable existed per weave target — no value to
+# cache, key, or invalidate. This module produces that value WITHOUT changing
+# the caller-facing weave path: `weave_with_artifact` applies the exact same
+# `apply_weaving_result` the driver uses and wraps target + selection + woven
+# MIR + fingerprints into an `AopWeaveArtifact`.
+#
+# Identity rules (frozen):
+# - `BlockId` is a transient integer handle (LOCAL_STATE) and is NEVER encoded
+#   into any fingerprint or key. Every block reference is routed through C5's
+#   `BlockKey` digest (compute_block_keys), which is pure CFG structure.
+# - Advice IMPLEMENTATION is NOT part of the key: the only weave mode
+#   implemented is symbolic call insertion (`make_advice_call_inst`), so only
+#   the advice function NAME participates. If an inlining/around-expansion
+#   mode is ever added, its body digest must join the key at that point.
+# - Fail-closed: when block identity is ambiguous (C5 `ambiguous` flag) or a
+#   fingerprint cannot be computed, the artifact carries `conservative: true`
+#   and the fingerprint is the "" empty sentinel (C0 rule) — consumers must
+#   treat that as a cache MISS for the whole target. A false miss recompiles;
+#   a false hit miscompiles.
+# - AopWeaveKey components with no in-tree producer stay on the "" sentinel
+#   (currently: backend_policy). Nothing is fabricated.
+
+use compiler.mir.mir_instructions.{
+    MirFunction, MirBlock, MirInst, MirTerminator, BlockId, LocalId,
+    MirOperand, mir_operand_const_int
+}
+use compiler.mir.mir_serialization.{serialize_mir_inst, serialize_mir_operand}
+use compiler.mir.incremental.block_key.{
+    BlockKeyMap, compute_block_keys, block_key_digest_for, incr_fnv1a64
+}
+use compiler.frontend.core.aop.{WeavingResult, AdviceCallInfo, JoinPointKind}
+use compiler.mir.mir_aop_injection.{apply_weaving_result}
+
+fn aop_weave_mode() -> text:
+    "symbolic_call"
+
+fn aop_weaver_schema() -> text:
+    "aop-weave-v1"
+
+# ============================================================================
+# Pre-weave MIR fingerprint (deliverable 1)
+# ============================================================================
+
+fn _terminator_encode(map: BlockKeyMap, t: MirTerminator) -> text:
+    """Encode a terminator with every BlockId replaced by its BlockKey digest.
+
+    Digest lookups of reachable targets always succeed; an unmapped target
+    means the map was already flagged ambiguous and the fingerprint is
+    discarded by the caller anyway."""
+    match t:
+        case Goto(target):
+            "G>{block_key_digest_for(map, target.id)}"
+        case Ret(value):
+            if value == nil:
+                "R-"
+            else:
+                val v = value ?? mir_operand_const_int(0)
+                "R{serialize_mir_operand(v)}"
+        case If(cond, then_, else_):
+            "I{serialize_mir_operand(cond)}>{block_key_digest_for(map, then_.id)}:{block_key_digest_for(map, else_.id)}"
+        case Switch(value, targets, default):
+            var acc = "S{serialize_mir_operand(value)}"
+            for c in targets:
+                acc = "{acc}|c{c.value}>{block_key_digest_for(map, c.target.id)}"
+            "{acc}|d>{block_key_digest_for(map, default.id)}"
+        case Unreachable:
+            "U"
+        case Abort(message):
+            "A{message.len()}:{message}"
+        case CallTerminator(dest, func, args, normal, unwind):
+            # LocalId is function-local; it already appears throughout the
+            # instruction JSON, so encoding it here adds no new id class.
+            var dtxt = "-"
+            if dest != nil:
+                val d = dest ?? LocalId(id: -1)
+                dtxt = "{d.id}"
+            var acc = "C{dtxt}={serialize_mir_operand(func)}("
+            for a in args:
+                acc = "{acc}{serialize_mir_operand(a)},"
+            acc = "{acc})>{block_key_digest_for(map, normal.id)}"
+            if unwind != nil:
+                val u = unwind ?? BlockId.entry()
+                acc = "{acc}u>{block_key_digest_for(map, u.id)}"
+            acc
+
+fn _find_block(blocks: [MirBlock], id: i64) -> i64:
+    var i = 0
+    while i < blocks.len():
+        if blocks[i].id.id == id:
+            return i
+        i = i + 1
+    -1
+
+fn preweave_blocks_fingerprint(fn_name: text, blocks: [MirBlock], entry: BlockId) -> text:
+    """Stable fingerprint of a function's MIR, BlockId-free.
+
+    Reachable blocks are visited in C5 canonical-DFS order; each contributes
+    its BlockKey digest, full instruction JSON, and an id-free terminator
+    encoding. Returns the "" sentinel (conservative: whole-target miss) when
+    block identity is ambiguous. Unreachable blocks do not participate — they
+    have no execution semantics and no stable identity."""
+    val map = compute_block_keys(fn_name, blocks, entry)
+    if map.ambiguous:
+        return ""
+    var acc = "fn{fn_name.len()}:{fn_name}"
+    var i = 0
+    while i < map.block_ids.len():
+        val bid = map.block_ids[i]
+        val bidx = _find_block(blocks, bid)
+        if bidx < 0:
+            return ""
+        val blk = blocks[bidx]
+        acc = "{acc}|B{block_key_digest_for(map, bid)}#"
+        for inst in blk.instructions:
+            acc = "{acc}{serialize_mir_inst(inst)}"
+        acc = "{acc}T{_terminator_encode(map, blk.terminator)}"
+        i = i + 1
+    incr_fnv1a64(acc)
+
+fn preweave_mir_fingerprint(func: MirFunction) -> text:
+    preweave_blocks_fingerprint(func.name, func.blocks, func.entry_block)
+
+# ============================================================================
+# Selection / join-point digests
+# ============================================================================
+
+fn join_point_kind_name(k: JoinPointKind) -> text:
+    # encode by NAME, never ordinal
+    match k:
+        case Execution: "execution"
+        case FunctionCall: "call"
+        case VariableAssignment: "assign"
+        case Decision: "decision"
+        case Condition: "condition"
+        case Error: "error"
+
+fn _advice_site(map: BlockKeyMap, info: AdviceCallInfo) -> text:
+    """Site of one advice insertion, BlockId-free.
+
+    Instruction-anchored join points carry the BlockKey digest of the anchor
+    block plus the instruction index (an intra-block semantic position);
+    role-anchored join points carry only the role."""
+    match info.join_point_kind:
+        case FunctionCall:
+            "b{block_key_digest_for(map, info.block_id)}@{info.instruction_index}"
+        case VariableAssignment:
+            "b{block_key_digest_for(map, info.block_id)}@{info.instruction_index}"
+        case _:
+            "role"
+
+fn selection_digest_for(map: BlockKeyMap, result: WeavingResult) -> text:
+    """Digest of the ordered advice selection: (advice NAME, join point, site).
+
+    Symbolic-call weave mode: the advice body is deliberately excluded."""
+    var acc = "sel"
+    for info in result.advice_calls:
+        val a = info.advice_function
+        acc = "{acc}|{join_point_kind_name(info.join_point_kind)}:a{a.len()}:{a}:{_advice_site(map, info)}"
+    incr_fnv1a64(acc)
+
+fn _aop_kind_tag(inst: MirInst) -> text:
+    match inst.kind:
+        case Call(_, _, _): "c"
+        case CallIndirect(_, _, _, _): "c"
+        case Intrinsic(_, _, _): "i"
+        case Store(_, _): "a"
+        case SetField(_, _, _): "a"
+        case BinOp(_, _, _, _): "b"
+        case _: "o"
+
+fn join_point_descriptor_for(map: BlockKeyMap, blocks: [MirBlock]) -> text:
+    """Digest of the target's join-point surface: per canonical block, the
+    coarse AOP instruction-kind sequence (what the matcher sees), id-free."""
+    var acc = "jp"
+    var i = 0
+    while i < map.block_ids.len():
+        val bidx = _find_block(blocks, map.block_ids[i])
+        if bidx < 0:
+            return ""
+        acc = "{acc}|B{block_key_digest_for(map, map.block_ids[i])}:"
+        for inst in blocks[bidx].instructions:
+            acc = "{acc}{_aop_kind_tag(inst)},"
+        i = i + 1
+    incr_fnv1a64(acc)
+
+# ============================================================================
+# Weave artifact (deliverable 2)
+# ============================================================================
+
+struct AopWeaveArtifact:
+    """Durable per-target weave product: target identity + selection + woven
+    MIR as a value. The caller-facing in-place path is untouched; this is the
+    cacheable record of what weaving did to ONE target."""
+    target_function: text
+    target_symbol_id: i64
+    preweave_fingerprint: text     # "" sentinel => conservative (no cache hit)
+    join_point_descriptor: text    # "" sentinel when identity ambiguous
+    selection_digest: text
+    weave_plan_digest: text        # digest of (selection, weave mode, schema)
+    advice_functions: [text]       # symbolic callees, application order
+    woven: MirFunction             # resulting woven MIR, durable value
+    postweave_fingerprint: text    # "" sentinel when post-weave identity ambiguous
+    conservative: bool             # true => per-target invalidation forbidden
+
+fn weave_with_artifact(func: MirFunction, result: WeavingResult) -> AopWeaveArtifact:
+    """Apply the standard weave and capture it as a durable artifact.
+
+    Uses the SAME apply_weaving_result as the driver's in-place path, so the
+    woven MIR is identical by construction (and proven by the differential
+    spec, not asserted). If a future weave mode changes exception edges or
+    control flow, the post-weave fingerprint recomputation is the tripwire:
+    any post-weave identity ambiguity forces `conservative`."""
+    val pre_map = compute_block_keys(func.name, func.blocks, func.entry_block)
+    val pre_fp = preweave_mir_fingerprint(func)
+    var jp_desc = ""
+    if not pre_map.ambiguous:
+        jp_desc = join_point_descriptor_for(pre_map, func.blocks)
+    val sel = selection_digest_for(pre_map, result)
+    val plan = incr_fnv1a64("plan|{aop_weaver_schema()}|{aop_weave_mode()}|{sel}")
+    var advice_names: [text] = []
+    for info in result.advice_calls:
+        advice_names.push(info.advice_function)
+    val woven = apply_weaving_result(func, result)
+    val post_fp = preweave_blocks_fingerprint(func.name, woven.blocks, woven.entry_block)
+    AopWeaveArtifact(
+        target_function: func.name,
+        target_symbol_id: func.symbol.id,
+        preweave_fingerprint: pre_fp,
+        join_point_descriptor: jp_desc,
+        selection_digest: sel,
+        weave_plan_digest: plan,
+        advice_functions: advice_names,
+        woven: woven,
+        postweave_fingerprint: post_fp,
+        conservative: pre_fp == "" or post_fp == "" or jp_desc == "")
+
+# ============================================================================
+# AopWeaveKey (deliverable 3, design §16.2)
+# ============================================================================
+
+struct AopWeaveKey:
+    target_preweave_mir: text            # REAL: preweave fingerprint
+    target_join_point_descriptor: text   # REAL: join-point surface digest
+    selection_digest: text               # REAL: ordered advice selection
+    weave_mode: text                     # REAL: "symbolic_call"
+    weaver_schema: text                  # REAL: "aop-weave-v1"
+    backend_policy: text                 # SENTINEL "": no in-tree producer yet
+
+fn compute_aop_weave_key(artifact: AopWeaveArtifact) -> AopWeaveKey:
+    AopWeaveKey(
+        target_preweave_mir: artifact.preweave_fingerprint,
+        target_join_point_descriptor: artifact.join_point_descriptor,
+        selection_digest: artifact.selection_digest,
+        weave_mode: aop_weave_mode(),
+        weaver_schema: aop_weaver_schema(),
+        backend_policy: "")
+
+fn aop_weave_key_usable(k: AopWeaveKey) -> bool:
+    """A key with any ""-sentinel REQUIRED component must never hit.
+    backend_policy is exempt: it is a declared sentinel until produced."""
+    (k.target_preweave_mir != "" and
+     k.target_join_point_descriptor != "" and
+     k.selection_digest != "")
+
+fn aop_weave_key_digest(k: AopWeaveKey) -> text:
+    """Canonical length-prefixed encoding in frozen field order."""
+    val m = k.target_preweave_mir
+    val j = k.target_join_point_descriptor
+    val s = k.selection_digest
+    val w = k.weave_mode
+    val v = k.weaver_schema
+    val b = k.backend_policy
+    incr_fnv1a64("M{m.len()}:{m}|J{j.len()}:{j}|S{s.len()}:{s}|W{w.len()}:{w}|V{v.len()}:{v}|B{b.len()}:{b}")
+
+# ============================================================================
+# Post-weave block identity (deliverable 4, design §17.6)
+# ============================================================================
+
+fn postweave_block_identity(preweave_block_key_digest: text, weave_plan_digest: text, advice_slot: i64, synthesized_role: text) -> text:
+    """Identity of a block AFTER weaving, derived from the pre-weave BlockKey
+    digest + the weave plan + the advice slot + the synthesized role.
+
+    Current symbolic-call weaving only edits instruction lists inside existing
+    blocks (no block synthesis): carried blocks use advice_slot = -1 and
+    synthesized_role = "carried". A future around-expansion that synthesizes
+    blocks must mint identities through this function, never fresh BlockIds."""
+    incr_fnv1a64("PW|{preweave_block_key_digest}|{weave_plan_digest}|S:{advice_slot}|R:{synthesized_role}")
+
+fn carried_block_identity(preweave_block_key_digest: text, weave_plan_digest: text) -> text:
+    postweave_block_identity(preweave_block_key_digest, weave_plan_digest, -1, "carried")
+
+export AopWeaveArtifact, AopWeaveKey
+export preweave_mir_fingerprint, preweave_blocks_fingerprint
+export selection_digest_for, join_point_descriptor_for, join_point_kind_name
+export weave_with_artifact, compute_aop_weave_key, aop_weave_key_digest, aop_weave_key_usable
+export postweave_block_identity, carried_block_identity
+export aop_weave_mode, aop_weaver_schema

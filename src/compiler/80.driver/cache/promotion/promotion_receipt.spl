@@ -1,46 +1,44 @@
-# PromotionReceipt — signed provenance evidence for the trusted remote-main
-# action namespace.
+# PromotionReceipt — schema `promotion_receipt` (simple/promotion-receipt/v2).
 #
-# Design: doc/05_design/compiler/semantic_incremental_build_cache_aop_formal_2026-08-09.md
-# §14.5 (PromotionReceipt fields), §15 (remote-main admission and promotion).
-# Schema: doc/03_plan/compiler/cache/c0_schema_freeze_2026-08-09.md — PROVENANCE
-# class fields (branch_name, source_commit, source_tree, trusted_ref,
-# trusted_ref_tip, builder_id, signature, timestamp, ...) never enter the
-# ActionKey; they live here instead.
+# Schema: src/compiler/80.driver/cache/schema/cache_protocol.sdn
+#   class_all: PROVENANCE
+#   order: [repository_id, source_commit, source_tree, trusted_ref, trusted_ref_tip,
+#           clean_tree_digest, action_digest, result_manifest_digest, builder_id,
+#           workflow_digest, toolchain_digest, external_parameters_digest,
+#           timestamp, signature]
+#   signed_over: "all fields except signature, in the order above"
 #
-# First-milestone scope: this module only DEFINES the receipt and its
-# canonical encoding/digest. Nothing in this file, or anywhere in this
-# agent's ownership (remote/, promotion/), writes a receipt into a trusted
-# remote namespace. See remote/remote_policy.spl for the write-gate that
-# keeps that path closed.
-#
-# Encoding reuses action_key.spl's canonical primitives (canon_str, canon_nat,
-# canon_field, canon_seq) — no second hash scheme, per contract.
+# HARD RULE: every field here is PROVENANCE. `action_digest` is *referenced*, not
+# recomputed from these fields — the receipt says "this trusted builder produced
+# this mapping", it never participates in computing the key.
 
-use std.common.crypto.sha256.{sha256_text}
 use compiler.driver.cache.action_key.{canon_str, canon_nat, canon_field, canon_seq}
+use compiler.driver.cache.promotion.git_provenance.{GitProvenanceFacts, git_fetch_evidence_digest}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.crypto.hmac.{hmac_sha256}
 
-# Exactly the PromotionReceipt fields from design §14.5. Field order here is
-# the canonical encoding order — do not reorder without a schema bump.
 struct PromotionReceipt:
-    repository_id: text            # Digest of authenticated repository identity
-    source_commit: text            # GitCommitId — exact immutable source commit
-    source_tree: text              # GitTreeId — exact source tree
-    trusted_ref: text              # e.g. "refs/remotes/origin/main"
-    trusted_ref_tip: text          # GitCommitId the trusted_ref pointed to at check time
-    clean_tree_digest: text        # Digest proving a clean (non-dirty) worktree
-    action_digest: text            # ActionDigest this receipt attests
-    result_manifest_digest: text   # ResultManifest this receipt attests
-    builder_id: text                # Trusted CI builder identity
-    workflow_digest: text          # Digest of the protected workflow definition
-    toolchain_digest: text         # Digest of the toolchain used to produce the result
-    external_parameters_digest: text  # Digest of hermetic/declared action inputs
-    timestamp: i64                 # Unix seconds
-    signature: text                # Signature over the canonical encoding below
+    repository_id: text
+    source_commit: text
+    source_tree: text
+    trusted_ref: text
+    trusted_ref_tip: text
+    clean_tree_digest: text
+    action_digest: text
+    result_manifest_digest: text
+    builder_id: text
+    workflow_digest: text
+    toolchain_digest: text
+    external_parameters_digest: text
+    timestamp: i64
+    signature: text
+    # Freshness evidence — not in the frozen 14-field signed body, but bound into
+    # it via `external_parameters_digest` by `promotion_receipt_from_facts`.
+    fetch_evidence_digest: text
+    fetch_epoch_seconds: i64
 
-# Canonical encoding of every field EXCEPT `signature` itself — the signature
-# is computed over this encoding, so it cannot include itself.
-fn promotion_receipt_encode_unsigned(r: PromotionReceipt) -> text:
+# Canonical encoding of the SIGNED BODY: the 13 fields before `signature`.
+fn promotion_receipt_encode_body(r: PromotionReceipt) -> text:
     var inner: [text] = []
     inner.push(canon_field("repositoryId", canon_str(r.repository_id)))
     inner.push(canon_field("sourceCommit", canon_str(r.source_commit)))
@@ -55,22 +53,114 @@ fn promotion_receipt_encode_unsigned(r: PromotionReceipt) -> text:
     inner.push(canon_field("toolchainDigest", canon_str(r.toolchain_digest)))
     inner.push(canon_field("externalParametersDigest", canon_str(r.external_parameters_digest)))
     inner.push(canon_field("timestamp", canon_nat(r.timestamp)))
-    canon_field("simple/promotion-receipt/v1", canon_seq(inner))
+    canon_field("simple/promotion-receipt/v2", canon_seq(inner))
 
-# Digest of the unsigned encoding — this is what `signature` signs over.
-fn promotion_receipt_signing_digest(r: PromotionReceipt) -> text:
-    sha256_text(promotion_receipt_encode_unsigned(r))
-
-# Full canonical encoding INCLUDING the signature field, for content-addressed
-# storage of the receipt itself (its own digest, distinct from the signing
-# digest above).
+# Full encoding (body + signature), for storage.
 fn promotion_receipt_encode(r: PromotionReceipt) -> text:
-    val unsigned = promotion_receipt_encode_unsigned(r)
-    canon_field("signed", canon_seq([unsigned, canon_field("signature", canon_str(r.signature))]))
+    var outer: [text] = []
+    outer.push(canon_field("body", canon_str(promotion_receipt_encode_body(r))))
+    outer.push(canon_field("signature", canon_str(r.signature)))
+    canon_field("simple/promotion-receipt-signed/v2", canon_seq(outer))
 
 fn promotion_receipt_digest(r: PromotionReceipt) -> text:
     sha256_text(promotion_receipt_encode(r))
 
-export PromotionReceipt
-export promotion_receipt_encode_unsigned, promotion_receipt_signing_digest
-export promotion_receipt_encode, promotion_receipt_digest
+# ----------------------------------------------------------------------------
+# Signing / verification
+# ----------------------------------------------------------------------------
+# HMAC-SHA256 over the canonical body with the builder's attestation key. The key
+# is looked up BY BUILDER ID from the verifier's trusted-builder table, so a
+# receipt naming an unknown builder cannot verify at all.
+
+fn promotion_receipt_sign(r: PromotionReceipt, signing_key: text) -> PromotionReceipt:
+    var signed = r
+    signed.signature = hmac_sha256(signing_key, promotion_receipt_encode_body(r))
+    signed
+
+struct TrustedBuilder:
+    builder_id: text
+    signing_key: text
+    approved_workflow_digests: [text]
+
+fn trusted_builder_key(builders: [TrustedBuilder], builder_id: text) -> text:
+    for b in builders:
+        if b.builder_id == builder_id:
+            return b.signing_key
+    ""
+
+fn trusted_builder_approves_workflow(builders: [TrustedBuilder], builder_id: text, workflow_digest: text) -> bool:
+    for b in builders:
+        if b.builder_id == builder_id:
+            for w in b.approved_workflow_digests:
+                if w == workflow_digest:
+                    return true
+            return false
+    false
+
+struct ReceiptVerification:
+    valid: bool
+    reason: text
+
+fn promotion_receipt_verify(r: PromotionReceipt, builders: [TrustedBuilder]) -> ReceiptVerification:
+    if r.signature == "":
+        return ReceiptVerification(valid: false, reason: "receipt is unsigned")
+    val key = trusted_builder_key(builders, r.builder_id)
+    if key == "":
+        return ReceiptVerification(valid: false, reason: "unknown builder: " + r.builder_id)
+    if not trusted_builder_approves_workflow(builders: builders, builder_id: r.builder_id, workflow_digest: r.workflow_digest):
+        return ReceiptVerification(valid: false, reason: "workflow not approved for builder " + r.builder_id)
+    val expect = hmac_sha256(key, promotion_receipt_encode_body(r))
+    if expect != r.signature:
+        return ReceiptVerification(valid: false, reason: "signature mismatch for builder " + r.builder_id)
+    ReceiptVerification(valid: true, reason: "")
+
+# ----------------------------------------------------------------------------
+# Construction from git facts
+# ----------------------------------------------------------------------------
+# `external_parameters_digest` folds in the fetch-evidence digest, so the
+# signature covers WHICH fetch produced the reachability proof.
+
+fn promotion_receipt_from_facts(facts: GitProvenanceFacts, action_digest: text, result_manifest_digest: text, toolchain_digest: text, external_parameters: text, timestamp: i64) -> PromotionReceipt:
+    val fetch_ev = git_fetch_evidence_digest(facts)
+    val ext = sha256_text("simple/external-parameters/v2|" + external_parameters + "|fetch=" + fetch_ev)
+    PromotionReceipt(
+        repository_id: facts.repository_id,
+        source_commit: facts.build_commit,
+        source_tree: facts.build_tree,
+        trusted_ref: facts.trusted_ref,
+        trusted_ref_tip: facts.origin_main_tip,
+        clean_tree_digest: facts.clean_tree_digest,
+        action_digest: action_digest,
+        result_manifest_digest: result_manifest_digest,
+        builder_id: facts.builder_id,
+        workflow_digest: facts.workflow_digest,
+        toolchain_digest: toolchain_digest,
+        external_parameters_digest: ext,
+        timestamp: timestamp,
+        signature: "",
+        fetch_evidence_digest: fetch_ev,
+        fetch_epoch_seconds: facts.fetch_epoch_seconds
+    )
+
+# A receipt must describe the SAME facts the gate is evaluating; otherwise a
+# valid signature over some other build would admit this one.
+fn promotion_receipt_matches_facts(r: PromotionReceipt, facts: GitProvenanceFacts) -> ReceiptVerification:
+    if r.repository_id != facts.repository_id:
+        return ReceiptVerification(valid: false, reason: "receipt repository_id does not match fetched repository")
+    if r.source_commit != facts.build_commit:
+        return ReceiptVerification(valid: false, reason: "receipt source_commit does not match the built commit")
+    if r.source_tree != facts.build_tree:
+        return ReceiptVerification(valid: false, reason: "receipt source_tree does not match the built tree")
+    if r.trusted_ref != facts.trusted_ref:
+        return ReceiptVerification(valid: false, reason: "receipt trusted_ref does not match")
+    if r.trusted_ref_tip != facts.origin_main_tip:
+        return ReceiptVerification(valid: false, reason: "receipt trusted_ref_tip does not match the freshly fetched tip")
+    if r.clean_tree_digest != facts.clean_tree_digest:
+        return ReceiptVerification(valid: false, reason: "receipt clean_tree_digest does not match")
+    if r.builder_id != facts.builder_id:
+        return ReceiptVerification(valid: false, reason: "receipt builder_id does not match the attested builder")
+    if r.workflow_digest != facts.workflow_digest:
+        return ReceiptVerification(valid: false, reason: "receipt workflow_digest does not match the attested workflow")
+    if r.fetch_evidence_digest != git_fetch_evidence_digest(facts):
+        return ReceiptVerification(valid: false, reason: "receipt fetch evidence does not match this fetch")
+    ReceiptVerification(valid: true, reason: "")

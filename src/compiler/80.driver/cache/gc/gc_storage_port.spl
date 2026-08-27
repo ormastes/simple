@@ -1,0 +1,147 @@
+# GC storage port — the only file here that touches the filesystem (design §18.7)
+#
+# Agent C3. Crash safety, in the order the design fixes:
+#   write temp -> hash while writing -> verify -> flush -> atomic rename ->
+#   publish blobs -> publish action mapping (LAST, only once the closure exists)
+# and for deletion:
+#   rename into trash/ -> grace period -> delete
+#
+# LOOKUP IGNORES trash/ AND quarantine/. That is a path invariant, not a policy:
+# `gc_lookup_visible` is false for anything under those two prefixes, so a
+# swept-but-not-yet-deleted object can never be served. Combined with
+# rename-before-delete, this is what makes a concurrent GC produce at worst a
+# MISS.
+#
+# STORAGE INTERFACE ASSUMED FROM C1 (see gc_index.spl header): C3 mirrors
+# cas_store.spl's on-disk layout constants only. It does not call cas_put/cas_get
+# and does not redefine the CAS; blob writes remain C1's.
+
+use compiler.driver.cache.metadata.gc_config.{GcRetention}
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_file_move(old_path: text, new_path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_dir_walk(path: text) -> [text]
+extern fn rt_getpid() -> i64
+extern fn rt_time_now_unix_micros() -> i64
+
+val GC_TRASH_DIR: text = "trash"
+val GC_QUARANTINE_DIR: text = "quarantine"
+val GC_TMP_DIR: text = "tmp"
+val GC_TRASH_GRACE_SECONDS: i64 = 300
+
+fn gc_trash_root(root: text) -> text:
+    "{root}/{GC_TRASH_DIR}"
+
+fn gc_quarantine_root(root: text) -> text:
+    "{root}/{GC_QUARANTINE_DIR}"
+
+fn gc_tmp_root(root: text) -> text:
+    "{root}/{GC_TMP_DIR}"
+
+fn gc_storage_open(root: text) -> bool:
+    rt_dir_create_all(gc_trash_root(root))
+    rt_dir_create_all(gc_quarantine_root(root))
+    rt_dir_create_all(gc_tmp_root(root))
+    true
+
+# A lookup may serve a path only when it lives under neither trash/ nor
+# quarantine/. Checked on the PATH, so a rename is instantly effective.
+fn gc_lookup_visible(root: text, path: text) -> bool:
+    if path.starts_with("{gc_trash_root(root)}/"):
+        return false
+    if path.starts_with("{gc_quarantine_root(root)}/"):
+        return false
+    true
+
+fn gc_unique_stamp() -> text:
+    "{rt_getpid()}-{rt_time_now_unix_micros()}"
+
+# Step 6 of fast GC / step 5 of mark-sweep: ATOMIC rename into trash/. Never an
+# unlink. If the rename fails the object stays exactly where it was and stays
+# servable — failing to collect is always the safe direction.
+fn gc_move_to_trash(root: text, path: text) -> bool:
+    if not rt_file_exists(path):
+        return false
+    rt_dir_create_all(gc_trash_root(root))
+    val dest = "{gc_trash_root(root)}/{gc_unique_stamp()}"
+    rt_file_move(path, dest)
+
+fn gc_move_all_to_trash(root: text, paths: [text]) -> i64:
+    var moved: i64 = 0
+    for p in paths:
+        if gc_move_to_trash(root, p):
+            moved = moved + 1
+    moved
+
+# Step 7/8: asynchronous delete, after the grace period. `entries` are (path,
+# moved_at) pairs supplied by the caller's trash journal.
+struct GcTrashEntry:
+    path: text
+    moved_at: i64
+
+fn gc_trash_deletable(entries: [GcTrashEntry], now: i64) -> [text]:
+    var out: [text] = []
+    for e in entries:
+        if now - e.moved_at >= GC_TRASH_GRACE_SECONDS:
+            out = out.push(e.path)
+    out
+
+fn gc_delete_trash(entries: [GcTrashEntry], now: i64) -> i64:
+    var deleted: i64 = 0
+    for p in gc_trash_deletable(entries, now):
+        if rt_file_delete(p):
+            deleted = deleted + 1
+    deleted
+
+# ---------------------------------------------------------------------------
+# Startup recovery (design §18.7 last bullets)
+# ---------------------------------------------------------------------------
+
+struct GcStartupReport:
+    schema_ok: bool
+    abandoned_temp_removed: i64
+    trash_resumed: i64
+    quarantine_retained: i64
+
+# Verify the schema stamp. A mismatch is NOT repaired in place: the caller must
+# treat the whole store as untrusted (C1's cas_open already moves it aside).
+fn gc_schema_ok(root: text, expected_version_text: text) -> bool:
+    val vpath = "{root}/VERSION"
+    if not rt_file_exists(vpath):
+        return false
+    val stored = rt_file_read_text(vpath) ?? ""
+    stored.trim() == expected_version_text
+
+# Abandoned temp files are ones older than the tmp retention window. A temp file
+# is never published, so deleting it can never cost a hit.
+fn gc_clean_abandoned_temp(root: text, ages_seconds: [i64], retention: GcRetention) -> i64:
+    val entries = rt_dir_walk(gc_tmp_root(root))
+    var removed: i64 = 0
+    var i: i64 = 0
+    while i < entries.len():
+        var age: i64 = 0
+        if i < ages_seconds.len():
+            age = ages_seconds[i]
+        if age >= retention.tmp_seconds:
+            if rt_file_delete(entries[i]):
+                removed = removed + 1
+        i = i + 1
+    removed
+
+# Resume an interrupted GC: everything already in trash/ stays invisible to
+# lookup and is deleted on the normal grace schedule.
+fn gc_resume_trash(root: text) -> i64:
+    rt_dir_walk(gc_trash_root(root)).len()
+
+fn gc_startup(root: text, expected_version_text: text, tmp_ages_seconds: [i64],
+              retention: GcRetention) -> GcStartupReport:
+    gc_storage_open(root)
+    val ok = gc_schema_ok(root, expected_version_text)
+    val removed = gc_clean_abandoned_temp(root, tmp_ages_seconds, retention)
+    val resumed = gc_resume_trash(root)
+    val quarantined = rt_dir_walk(gc_quarantine_root(root)).len()
+    GcStartupReport(schema_ok: ok, abandoned_temp_removed: removed,
+                    trash_resumed: resumed, quarantine_retained: quarantined)

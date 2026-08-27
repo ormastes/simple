@@ -1,6 +1,29 @@
 # Dashboard Serve Specification
 
-> Tests covering dashboard run_serve stub replacement, dashboard run_gui stub replacement, dashboard run_agents stub replacement.
+> <details>
+
+<!-- sdn-diagram:id=dashboard_serve_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=dashboard_serve_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+dashboard_serve_spec -> app
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=dashboard_serve_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -17,23 +40,13 @@
 
 #### run_serve does not return unavailable message
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- run_serve does not return unavailable message
-   - Expected: result does not contain `unavailable`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("run_serve does not return unavailable message")
 val result = _run_serve_result([])
 expect(result.contains("unavailable")).to_equal(false)
 ```
@@ -42,19 +55,13 @@ expect(result.contains("unavailable")).to_equal(false)
 
 #### run_serve result indicates delegation or ok
 
-- run_serve result indicates delegation or ok
-   - Expected: result.len() >= 0 is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("run_serve result indicates delegation or ok")
 val result = _run_serve_result([])
 expect(result.len() >= 0).to_equal(true)
 ```
@@ -63,19 +70,13 @@ expect(result.len() >= 0).to_equal(true)
 
 #### run_serve accepts port arg without error
 
-- run_serve accepts port arg without error
-   - Expected: result does not contain `unavailable`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("run_serve accepts port arg without error")
 val result = _run_serve_result(["--port", "8080"])
 expect(result.contains("unavailable")).to_equal(false)
 ```
@@ -86,19 +87,13 @@ expect(result.contains("unavailable")).to_equal(false)
 
 #### run_gui does not return unavailable message
 
-- run_gui does not return unavailable message
-   - Expected: result does not contain `unavailable`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("run_gui does not return unavailable message")
 val result = _run_gui_result([])
 expect(result.contains("unavailable")).to_equal(false)
 ```
@@ -107,19 +102,13 @@ expect(result.contains("unavailable")).to_equal(false)
 
 #### run_gui accepts args without error
 
-- run_gui accepts args without error
-   - Expected: result does not contain `unavailable`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("run_gui accepts args without error")
 val result = _run_gui_result(["--port", "9090"])
 expect(result.contains("unavailable")).to_equal(false)
 ```
@@ -130,19 +119,13 @@ expect(result.contains("unavailable")).to_equal(false)
 
 #### run_agents does not return unavailable message
 
-- run_agents does not return unavailable message
-   - Expected: result does not contain `unavailable`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("run_agents does not return unavailable message")
 val result = _run_agents_result([])
 expect(result.contains("unavailable")).to_equal(false)
 ```
@@ -156,12 +139,12 @@ expect(result.contains("unavailable")).to_equal(false)
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/dashboard/dashboard_serve_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering dashboard run_serve stub replacement, dashboard run_gui stub replacement, dashboard run_agents stub replacement.
+Tests covering:
 - dashboard run_serve stub replacement
 - dashboard run_gui stub replacement
 - dashboard run_agents stub replacement
@@ -178,51 +161,3 @@ Tests covering dashboard run_serve stub replacement, dashboard run_gui stub repl
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-UNIT`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `b4ba14b27b0541f8c319aa6206ea08126e1cd4935ce945cba613c1e00511a514`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `b4ba14b27b0541f8c319aa6206ea08126e1cd4935ce945cba613c1e00511a514`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `b4ba14b27b0541f8c319aa6206ea08126e1cd4935ce945cba613c1e00511a514`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/01_unit/app/dashboard/dashboard_serve_spec.spl
-mirror: doc/06_spec/01_unit/app/dashboard/dashboard_serve_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/app/dashboard/dashboard_serve_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/app/dashboard/dashboard_serve_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/app/dashboard/dashboard_serve_spec.spl:18:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'run_serve does not return unavailable message' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/dashboard/dashboard_serve_spec.spl:24:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'run_serve result indicates delegation or ok' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/dashboard/dashboard_serve_spec.spl:30:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'run_serve accepts port arg without error' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

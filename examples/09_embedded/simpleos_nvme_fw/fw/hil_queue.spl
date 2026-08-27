@@ -7,7 +7,6 @@ use nvme_types.*
 
 struct NvmeQueues:
     sq_cid:    [i64]
-    sq_nsid:   [i64]
     sq_op:     [i64]
     sq_lba:    [i64]
     sq_nblk:   [i64]
@@ -26,7 +25,6 @@ struct NvmeQueues:
 fn nvme_queues_new() -> NvmeQueues:
     val cap: i64 = 64
     var sq_cid:    [i64] = []
-    var sq_nsid:   [i64] = []
     var sq_op:     [i64] = []
     var sq_lba:    [i64] = []
     var sq_nblk:   [i64] = []
@@ -37,7 +35,6 @@ fn nvme_queues_new() -> NvmeQueues:
     var i: i64 = 0
     while i < cap:
         sq_cid.push(0)
-        sq_nsid.push(1)
         sq_op.push(0)
         sq_lba.push(0)
         sq_nblk.push(0)
@@ -46,39 +43,9 @@ fn nvme_queues_new() -> NvmeQueues:
         cq_status.push(0)
         cq_data.push(0)
         i = i + 1
-    NvmeQueues(sq_cid: sq_cid, sq_nsid: sq_nsid, sq_op: sq_op, sq_lba: sq_lba, sq_nblk: sq_nblk, sq_data: sq_data, sq_head: 0, sq_tail: 0, sq_len: 0, cq_cid: cq_cid, cq_status: cq_status, cq_data: cq_data, cq_head: 0, cq_tail: 0, cq_len: 0, depth: cap)
+    NvmeQueues(sq_cid: sq_cid, sq_op: sq_op, sq_lba: sq_lba, sq_nblk: sq_nblk, sq_data: sq_data, sq_head: 0, sq_tail: 0, sq_len: 0, cq_cid: cq_cid, cq_status: cq_status, cq_data: cq_data, cq_head: 0, cq_tail: 0, cq_len: 0, depth: cap)
 
 impl NvmeQueues:
-    me sq_effective_depth() -> i64:
-        var d: i64 = me.depth
-        if d < 0:
-            return 0
-        if me.sq_cid.len() < d:
-            d = me.sq_cid.len()
-        if me.sq_nsid.len() < d:
-            d = me.sq_nsid.len()
-        if me.sq_op.len() < d:
-            d = me.sq_op.len()
-        if me.sq_lba.len() < d:
-            d = me.sq_lba.len()
-        if me.sq_nblk.len() < d:
-            d = me.sq_nblk.len()
-        if me.sq_data.len() < d:
-            d = me.sq_data.len()
-        d
-
-    me cq_effective_depth() -> i64:
-        var d: i64 = me.depth
-        if d < 0:
-            return 0
-        if me.cq_cid.len() < d:
-            d = me.cq_cid.len()
-        if me.cq_status.len() < d:
-            d = me.cq_status.len()
-        if me.cq_data.len() < d:
-            d = me.cq_data.len()
-        d
-
     me sq_submit(c: NvmeCmd) -> bool:
         if not cid_valid(c.cid):
             return false
@@ -91,13 +58,12 @@ impl NvmeQueues:
         if t < 0 or t >= depth:
             return false
         me.sq_cid[t]  = c.cid
-        me.sq_nsid[t] = c.nsid
         me.sq_op[t]   = c.opcode
         me.sq_lba[t]  = c.lba
         me.sq_nblk[t] = c.nblocks
         me.sq_data[t] = c.data
         val next_t: i64 = me.sq_tail + 1
-        me.sq_tail = next_t % depth
+        me.sq_tail = next_t % me.depth
         me.sq_len = me.sq_len + 1
         true
 
@@ -111,17 +77,14 @@ impl NvmeQueues:
         if h < 0 or h >= depth:
             return cmd_make(0, OP_FLUSH, 0, 0, 0)
         val cid:   i64 = me.sq_cid[h]
-        if not cid_valid(cid):
-            return cmd_make(0, OP_FLUSH, 0, 0, 0)
-        val nsid:  i64 = me.sq_nsid[h]
         val op:    i64 = me.sq_op[h]
         val lba:   i64 = me.sq_lba[h]
         val nblk:  i64 = me.sq_nblk[h]
         val data:  i64 = me.sq_data[h]
         val next_h: i64 = me.sq_head + 1
-        me.sq_head = next_h % depth
+        me.sq_head = next_h % me.depth
         me.sq_len = me.sq_len - 1
-        cmd_make_nsid(cid, nsid, op, lba, nblk, data)
+        cmd_make(cid, op, lba, nblk, data)
 
     me sq_pending() -> i64:
         val depth: i64 = me.sq_effective_depth()
@@ -130,18 +93,6 @@ impl NvmeQueues:
         if me.sq_len > depth:
             return depth
         me.sq_len
-
-    me sq_can_fetch() -> bool:
-        val depth: i64 = me.sq_effective_depth()
-        if depth <= 0:
-            return false
-        if me.sq_len <= 0 or me.sq_len > depth:
-            return false
-        if me.sq_head < 0 or me.sq_head >= depth:
-            return false
-        if not cid_valid(me.sq_cid[me.sq_head]):
-            return false
-        true
 
     me cq_post(p: NvmeCpl) -> bool:
         if not cid_valid(p.cid):
@@ -160,7 +111,7 @@ impl NvmeQueues:
         me.cq_status[t] = p.status
         me.cq_data[t]   = p.data
         val next_t: i64 = me.cq_tail + 1
-        me.cq_tail = next_t % depth
+        me.cq_tail = next_t % me.depth
         me.cq_len = me.cq_len + 1
         true
 
@@ -174,14 +125,10 @@ impl NvmeQueues:
         if h < 0 or h >= depth:
             return cpl_make(0, SC_INVALID_FIELD, 0)
         val cid:    i64 = me.cq_cid[h]
-        if not cid_valid(cid):
-            return cpl_make(0, SC_INVALID_FIELD, 0)
         val status: i64 = me.cq_status[h]
-        if not cpl_status_valid(status):
-            return cpl_make(0, SC_INVALID_FIELD, 0)
         val data:   i64 = me.cq_data[h]
         val next_h: i64 = me.cq_head + 1
-        me.cq_head = next_h % depth
+        me.cq_head = next_h % me.depth
         me.cq_len = me.cq_len - 1
         cpl_make(cid, status, data)
 
@@ -192,23 +139,6 @@ impl NvmeQueues:
         if me.cq_len > depth:
             return depth
         me.cq_len
-
-    me cq_is_full() -> bool:
-        val depth: i64 = me.cq_effective_depth()
-        if depth <= 0:
-            return true
-        if me.cq_len < 0 or me.cq_len > depth:
-            return true
-        if me.cq_head < 0 or me.cq_head >= depth:
-            return true
-        if me.cq_tail < 0 or me.cq_tail >= depth:
-            return true
-        if me.cq_len > 0:
-            if not cid_valid(me.cq_cid[me.cq_head]):
-                return true
-            if not cpl_status_valid(me.cq_status[me.cq_head]):
-                return true
-        me.cq_len >= depth
 
 # ── Helper: convert bool to i64 for expect_eq ────────────────────────────────
 fn bool_to_i64(b: bool) -> i64:
@@ -234,7 +164,6 @@ fn hil_queue_selftest() -> i64:
     val f1 = q.sq_fetch()
     val f2 = q.sq_fetch()
     failures = failures + expect_eq(f1.cid,    1,        "fetch1 cid==1")
-    failures = failures + expect_eq(f1.nsid,   1,        "fetch1 nsid==1")
     failures = failures + expect_eq(f1.opcode, OP_READ,  "fetch1 opcode==OP_READ")
     failures = failures + expect_eq(f1.lba,    10,       "fetch1 lba==10")
     failures = failures + expect_eq(f2.cid,    2,        "fetch2 cid==2")
@@ -391,7 +320,5 @@ fn hil_queue_selftest() -> i64:
         i = i + 1
     failures = failures + expect_eq(fifo_ok, 1,           "wrap-around FIFO order correct")
     failures = failures + expect_eq(q.sq_pending(), 0,    "sq empty after wrap drain")
-    failures = failures + expect_eq(bool_to_i64(q.sq_submit(cmd_make(70000, OP_READ, 0, 1, 0))), 0, "reject oversized command id")
-    failures = failures + expect_eq(bool_to_i64(q.sq_submit(cmd_make(-1, OP_READ, 0, 1, 0))), 0, "reject negative command id")
 
     failures

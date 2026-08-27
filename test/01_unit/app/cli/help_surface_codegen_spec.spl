@@ -1,0 +1,40 @@
+use std.spec
+use app.cli.help_surface_codegen.{
+    cli_surface_codegen_check_v1,
+    cli_surface_codegen_extract_dispatch_v1,
+    cli_surface_codegen_extract_help_v1,
+    cli_surface_codegen_extract_table_v1,
+}
+use std.io_runtime.{file_read}
+
+describe "CLI help surface generated data":
+    it "is current with all three canonical source inputs":
+        val checked = cli_surface_codegen_check_v1()
+        expect(checked.ok).to_equal(true)
+        expect(checked.detail).to_equal("current")
+
+    it "NEGATIVE control: dispatch-only drift is detected by independent extractors":
+        val dispatch_source = "elif str_eq(first, \"provider\"):\n    return 0\n"
+        val help_source = "print \"  simple compile <src>  Compile\"\n"
+        val dispatch = cli_surface_codegen_extract_dispatch_v1(dispatch_source)
+        val help = cli_surface_codegen_extract_help_v1(help_source)
+        expect(dispatch).to_equal(["provider"])
+        expect(help).to_equal(["compile"])
+        expect(dispatch == help).to_equal(false)
+
+    it "NEGATIVE control: table extraction does not fabricate provider":
+        val table = cli_surface_codegen_extract_table_v1(
+            "CommandEntry(\n  name: \"compile\",\n  app_path: \"src/app/compile/main.spl\"\n)\n")
+        expect(table).to_equal(["compile"])
+        expect(table.contains("provider")).to_equal(false)
+
+    it "signs only validated structured registry inputs":
+        val source = file_read("src/app/cli/help_surface_codegen.spl")
+        expect(source).to_contain(
+            "fn _codegen_validate_canonical_inputs_v1")
+        expect(source).to_contain(
+            "val validated = _codegen_validate_canonical_inputs_v1")
+        expect(source).to_contain(
+            "CLI_SURFACE_HELP_SOURCE_V1: text = \"src/app/cli/command_registry.spl\"")
+        expect(source.contains("cli_help_legacy_migration_oracle_v1"))
+            .to_equal(false)

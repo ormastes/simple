@@ -1,0 +1,225 @@
+"""Fail-closed lifecycle shell for one persistent scalar SSR owner thread.
+
+This module names the execution domains before an actual renderer is wired:
+the HTTP parent owns admission/cancellation and the native runtime owns copied
+payload/blob leases plus the bounded command port.  A future renderer thread
+may receive only ``(port_token, control_token)`` i64 values.  It claims a
+runtime-owned command, produces a runtime-owned result blob, and returns a
+scalar receipt; it never receives an HTTP aggregate, callback, dynamic value,
+or host address.
+
+The runtime adapter has not yet proved a trap-safe, persistent renderer
+lifecycle.  Consequently the capability gate below is intentionally hard
+false: ``start`` does not allocate a port or spawn a thread, and all claim,
+complete, cancel, stop, and join calls report the unavailable state.  Keeping
+the lifecycle surface here makes the eventual proof obligation explicit
+without accidentally turning the existing per-request/pool path into a
+production service.
+"""
+
+use std.concurrent.thread.{thread_spawn_with_i64_args_id, thread_join_by_id}
+use std.http_server.ssr_scalar_runtime_adapter.{
+    SsrScalarRuntimePortV1,
+    ssr_scalar_claim_abort,
+    ssr_scalar_claim_complete,
+    ssr_scalar_receipt_release
+}
+use std.http_server.ssr_scalar_service.{
+    SSR_SCALAR_LIFECYCLE_UNAVAILABLE,
+    SSR_SCALAR_LIFECYCLE_STARTING,
+    SSR_SCALAR_LIFECYCLE_RUNNING,
+    SSR_SCALAR_LIFECYCLE_DRAINING,
+    SSR_SCALAR_LIFECYCLE_STOPPED,
+    SSR_SCALAR_REASON_BRIDGE_UNAVAILABLE,
+    SSR_SCALAR_REASON_INVALID_COMMAND,
+    SSR_SCALAR_REASON_NOT_OWNED,
+    SSR_SCALAR_REASON_ALREADY_TERMINAL,
+    SSR_SCALAR_REASON_PROTOCOL_VIOLATION,
+    SsrScalarServiceOwnerV1
+}
+
+val SSR_SCALAR_OWNER_LOOP_PROTOCOL_V1: i64 = 1
+val SSR_SCALAR_OWNER_LOOP_THREAD_ARGS_V1: i64 = 2
+
+val SSR_SCALAR_OWNER_LOOP_EVENT_START: i64 = 1
+val SSR_SCALAR_OWNER_LOOP_EVENT_CLAIM: i64 = 2
+val SSR_SCALAR_OWNER_LOOP_EVENT_COMPLETE: i64 = 3
+val SSR_SCALAR_OWNER_LOOP_EVENT_CANCEL: i64 = 4
+val SSR_SCALAR_OWNER_LOOP_EVENT_STOP: i64 = 5
+val SSR_SCALAR_OWNER_LOOP_EVENT_JOIN: i64 = 6
+
+struct SsrScalarOwnerLoopReceiptV1:
+    """Scalar lifecycle evidence; neither command nor result bytes cross it."""
+    event_code: i64
+    lifecycle_state: i64
+    port_token: i64
+    thread_handle: i64
+    value_token: i64
+    status_code: i64
+    reason_code: i64
+
+fn ssr_scalar_owner_loop_receipt(event_code: i64, lifecycle_state: i64,
+        port_token: i64, thread_handle: i64, value_token: i64,
+        status_code: i64, reason_code: i64) -> SsrScalarOwnerLoopReceiptV1:
+    SsrScalarOwnerLoopReceiptV1(event_code: event_code,
+        lifecycle_state: lifecycle_state, port_token: port_token,
+        thread_handle: thread_handle, value_token: value_token,
+        status_code: status_code, reason_code: reason_code)
+
+fn ssr_scalar_owner_loop_unavailable(event_code: i64,
+        value_token: i64) -> SsrScalarOwnerLoopReceiptV1:
+    ssr_scalar_owner_loop_receipt(event_code,
+        SSR_SCALAR_LIFECYCLE_UNAVAILABLE, 0, 0, value_token, 0,
+        SSR_SCALAR_REASON_BRIDGE_UNAVAILABLE)
+
+fn ssr_scalar_owner_loop_runtime_proven() -> bool:
+    """Future proof gate: trap-safe persistent ownership is not available."""
+    false
+
+fn ssr_scalar_owner_loop_thread_entry(port_token: i64,
+        control_token: i64) -> i64:
+    """Noncapturing scalar-only entry reserved for the proven runtime path.
+
+    It deliberately cannot claim a command today.  Claiming before the
+    registry/renderer ownership proof would strand a payload lease or create
+    an unjoinable render task.
+    """
+    if port_token <= 0 or control_token <= 0:
+        return -1
+    -1
+
+fn ssr_scalar_owner_loop_spawn_proven(port_token: i64,
+        control_token: i64) -> i64:
+    """Canonical thread handoff with precisely two i64 values.
+
+    The hard proof gate prevents this wrapper from being reached in v1.  It
+    exists so a later runtime proof cannot substitute a closure capture,
+    dynamic value, or detached worker for the structured owner thread.
+    """
+    if not ssr_scalar_owner_loop_runtime_proven():
+        return 0
+    if port_token <= 0 or control_token <= 0:
+        return 0
+    thread_spawn_with_i64_args_id(port_token, control_token,
+        \port, control: ssr_scalar_owner_loop_thread_entry(port, control))
+
+class SsrScalarOwnerLoopV1:
+    """Parent-owned lifecycle state for exactly one future renderer thread.
+
+    ``port_token`` and ``thread_handle`` are opaque runtime ids.  They remain
+    zero until runtime proof succeeds.  The ``service`` capability is retained
+    only as local parent metadata; no service aggregate is sent to the thread.
+    """
+    service: SsrScalarServiceOwnerV1
+    port_token: i64
+    thread_handle: i64
+    control_token: i64
+    lifecycle_state: i64
+
+    static fn unavailable(queue_limit: i64) -> SsrScalarOwnerLoopV1:
+        SsrScalarOwnerLoopV1(service: SsrScalarServiceOwnerV1.unavailable(
+            queue_limit), port_token: 0, thread_handle: 0, control_token: 0,
+            lifecycle_state: SSR_SCALAR_LIFECYCLE_UNAVAILABLE)
+
+    fn lifecycle() -> i64:
+        self.lifecycle_state
+
+    fn running() -> bool:
+        self.lifecycle_state == SSR_SCALAR_LIFECYCLE_RUNNING
+
+    fn capability_ready() -> bool:
+        ssr_scalar_owner_loop_runtime_proven()
+            and self.service.capability().bridge_ready
+            and self.port_token > 0 and self.thread_handle > 0
+
+    me start() -> SsrScalarOwnerLoopReceiptV1:
+        if self.lifecycle_state != SSR_SCALAR_LIFECYCLE_UNAVAILABLE
+                and self.lifecycle_state != SSR_SCALAR_LIFECYCLE_STOPPED:
+            return ssr_scalar_owner_loop_receipt(SSR_SCALAR_OWNER_LOOP_EVENT_START,
+                self.lifecycle_state, self.port_token, self.thread_handle, 0,
+                0, SSR_SCALAR_REASON_ALREADY_TERMINAL)
+        # Never create SsrScalarRuntimePortV1 or call the spawn wrapper until
+        # the native adapter can prove registry ownership and structured join.
+        if not ssr_scalar_owner_loop_runtime_proven():
+            return ssr_scalar_owner_loop_unavailable(
+                SSR_SCALAR_OWNER_LOOP_EVENT_START, 0)
+        self.lifecycle_state = SSR_SCALAR_LIFECYCLE_STARTING
+        val runtime_port = SsrScalarRuntimePortV1.create()
+        if runtime_port == nil:
+            self.lifecycle_state = SSR_SCALAR_LIFECYCLE_UNAVAILABLE
+            return ssr_scalar_owner_loop_unavailable(
+                SSR_SCALAR_OWNER_LOOP_EVENT_START, 0)
+        # This branch is unreachable under the hard v1 gate.  Keep only
+        # scalar ids; the runtime port class is never moved into the thread.
+        self.lifecycle_state = SSR_SCALAR_LIFECYCLE_UNAVAILABLE
+        ssr_scalar_owner_loop_unavailable(SSR_SCALAR_OWNER_LOOP_EVENT_START, 0)
+
+    me claim() -> SsrScalarOwnerLoopReceiptV1:
+        if not self.capability_ready():
+            return ssr_scalar_owner_loop_unavailable(
+                SSR_SCALAR_OWNER_LOOP_EVENT_CLAIM, 0)
+        ssr_scalar_owner_loop_receipt(SSR_SCALAR_OWNER_LOOP_EVENT_CLAIM,
+            self.lifecycle_state, self.port_token, self.thread_handle, 0, 0,
+            SSR_SCALAR_REASON_PROTOCOL_VIOLATION)
+
+    me complete(claim_token: i64, status_code: i64,
+            blob_lease_token: i64) -> SsrScalarOwnerLoopReceiptV1:
+        if claim_token <= 0 or status_code <= 0 or blob_lease_token < 0:
+            return ssr_scalar_owner_loop_receipt(
+                SSR_SCALAR_OWNER_LOOP_EVENT_COMPLETE, self.lifecycle_state,
+                self.port_token, self.thread_handle, claim_token, 0,
+                SSR_SCALAR_REASON_INVALID_COMMAND)
+        if not self.capability_ready():
+            return ssr_scalar_owner_loop_unavailable(
+                SSR_SCALAR_OWNER_LOOP_EVENT_COMPLETE, claim_token)
+        # Future proven path calls ssr_scalar_claim_complete(claim_token,
+        # status_code, blob_lease_token).  Completion returns only success;
+        # the HTTP-side port owner alone transfers and releases the receipt
+        # through receipt_take(), so a renderer never owns a response lease.
+        ssr_scalar_owner_loop_receipt(SSR_SCALAR_OWNER_LOOP_EVENT_COMPLETE,
+            self.lifecycle_state, self.port_token, self.thread_handle,
+            claim_token, 0, SSR_SCALAR_REASON_PROTOCOL_VIOLATION)
+
+    me cancel(command_token: i64, status_code: i64) -> SsrScalarOwnerLoopReceiptV1:
+        if command_token <= 0 or status_code <= 0:
+            return ssr_scalar_owner_loop_receipt(
+                SSR_SCALAR_OWNER_LOOP_EVENT_CANCEL, self.lifecycle_state,
+                self.port_token, self.thread_handle, command_token, 0,
+                SSR_SCALAR_REASON_INVALID_COMMAND)
+        if not self.capability_ready():
+            return ssr_scalar_owner_loop_unavailable(
+                SSR_SCALAR_OWNER_LOOP_EVENT_CANCEL, command_token)
+        ssr_scalar_owner_loop_receipt(SSR_SCALAR_OWNER_LOOP_EVENT_CANCEL,
+            self.lifecycle_state, self.port_token, self.thread_handle,
+            command_token, 0, SSR_SCALAR_REASON_PROTOCOL_VIOLATION)
+
+    me stop() -> SsrScalarOwnerLoopReceiptV1:
+        if self.lifecycle_state == SSR_SCALAR_LIFECYCLE_STOPPED:
+            return ssr_scalar_owner_loop_receipt(SSR_SCALAR_OWNER_LOOP_EVENT_STOP,
+                self.lifecycle_state, self.port_token, self.thread_handle, 0,
+                0, SSR_SCALAR_REASON_ALREADY_TERMINAL)
+        if not self.capability_ready():
+            return ssr_scalar_owner_loop_unavailable(
+                SSR_SCALAR_OWNER_LOOP_EVENT_STOP, 0)
+        ssr_scalar_owner_loop_receipt(SSR_SCALAR_OWNER_LOOP_EVENT_STOP,
+            SSR_SCALAR_LIFECYCLE_DRAINING, self.port_token, self.thread_handle,
+            0, 0, SSR_SCALAR_REASON_PROTOCOL_VIOLATION)
+
+    me join() -> SsrScalarOwnerLoopReceiptV1:
+        if not self.capability_ready():
+            return ssr_scalar_owner_loop_unavailable(
+                SSR_SCALAR_OWNER_LOOP_EVENT_JOIN, 0)
+        # Future proven shutdown is ordered: close admission, resolve/cancel
+        # commands, take and release every HTTP-owned receipt, then join this
+        # renderer thread.  Only after join may the parent release the native
+        # port, because release invalidates outstanding claims and receipts.
+        ssr_scalar_owner_loop_receipt(SSR_SCALAR_OWNER_LOOP_EVENT_JOIN,
+            self.lifecycle_state, self.port_token, self.thread_handle, 0, 0,
+            SSR_SCALAR_REASON_PROTOCOL_VIOLATION)
+
+export SSR_SCALAR_OWNER_LOOP_PROTOCOL_V1, SSR_SCALAR_OWNER_LOOP_THREAD_ARGS_V1
+export SSR_SCALAR_OWNER_LOOP_EVENT_START, SSR_SCALAR_OWNER_LOOP_EVENT_CLAIM
+export SSR_SCALAR_OWNER_LOOP_EVENT_COMPLETE, SSR_SCALAR_OWNER_LOOP_EVENT_CANCEL
+export SSR_SCALAR_OWNER_LOOP_EVENT_STOP, SSR_SCALAR_OWNER_LOOP_EVENT_JOIN
+export SsrScalarOwnerLoopReceiptV1, SsrScalarOwnerLoopV1
+export ssr_scalar_owner_loop_runtime_proven

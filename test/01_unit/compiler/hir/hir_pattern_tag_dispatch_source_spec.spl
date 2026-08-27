@@ -1,0 +1,55 @@
+"""
+# HIR retained-pattern scalar dispatch contract
+
+Pattern lowering must classify retained HIR enum values through stable scalar
+tags and decode payloads explicitly. Dummy payload construction and native
+aggregate-pattern dispatch can retain or overwrite parser/HIR aggregate state.
+"""
+
+extern fn rt_file_read_text(path: text) -> text
+
+fn read_pattern_source(path: text) -> text:
+    rt_file_read_text(path) ?? ""
+
+describe "HIR retained-pattern scalar dispatch":
+    it "owns stable typed tags in one HIR module":
+        val tags = read_pattern_source("src/compiler/20.hir/hir_pattern_tags.spl")
+        expect(tags).to_contain("const HIR_PATTERN_WILDCARD_TAG: i64 = 3721716106")
+        expect(tags).to_contain("const HIR_PATTERN_ENUM_TAG: i64 = 1346025362")
+        expect(tags).to_contain("fn hir_pattern_kind_tag(kind: HirPatternKind) -> i64:")
+        expect(tags).to_contain("export hir_pattern_kind_tag")
+
+    it "decodes recursive destructure payloads without matching pat.kind":
+        val source = read_pattern_source(
+            "src/compiler/20.hir/hir_lowering/_Expressions/match_desugaring.spl")
+        val helper_start = source.index_of("me hir_destructure_pattern_prelude_tagged(")
+        val helper_end = source.index_of("me literal_test_condition(")
+        val helper = source[helper_start:helper_end]
+        expect(helper.contains("match pat.kind")).to_equal(false)
+        expect(helper).to_contain("kind: HirPatternKind, pat_tag: i64")
+        expect(helper).to_contain("val raw_payload = rt_enum_payload(kind)")
+        expect(helper.contains("pat: HirPattern")).to_equal(false)
+        expect(helper).to_contain("val sym: SymbolId = rt_tuple_get(raw_payload, 0)")
+        expect(helper).to_contain("val elements: [HirPattern] = raw_payload")
+        expect(helper).to_contain("val fields: [(text, HirPattern)] = rt_tuple_get(raw_payload, 1)")
+        expect(helper).to_contain("val payload: HirPatternPayload? = rt_tuple_get(raw_payload, 2)")
+        expect(helper).to_contain("hir_pattern_kind_tag(elements[i].kind)")
+        expect(helper.contains("val child =")).to_equal(false)
+        expect(helper.contains("val fpat:")).to_equal(false)
+
+    it "keeps enum payload recursion on the kind-only helper":
+        val source = read_pattern_source(
+            "src/compiler/20.hir/hir_lowering/_Expressions/match_desugaring.spl")
+        val prelude_start = source.index_of("me enum_payload_prelude(")
+        val prelude_end = source.index_of("me enum_payload_conditions(")
+        val prelude = source[prelude_start:prelude_end]
+        expect(prelude.contains("self.destructure_pattern_prelude(")).to_equal(false)
+        expect(prelude).to_contain("fslot, fs[fi].1.kind,")
+        expect(prelude).to_contain("hir_pattern_kind_tag(fs[fi].1.kind)")
+
+    it "classifies enum payload rows without allocation-backed probes":
+        val source = read_pattern_source(
+            "src/compiler/20.hir/hir_lowering/_Expressions/match_desugaring.spl")
+        expect(source).to_contain("val pat_tag = hir_pattern_kind_tag(pat.kind)")
+        expect(source.contains("literal_probe")).to_equal(false)
+        expect(source.contains("rt_enum_discriminant(HirPatternKind.Binding")).to_equal(false)

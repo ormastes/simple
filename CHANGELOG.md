@@ -5,13 +5,10 @@ All notable changes to Simple Language will be documented in this file.
 ## [Unreleased]
 
 ### Added
-- **Self-attested GitHub policy live apply** (2026-08-27) — allow the repository
-  policy owner to apply the explicitly accepted generic-Actions self-review
-  projection: read-only workflow defaults, a protected-branch-only admission
-  environment, and zero-approval `main`/`release/*` rulesets requiring the exact
-  `SPipe Self Review Admission` check. Unconfigured signed-broker mode remains
-  fail-closed, and every apply ends with live readback verification and a
-  normalized projection digest.
+- **Exact-ref mandatory-check evidence** — retain bootstrap gate logs in a
+  commit-ready textual evidence tree, validate them from the exact pushed Git
+  revision, reject dirty bootstrap attribution, and allow receipt-backed TODO
+  rows to earn a durable hash-bound PASS without adding costly work to push.
 - **LLM Caret agent workspaces + `workspace` dev CLI** (2026-08-25) — give each agent
   one detached `git worktree` (never a branch) plus one tmux window on a PRIVATE tmux
   socket (`tmux -L caret_ws_<id>`), so the operator's own tmux server is never touched;
@@ -173,7 +170,6 @@ All notable changes to Simple Language will be documented in this file.
 - **Stdlib exports** — missing `pub` exports added for `std.common` (compress, math, easy_fix, drawing, sdn, image)
 
 ### Fixed
-- **GPU binary generation** — Simple-emitted Metal kernels now use valid constant-buffer ABI bindings, compile to verified metallib artifacts, and pass live host-upload/device-submit/GPU-readback checks; CUDA/Vulkan unsupported MIR paths now fail with typed backend diagnostics instead of placeholder output
 - **Interpreter: Break/Continue in block closures** — BDD `it` blocks now correctly handle Break/Continue control flow
 - **Interpreter: While/Loop in block closures** — `it` blocks execute while/loop constructs correctly
 - **Interpreter: index-receiver method write-back** — `Value::Array` arm clone fix (bug #28)

@@ -1,0 +1,510 @@
+# Typed JIT IR contract — the interface a JIT backend consumes INSTEAD of
+# source text (startup-perf audit gap #17).
+#
+# Today `TieredJitManager._compile_function` hands `rt_jit_compile_source`
+# a `text` blob, so the JIT re-parses and re-type-checks source the compiler
+# already parsed and type-checked. This module defines the typed IR that
+# replaces that hand-off, plus its verifier, its MIR adapter, its
+# serialization to the opaque `[i64]` word stream shape the persistent code
+# cache already stores, and a typed reference evaluator used as the
+# equivalence oracle.
+#
+# CORRECTNESS RULE (fail-closed, never best-effort): every register carries
+# a declared JitType. A program whose type vector does not cover every
+# register, or whose operand types do not satisfy the opcode's typing rule,
+# is REJECTED. Nothing is defaulted to i64, and nothing is inferred.
+#
+# Research: doc/01_research/compiler/startup_performance/
+#   startup_perf_architecture_2026-08-17.md (9.2, 9.14)
+#   execir_benefit_envelope_2026-08-18.md (4.3)
+#
+# WIRED:     MIR -> typed IR -> verify -> word stream -> verify -> typed eval.
+# NOT WIRED: no Cranelift/`rt_jit_*` consumer reads this yet; `95.interp`
+#            and the code cache are untouched by design.
+
+use compiler.mir.mir_types.*
+use compiler.mir.mir_instructions.*
+use compiler.interp.execir.{ExecIrProgram, execir_encode}
+
+# ============================================================================
+# Type lattice
+# ============================================================================
+
+"""Type of a JIT register. Deliberately closed: an unmapped MIR type is a
+rejection, not a widening."""
+enum JitType:
+    I1      # boolean, values normalized to 0/1
+    I64     # signed 64-bit integer
+    F64     # 64-bit float (verified here; execution not implemented)
+
+fn jit_type_code(t: JitType) -> i64:
+    """Stable wire code for a JitType."""
+    match t:
+        case I1: 1
+        case I64: 2
+        case F64: 3
+
+fn jit_type_of_code(c: i64) -> JitType?:
+    """Decode a wire code, or nil for an unknown code (fail closed)."""
+    if c == 1:
+        Some(JitType.I1)
+    elif c == 2:
+        Some(JitType.I64)
+    elif c == 3:
+        Some(JitType.F64)
+    else:
+        nil
+
+fn jit_type_name(t: JitType) -> text:
+    """Human-readable name, for rejection reasons."""
+    match t:
+        case I1: "i1"
+        case I64: "i64"
+        case F64: "f64"
+
+# ============================================================================
+# The contract
+# ============================================================================
+
+struct JitTypedFunction:
+    """A function a JIT backend can consume with no parsing and no type
+    inference. `code` uses the ExecIR 4-slot [op, a, b, c] layout; every
+    register index appearing in it is typed by `reg_types`."""
+    name: text
+    params: [JitType]
+    ret: JitType
+    reg_types: [JitType]
+    code: [i64]
+    const_regs: [i64]
+    const_vals: [i64]
+    entry_pc: i64
+
+"""Verifier verdict. Rejection always names a reason — a JIT must never see
+an unverified function."""
+enum JitVerdict:
+    Ok
+    Rejected(reason: text)
+
+fn jit_verdict_ok(v: JitVerdict) -> bool:
+    """True only for an accepting verdict."""
+    match v:
+        case Ok: true
+        case Rejected(reason): false
+
+fn jit_verdict_reason(v: JitVerdict) -> text:
+    """Rejection reason, or "" when accepted."""
+    match v:
+        case Ok: ""
+        case Rejected(reason): reason
+
+# ============================================================================
+# Verifier
+# ============================================================================
+#
+# Typing rules (each opcode, exhaustively):
+#   1  LOADK dest, imm      dest in {i1, i64}; an i1 immediate must be 0 or 1
+#   2  MOV   dest, src      types must be EXACTLY equal
+#   3  JMP   pc             pc in range and 4-slot aligned
+#   4  JIF   cond, t, e     cond in {i1, i64}; both targets in range
+#   5  RET   src            type(src) == ret, with i1/i64 accepted for an
+#                           i1 return (MIR lowers bools into i64 slots)
+#   10-14  arith            all three the same type, in {i64, f64}
+#   15-20  compare          operands same type in {i64, f64};
+#                           dest in {i1, i64} (lowered boolean)
+#   21-25  bitwise/shift    all three i64 (f64 and i1 rejected)
+#   30 NEG                  dest == src, in {i64, f64}
+#   31 NOT                  dest and src in {i1, i64}
+#   32 BITNOT               dest == src == i64
+
+fn jit_is_int(t: JitType) -> bool:
+    """i64 only."""
+    jit_type_code(t) == 2
+
+fn jit_is_boolish(t: JitType) -> bool:
+    """i1 or i64 — the two representations MIR uses for a lowered bool."""
+    val c = jit_type_code(t)
+    c == 1 or c == 2
+
+fn jit_is_numeric(t: JitType) -> bool:
+    """i64 or f64 — arithmetic-capable."""
+    val c = jit_type_code(t)
+    c == 2 or c == 3
+
+fn jit_same(a: JitType, b: JitType) -> bool:
+    """Exact type identity."""
+    jit_type_code(a) == jit_type_code(b)
+
+fn jit_typed_verify(f: JitTypedFunction) -> JitVerdict:
+    """Verify a typed function. Fail-closed: any unmapped register, any
+    out-of-range index, any unknown opcode, and any operand-type violation
+    is a rejection."""
+    val nregs = f.reg_types.len()
+    if nregs == 0:
+        return JitVerdict.Rejected("type-erased: reg_types is empty")
+    val n = f.code.len()
+    if n == 0:
+        return JitVerdict.Rejected("empty code stream")
+    if n % 4 != 0:
+        return JitVerdict.Rejected("code length " + str(n) + " is not 4-slot aligned")
+    if f.entry_pc < 0 or f.entry_pc >= n or f.entry_pc % 4 != 0:
+        return JitVerdict.Rejected("entry_pc " + str(f.entry_pc) + " out of range or unaligned")
+    if f.const_regs.len() != f.const_vals.len():
+        return JitVerdict.Rejected("const pool arity mismatch")
+
+    var ci = 0
+    while ci < f.const_regs.len():
+        val cr = f.const_regs[ci]
+        if cr < 0 or cr >= nregs:
+            return JitVerdict.Rejected("const register " + str(cr) + " has no declared type")
+        ci = ci + 1
+
+    var pc = 0
+    while pc < n:
+        val op = f.code[pc]
+        val a = f.code[pc + 1]
+        val b = f.code[pc + 2]
+        val c = f.code[pc + 3]
+
+        # Every register-shaped operand must be typed before it is used.
+        if op == 1:
+            if a < 0 or a >= nregs:
+                return JitVerdict.Rejected("LOADK dest reg " + str(a) + " has no declared type")
+            val dt = f.reg_types[a]
+            if not jit_is_boolish(dt):
+                return JitVerdict.Rejected("LOADK into " + jit_type_name(dt) + " register (only i1/i64 immediates are encodable)")
+            if jit_type_code(dt) == 1 and b != 0 and b != 1:
+                return JitVerdict.Rejected("LOADK " + str(b) + " into an i1 register")
+        elif op == 2:
+            if a < 0 or a >= nregs or b < 0 or b >= nregs:
+                return JitVerdict.Rejected("MOV register out of range")
+            if not jit_same(f.reg_types[a], f.reg_types[b]):
+                return JitVerdict.Rejected("MOV type mismatch: " + jit_type_name(f.reg_types[b]) + " -> " + jit_type_name(f.reg_types[a]))
+        elif op == 3:
+            if a < 0 or a >= n or a % 4 != 0:
+                return JitVerdict.Rejected("JMP target " + str(a) + " out of range or unaligned")
+        elif op == 4:
+            if a < 0 or a >= nregs:
+                return JitVerdict.Rejected("JIF cond reg " + str(a) + " has no declared type")
+            if not jit_is_boolish(f.reg_types[a]):
+                return JitVerdict.Rejected("JIF on a " + jit_type_name(f.reg_types[a]) + " condition")
+            if b < 0 or b >= n or b % 4 != 0 or c < 0 or c >= n or c % 4 != 0:
+                return JitVerdict.Rejected("JIF target out of range or unaligned")
+        elif op == 5:
+            if a < 0 or a >= nregs:
+                return JitVerdict.Rejected("RET reg " + str(a) + " has no declared type")
+            val st = f.reg_types[a]
+            val okret = if jit_type_code(f.ret) == 1: jit_is_boolish(st) else: jit_same(st, f.ret)
+            if not okret:
+                return JitVerdict.Rejected("RET type mismatch: returns " + jit_type_name(st) + ", declared " + jit_type_name(f.ret))
+        elif op >= 10 and op <= 25:
+            if a < 0 or a >= nregs or b < 0 or b >= nregs or c < 0 or c >= nregs:
+                return JitVerdict.Rejected("binop register out of range")
+            val dt = f.reg_types[a]
+            val lt = f.reg_types[b]
+            val rt = f.reg_types[c]
+            if op <= 14:
+                if not (jit_is_numeric(dt) and jit_same(dt, lt) and jit_same(dt, rt)):
+                    return JitVerdict.Rejected("arith op " + str(op) + " types (" + jit_type_name(lt) + ", " + jit_type_name(rt) + ") -> " + jit_type_name(dt))
+            elif op <= 20:
+                if not (jit_is_numeric(lt) and jit_same(lt, rt)):
+                    return JitVerdict.Rejected("compare op " + str(op) + " operand types (" + jit_type_name(lt) + ", " + jit_type_name(rt) + ")")
+                if not jit_is_boolish(dt):
+                    return JitVerdict.Rejected("compare op " + str(op) + " result into " + jit_type_name(dt))
+            else:
+                if not (jit_is_int(dt) and jit_is_int(lt) and jit_is_int(rt)):
+                    return JitVerdict.Rejected("bitwise/shift op " + str(op) + " requires i64, got (" + jit_type_name(lt) + ", " + jit_type_name(rt) + ") -> " + jit_type_name(dt))
+        elif op == 30 or op == 31 or op == 32:
+            if a < 0 or a >= nregs or b < 0 or b >= nregs:
+                return JitVerdict.Rejected("unary register out of range")
+            val dt = f.reg_types[a]
+            val st = f.reg_types[b]
+            if op == 30:
+                if not (jit_is_numeric(dt) and jit_same(dt, st)):
+                    return JitVerdict.Rejected("NEG types " + jit_type_name(st) + " -> " + jit_type_name(dt))
+            elif op == 31:
+                if not (jit_is_boolish(dt) and jit_is_boolish(st)):
+                    return JitVerdict.Rejected("NOT types " + jit_type_name(st) + " -> " + jit_type_name(dt))
+            else:
+                if not (jit_is_int(dt) and jit_is_int(st)):
+                    return JitVerdict.Rejected("BITNOT requires i64, got " + jit_type_name(st) + " -> " + jit_type_name(dt))
+        else:
+            return JitVerdict.Rejected("unknown opcode " + str(op) + " at pc " + str(pc))
+        pc = pc + 4
+    JitVerdict.Ok
+
+# ============================================================================
+# MIR adapter — the no-source path
+# ============================================================================
+
+fn jit_type_of_mir(t: MirType) -> JitType?:
+    """Map a MIR type into the JIT lattice, or nil when it has no faithful
+    representation. Never widens: an unmapped type is a rejection."""
+    match t.kind:
+        case Bool: Some(JitType.I1)
+        case I64: Some(JitType.I64)
+        case F64: Some(JitType.F64)
+        case _: nil
+
+fn jit_typed_from_mir(func: MirFunction) -> JitTypedFunction?:
+    """Build the typed contract straight from MIR — no source text, no
+    re-parse. nil when the function is outside the encodable subset or
+    carries a type with no faithful JIT representation.
+
+    Register layout mirrors `execir_encode`: locals in declaration order,
+    then the pooled constant registers, which hold raw i64 words and are
+    therefore typed i64. A bool local fed from a pooled constant is
+    consequently rejected by the MOV rule — conservative, never unsound."""
+    val prog0 = execir_encode(func)
+    if prog0 == nil:
+        return nil
+    val prog = prog0 ?? ExecIrProgram(code: [], reg_count: 0, const_regs: [], const_vals: [], entry_pc: 0)
+
+    var reg_types: [JitType] = []
+    for local in func.locals:
+        val jt = jit_type_of_mir(local.type_)
+        if jt == nil:
+            return nil
+        reg_types.push(jt ?? JitType.I64)
+    var i = reg_types.len()
+    while i < prog.reg_count:
+        reg_types.push(JitType.I64)
+        i = i + 1
+    if reg_types.len() != prog.reg_count:
+        return nil
+
+    var params: [JitType] = []
+    for p in func.signature.params:
+        val pt = jit_type_of_mir(p)
+        if pt == nil:
+            return nil
+        params.push(pt ?? JitType.I64)
+    val rt = jit_type_of_mir(func.signature.return_type)
+    if rt == nil:
+        return nil
+
+    Some(JitTypedFunction(
+        name: func.name,
+        params: params,
+        ret: rt ?? JitType.I64,
+        reg_types: reg_types,
+        code: prog.code,
+        const_regs: prog.const_regs,
+        const_vals: prog.const_vals,
+        entry_pc: prog.entry_pc
+    ))
+
+# ============================================================================
+# Word-stream serialization
+# ============================================================================
+#
+# Layout (all i64, matching the opaque word-stream shape the persistent code
+# cache already stores — this module writes its own buffers and never touches
+# that cache):
+#   [MAGIC, VERSION, ret, nparams, params..., nregs, regcodes...,
+#    nconst, (reg, val)*, entry_pc, ncode, code...]
+# The name is NOT in the stream: it is cache-key material, not semantics.
+
+fn jit_typed_magic() -> i64:
+    """Stream magic — "SJIT" packed."""
+    1397508180
+
+fn jit_typed_version() -> i64:
+    """Stream version. Bump on any layout or typing-rule change."""
+    1
+
+fn jit_typed_to_words(f: JitTypedFunction) -> [i64]:
+    """Serialize the typed contract to an opaque word stream."""
+    var w: [i64] = []
+    w.push(jit_typed_magic())
+    w.push(jit_typed_version())
+    w.push(jit_type_code(f.ret))
+    w.push(f.params.len())
+    for p in f.params:
+        w.push(jit_type_code(p))
+    w.push(f.reg_types.len())
+    for t in f.reg_types:
+        w.push(jit_type_code(t))
+    w.push(f.const_regs.len())
+    var i = 0
+    while i < f.const_regs.len():
+        w.push(f.const_regs[i])
+        w.push(f.const_vals[i])
+        i = i + 1
+    w.push(f.entry_pc)
+    w.push(f.code.len())
+    for x in f.code:
+        w.push(x)
+    w
+
+fn jit_typed_from_words(name: text, w: [i64]) -> JitTypedFunction?:
+    """Deserialize a word stream. nil on bad magic, bad version, truncation,
+    or an unknown type code — a malformed stream never becomes a program."""
+    val n = w.len()
+    if n < 8:
+        return nil
+    if w[0] != jit_typed_magic() or w[1] != jit_typed_version():
+        return nil
+    val rt = jit_type_of_code(w[2])
+    if rt == nil:
+        return nil
+    var p = 3
+    val nparams = w[p]
+    p = p + 1
+    if nparams < 0 or p + nparams > n:
+        return nil
+    var params: [JitType] = []
+    var i = 0
+    while i < nparams:
+        val t = jit_type_of_code(w[p + i])
+        if t == nil:
+            return nil
+        params.push(t ?? JitType.I64)
+        i = i + 1
+    p = p + nparams
+
+    if p >= n:
+        return nil
+    val nregs = w[p]
+    p = p + 1
+    if nregs <= 0 or p + nregs > n:
+        return nil
+    var reg_types: [JitType] = []
+    i = 0
+    while i < nregs:
+        val t = jit_type_of_code(w[p + i])
+        if t == nil:
+            return nil
+        reg_types.push(t ?? JitType.I64)
+        i = i + 1
+    p = p + nregs
+
+    if p >= n:
+        return nil
+    val nconst = w[p]
+    p = p + 1
+    if nconst < 0 or p + nconst * 2 > n:
+        return nil
+    var const_regs: [i64] = []
+    var const_vals: [i64] = []
+    i = 0
+    while i < nconst:
+        const_regs.push(w[p + i * 2])
+        const_vals.push(w[p + i * 2 + 1])
+        i = i + 1
+    p = p + nconst * 2
+
+    if p + 1 >= n:
+        return nil
+    val entry_pc = w[p]
+    val ncode = w[p + 1]
+    p = p + 2
+    if ncode <= 0 or p + ncode != n:
+        return nil
+    var code: [i64] = []
+    i = 0
+    while i < ncode:
+        code.push(w[p + i])
+        i = i + 1
+
+    Some(JitTypedFunction(
+        name: name,
+        params: params,
+        ret: rt ?? JitType.I64,
+        reg_types: reg_types,
+        code: code,
+        const_regs: const_regs,
+        const_vals: const_vals,
+        entry_pc: entry_pc
+    ))
+
+# ============================================================================
+# Typed reference evaluator (equivalence oracle)
+# ============================================================================
+
+fn jit_typed_eval(f: JitTypedFunction) -> i64?:
+    """Execute a typed function using its DECLARED types, returning nil if
+    the function does not verify or uses a type this evaluator does not
+    implement (f64). This is the semantic oracle the contract is proved
+    against, not a production backend."""
+    if not jit_verdict_ok(jit_typed_verify(f)):
+        return nil
+    for t in f.reg_types:
+        if jit_type_code(t) == 3:
+            return nil
+
+    var regs: [i64] = []
+    var i = 0
+    while i < f.reg_types.len():
+        regs.push(0)
+        i = i + 1
+    var k = 0
+    while k < f.const_regs.len():
+        regs[f.const_regs[k]] = f.const_vals[k]
+        k = k + 1
+
+    val code = f.code
+    var pc = f.entry_pc
+    var steps = 0
+    val limit = 100000000
+    while steps < limit:
+        steps = steps + 1
+        val op = code[pc]
+        val a = code[pc + 1]
+        val b = code[pc + 2]
+        val c = code[pc + 3]
+        if op == 1:
+            regs[a] = b
+        elif op == 2:
+            regs[a] = regs[b]
+        elif op == 3:
+            pc = a
+            continue
+        elif op == 4:
+            pc = if regs[a] != 0: b else: c
+            continue
+        elif op == 5:
+            return Some(regs[a])
+        elif op == 10:
+            regs[a] = regs[b] + regs[c]
+        elif op == 11:
+            regs[a] = regs[b] - regs[c]
+        elif op == 12:
+            regs[a] = regs[b] * regs[c]
+        elif op == 13:
+            val r = regs[c]
+            regs[a] = if r != 0: regs[b] / r else: 0
+        elif op == 14:
+            val r = regs[c]
+            regs[a] = if r != 0: regs[b] % r else: 0
+        elif op == 15:
+            regs[a] = if regs[b] == regs[c]: 1 else: 0
+        elif op == 16:
+            regs[a] = if regs[b] != regs[c]: 1 else: 0
+        elif op == 17:
+            regs[a] = if regs[b] < regs[c]: 1 else: 0
+        elif op == 18:
+            regs[a] = if regs[b] <= regs[c]: 1 else: 0
+        elif op == 19:
+            regs[a] = if regs[b] > regs[c]: 1 else: 0
+        elif op == 20:
+            regs[a] = if regs[b] >= regs[c]: 1 else: 0
+        elif op == 21:
+            regs[a] = regs[b] & regs[c]
+        elif op == 22:
+            regs[a] = regs[b] | regs[c]
+        elif op == 23:
+            regs[a] = regs[b] xor regs[c]
+        elif op == 24:
+            regs[a] = regs[b] << (regs[c] & 63)
+        elif op == 25:
+            regs[a] = regs[b] >> (regs[c] & 63)
+        elif op == 30:
+            regs[a] = 0 - regs[b]
+        elif op == 31:
+            regs[a] = if regs[b] == 0: 1 else: 0
+        elif op == 32:
+            regs[a] = -1 - regs[b]
+        else:
+            return nil
+        pc = pc + 4
+    nil

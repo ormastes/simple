@@ -178,7 +178,7 @@ static void x86_32_harden_print_canary(void)
 #define TAG_SPECIAL 0x3U
 
 #define ENCODE_INT(v)  ((RuntimeValue)(((uint32_t)(int32_t)(v) << 3) | TAG_INT))
-#define DECODE_INT(v)  ((int32_t)(v) >> 3)
+#define DECODE_INT(v)  ((int32_t)((uint32_t)(v) >> 3))
 
 #define ENCODE_PTR(p)  ((RuntimeValue)((uint32_t)(uintptr_t)(p) | TAG_HEAP))
 #define DECODE_PTR(v)  ((void*)((uint32_t)(v) & ~TAG_MASK))
@@ -232,12 +232,8 @@ static size_t _heap_off = 0;
 
 void *malloc(size_t sz)
 {
-    if (sz > sizeof(_heap) - 15) {
-        serial_puts("[PANIC] heap exhausted\r\n");
-        for(;;) outb(0xF4, 0);
-    }
     sz = (sz + 15) & ~(size_t)15;
-    if (_heap_off > sizeof(_heap) - sz) {
+    if (_heap_off + sz > sizeof(_heap)) {
         serial_puts("[PANIC] heap exhausted\r\n");
         for(;;) outb(0xF4, 0);
     }
@@ -387,7 +383,7 @@ RuntimeValue rt_string_new(RuntimeValue data, RuntimeValue len_val)
     /* Parameters are raw (untagged) per the Rust runtime ABI.
        len_val is the raw byte count, data is a raw pointer. */
     int32_t len = len_val;
-    if (len < 0 || len > 0x100000) return NIL_VALUE;
+    if (len <= 0 || len > 0x100000) return NIL_VALUE;
     RuntimeString *s = (RuntimeString *)malloc(sizeof(RuntimeString) + (size_t)len + 1);
     if (!s) return NIL_VALUE;
     s->hdr.type = HEAP_STRING;
@@ -416,19 +412,19 @@ RuntimeValue rt_string_from_cstr(const char *cstr)
 
 RuntimeValue rt_string_len(RuntimeValue str)
 {
-    if (!IS_HEAP(str)) return 0;
+    if (!IS_HEAP(str)) return ENCODE_INT(0);
     RuntimeString *s = (RuntimeString *)DECODE_PTR(str);
-    if (!s) return 0;
-    return (RuntimeValue)s->len;
+    if (!s) return ENCODE_INT(0);
+    return ENCODE_INT(s->len);
 }
 
 RuntimeValue rt_string_char_at(RuntimeValue str, RuntimeValue idx)
 {
-    if (!IS_HEAP(str)) return NIL_VALUE;
+    if (!IS_HEAP(str)) return ENCODE_INT(0);
     RuntimeString *s = (RuntimeString *)DECODE_PTR(str);
-    int32_t i = (int32_t)idx;
-    if (!s || i < 0 || (uint32_t)i >= s->len) return NIL_VALUE;
-    return rt_string_new((RuntimeValue)(uintptr_t)(s->data + i), 1);
+    int32_t i = DECODE_INT(idx);
+    if (!s || i < 0 || (uint32_t)i >= s->len) return ENCODE_INT(0);
+    return ENCODE_INT((int32_t)(unsigned char)s->data[i]);
 }
 
 RuntimeValue rt_string_concat(RuntimeValue a, RuntimeValue b)
@@ -613,12 +609,11 @@ RuntimeValue rt_index_get(RuntimeValue v, RuntimeValue idx)
     if (!IS_HEAP(v)) return NIL_VALUE;
     HeapHeader *h = (HeapHeader *)DECODE_PTR(v);
     if (!h) return NIL_VALUE;
+    int32_t i = DECODE_INT(idx);
     if (h->type == HEAP_STRING) {
-        if (!IS_INT(idx)) return NIL_VALUE;
-        return rt_string_char_at(v, (RuntimeValue)DECODE_INT(idx));
+        return rt_string_char_at(v, idx);
     }
     if (h->type == HEAP_ARRAY) {
-        int32_t i = DECODE_INT(idx);
         RuntimeArray *a = (RuntimeArray *)h;
         if (i < 0 || (uint32_t)i >= a->len) return NIL_VALUE;
         return a->items[i];
@@ -801,6 +796,198 @@ static int x86_32_initrd_contains_ascii(const char *needle)
         uint32_t j = 0;
         while (j < needle_len && base[i + j] == (uint8_t)needle[j]) j++;
         if (j == needle_len) return 1;
+    }
+    return 0;
+}
+
+typedef struct {
+    const uint8_t *base;
+    uint32_t bytes;
+    uint32_t sectors_per_cluster;
+    uint32_t reserved_sectors;
+    uint32_t fat_count;
+    uint32_t sectors_per_fat;
+    uint32_t root_cluster;
+    uint32_t data_start_sector;
+} X86_32Fat32Probe;
+
+static uint32_t x86_32_rd16(const uint8_t *p)
+{
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8);
+}
+
+static uint32_t x86_32_rd32(const uint8_t *p)
+{
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static int x86_32_fat32_probe(X86_32Fat32Probe *fat)
+{
+    if (x86_32_initrd_start == 0U || x86_32_initrd_end <= x86_32_initrd_start ||
+        x86_32_initrd_end - x86_32_initrd_start < 512U) return 0;
+    const uint8_t *b = (const uint8_t *)(uintptr_t)x86_32_initrd_start;
+    if (x86_32_rd16(b + 11U) != 512U) return 0;
+    fat->base = b;
+    fat->bytes = x86_32_initrd_end - x86_32_initrd_start;
+    fat->sectors_per_cluster = b[13U];
+    fat->reserved_sectors = x86_32_rd16(b + 14U);
+    fat->fat_count = b[16U];
+    fat->sectors_per_fat = x86_32_rd32(b + 36U);
+    fat->root_cluster = x86_32_rd32(b + 44U);
+    if (fat->sectors_per_cluster == 0U || fat->reserved_sectors == 0U ||
+        fat->fat_count == 0U || fat->sectors_per_fat == 0U || fat->root_cluster < 2U)
+        return 0;
+    fat->data_start_sector = fat->reserved_sectors + fat->fat_count * fat->sectors_per_fat;
+    return 1;
+}
+
+static const uint8_t *x86_32_fat32_sector(const X86_32Fat32Probe *fat, uint32_t sector)
+{
+    uint32_t offset = sector * 512U;
+    if (sector > 0x007fffffU || offset > fat->bytes || fat->bytes - offset < 512U) return 0;
+    return fat->base + offset;
+}
+
+static uint32_t x86_32_fat32_cluster_sector(const X86_32Fat32Probe *fat, uint32_t cluster)
+{
+    return fat->data_start_sector + (cluster - 2U) * fat->sectors_per_cluster;
+}
+
+static uint32_t x86_32_fat32_next(const X86_32Fat32Probe *fat, uint32_t cluster)
+{
+    uint32_t offset = cluster * 4U;
+    const uint8_t *sector = x86_32_fat32_sector(fat, fat->reserved_sectors + offset / 512U);
+    if (!sector) return 0x0fffffffU;
+    return x86_32_rd32(sector + offset % 512U) & 0x0fffffffU;
+}
+
+static int x86_32_name11_eq(const uint8_t *entry, const char *name11)
+{
+    for (uint32_t i = 0; i < 11U; ++i) if (entry[i] != (uint8_t)name11[i]) return 0;
+    return 1;
+}
+
+static uint32_t x86_32_fat32_find(const X86_32Fat32Probe *fat, uint32_t directory,
+                                  const char *name11, uint32_t want_dir, uint32_t *size)
+{
+    uint32_t cluster = directory;
+    uint32_t budget = 128U;
+    while (cluster >= 2U && cluster < 0x0ffffff8U && budget-- > 0U) {
+        uint32_t first = x86_32_fat32_cluster_sector(fat, cluster);
+        for (uint32_t sec = 0; sec < fat->sectors_per_cluster; ++sec) {
+            const uint8_t *data = x86_32_fat32_sector(fat, first + sec);
+            if (!data) return 0;
+            for (uint32_t off = 0; off < 512U; off += 32U) {
+                const uint8_t *entry = data + off;
+                if (entry[0] == 0U) return 0;
+                if (entry[0] == 0xe5U || entry[11] == 0x0fU || !x86_32_name11_eq(entry, name11)) continue;
+                if ((((entry[11] & 0x10U) != 0U) ? 1U : 0U) != want_dir) continue;
+                if (size) *size = x86_32_rd32(entry + 28U);
+                return (x86_32_rd16(entry + 20U) << 16) | x86_32_rd16(entry + 26U);
+            }
+        }
+        cluster = x86_32_fat32_next(fat, cluster);
+    }
+    return 0;
+}
+
+static void x86_32_serial_name83(const uint8_t *entry)
+{
+    uint32_t base_end = 8U, ext_end = 11U;
+    while (base_end > 0U && entry[base_end - 1U] == ' ') --base_end;
+    while (ext_end > 8U && entry[ext_end - 1U] == ' ') --ext_end;
+    for (uint32_t i = 0; i < base_end; ++i) serial_putchar((char)entry[i]);
+    if (ext_end > 8U) {
+        serial_putchar('.');
+        for (uint32_t i = 8U; i < ext_end; ++i) serial_putchar((char)entry[i]);
+    }
+}
+
+RuntimeValue rt_x86_32_fs_ls_sys_apps(void)
+{
+    X86_32Fat32Probe fat;
+    if (!x86_32_fat32_probe(&fat)) return 0;
+    uint32_t sys = x86_32_fat32_find(&fat, fat.root_cluster, "SYS        ", 1U, 0);
+    uint32_t apps = sys < 2U ? 0U : x86_32_fat32_find(&fat, sys, "APPS       ", 1U, 0);
+    if (apps < 2U) return 0;
+    serial_puts("FS_LS_BEGIN path=/SYS/APPS\r\n");
+    uint32_t cluster = apps, entries = 0U, budget = 128U;
+    while (cluster >= 2U && cluster < 0x0ffffff8U && budget-- > 0U) {
+        uint32_t first = x86_32_fat32_cluster_sector(&fat, cluster);
+        for (uint32_t sec = 0; sec < fat.sectors_per_cluster; ++sec) {
+            const uint8_t *data = x86_32_fat32_sector(&fat, first + sec);
+            if (!data) return 0;
+            for (uint32_t off = 0; off < 512U; off += 32U) {
+                const uint8_t *entry = data + off;
+                if (entry[0] == 0U) goto x86_32_listing_done;
+                if (entry[0] == 0xe5U || entry[11] == 0x0fU ||
+                    (entry[11] & 0x08U) != 0U || entry[0] == '.') continue;
+                serial_puts("FS_LS_ENTRY name=");
+                x86_32_serial_name83(entry);
+                serial_puts("\r\n");
+                if (++entries >= 256U) goto x86_32_listing_done;
+            }
+        }
+        cluster = x86_32_fat32_next(&fat, cluster);
+    }
+x86_32_listing_done:
+    if (entries == 0U) return 0;
+    serial_puts("FS_LS_END status=pass\r\n");
+    return 1;
+}
+
+RuntimeValue rt_x86_32_fsexec_elf32_present(void)
+{
+    X86_32Fat32Probe fat;
+    uint32_t size = 0;
+    if (!x86_32_fat32_probe(&fat)) return 0;
+    uint32_t cluster = x86_32_fat32_find(&fat, fat.root_cluster, "FSEXEC  ELF", 0U, &size);
+    if (cluster < 2U || size < 52U) return 0;
+    const uint8_t *elf = x86_32_fat32_sector(&fat, x86_32_fat32_cluster_sector(&fat, cluster));
+    if (!elf) return 0;
+    return elf[0] == 0x7fU && elf[1] == 'E' && elf[2] == 'L' && elf[3] == 'F' &&
+           elf[4] == 1U && elf[5] == 1U && x86_32_rd16(elf + 16U) == 2U &&
+           x86_32_rd16(elf + 18U) == 3U ? 1 : 0;
+}
+
+RuntimeValue rt_x86_32_report_fs_program_blocked(void)
+{
+    serial_puts("FS_PROGRAM_BEGIN path=/FSEXEC.ELF arch=x86_32\r\n");
+    serial_puts("FS_PROGRAM_BLOCKED reason=x86_32-cpl3-lifecycle-owner-absent\r\n");
+    return 1;
+}
+
+RuntimeValue rt_qemu_nonce_echo(void)
+{
+    static const char prefix[] = "SIMPLEOS_QEMU_NONCE=";
+    const uint32_t prefix_len = (uint32_t)(sizeof(prefix) - 1U);
+    if (x86_32_initrd_start == 0U || x86_32_initrd_end <= x86_32_initrd_start)
+        return 0;
+    const uint8_t *base = (const uint8_t *)(uintptr_t)x86_32_initrd_start;
+    uint32_t len = x86_32_initrd_end - x86_32_initrd_start;
+    for (uint32_t off = 0; off + prefix_len + 2U <= len; ++off) {
+        uint32_t i = 0;
+        while (i < prefix_len && base[off + i] == (uint8_t)prefix[i]) ++i;
+        if (i != prefix_len) continue;
+
+        uint32_t end = off + prefix_len;
+        while (end < len && end - off <= 118U && base[end] != '\n') {
+            uint8_t c = base[end];
+            if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                  (c >= '0' && c <= '9') || c == '.' || c == '_' ||
+                  c == ':' || c == '-')) {
+                end = off;
+                break;
+            }
+            ++end;
+        }
+        /* Invalid compiled-in/decoy candidates must not hide the FAT payload. */
+        if (end == off || end >= len || base[end] != '\n' ||
+            end == off + prefix_len || end - off > 117U)
+            continue;
+        for (uint32_t p = off; p <= end; ++p) serial_putchar((char)base[p]);
+        return 1;
     }
     return 0;
 }
@@ -1399,7 +1586,7 @@ void _start(uint32_t multiboot_magic, uint32_t multiboot_info)
     x86_32_capture_multiboot_modules(multiboot_magic, multiboot_info);
     _serial_init();
 
-    serial_puts("SimpleOS x86_32 boot\r\n");
+    serial_puts("SimpleOS x86_32 boot OK\r\n");
     serial_puts("[BOOT] COM1 serial initialized at 115200 baud\r\n");
     serial_puts("[BOOT] Heap: 4 MB bump allocator\r\n");
     serial_puts("[BOOT] RuntimeValue: tagged 32-bit (int/heap/float/special)\r\n");
@@ -1478,81 +1665,6 @@ RuntimeValue rt_is_some(RuntimeValue value)
     return rt_is_none(value) ? 0 : 1;
 }
 
-RuntimeValue rt_array_new(RuntimeValue cap_val)
-{
-    int32_t cap = (int32_t)cap_val;
-    if (cap <= 0) cap = 64;
-    if (cap < 64) cap = 64;
-    if (cap > 0x100000) cap = 0x100000;
-    size_t alloc_size = sizeof(RuntimeArray) + (size_t)cap * sizeof(RuntimeValue);
-    RuntimeArray *a = (RuntimeArray *)malloc(alloc_size);
-    if (!a) return NIL_VALUE;
-    a->hdr.type = HEAP_ARRAY;
-    a->hdr.size = (uint32_t)alloc_size;
-    a->len = 0;
-    a->cap = (uint32_t)cap;
-    for (int32_t i = 0; i < cap; i++) a->items[i] = NIL_VALUE;
-    return ENCODE_PTR(a);
-}
-
-static RuntimeValue rt_array_push_handle(RuntimeValue arr, RuntimeValue val)
-{
-    if (!IS_HEAP(arr)) return NIL_VALUE;
-    RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
-    if (!a || a->hdr.type != HEAP_ARRAY) return NIL_VALUE;
-    if (a->len >= a->cap) {
-        uint32_t old_cap = a->cap;
-        uint32_t new_cap = old_cap ? old_cap * 2 : 64;
-        size_t new_size = sizeof(RuntimeArray) + (size_t)new_cap * sizeof(RuntimeValue);
-        RuntimeArray *grown = (RuntimeArray *)realloc(a, new_size);
-        if (!grown) return ENCODE_PTR(a);
-        grown->hdr.size = (uint32_t)new_size;
-        grown->cap = new_cap;
-        for (uint32_t i = old_cap; i < new_cap; i++) grown->items[i] = NIL_VALUE;
-        a = grown;
-    }
-    a->items[a->len++] = val;
-    return ENCODE_PTR(a);
-}
-
-int8_t rt_array_push(RuntimeValue arr, RuntimeValue val)
-{
-    return rt_array_push_handle(arr, val) != NIL_VALUE;
-}
-
-RuntimeValue rt_array_get(RuntimeValue arr, RuntimeValue idx)
-{
-    if (!IS_HEAP(arr)) return NIL_VALUE;
-    RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
-    int32_t i = (int32_t)idx;
-    if (!a || a->hdr.type != HEAP_ARRAY || i < 0 || (uint32_t)i >= a->len) return NIL_VALUE;
-    return a->items[i];
-}
-
-RuntimeValue rt_array_len(RuntimeValue arr)
-{
-    if (!IS_HEAP(arr)) return 0;
-    RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
-    return (!a || a->hdr.type != HEAP_ARRAY) ? 0 : (RuntimeValue)a->len;
-}
-
-RuntimeValue rt_string_chars(RuntimeValue str)
-{
-    RuntimeString *s = IS_HEAP(str) ? (RuntimeString *)DECODE_PTR(str) : (RuntimeString *)0;
-    RuntimeValue arr = rt_array_new((RuntimeValue)(s && s->hdr.type == HEAP_STRING ? s->len : 0));
-    if (!s || s->hdr.type != HEAP_STRING) return arr;
-    for (uint32_t i = 0; i < s->len;) {
-        uint8_t lead = (uint8_t)s->data[i];
-        uint32_t width = 1;
-        if (lead >= 0xC2 && lead <= 0xDF && i + 2 <= s->len) width = 2;
-        else if (lead >= 0xE0 && lead <= 0xEF && i + 3 <= s->len) width = 3;
-        else if (lead >= 0xF0 && lead <= 0xF4 && i + 4 <= s->len) width = 4;
-        arr = rt_array_push_handle(arr, rt_string_new((RuntimeValue)(uintptr_t)&s->data[i], (RuntimeValue)width));
-        i += width;
-    }
-    return arr;
-}
-
 /* ===================================================================
  * 10. No-op stubs — macro-generated runtime function stubs
  * =================================================================== */
@@ -1587,59 +1699,14 @@ S2(rt_string_index_of) S2(rt_string_last_index_of)
 S2(rt_string_substr) S2(rt_string_split)
 S1(rt_string_trim) S1(rt_string_trim_start) S1(rt_string_trim_end)
 S1(rt_string_to_upper) S1(rt_string_to_lower)
-S2(rt_string_repeat)
+S2(rt_string_replace) S3(rt_string_replace_all) S2(rt_string_repeat)
 S2(rt_string_pad_start) S2(rt_string_pad_end)
-S1(rt_string_reverse) S1(rt_string_bytes)
+S1(rt_string_reverse) S1(rt_string_chars) S1(rt_string_bytes)
 S1(rt_string_is_empty) S2(rt_string_compare) S2(rt_string_format)
 
-RuntimeValue rt_string_replace_all(RuntimeValue str, RuntimeValue old_val, RuntimeValue new_val)
-{
-    if (!IS_HEAP(str) || !IS_HEAP(old_val) || !IS_HEAP(new_val)) return NIL_VALUE;
-    RuntimeString *s = IS_HEAP(str) ? (RuntimeString *)DECODE_PTR(str) : (RuntimeString *)0;
-    RuntimeString *o = IS_HEAP(old_val) ? (RuntimeString *)DECODE_PTR(old_val) : (RuntimeString *)0;
-    RuntimeString *n = IS_HEAP(new_val) ? (RuntimeString *)DECODE_PTR(new_val) : (RuntimeString *)0;
-    if (!s || !o || !n || s->hdr.type != HEAP_STRING || o->hdr.type != HEAP_STRING || n->hdr.type != HEAP_STRING) return NIL_VALUE;
-    if (o->len == 0 || o->len > s->len) return str;
-    uint32_t nlen = n->len;
-    uint32_t count = 0;
-    for (uint32_t i = 0; o->len <= s->len - i;) {
-        uint32_t j;
-        for (j = 0; j < o->len; j++) if (s->data[i + j] != o->data[j]) break;
-        if (j == o->len) { count++; i += o->len; } else i++;
-    }
-    if (count == 0) return str;
-    uint64_t result_len_wide = (uint64_t)s->len - (uint64_t)count * o->len + (uint64_t)count * nlen;
-    if (result_len_wide > 0x100000U) return str;
-    uint32_t result_len = (uint32_t)result_len_wide;
-    RuntimeString *r = (RuntimeString *)malloc(sizeof(RuntimeString) + result_len + 1);
-    if (!r) return str;
-    r->hdr.type = HEAP_STRING;
-    r->hdr.size = (uint32_t)(sizeof(RuntimeString) + result_len + 1);
-    r->len = result_len;
-    uint32_t out = 0;
-    for (uint32_t i = 0; i < s->len;) {
-        if (o->len <= s->len - i) {
-            uint32_t j;
-            for (j = 0; j < o->len; j++) if (s->data[i + j] != o->data[j]) break;
-            if (j == o->len) {
-                if (nlen > 0) { __builtin_memcpy(r->data + out, n->data, nlen); out += nlen; }
-                i += o->len;
-                continue;
-            }
-        }
-        r->data[out++] = s->data[i++];
-    }
-    r->data[result_len] = '\0';
-    return ENCODE_PTR(r);
-}
-
-RuntimeValue rt_string_replace(RuntimeValue str, RuntimeValue old_val, RuntimeValue new_val)
-{
-    return rt_string_replace_all(str, old_val, new_val);
-}
-
 /* --- Array --- */
-S1(rt_array_pop) S3(rt_array_set)
+S1(rt_array_new) S2(rt_array_push) S1(rt_array_pop)
+S2(rt_array_get) S3(rt_array_set) S1(rt_array_len)
 S3(rt_array_slice) S2(rt_array_contains) S2(rt_array_index_of)
 S2(rt_array_last_index_of) S2(rt_array_remove) S3(rt_array_insert)
 S1(rt_array_reverse) S1(rt_array_sort) S2(rt_array_sort_by)
@@ -2501,16 +2568,5 @@ RuntimeValue rt_x86_32_fpu_restore(RuntimeValue ctx_ptr_val)
 #define RV_INT int32_t
 #define CRYPTO_ARRAY_HDR_TYPE(arr) ((arr)->type)
 #include "../../shared/crypto_common.h"
-#include "../../common/boot/text_codepoint_runtime.h"
 
 /* End of x86_32 baremetal_stubs.c */
-
-/* Interned string-literal ctor: codegen emits rt_string_new_literal for every
- * multi-byte literal (hosted interns by data ptr for perf). The freestanding
- * kernel has no intern table, so forward to rt_string_new — functionally
- * identical (a fresh heap string per call). Matches the riscv32 stub. */
-RuntimeValue rt_string_new(RuntimeValue data, RuntimeValue len_val);
-RuntimeValue rt_string_new_literal(RuntimeValue data, RuntimeValue len_val)
-{
-    return rt_string_new(data, len_val);
-}

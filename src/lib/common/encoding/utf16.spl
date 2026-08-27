@@ -42,19 +42,13 @@ fn utf16_decode_one(units: [i64], offset: i64) -> [i64]:
     if offset < 0 or offset >= units.len():
         return [-1, 0]
 
-    val raw0 = units[offset]
-    if raw0 < 0 or raw0 > 0xFFFF:
-        return [0xFFFD, 1]
-    val u0 = raw0
+    val u0 = units[offset] & 0xFFFF
 
     # Check for high surrogate
     if u0 >= 0xD800 and u0 <= 0xDBFF:
         if offset + 1 >= units.len():
             return [0xFFFD, 1]  # lone high surrogate
-        val raw1 = units[offset + 1]
-        if raw1 < 0 or raw1 > 0xFFFF:
-            return [0xFFFD, 1]
-        val u1 = raw1
+        val u1 = units[offset + 1] & 0xFFFF
         if u1 < 0xDC00 or u1 > 0xDFFF:
             return [0xFFFD, 1]  # invalid low surrogate
         val cp = 0x10000 + ((u0 - 0xD800) << 10) + (u1 - 0xDC00)
@@ -90,9 +84,11 @@ fn utf16_decode_all(units: [i64]) -> [i64]:
     while i < units.len():
         val decoded = utf16_decode_one(units, i)
         result.push(decoded[0])
-        # i is in bounds, so utf16_decode_one always consumes one valid/replaced
-        # unit or two units for a valid surrogate pair.
-        i = i + decoded[1]
+        val consumed = decoded[1]
+        if consumed <= 0:
+            i = i + 1
+        else:
+            i = i + consumed
     result
 
 # ============================================================================
@@ -104,8 +100,7 @@ fn utf16_to_bytes_le(units: [i64]) -> [i64]:
     var result: [i64] = []
     var i: i64 = 0
     while i < units.len():
-        val raw = units[i]
-        val u = if raw < 0 or raw > 0xFFFF: 0xFFFD else: raw
+        val u = units[i] & 0xFFFF
         result.push(u & 0xFF)
         result.push((u >> 8) & 0xFF)
         i = i + 1
@@ -116,8 +111,7 @@ fn utf16_to_bytes_be(units: [i64]) -> [i64]:
     var result: [i64] = []
     var i: i64 = 0
     while i < units.len():
-        val raw = units[i]
-        val u = if raw < 0 or raw > 0xFFFF: 0xFFFD else: raw
+        val u = units[i] & 0xFFFF
         result.push((u >> 8) & 0xFF)
         result.push(u & 0xFF)
         i = i + 1
@@ -128,17 +122,9 @@ fn utf16_from_bytes_le(bytes: [i64]) -> [i64]:
     var result: [i64] = []
     var i: i64 = 0
     while i + 1 < bytes.len():
-        val b0 = bytes[i]
-        val b1 = bytes[i + 1]
-        if b0 < 0 or b0 > 255 or b1 < 0 or b1 > 255:
-            result.push(0xFFFD)
-            i = i + 2
-            continue
-        val u = b0 | (b1 << 8)
+        val u = (bytes[i] & 0xFF) | ((bytes[i + 1] & 0xFF) << 8)
         result.push(u)
         i = i + 2
-    if i < bytes.len():
-        result.push(0xFFFD)
     result
 
 fn utf16_from_bytes_be(bytes: [i64]) -> [i64]:
@@ -146,17 +132,9 @@ fn utf16_from_bytes_be(bytes: [i64]) -> [i64]:
     var result: [i64] = []
     var i: i64 = 0
     while i + 1 < bytes.len():
-        val b0 = bytes[i]
-        val b1 = bytes[i + 1]
-        if b0 < 0 or b0 > 255 or b1 < 0 or b1 > 255:
-            result.push(0xFFFD)
-            i = i + 2
-            continue
-        val u = (b0 << 8) | b1
+        val u = ((bytes[i] & 0xFF) << 8) | (bytes[i + 1] & 0xFF)
         result.push(u)
         i = i + 2
-    if i < bytes.len():
-        result.push(0xFFFD)
     result
 
 # ============================================================================

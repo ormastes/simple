@@ -19,7 +19,7 @@ The actor model provides a message-passing concurrency primitive where isolated 
 |-------|-------|
 | Feature IDs | #RUNTIME-010 |
 | Category | Runtime |
-| Status | Active |
+| Status | In Progress |
 | Source | `test/03_system/feature/usage/actors_spec.spl` |
 | Updated | 2026-08-27 |
 | Generator | `simple spipe-docgen` (Simple) |

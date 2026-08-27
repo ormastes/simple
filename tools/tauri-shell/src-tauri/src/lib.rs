@@ -11,7 +11,7 @@ use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -22,13 +22,6 @@ include!(concat!(env!("OUT_DIR"), "/mobile_runtime_assets.rs"));
 
 static MDI_OPEN_WINDOW_COUNT: AtomicUsize = AtomicUsize::new(0);
 static MDI_IMAGE_COUNT: AtomicUsize = AtomicUsize::new(0);
-// P1.3 background/foreground lifecycle (design §4b / plan P1.3). Desktop
-// window APIs (`minimize`/`maximize`/`close`) are `#[cfg(desktop)]` and
-// unavailable on mobile, so lifecycle is tracked the same way on every
-// platform via `WindowEvent::Focused` (fires from `applicationDidBecomeActive`
-// / `applicationWillResignActive` on iOS and `onResume`/`onPause` on Android,
-// as well as ordinary window focus changes on desktop).
-static APP_BACKGROUNDED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -36,8 +29,6 @@ struct MdiProof {
     count: usize,
     has_desktop: bool,
     image_count: usize,
-    source_window_count: usize,
-    has_simple_smoke_text: bool,
     has_drag_runtime: bool,
     has_drag_events: bool,
     drag_moved: bool,
@@ -47,7 +38,6 @@ struct MdiProof {
     body_click_routed: bool,
     body_input_routed: bool,
     body_key_routed: bool,
-    event_sequence: Vec<String>,
     taskbar_item_count: usize,
     taskbar_icon_count: usize,
     taskbar_icons_visible: bool,
@@ -55,24 +45,11 @@ struct MdiProof {
     html_renderable: bool,
     viewport_width: u32,
     viewport_height: u32,
-    device_pixel_ratio: f64,
-    screen_orientation: String,
     performance_now_available: bool,
     performance_now_delta_ms: f64,
-    input_to_paint_ms: f64,
     animation_frame_available: bool,
     animation_frame_count: usize,
     css_animation_probe: bool,
-    // Two-way invoke() round-trip proof (P1.2): a real command call/return,
-    // not a fire-and-forget `invoke(...).catch(...)`. See
-    // `invoke_roundtrip_ping` / `report_invoke_roundtrip` below.
-    // `#[serde(default)]` keeps this additive: any producer that predates
-    // this field (there is only one today, this module's injected JS) still
-    // deserializes fine.
-    #[serde(default)]
-    invoke_roundtrip_status: String,
-    #[serde(default)]
-    invoke_roundtrip_reply: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -210,64 +187,6 @@ fn html_escape(text: &str) -> String {
         .replace('\'', "&#39;")
 }
 
-fn js_string_or_null(value: Option<&str>) -> String {
-    value
-        .map(|text| format!("{:?}", text))
-        .unwrap_or_else(|| "null".to_string())
-}
-
-fn mdi_proof_value(key: &str, value: &str) -> serde_json::Value {
-    if key == "eventSequence" {
-        return serde_json::Value::Array(
-            value
-                .split('|')
-                .filter(|item| !item.is_empty())
-                .map(|item| serde_json::Value::String(item.to_string()))
-                .collect(),
-        );
-    }
-    if value == "true" {
-        return serde_json::Value::Bool(true);
-    }
-    if value == "false" {
-        return serde_json::Value::Bool(false);
-    }
-    if let Ok(number) = value.parse::<i64>() {
-        return serde_json::Value::Number(number.into());
-    }
-    if let Ok(number) = value.parse::<f64>() {
-        if let Some(number) = serde_json::Number::from_f64(number) {
-            return serde_json::Value::Number(number);
-        }
-    }
-    serde_json::Value::String(value.to_string())
-}
-
-fn mdi_proof_json_from_url(url: &tauri::Url) -> Option<String> {
-    if url.scheme() != "simple-mdi-proof" {
-        return None;
-    }
-    let mut object = serde_json::Map::new();
-    for (key, value) in url.query_pairs() {
-        object.insert(key.to_string(), mdi_proof_value(&key, &value));
-    }
-    Some(serde_json::Value::Object(object).to_string())
-}
-
-fn record_mdi_proof_json(proof_json: String, _app: Option<&AppHandle>) {
-    eprintln!("[tauri-shell] mdi proof: {}", proof_json);
-    if let Ok(path) = env::var("SIMPLE_TAURI_MDI_PROOF_PATH") {
-        if fs::metadata(&path)
-            .map(|metadata| metadata.len() > 0)
-            .unwrap_or(false)
-        {
-            eprintln!("[tauri-shell] mdi proof write skipped reason=already-recorded");
-            return;
-        }
-        let _ = fs::write(path, proof_json);
-    }
-}
-
 fn shell_input_message(event_type: &str, key: &str, value: &str, x: f64, y: f64) -> ShellMessage {
     shell_input_message_for("main", event_type, "", key, value, x, y, 0.0, 0.0, "")
 }
@@ -370,7 +289,7 @@ fn tauri_mdi_init_script() -> &'static str {
             if (!document.getElementById('simple-tauri-wm-style')) {
                 var style = document.createElement('style');
                 style.id = 'simple-tauri-wm-style';
-                style.textContent = '#wm-desktop{position:fixed;inset:0 0 58px 0;overflow:hidden;z-index:10000;pointer-events:none}.wm-window{position:absolute;display:flex;flex-direction:column;background:#111827;color:#e5e7eb;border:1px solid rgba(255,255,255,.18);box-shadow:0 18px 45px rgba(0,0,0,.42);border-radius:8px;overflow:hidden;pointer-events:auto}.wm-titlebar{height:32px;display:flex;align-items:center;gap:10px;padding:0 10px;background:#0f172a;border-bottom:1px solid rgba(255,255,255,.12);user-select:none;cursor:grab;touch-action:none}.wm-titlebar:active{cursor:grabbing}.wm-traffic-lights{display:flex;gap:6px}.wm-traffic-lights button{width:13px;height:13px;border-radius:50%;border:0;font-size:0;padding:0;cursor:pointer}.wm-traffic-lights button[data-action=close]{background:#ff5f57}.wm-traffic-lights button[data-action=minimize]{background:#febc2e}.wm-traffic-lights button[data-action=maximize]{background:#28c840}.wm-title{font:600 12px system-ui,sans-serif;color:#e5e7eb;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.wm-titlebar-widgets{display:flex;align-items:center;gap:6px;margin-left:auto}.wm-titlebar-widgets [data-simple-titlebar-widget]{min-height:24px}.wm-body{flex:1;min-height:0;overflow:auto;background:#0b0d10;pointer-events:auto}.wm-body *{pointer-events:auto}#dock{position:fixed;left:0;right:0;bottom:0;height:58px;z-index:10001;display:flex;align-items:center;gap:8px;padding:7px 10px;background:rgba(5,8,13,.94);border-top:1px solid rgba(255,255,255,.16);box-sizing:border-box}.tab-bar-item{min-width:58px;height:42px;display:flex;align-items:center;gap:6px;padding:4px 8px;border:1px solid rgba(255,255,255,.18);border-radius:8px;background:#172033;color:#e5e7eb}.tab-bar-icon{width:22px;height:22px;border-radius:6px;background:#38bdf8;color:#031018;display:flex;align-items:center;justify-content:center;font:700 12px system-ui,sans-serif}.tab-bar-label{font:600 11px system-ui,sans-serif;color:#e5e7eb;max-width:72px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}';
+                style.textContent = '#wm-desktop{position:fixed;inset:0;overflow:hidden;z-index:10000;pointer-events:none}.wm-window{position:absolute;display:flex;flex-direction:column;background:#111827;color:#e5e7eb;border:1px solid rgba(255,255,255,.18);box-shadow:0 18px 45px rgba(0,0,0,.42);border-radius:8px;overflow:hidden;pointer-events:auto}.wm-titlebar{height:32px;display:flex;align-items:center;gap:10px;padding:0 10px;background:#0f172a;border-bottom:1px solid rgba(255,255,255,.12);user-select:none;cursor:grab;touch-action:none}.wm-titlebar:active{cursor:grabbing}.wm-traffic-lights{display:flex;gap:6px}.wm-traffic-lights button{width:13px;height:13px;border-radius:50%;border:0;font-size:0;padding:0;cursor:pointer}.wm-traffic-lights button[data-action=close]{background:#ff5f57}.wm-traffic-lights button[data-action=minimize]{background:#febc2e}.wm-traffic-lights button[data-action=maximize]{background:#28c840}.wm-title{font:600 12px system-ui,sans-serif;color:#e5e7eb;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.wm-titlebar-widgets{display:flex;align-items:center;gap:6px;margin-left:auto}.wm-titlebar-widgets [data-simple-titlebar-widget]{min-height:24px}.wm-body{flex:1;min-height:0;overflow:auto;background:#0b0d10;pointer-events:auto}.wm-body *{pointer-events:auto}';
                 document.head.appendChild(style);
             }
             var desktop = document.getElementById('wm-desktop');
@@ -379,13 +298,6 @@ fn tauri_mdi_init_script() -> &'static str {
                 desktop.id = 'wm-desktop';
                 document.body.appendChild(desktop);
             }
-            var dock = document.getElementById('dock');
-            if (!dock) {
-                dock = document.createElement('nav');
-                dock.id = 'dock';
-                dock.setAttribute('aria-label', 'Open windows');
-                document.body.appendChild(dock);
-            }
             if (!window.__SIMPLE_TAURI_WM__) {
                 window.__SIMPLE_TAURI_WM__ = {
                     windows: {},
@@ -393,11 +305,9 @@ fn tauri_mdi_init_script() -> &'static str {
                     drag: null,
                     lastEvent: null,
                     invoke: function(name, payload) {
-                        var inv = window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke
-                            ? window.__TAURI__.core.invoke
-                            : (window.__TAURI__ && window.__TAURI__.tauri && window.__TAURI__.tauri.invoke
-                                ? window.__TAURI__.tauri.invoke
-                                : (window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke ? window.__TAURI_INTERNALS__.invoke : null));
+                        var inv = window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke
+                            ? window.__TAURI_INTERNALS__.invoke
+                            : (window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke ? window.__TAURI__.core.invoke : null);
                         if (inv) inv(name, payload || {});
                     },
                     elementId: function(el) {
@@ -567,31 +477,6 @@ fn tauri_mdi_init_script() -> &'static str {
                         var top = parseInt(win.style.top || '0', 10) || 0;
                         this.invoke('send_action', { name: 'wm_move:' + id + ':' + left + ':' + top });
                     },
-                    ensureDockItem: function(id, titleText) {
-                        var itemId = 'dock-item-' + id;
-                        var item = document.getElementById(itemId);
-                        if (!item) {
-                            item = document.createElement('button');
-                            item.id = itemId;
-                            item.className = 'tab-bar-item';
-                            item.type = 'button';
-                            item.dataset.windowId = id;
-                            var icon = document.createElement('span');
-                            icon.className = 'tab-bar-icon';
-                            icon.textContent = (titleText || id || '?').substring(0, 1).toUpperCase();
-                            var label = document.createElement('span');
-                            label.className = 'tab-bar-label';
-                            label.textContent = titleText || id;
-                            item.appendChild(icon);
-                            item.appendChild(label);
-                            var self = this;
-                            item.addEventListener('click', function() { self.focus(id); });
-                            dock.appendChild(item);
-                        } else {
-                            var label = item.querySelector('.tab-bar-label');
-                            if (label) label.textContent = titleText || id;
-                        }
-                    },
                     receiveMessage: function(msg) {
                         if (!msg || !msg.type) return;
                         if (msg.type === 'openWindow') {
@@ -634,7 +519,6 @@ fn tauri_mdi_init_script() -> &'static str {
                                 existing.body.innerHTML = msg.html || '';
                                 existing.title.textContent = msg.title || id;
                             }
-                            this.ensureDockItem(id, msg.title || id);
                             this.mountTitlebarWidgets(existing);
                             this.focus(id);
                         } else if (msg.type === 'renderWindow' && this.windows[msg.windowId]) {
@@ -653,28 +537,15 @@ fn tauri_mdi_init_script() -> &'static str {
 
 fn eval_tauri_mdi_message(app: &AppHandle, msg_json: String) {
     if let Some(win) = app.get_webview_window("main") {
-        let msg_kind = serde_json::from_str::<serde_json::Value>(&msg_json)
-            .ok()
-            .and_then(|value| {
-                value
-                    .get("type")
-                    .and_then(|kind| kind.as_str())
-                    .map(|kind| kind.to_string())
-            })
-            .unwrap_or_else(|| "unknown".to_string());
         let js = format!(
             "{}\nwindow.__SIMPLE_TAURI_WM__.receiveMessage({});",
             tauri_mdi_init_script(),
             msg_json
         );
-        match win.eval(&js) {
-            Ok(_) => eprintln!("[tauri-shell] mdi eval OK type={}", msg_kind),
-            Err(e) => eprintln!("[tauri-shell] mdi eval FAIL type={} err={}", msg_kind, e),
-        }
+        let _ = win.eval(&js);
         if cfg!(mobile) {
             let handle = app.clone();
             let delayed_msg = msg_json;
-            let delayed_kind = msg_kind;
             thread::spawn(move || {
                 thread::sleep(std::time::Duration::from_millis(1800));
                 if let Some(win) = handle.get_webview_window("main") {
@@ -683,26 +554,10 @@ fn eval_tauri_mdi_message(app: &AppHandle, msg_json: String) {
                         tauri_mdi_init_script(),
                         delayed_msg
                     );
-                    match win.eval(&js) {
-                        Ok(_) => {
-                            eprintln!("[tauri-shell] delayed mdi eval OK type={}", delayed_kind)
-                        }
-                        Err(e) => eprintln!(
-                            "[tauri-shell] delayed mdi eval FAIL type={} err={}",
-                            delayed_kind, e
-                        ),
-                    }
-                    maybe_write_tauri_mdi_proof(&handle);
-                } else {
-                    eprintln!(
-                        "[tauri-shell] delayed mdi eval skipped type={} reason=missing-main-window",
-                        delayed_kind
-                    );
+                    let _ = win.eval(&js);
                 }
             });
         }
-    } else {
-        eprintln!("[tauri-shell] mdi eval skipped reason=missing-main-window");
     }
 }
 
@@ -716,56 +571,23 @@ fn maybe_write_tauri_mdi_proof(app: &AppHandle) {
         return;
     }
     if let Some(win) = app.get_webview_window("main") {
-        eprintln!(
-            "[tauri-shell] mdi proof eval requested count={} proof_url={:?}",
-            count, MOBILE_MDI_PROOF_URL
-        );
-        let proof_url = js_string_or_null(MOBILE_MDI_PROOF_URL);
         let js = r#"
             (function() {
-                var proofFetchUrl = __SIMPLE_TAURI_MDI_PROOF_URL__;
                 var wm = window.__SIMPLE_TAURI_WM__;
                 var dragMoved = false;
                 var bodyClickRouted = false;
                 var bodyInputRouted = false;
                 var bodyKeyRouted = false;
-                var eventSequence = [];
                 var appActionControlFound = false;
                 var appInputControlFound = false;
                 var performanceNowAvailable = !!(window.performance && typeof window.performance.now === 'function');
                 var perfStart = performanceNowAvailable ? window.performance.now() : 0;
                 var performanceNowDeltaMs = 0;
-                var inputToPaintStart = 0;
-                var inputToPaintMs = 0;
                 var animationFrameAvailable = typeof window.requestAnimationFrame === 'function';
                 var animationFrameCount = 0;
-                var proofRetryCount = 0;
                 var cssAnimationProbe = false;
-                var invokeFn = window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke
-                    ? window.__TAURI__.core.invoke
-                    : (window.__TAURI__ && window.__TAURI__.tauri && window.__TAURI__.tauri.invoke
-                        ? window.__TAURI__.tauri.invoke
-                        : (window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke ? window.__TAURI_INTERNALS__.invoke : null));
-                var invokeRoundtripSeq = Date.now() % 100000;
-                var invokeRoundtripStatus = invokeFn ? 'pending' : 'unavailable';
-                var invokeRoundtripReply = '';
-                if (invokeFn) {
-                    try {
-                        invokeFn('invoke_roundtrip_ping', { seq: invokeRoundtripSeq }).then(function(reply) {
-                            invokeRoundtripReply = String(reply);
-                            invokeRoundtripStatus = invokeRoundtripReply === ('pong:' + (invokeRoundtripSeq * 2 + 1)) ? 'pass' : 'mismatch';
-                            invokeFn('report_invoke_roundtrip', { seq: invokeRoundtripSeq, reply: invokeRoundtripReply }).catch(function() {});
-                        }).catch(function() {
-                            invokeRoundtripStatus = 'fail';
-                        });
-                    } catch (_rtErr) {
-                        invokeRoundtripStatus = 'fail';
-                    }
-                }
                 var viewportWidth = Math.max(document.documentElement ? document.documentElement.clientWidth : 0, window.innerWidth || 0);
                 var viewportHeight = Math.max(document.documentElement ? document.documentElement.clientHeight : 0, window.innerHeight || 0);
-                var devicePixelRatio = typeof window.devicePixelRatio === 'number' ? window.devicePixelRatio : 0;
-                var screenOrientation = viewportWidth >= viewportHeight ? 'landscape' : 'portrait';
                 try {
                     var styleProbe = document.createElement('style');
                     styleProbe.textContent = '@keyframes simple-proof-pulse { from { opacity: 0.65; } to { opacity: 1; } }';
@@ -791,7 +613,6 @@ fn maybe_write_tauri_mdi_proof(app: &AppHandle) {
                     return rect.width >= 20 && rect.height >= 10 && style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
                 });
                 if (wm && wm.windows && wm.windows.terminal) {
-                    inputToPaintStart = performanceNowAvailable ? window.performance.now() : 0;
                     var terminal = wm.windows.terminal.win;
                     var body = wm.windows.terminal.body;
                     var titlebar = terminal.querySelector('.wm-titlebar');
@@ -812,9 +633,6 @@ fn maybe_write_tauri_mdi_proof(app: &AppHandle) {
                     var afterLeft = parseInt(terminal.style.left || '0', 10) || 0;
                     var afterTop = parseInt(terminal.style.top || '0', 10) || 0;
                     dragMoved = afterLeft > beforeLeft && afterTop > beforeTop;
-                    if (dragMoved) {
-                        eventSequence.push('window_drag:move');
-                    }
                     if (body) {
                         if (!body.querySelector('[data-action]')) {
                             var proofButton = document.createElement('button');
@@ -833,9 +651,6 @@ fn maybe_write_tauri_mdi_proof(app: &AppHandle) {
                             var actionName = appButton.getAttribute('data-action') || '';
                             appButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
                             bodyClickRouted = !!(wm.lastEvent && wm.lastEvent.kind === 'action' && wm.lastEvent.windowId === 'terminal' && wm.lastEvent.action === actionName);
-                            if (bodyClickRouted) {
-                                eventSequence.push('app_action:body_click');
-                            }
                         }
 
                         var appInput = body.querySelector('input[data-target-id], textarea[data-target-id], select[data-target-id], [contenteditable][data-target-id]');
@@ -849,98 +664,50 @@ fn maybe_write_tauri_mdi_proof(app: &AppHandle) {
                             }
                             appInput.dispatchEvent(new Event('input', { bubbles: true }));
                             bodyInputRouted = !!(wm.lastEvent && wm.lastEvent.kind === 'input' && wm.lastEvent.windowId === 'terminal' && wm.lastEvent.targetId === targetId && wm.lastEvent.value === 'ok');
-                            if (bodyInputRouted) {
-                                eventSequence.push('app_input:body_input');
-                            }
                         }
                         body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
                         bodyKeyRouted = !!(wm.lastEvent && wm.lastEvent.kind === 'key' && wm.lastEvent.windowId === 'terminal' && wm.lastEvent.key === 'Enter');
-                        if (bodyKeyRouted) {
-                            eventSequence.push('app_key:body_key');
-                        }
                     }
                 }
-                var invoke = window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke
-                    ? window.__TAURI__.core.invoke
-                    : (window.__TAURI__ && window.__TAURI__.tauri && window.__TAURI__.tauri.invoke
-                        ? window.__TAURI__.tauri.invoke
-                        : (window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke ? window.__TAURI_INTERNALS__.invoke : null));
+                var invoke = window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke
+                    ? window.__TAURI_INTERNALS__.invoke
+                    : (window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke ? window.__TAURI__.core.invoke : null);
                 var finish = function() {
                     performanceNowDeltaMs = performanceNowAvailable ? Math.max(0, window.performance.now() - perfStart) : 0;
                     inputToPaintMs = performanceNowAvailable && inputToPaintStart > 0 ? Math.max(0, window.performance.now() - inputToPaintStart) : 0;
-                    var proof = {
-                        count: window.__SIMPLE_TAURI_WM__ ? Object.keys(window.__SIMPLE_TAURI_WM__.windows || {}).length : 0,
-                        hasDesktop: !!document.getElementById('wm-desktop'),
-                        imageCount: document.querySelectorAll('img.simple-picture').length,
-                        sourceWindowCount: document.querySelectorAll('.wm-window[data-surface-id]').length,
-                        hasSimpleSmokeText: document.body.innerText.indexOf('Tauri mobile MDI smoke') >= 0,
-                        hasDragRuntime: !!(wm && wm.bindDrag),
-                        hasDragEvents: !!(wm && wm.notifyMove),
-                        dragMoved: dragMoved,
-                        hasWindowEventRuntime: !!(wm && wm.bindWindowEvents && wm.sendWindowAction && wm.sendWindowKey && wm.sendWindowInput && wm.sendWindowMouse),
-                        appActionControlFound: appActionControlFound,
-                        appInputControlFound: appInputControlFound,
-                        bodyClickRouted: bodyClickRouted,
-                        bodyInputRouted: bodyInputRouted,
-                        bodyKeyRouted: bodyKeyRouted,
-                        eventSequence: eventSequence,
-                        taskbarItemCount: taskbarItems.length,
-                        taskbarIconCount: taskbarIcons.length,
-                        taskbarIconsVisible: taskbarIconsVisible,
-                        taskbarLabelsVisible: taskbarLabelsVisible,
-                        htmlRenderable: document.body.innerHTML.indexOf('simple-app-window') >= 0 && document.body.innerHTML.indexOf('<pre class="simple-app-pre">') >= 0,
-                        viewportWidth: viewportWidth,
-                        viewportHeight: viewportHeight,
-                        devicePixelRatio: devicePixelRatio,
-                        screenOrientation: screenOrientation,
-                        performanceNowAvailable: performanceNowAvailable,
-                        performanceNowDeltaMs: performanceNowDeltaMs,
-                        inputToPaintMs: inputToPaintMs,
-                        animationFrameAvailable: animationFrameAvailable,
-                        animationFrameCount: animationFrameCount,
-                        cssAnimationProbe: cssAnimationProbe,
-                        invokeRoundtripStatus: invokeRoundtripStatus,
-                        invokeRoundtripReply: invokeRoundtripReply
-                    };
-                    var proofIncomplete = (
-                        proof.count < 4 ||
-                        proof.imageCount < 1 ||
-                        proof.sourceWindowCount < 4 ||
-                        proof.taskbarItemCount < 4 ||
-                        proof.taskbarIconCount < 4 ||
-                        !proof.hasDesktop ||
-                        !proof.hasSimpleSmokeText ||
-                        !proof.htmlRenderable ||
-                        invokeRoundtripStatus === 'pending'
-                    );
-                    if (proofIncomplete) {
-                        if (proofRetryCount < 20) {
-                            proofRetryCount += 1;
-                            window.setTimeout(finish, 100);
+                    if (!invoke) return;
+                    invoke('report_mdi_proof', {
+                        proof: {
+                            count: window.__SIMPLE_TAURI_WM__ ? Object.keys(window.__SIMPLE_TAURI_WM__.windows || {}).length : 0,
+                            hasDesktop: !!document.getElementById('wm-desktop'),
+                            imageCount: document.querySelectorAll('img.simple-picture').length,
+                            hasDragRuntime: !!(wm && wm.bindDrag),
+                            hasDragEvents: !!(wm && wm.notifyMove),
+                            dragMoved: dragMoved,
+                            hasWindowEventRuntime: !!(wm && wm.bindWindowEvents && wm.sendWindowAction && wm.sendWindowKey && wm.sendWindowInput && wm.sendWindowMouse),
+                            appActionControlFound: appActionControlFound,
+                            appInputControlFound: appInputControlFound,
+                            bodyClickRouted: bodyClickRouted,
+                            bodyInputRouted: bodyInputRouted,
+                            bodyKeyRouted: bodyKeyRouted,
+                            eventSequence: eventSequence,
+                            taskbarItemCount: taskbarItems.length,
+                            taskbarIconCount: taskbarIcons.length,
+                            taskbarIconsVisible: taskbarIconsVisible,
+                            taskbarLabelsVisible: taskbarLabelsVisible,
+                            htmlRenderable: document.body.innerHTML.indexOf('simple-app-window') >= 0 && document.body.innerHTML.indexOf('<pre class="simple-app-pre">') >= 0,
+                            viewportWidth: viewportWidth,
+                            viewportHeight: viewportHeight,
+                            devicePixelRatio: devicePixelRatio,
+                            screenOrientation: screenOrientation,
+                            performanceNowAvailable: performanceNowAvailable,
+                            performanceNowDeltaMs: performanceNowDeltaMs,
+                            inputToPaintMs: inputToPaintMs,
+                            animationFrameAvailable: animationFrameAvailable,
+                            animationFrameCount: animationFrameCount,
+                            cssAnimationProbe: cssAnimationProbe
                         }
-                        return;
-                    }
-                    if (proofFetchUrl && typeof fetch === 'function') {
-                        var params = new URLSearchParams();
-                        Object.keys(proof).forEach(function(key) {
-                            var value = proof[key];
-                            params.set(key, Array.isArray(value) ? value.join('|') : String(value));
-                        });
-                        fetch(proofFetchUrl + '?' + params.toString()).catch(function() {});
-                    }
-                    if (!proofFetchUrl && !invoke) {
-                        try {
-                            var navParams = new URLSearchParams();
-                            Object.keys(proof).forEach(function(key) {
-                                var value = proof[key];
-                                navParams.set(key, Array.isArray(value) ? value.join('|') : String(value));
-                            });
-                            window.location.href = 'simple-mdi-proof://capture?' + navParams.toString();
-                        } catch (_) {}
-                    }
-                    if (invoke) {
-                        invoke('report_mdi_proof', { proof: proof }).catch(function() {});
-                    }
+                    });
                 };
                 if (animationFrameAvailable) {
                     window.requestAnimationFrame(function() {
@@ -954,26 +721,14 @@ fn maybe_write_tauri_mdi_proof(app: &AppHandle) {
                     finish();
                 }
             })();
-        "#
-        .replace("__SIMPLE_TAURI_MDI_PROOF_URL__", &proof_url);
-        match win.eval(&js) {
-            Ok(_) => eprintln!("[tauri-shell] mdi proof eval OK"),
-            Err(e) => eprintln!("[tauri-shell] mdi proof eval FAIL err={}", e),
-        }
+        "#;
+        let _ = win.eval(js);
         if cfg!(mobile) {
             let handle = app.clone();
-            let delayed_js = js.clone();
             thread::spawn(move || {
                 thread::sleep(std::time::Duration::from_millis(2600));
                 if let Some(win) = handle.get_webview_window("main") {
-                    match win.eval(&delayed_js) {
-                        Ok(_) => eprintln!("[tauri-shell] delayed mdi proof eval OK"),
-                        Err(e) => eprintln!("[tauri-shell] delayed mdi proof eval FAIL err={}", e),
-                    }
-                } else {
-                    eprintln!(
-                        "[tauri-shell] delayed mdi proof eval skipped reason=missing-main-window"
-                    );
+                    let _ = win.eval(js);
                 }
             });
         }
@@ -982,8 +737,6 @@ fn maybe_write_tauri_mdi_proof(app: &AppHandle) {
             count,
             has_desktop: true,
             image_count: MDI_IMAGE_COUNT.load(Ordering::SeqCst),
-            source_window_count: count,
-            has_simple_smoke_text: false,
             has_drag_runtime: true,
             has_drag_events: true,
             drag_moved: false,
@@ -993,7 +746,6 @@ fn maybe_write_tauri_mdi_proof(app: &AppHandle) {
             body_click_routed: false,
             body_input_routed: false,
             body_key_routed: false,
-            event_sequence: Vec::new(),
             taskbar_item_count: 0,
             taskbar_icon_count: 0,
             taskbar_icons_visible: false,
@@ -1001,16 +753,11 @@ fn maybe_write_tauri_mdi_proof(app: &AppHandle) {
             html_renderable: false,
             viewport_width: 0,
             viewport_height: 0,
-            device_pixel_ratio: 0.0,
-            screen_orientation: String::new(),
             performance_now_available: false,
             performance_now_delta_ms: 0.0,
-            input_to_paint_ms: 0.0,
             animation_frame_available: false,
             animation_frame_count: 0,
             css_animation_probe: false,
-            invoke_roundtrip_status: "unavailable".to_string(),
-            invoke_roundtrip_reply: String::new(),
         };
         if let Ok(path) = env::var("SIMPLE_TAURI_MDI_PROOF_PATH") {
             let _ = fs::write(path, serde_json::to_string(&proof).unwrap_or_default());
@@ -1198,19 +945,6 @@ fn handle_subprocess_message(msg: SubprocessMessage, app: &AppHandle) {
 
                         if (!window._evtBound) {{
                             window._evtBound = true;
-                            var _rtInvoke = window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke
-                                ? window.__TAURI__.core.invoke
-                                : (window.__TAURI__ && window.__TAURI__.tauri && window.__TAURI__.tauri.invoke
-                                    ? window.__TAURI__.tauri.invoke
-                                    : (window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke ? window.__TAURI_INTERNALS__.invoke : null));
-                            if (_rtInvoke) {{
-                                try {{
-                                    var _rtSeq = Date.now() % 100000;
-                                    _rtInvoke('invoke_roundtrip_ping', {{ seq: _rtSeq }}).then(function(reply) {{
-                                        _rtInvoke('report_invoke_roundtrip', {{ seq: _rtSeq, reply: reply }}).catch(function() {{}});
-                                    }}).catch(function() {{}});
-                                }} catch (_rtErr) {{}}
-                            }}
                             window._simpleTargetId = function(el) {{
                                 if (!el) return '';
                                 return el.getAttribute('data-target-id') || el.getAttribute('data-widget-id') || el.getAttribute('data-id') || el.id || el.name || '';
@@ -1319,7 +1053,6 @@ fn handle_subprocess_message(msg: SubprocessMessage, app: &AppHandle) {
             width,
             height,
         } => {
-            eprintln!("[tauri-shell] render, html_len={}", html.len());
             eprintln!("[tauri-shell] openWindow id={} title={}", window_id, title);
             MDI_OPEN_WINDOW_COUNT.fetch_add(1, Ordering::SeqCst);
             if html.contains("<img") {
@@ -1340,7 +1073,6 @@ fn handle_subprocess_message(msg: SubprocessMessage, app: &AppHandle) {
             maybe_write_tauri_mdi_proof(app);
         }
         SubprocessMessage::RenderWindow { window_id, html } => {
-            eprintln!("[tauri-shell] render, html_len={}", html.len());
             let msg_json = serde_json::json!({
                 "type": "renderWindow",
                 "windowId": window_id,
@@ -1424,139 +1156,25 @@ fn send_window_mouse(
     ));
 }
 
-// Shared by the explicit `send_resize` command (webview → native, on a real
-// viewport size change) and the P1.3 background/foreground lifecycle resume
-// hook below (native-initiated, using the window's current inner size).
-// Re-sending the *same* width/height the Simple subprocess already has is a
-// deliberate no-op resize: `TauriApp.run()` (`src/app/ui.tauri/app.spl:74-84`)
-// unconditionally calls `send_render()` after any non-Quit event, including
-// `UIEvent.Resize`, so this is the existing, already-wired mechanism for
-// "re-emit the last render envelope" (design §4b) — it does not require a
-// new IPC message type or any change to the Simple-side event loop.
-fn resize_shell_message(width: u32, height: u32) -> ShellMessage {
-    shell_input_message("resize", "", "", width as f64, height as f64)
-}
-
 #[tauri::command]
 fn send_resize(width: u32, height: u32, state: tauri::State<'_, Arc<SimpleProcess>>) {
-    state.send(&resize_shell_message(width, height));
-}
-
-// ---------------------------------------------------------------------------
-// Background / foreground lifecycle (P1.3)
-//
-// No desktop window API (`minimize`/`maximize`/`hide`) exists on mobile
-// (`#[cfg(desktop)]`-gated), so lifecycle is observed the same way on every
-// platform via `WindowEvent::Focused(bool)` (design §4b). On backgrounding
-// there is nothing native-side that needs pausing today — the Simple
-// subprocess just keeps blocking on `rt_stdin_read_line()`, it does not spin
-// a CPU-hungry loop while idle — so the actionable half of the gate is the
-// resume side: on regaining foreground *after* having been backgrounded,
-// request a fresh render so a stale/blank webview (e.g. after the OS
-// suspended/discarded the WKWebView's GPU surface) recovers without the user
-// having to interact first.
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LifecycleTransition {
-    /// Window/app lost focus — mark backgrounded.
-    Backgrounded,
-    /// Window/app regained focus after being backgrounded — resume render.
-    ResumedFromBackground,
-    /// Focus event that isn't a background→foreground transition (e.g. two
-    /// `Focused(true)` events in a row, or losing focus while already
-    /// backgrounded) — no action needed.
-    FocusNoOp,
-}
-
-fn lifecycle_focus_transition(was_backgrounded: bool, now_focused: bool) -> LifecycleTransition {
-    if now_focused {
-        if was_backgrounded {
-            LifecycleTransition::ResumedFromBackground
-        } else {
-            LifecycleTransition::FocusNoOp
-        }
-    } else {
-        LifecycleTransition::Backgrounded
-    }
-}
-
-/// Handles a `WindowEvent::Focused` transition: updates `APP_BACKGROUNDED`
-/// and, on resume-from-background, sends a same-size resize event so the
-/// Simple subprocess re-emits a fresh render (`resize_shell_message` above).
-/// Real logging on every branch (not just success) so a `lifecycle_resume_status`
-/// row can be derived from `[tauri-shell]` stdout/stderr by an evidence
-/// wrapper without guessing at internal state.
-fn handle_window_focus_change<R: tauri::Runtime>(
-    process: &Arc<SimpleProcess>,
-    window: &tauri::window::Window<R>,
-    now_focused: bool,
-) {
-    let was_backgrounded = APP_BACKGROUNDED.load(Ordering::SeqCst);
-    match lifecycle_focus_transition(was_backgrounded, now_focused) {
-        LifecycleTransition::Backgrounded => {
-            APP_BACKGROUNDED.store(true, Ordering::SeqCst);
-            eprintln!("[tauri-shell] lifecycle: backgrounded");
-        }
-        LifecycleTransition::ResumedFromBackground => {
-            APP_BACKGROUNDED.store(false, Ordering::SeqCst);
-            eprintln!("[tauri-shell] lifecycle: foregrounded, requesting resume render");
-            match window.inner_size() {
-                Ok(size) => {
-                    process.send(&resize_shell_message(size.width, size.height));
-                    eprintln!(
-                        "[tauri-shell] lifecycle_resume_status=pass width={} height={}",
-                        size.width, size.height
-                    );
-                }
-                Err(e) => {
-                    eprintln!(
-                        "[tauri-shell] lifecycle_resume_status=fail reason=inner_size_error error={}",
-                        e
-                    );
-                }
-            }
-        }
-        LifecycleTransition::FocusNoOp => {}
-    }
+    state.send(&shell_input_message(
+        "resize",
+        "",
+        "",
+        width as f64,
+        height as f64,
+    ));
 }
 
 #[tauri::command]
 fn report_mdi_proof(proof: MdiProof, app: AppHandle) {
     let proof_json = serde_json::to_string(&proof).unwrap_or_default();
-    record_mdi_proof_json(proof_json, Some(&app));
-}
-
-// ---------------------------------------------------------------------------
-// invoke() two-way round-trip proof (P1.2)
-//
-// Every other command above is fire-and-forget: the webview calls `invoke`
-// and never uses the resolved value. That leaves the native->webview return
-// path unproven on mobile (design doc §3b). `invoke_roundtrip_ping` computes
-// a value that depends on the caller-supplied `seq` (never a constant, so a
-// stale/cached reply cannot pass), returns it to the webview's `invoke()`
-// promise, and the webview reports what it actually received back via
-// `report_invoke_roundtrip` so the match is provable from native-side logs
-// (and, for the MDI lane, from the proof JSON) instead of trusting the JS.
-// ---------------------------------------------------------------------------
-
-fn invoke_roundtrip_reply_for(seq: u32) -> String {
-    format!("pong:{}", seq.wrapping_mul(2).wrapping_add(1))
-}
-
-#[tauri::command]
-fn invoke_roundtrip_ping(seq: u32) -> String {
-    eprintln!("[tauri-shell] invoke_roundtrip_ping called: seq={}", seq);
-    invoke_roundtrip_reply_for(seq)
-}
-
-#[tauri::command]
-fn report_invoke_roundtrip(seq: u32, reply: String) {
-    let matched = reply == invoke_roundtrip_reply_for(seq);
-    eprintln!(
-        "[tauri-shell] invoke_roundtrip: seq={} reply={} matched={}",
-        seq, reply, matched
-    );
+    eprintln!("[tauri-shell] mdi proof: {}", proof_json);
+    if let Ok(path) = env::var("SIMPLE_TAURI_MDI_PROOF_PATH") {
+        let _ = fs::write(path, proof_json);
+        app.exit(0);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1706,7 +1324,9 @@ fn packaged_android_runtime_path() -> Option<String> {
             if !path.ends_with("libsimple_tauri_shell_lib.so") {
                 continue;
             }
-            let candidate = PathBuf::from(path).parent().map(|dir| dir.join(filename));
+            let candidate = PathBuf::from(path)
+                .parent()
+                .map(|dir| dir.join(filename));
             if let Some(candidate) = candidate {
                 if candidate.exists() {
                     return Some(candidate.to_string_lossy().into_owned());
@@ -1722,10 +1342,7 @@ fn packaged_android_runtime_path() -> Option<String> {
             Err(_) => vec![root_path],
         };
         for app_dir in app_dirs {
-            let name = app_dir
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("");
+            let name = app_dir.file_name().and_then(|name| name.to_str()).unwrap_or("");
             if !name.starts_with("com.simple.ui") {
                 continue;
             }
@@ -1794,12 +1411,6 @@ fn prepare_bundled_mobile_entry() -> Result<Option<String>, String> {
     Ok(Some(entry_path.to_string_lossy().into_owned()))
 }
 
-fn prefer_bundled_mobile_mdi_entry() -> bool {
-    MOBILE_PROBE_ENTRY == Some("mdi-smoke")
-        || option_env!("SIMPLE_TAURI_MOBILE_PROBE_ENTRY") == Some("mdi-smoke")
-        || env::var("SIMPLE_TAURI_MOBILE_PROBE_ENTRY").as_deref() == Ok("mdi-smoke")
-}
-
 // Extracts the embedded UI source bundle (gzip tar) to a cache directory and
 // returns its root path. The bundle is laid out as `<root>/src/{app,lib,os,type}/...`
 // plus `<root>/widget_showcase_mobile.ui.sdn`, so the on-device invocation
@@ -1826,7 +1437,8 @@ fn prepare_bundled_ui_bundle() -> Result<Option<String>, String> {
         if bundle_dir.exists() {
             let _ = fs::remove_dir_all(&bundle_dir);
         }
-        fs::create_dir_all(&root).map_err(|e| format!("failed to create ui-bundle dir: {}", e))?;
+        fs::create_dir_all(&root)
+            .map_err(|e| format!("failed to create ui-bundle dir: {}", e))?;
         let decoder = flate2::read::GzDecoder::new(bytes);
         let mut archive = tar::Archive::new(decoder);
         archive
@@ -1883,7 +1495,11 @@ fn simple_subprocess_args_with_main(
             args.extend(["run".to_string(), entry.to_string()]);
         }
     } else if shared_wm {
-        args.extend(["run".to_string(), ui_main.to_string(), "tauri".to_string()]);
+        args.extend([
+            "run".to_string(),
+            ui_main.to_string(),
+            "tauri".to_string(),
+        ]);
     }
     if shared_wm {
         args.push("--shared-wm".to_string());
@@ -1909,21 +1525,6 @@ fn html_data_url(html: &str) -> String {
     format!("data:text/html;charset=utf-8,{}", urlencoding::encode(html))
 }
 
-#[cfg(not(mobile))]
-fn desktop_window_size() -> (f64, f64) {
-    let width = env::var("SIMPLE_TAURI_CAPTURE_WIDTH")
-        .ok()
-        .and_then(|value| value.parse::<f64>().ok())
-        .filter(|value| *value >= 1.0)
-        .unwrap_or(1280.0);
-    let height = env::var("SIMPLE_TAURI_CAPTURE_HEIGHT")
-        .ok()
-        .and_then(|value| value.parse::<f64>().ok())
-        .filter(|value| *value >= 1.0)
-        .unwrap_or(720.0);
-    (width, height)
-}
-
 fn inline_shell_document_script(html: &str) -> String {
     format!(
         r#"(function() {{
@@ -1940,22 +1541,8 @@ fn inline_shell_document_script(html: &str) -> String {
 // Shared entry point for desktop and mobile
 // ---------------------------------------------------------------------------
 
-#[cfg(target_os = "ios")]
-fn ignore_ios_sigpipe() {
-    // The iOS simulator can close diagnostic stdio pipes while the app remains
-    // valid. Do not let later stderr/stdout writes terminate the GUI process.
-    unsafe {
-        libc::signal(libc::SIGPIPE, libc::SIG_IGN);
-    }
-}
-
-#[cfg(not(target_os = "ios"))]
-fn ignore_ios_sigpipe() {}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    ignore_ios_sigpipe();
-
     // Check for external URL mode (e.g. --url http://localhost:3000)
     let external_url = resolve_external_url();
     let shared_wm_requested = shared_wm_requested();
@@ -1984,21 +1571,6 @@ pub fn run() {
     // repo-relative desktop path; the embedded source bundle overrides it with an
     // absolute `<bundleRoot>/src/...` entry so find_project_root resolves on device.
     let mut ui_main_path = "src/app/ui/main.spl".to_string();
-    if entry_file.is_none() && prefer_bundled_mobile_mdi_entry() {
-        match prepare_bundled_mobile_entry() {
-            Ok(path) => entry_file = path,
-            Err(err) => {
-                eprintln!(
-                    "[tauri-shell] bundled mobile MDI entry extraction failed: {}",
-                    err
-                );
-                startup_error = Some(format!(
-                    "Bundled mobile MDI entry extraction failed.\n\n{}",
-                    err
-                ));
-            }
-        }
-    }
     // Prefer the embedded real-pipeline source bundle (renders the widget showcase
     // via the genuine render_html_tree path) over the hard-coded smoke entry.
     if entry_file.is_none() {
@@ -2014,7 +1586,10 @@ pub fn run() {
             Ok(None) => {}
             Err(err) => {
                 eprintln!("[tauri-shell] bundled ui source extraction failed: {}", err);
-                startup_error = Some(format!("Bundled UI source extraction failed.\n\n{}", err));
+                startup_error = Some(format!(
+                    "Bundled UI source extraction failed.\n\n{}",
+                    err
+                ));
             }
         }
     }
@@ -2022,10 +1597,7 @@ pub fn run() {
         match prepare_bundled_mobile_entry() {
             Ok(path) => entry_file = path,
             Err(err) => {
-                eprintln!(
-                    "[tauri-shell] bundled mobile entry extraction failed: {}",
-                    err
-                );
+                eprintln!("[tauri-shell] bundled mobile entry extraction failed: {}", err);
                 startup_error = Some(format!(
                     "Bundled mobile entry extraction failed.\n\n{}",
                     err
@@ -2160,8 +1732,6 @@ pub fn run() {
             send_window_mouse,
             send_resize,
             report_mdi_proof,
-            invoke_roundtrip_ping,
-            report_invoke_roundtrip,
         ])
         .setup(move |app| {
             let url = if let Some(ref ext_url) = external_url {
@@ -2186,30 +1756,11 @@ pub fn run() {
                 WebviewUrl::App("index.html".into())
             };
 
-            let proof_nav_app = app.handle().clone();
-            let builder = WebviewWindowBuilder::new(app, "main", url).on_navigation(move |url| {
-                if let Some(proof_json) = mdi_proof_json_from_url(url) {
-                    record_mdi_proof_json(proof_json, Some(&proof_nav_app));
-                    return false;
-                }
-                true
-            });
-            #[cfg(not(mobile))]
-            let builder = {
-                let (width, height) = desktop_window_size();
-                let builder = builder
-                    .title("Simple Window Manager")
-                    .inner_size(width, height);
-                if env::var("SIMPLE_TAURI_CAPTURE_WINDOW").as_deref() == Ok("1") {
-                    builder.decorations(false).resizable(false)
-                } else {
-                    builder
-                }
-            };
-            #[cfg(target_os = "ios")]
-            eprintln!(
-                "[tauri-shell] ios renderer context: backend=WKWebView metal_expected=true metal_layer=CAMetalLayer"
-            );
+            let builder = WebviewWindowBuilder::new(app, "main", url);
+            #[cfg(desktop)]
+            let builder = builder
+                .title("Simple Window Manager")
+                .inner_size(1280.0, 720.0);
             let _win = builder.build()?;
             if let Some(ref html) = initial_inline_html {
                 let js = inline_shell_document_script(html);
@@ -2221,12 +1772,6 @@ pub fn run() {
                 let delayed_html = html.clone();
                 thread::spawn(move || {
                     thread::sleep(std::time::Duration::from_millis(1200));
-                    if MDI_OPEN_WINDOW_COUNT.load(Ordering::SeqCst) > 0 {
-                        eprintln!(
-                            "[tauri-shell] delayed inline shell eval skipped reason=mdi-opened"
-                        );
-                        return;
-                    }
                     if let Some(win) = delayed_handle.get_webview_window("main") {
                         let js = inline_shell_document_script(&delayed_html);
                         match win.eval(&js) {
@@ -2315,7 +1860,7 @@ pub fn run() {
 
             Ok(())
         })
-        .on_window_event(move |window, event| {
+        .on_window_event(move |_window, event| {
             if let tauri::WindowEvent::CloseRequested { .. } = event {
                 process.send(&ShellMessage::Quit);
                 if let Ok(mut guard) = process.stdin.lock() {
@@ -2330,9 +1875,6 @@ pub fn run() {
                 // Window is already closing via the CloseRequested event.
                 // No explicit close() needed (and it's not available on mobile).
             }
-            if let tauri::WindowEvent::Focused(now_focused) = event {
-                handle_window_focus_change(&process, window, *now_focused);
-            }
         })
         .run(tauri::generate_context!())
         .expect("tauri error");
@@ -2341,12 +1883,10 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        inline_shell_document_script, invoke_roundtrip_ping, lifecycle_focus_transition,
-        mdi_shell_html, render_envelope_metadata_js, report_invoke_roundtrip,
-        resize_shell_message, resolve_simple_binary_from, shell_input_message,
-        shell_input_message_for, simple_subprocess_args_for, simple_subprocess_args_with_main,
-        startup_error_shell_html, tauri_mdi_init_script, LifecycleTransition, ShellMessage,
-        SubprocessMessage,
+        inline_shell_document_script, mdi_shell_html, render_envelope_metadata_js,
+        resolve_simple_binary_from, shell_input_message, shell_input_message_for,
+        simple_subprocess_args_for, simple_subprocess_args_with_main, startup_error_shell_html,
+        tauri_mdi_init_script, ShellMessage, SubprocessMessage,
     };
     use crate::{
         ANDROID_RUNTIME_AARCH64, ANDROID_RUNTIME_X86_64, IOS_RUNTIME_AARCH64,
@@ -2562,12 +2102,9 @@ mod tests {
         assert!(js.contains("send_window_mouse"));
         assert!(include_str!("lib.rs").contains("hasWindowEventRuntime: !!(wm && wm.bindWindowEvents && wm.sendWindowAction && wm.sendWindowKey && wm.sendWindowInput && wm.sendWindowMouse)"));
         assert!(include_str!("lib.rs").contains("performanceNowAvailable"));
-        assert!(include_str!("lib.rs").contains("inputToPaintMs"));
         assert!(include_str!("lib.rs").contains("animationFrameCount"));
         assert!(include_str!("lib.rs").contains("cssAnimationProbe"));
         assert!(include_str!("lib.rs").contains("viewportWidth"));
-        assert!(include_str!("lib.rs").contains("devicePixelRatio"));
-        assert!(include_str!("lib.rs").contains("screenOrientation"));
         assert!(js.contains("body.tabIndex = 0"));
         assert!(js.contains("bindDrag"));
         assert!(js.contains("notifyMove"));
@@ -2581,126 +2118,5 @@ mod tests {
         assert!(src.contains(r#".env("SIMPLE_UI_BACKEND", "tauri")"#));
         assert!(src.contains("SIMPLE_EXECUTION_MODE"));
         assert!(src.contains("SIMPLE_TIMEOUT_SECONDS"));
-    }
-
-    // -----------------------------------------------------------------
-    // P1.2 — invoke() two-way round-trip proof
-    // -----------------------------------------------------------------
-
-    #[test]
-    fn invoke_roundtrip_ping_computes_a_seq_dependent_reply() {
-        // The reply must be a function of the caller-supplied seq, not a
-        // hardcoded constant — otherwise a JS-side fake ("pong") would pass
-        // without ever actually reaching the native command.
-        assert_eq!(invoke_roundtrip_ping(0), "pong:1");
-        assert_eq!(invoke_roundtrip_ping(5), "pong:11");
-        assert_eq!(invoke_roundtrip_ping(1000), "pong:2001");
-        assert_ne!(invoke_roundtrip_ping(1), invoke_roundtrip_ping(2));
-    }
-
-    #[test]
-    fn report_invoke_roundtrip_accepts_the_matching_reply_shape() {
-        // report_invoke_roundtrip has no return value to assert on (it only
-        // logs), but it must at least accept the exact (seq, reply) pair
-        // invoke_roundtrip_ping produces for the same seq without panicking —
-        // this is the shape the webview round-trips back over invoke().
-        report_invoke_roundtrip(42, invoke_roundtrip_ping(42));
-        report_invoke_roundtrip(0, "not-a-real-reply".to_string());
-    }
-
-    #[test]
-    fn invoke_roundtrip_commands_are_registered_and_wired_from_both_js_paths() {
-        let src = include_str!("lib.rs");
-        // Registered as real Tauri commands (not just free functions).
-        assert!(src.contains("invoke_roundtrip_ping,"));
-        assert!(src.contains("report_invoke_roundtrip,"));
-        // Wired into the always-on render bootstrap (fires on every real
-        // desktop/mobile render, exercising the two-way path in production,
-        // not just in the MDI evidence harness). Uses the same defensive
-        // three-bridge invoke detection as the MDI proof path below (plain
-        // `window.__TAURI_INTERNALS__.invoke` alone was empirically found to
-        // be unavailable in the desktop initial-data-URL webview lane).
-        assert!(src.contains("_rtInvoke('invoke_roundtrip_ping', {{ seq: _rtSeq }})"));
-        assert!(src.contains("_rtInvoke('report_invoke_roundtrip', {{ seq: _rtSeq, reply: reply }})"));
-        // Wired into the MDI proof object (P1.2 gate: "MDI proof gains an
-        // invoke_roundtrip_status=pass field ... backed by a real returned
-        // value"), gating the existing proofIncomplete retry loop so the
-        // proof is not finalized before the round trip resolves.
-        assert!(src.contains("invokeRoundtripStatus: invokeRoundtripStatus"));
-        assert!(src.contains("invokeRoundtripReply: invokeRoundtripReply"));
-        assert!(src.contains("invokeRoundtripStatus === 'pending'"));
-    }
-
-    // -----------------------------------------------------------------
-    // P1.3 — background/foreground lifecycle
-    // -----------------------------------------------------------------
-
-    #[test]
-    fn lifecycle_focus_transition_covers_all_four_cases() {
-        // Losing focus always marks backgrounded, regardless of prior state.
-        assert_eq!(
-            lifecycle_focus_transition(false, false),
-            LifecycleTransition::Backgrounded
-        );
-        assert_eq!(
-            lifecycle_focus_transition(true, false),
-            LifecycleTransition::Backgrounded
-        );
-        // Regaining focus only triggers a resume if we were actually
-        // backgrounded — an ordinary focus event (e.g. two Focused(true) in
-        // a row, which some platforms emit) must not re-send a render.
-        assert_eq!(
-            lifecycle_focus_transition(false, true),
-            LifecycleTransition::FocusNoOp
-        );
-        assert_eq!(
-            lifecycle_focus_transition(true, true),
-            LifecycleTransition::ResumedFromBackground
-        );
-    }
-
-    #[test]
-    fn resize_shell_message_is_a_same_shape_resize_input_event() {
-        // Must match the exact wire shape the Simple-side `parse_ipc_message`
-        // "input" + event_type=="resize" branch reads: type=="input",
-        // event_type=="resize", width in the `x` field, height in the `y`
-        // field (`src/app/ui.ipc/protocol.spl:199-218`). This is the same
-        // message `send_resize` has always sent — the lifecycle resume hook
-        // reuses it verbatim rather than inventing a parallel path.
-        let msg = resize_shell_message(390, 844);
-        let value: serde_json::Value =
-            serde_json::to_value(&msg).expect("ShellMessage::Input must serialize");
-        assert_eq!(value["type"], "input");
-        assert_eq!(value["event_type"], "resize");
-        assert_eq!(value["x"], 390.0);
-        assert_eq!(value["y"], 844.0);
-
-        // Sanity: matches what send_resize would have produced directly.
-        let via_helper = shell_input_message("resize", "", "", 390.0, 844.0);
-        assert_eq!(
-            serde_json::to_string(&msg).unwrap(),
-            serde_json::to_string(&via_helper).unwrap()
-        );
-    }
-
-    #[test]
-    fn lifecycle_hook_is_wired_into_on_window_event() {
-        let src = include_str!("lib.rs");
-        // The resume path must observe real WindowEvent::Focused transitions
-        // (not a synthetic timer/poll), and route through the same
-        // AtomicBool-backed transition function covered by the pure-logic
-        // test above — so the wiring test only needs to confirm the call
-        // sites exist and use the shared helpers, not re-derive the logic.
-        assert!(src.contains("tauri::WindowEvent::Focused(now_focused)"));
-        assert!(src.contains("handle_window_focus_change(&process, window, *now_focused)"));
-        assert!(src.contains("static APP_BACKGROUNDED: AtomicBool"));
-        // Real, greppable evidence markers an evidence wrapper (or a human
-        // reading `[tauri-shell]` stdout/stderr) can key a
-        // `lifecycle_resume_status=pass|fail` row off, mirroring the
-        // `invoke_roundtrip_status` proof pattern used for P1.2.
-        assert!(src.contains("[tauri-shell] lifecycle: backgrounded"));
-        assert!(src.contains("[tauri-shell] lifecycle: foregrounded, requesting resume render"));
-        assert!(src.contains("lifecycle_resume_status=pass"));
-        assert!(src.contains("lifecycle_resume_status=fail"));
     }
 }

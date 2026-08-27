@@ -14,10 +14,11 @@ git -C "$fixture" add source && git -C "$fixture" commit -qm fixture
 for name in qemu firmware kernel image program; do printf '%s\n' "$name" > "$work/$name"; done
 chmod +x "$work/qemu"
 nonce=nonce-linux-arm64-0001
+boot_marker=boot-correlation-linux-arm64-unique
 printf '%s\n' 'qemu fixture 9.2.0' > "$work/version"
 printf '%s\n' '/fixture/qemu -machine virt -accel tcg' > "$work/argv"
-printf '%s\n' opensbi-entry opensbi-handoff guest-entry "$nonce" > "$work/transcript"
-printf '%s\n' opensbi-entry opensbi-handoff guest-entry "$nonce" > "$work/markers"
+printf '%s\n' opensbi-entry opensbi-handoff "$boot_marker" guest-entry "$nonce" > "$work/transcript"
+printf '%s\n' opensbi-entry opensbi-handoff "$boot_marker" guest-entry > "$work/markers"
 cat > "$work/admission" <<EOF
 detected_host=linux
 requested_host=linux
@@ -40,8 +41,10 @@ run() {
     --qemu-binary "$work/qemu" --qemu-argv-file "$work/argv" --qemu-version-file "$work/version" \
     --accelerator tcg --firmware "$work/firmware" --firmware-id opensbi-fixture \
     --firmware-mode opensbi-bios --firmware-version 2026.08 --firmware-stages 'opensbi-entry>opensbi-handoff>guest-entry' \
+    --boot-correlation-marker "$boot_marker" \
     --kernel "$work/kernel" --image "$work/image" --program "$work/program" --transcript "$work/transcript" --required-markers-file "$work/markers" \
-    --nonce "$nonce" --owner fixture-owner --reviewer fixture-reviewer --compiler-identity simple-selfhost:fixture --source "$fixture"
+    --nonce "$nonce" --owner fixture-owner --reviewer fixture-reviewer --compiler-identity simple-selfhost:fixture \
+    --compiler-in-filesystem false --source "$fixture"
 }
 run "$work/good" "$work/admission" > "$work/good.out"
 env_file=$work/good/linux/arm64/run-$nonce/evidence.env
@@ -49,53 +52,84 @@ env_file=$work/good/linux/arm64/run-$nonce/evidence.env
 [ "$(grep -c '^artifact_[1-9]_path=' "$env_file")" -eq 9 ]
 grep -Eq '^source_identity=git:[0-9a-f]{40,64}:tree:[0-9a-f]{40,64}:clean$' "$env_file"
 grep -qx "qemu_identity=sha256:$(sha256sum "$work/qemu" | awk '{print $1}'):version:qemu fixture 9.2.0" "$env_file"
-
-run_direct() {
-  "$producer" --host linux --guest riscv32 --output "$1" --admission "$2" \
-    --qemu-binary "$work/qemu" --qemu-argv-file "$work/argv" --qemu-version-file "$work/version" \
-    --accelerator tcg --firmware none --firmware-id none --firmware-mode direct-kernel \
-    --firmware-version none --firmware-stages guest-entry --kernel "$work/kernel" \
-    --image "$work/image" --program "$work/program" --transcript "$work/transcript" \
-    --required-markers-file "$work/markers" --nonce "$nonce" --owner fixture-owner \
-    --reviewer fixture-reviewer --compiler-identity simple-selfhost:fixture --source "$fixture"
-}
-printf '%s\n' guest-entry "$nonce" > "$work/transcript"
-printf '%s\n' guest-entry "$nonce" > "$work/markers"
-run_direct "$work/direct-good" "$work/admission" > "$work/direct-good.out"
-direct_env=$work/direct-good/linux/riscv32/run-$nonce/evidence.env
-grep -qx schema_version=2 "$direct_env"
-grep -qx firmware_identity=firmware:none "$direct_env"
-grep -qx firmware_mode=direct-kernel "$direct_env"
-grep -qx firmware_path=none "$direct_env"
-grep -qx firmware_version=version:none "$direct_env"
-grep -qx firmware_sha256=none "$direct_env"
-grep -qx firmware_stage_markers=guest-entry "$direct_env"
-grep -qx artifact_count=8 "$direct_env"
-! grep -q firmware.bin "$direct_env"
 expect_reject() { name=$1; shift; if "$@" > "$work/$name.out" 2>&1; then echo "FAIL: accepted sabotage $name" >&2; exit 1; fi; }
 
-# External-firmware modes remain fail closed when their firmware bytes vanish.
-mv "$work/firmware" "$work/firmware.saved"
-expect_reject missing-external-firmware run "$work/out-missing-firmware" "$work/admission"
-mv "$work/firmware.saved" "$work/firmware"
-
-# A nonce-bearing workload line cannot substitute for the distinct guest-entry stage.
-printf '%s\n' workload-entry "$nonce" > "$work/transcript"
-expect_reject fake-guest-entry run_direct "$work/out-fake-guest-entry" "$work/admission"
-
-# The producer binds argv and kernel bytes. Sabotage must disagree with the
-# declared artifact hash and a nonce cannot name two candidate bundles.
-printf '%s\n' guest-entry "$nonce" > "$work/transcript"
-direct_dir=$work/direct-good/linux/riscv32/run-$nonce
-argv_index=$(awk -F= '$2=="qemu.argv" { sub(/^artifact_/,"",$1); sub(/_path$/, "", $1); print $1 }' "$direct_env")
-kernel_index=$(awk -F= '$2=="kernel.elf" { sub(/^artifact_/,"",$1); sub(/_path$/, "", $1); print $1 }' "$direct_env")
-test "$(sha256sum "$direct_dir/qemu.argv" | awk '{print $1}')" = "$(awk -F= -v k="artifact_${argv_index}_sha256" '$1==k {print $2}' "$direct_env")"
-test "$(sha256sum "$direct_dir/kernel.elf" | awk '{print $1}')" = "$(awk -F= -v k="artifact_${kernel_index}_sha256" '$1==k {print $2}' "$direct_env")"
-printf tamper >> "$direct_dir/qemu.argv"
-test "$(sha256sum "$direct_dir/qemu.argv" | awk '{print $1}')" != "$(awk -F= -v k="artifact_${argv_index}_sha256" '$1==k {print $2}' "$direct_env")"
-printf tamper >> "$direct_dir/kernel.elf"
-test "$(sha256sum "$direct_dir/kernel.elf" | awk '{print $1}')" != "$(awk -F= -v k="artifact_${kernel_index}_sha256" '$1==k {print $2}' "$direct_env")"
-printf '%s\n%s\n' "$nonce" "$nonce" | sort | uniq -d | grep -Fx "$nonce" >/dev/null
+printf 'Simple fixture compiler 1\n' > "$work/compiler-version"
+printf 'hello from fixture compiler\n' > "$work/compiler-hello"
+kernel_sum=$(sha256sum "$work/kernel" | awk '{print $1}')
+image_sum=$(sha256sum "$work/image" | awk '{print $1}')
+fixture_commit=$(git -C "$fixture" rev-parse HEAD)
+fixture_tree=$(git -C "$fixture" rev-parse 'HEAD^{tree}')
+payload_sum=$(printf '%s' 'target-native-simple-payload' | sha256sum | awk '{print $1}')
+interpreter_sum=$(printf '%s' 'target-native-simple-interpreter' | sha256sum | awk '{print $1}')
+loader_sum=$(printf '%s' 'target-native-simple-loader' | sha256sum | awk '{print $1}')
+tool_sum=$(printf '%s' 'target-native-simple-tool-manifest' | sha256sum | awk '{print $1}')
+{
+    printf '%s\n' "SIMPLEOS_COMPILER_PLACEMENT schema=1 host=linux guest=arm64 nonce=$nonce image_identity=sha256:$image_sum"
+    printf '%s\n' "SIMPLEOS_COMPILER_READBACK host=linux guest=arm64 nonce=$nonce path=/usr/bin/simple role=compiler sha256=$payload_sum target_native=true"
+    printf '%s\n' "SIMPLEOS_COMPILER_READBACK host=linux guest=arm64 nonce=$nonce path=/bin/simple role=compiler-alias sha256=$payload_sum target_native=true"
+    printf '%s\n' "SIMPLEOS_COMPILER_READBACK host=linux guest=arm64 nonce=$nonce path=/sys/apps/simple role=compiler-alias sha256=$payload_sum target_native=true"
+    printf '%s\n' "SIMPLEOS_COMPILER_READBACK host=linux guest=arm64 nonce=$nonce path=/sys/apps/simple_compiler role=compiler-alias sha256=$payload_sum target_native=true"
+    printf '%s\n' "SIMPLEOS_COMPILER_READBACK host=linux guest=arm64 nonce=$nonce path=/sys/apps/simple_interpreter role=interpreter sha256=$interpreter_sum target_native=true"
+    printf '%s\n' "SIMPLEOS_COMPILER_READBACK host=linux guest=arm64 nonce=$nonce path=/sys/apps/simple_loader role=loader sha256=$loader_sum target_native=true"
+    printf '%s\n' "SIMPLEOS_COMPILER_READBACK host=linux guest=arm64 nonce=$nonce path=/SYS/SIMPLETOOL.SDN role=toolchain-manifest sha256=$tool_sum target_native=true"
+} > "$work/compiler-aliases"
+alias_sum=$(sha256sum "$work/compiler-aliases" | awk '{print $1}')
+printf '%s\n' "SIMPLEOS_COMPILER_MANIFEST schema=1 host=linux guest=arm64 nonce=$nonce source_identity=git:$fixture_commit:tree:$fixture_tree:clean payload_path=/usr/bin/simple payload_identity=sha256:$payload_sum image_path=guest.img image_identity=sha256:$image_sum placement_identity=sha256:$alias_sum" > "$work/compiler-manifest"
+manifest_sum=$(sha256sum "$work/compiler-manifest" | awk '{print $1}')
+compiler_identity="target-native-simple:payload=sha256:$payload_sum:image=sha256:$image_sum:alias=sha256:$alias_sum:manifest=sha256:$manifest_sum"
+cat "$work/compiler-aliases" "$work/compiler-manifest" >> "$work/transcript"
+run_compiler() {
+  SOSIX_QEMU_TEST_MODE=1 "$producer" --host linux --guest arm64 --compiler-designation-fixture linux:arm64 --output "$1" --admission "$work/admission" \
+    --qemu-binary "$work/qemu" --qemu-argv-file "$work/argv" --qemu-version-file "$work/version" \
+    --accelerator tcg --firmware "$work/firmware" --firmware-id opensbi-fixture \
+    --firmware-mode opensbi-bios --firmware-version 2026.08 --firmware-stages 'opensbi-entry>opensbi-handoff>guest-entry' \
+    --boot-correlation-marker "$boot_marker" \
+    --kernel "$work/kernel" --image "$work/image" --program "$work/program" --transcript "$work/transcript" --required-markers-file "$work/markers" \
+    --nonce "$nonce" --owner fixture-owner --reviewer fixture-reviewer --compiler-identity "$compiler_identity" \
+    --compiler-in-filesystem true --compiler-version-evidence "$2" --compiler-hello-evidence "$3" \
+    --compiler-alias-evidence "$work/compiler-aliases" --compiler-manifest-evidence "$work/compiler-manifest" --source "$fixture"
+}
+run_compiler_mutation() {
+  SOSIX_QEMU_TEST_MUTATE_COMPILER_BEFORE_COPY=true run_compiler "$@"
+}
+run_compiler_live_policy() {
+  "$producer" --host linux --guest arm64 --output "$1" --admission "$work/admission" \
+    --qemu-binary "$work/qemu" --qemu-argv-file "$work/argv" --qemu-version-file "$work/version" \
+    --accelerator tcg --firmware "$work/firmware" --firmware-id opensbi-fixture \
+    --firmware-mode opensbi-bios --firmware-version 2026.08 --firmware-stages 'opensbi-entry>opensbi-handoff>guest-entry' \
+    --boot-correlation-marker "$boot_marker" \
+    --kernel "$work/kernel" --image "$work/image" --program "$work/program" --transcript "$work/transcript" --required-markers-file "$work/markers" \
+    --nonce "$nonce" --owner fixture-owner --reviewer fixture-reviewer --compiler-identity "$compiler_identity" \
+    --compiler-in-filesystem true --compiler-version-evidence "$2" --compiler-hello-evidence "$3" \
+    --compiler-alias-evidence "$work/compiler-aliases" --compiler-manifest-evidence "$work/compiler-manifest" --source "$fixture"
+}
+run_compiler "$work/compiler-good" "$work/compiler-version" "$work/compiler-hello" > "$work/compiler-good.out"
+compiler_env=$work/compiler-good/linux/arm64/run-$nonce/evidence.env
+grep -qx 'compiler_in_filesystem=true' "$compiler_env"
+grep -qx 'compiler_version_evidence_path=compiler-version.txt' "$compiler_env"
+grep -qx 'compiler_hello_evidence_path=compiler-hello.txt' "$compiler_env"
+grep -qx 'artifact_count=13' "$compiler_env"
+cmp "$work/compiler-version" "${compiler_env%/*}/compiler-version.txt"
+cmp "$work/compiler-hello" "${compiler_env%/*}/compiler-hello.txt"
+expect_reject compiler-live-designation run_compiler_live_policy "$work/compiler-live" "$work/compiler-version" "$work/compiler-hello"
+grep -q -- '--compiler-version-evidence "$(resolve_repo_input "$(descriptor_field compiler_version_evidence_path "$descriptor")")"' "$repo_root/scripts/check/check-sosix-qemu-matrix.shs"
+grep -q -- '--compiler-alias-evidence "$(resolve_repo_input "$(descriptor_field compiler_alias_evidence_path "$descriptor")")"' "$repo_root/scripts/check/check-sosix-qemu-matrix.shs"
+expect_reject compiler-one-sided run_compiler "$work/compiler-one-sided" "$work/compiler-version" ''
+expect_reject compiler-missing run_compiler "$work/compiler-missing" "$work/not-present" "$work/compiler-hello"
+expect_reject compiler-same run_compiler "$work/compiler-same" "$work/compiler-version" "$work/compiler-version"
+ln -s "$work/compiler-version" "$work/compiler-version-symlink"
+expect_reject compiler-symlink run_compiler "$work/compiler-symlinked" "$work/compiler-version-symlink" "$work/compiler-hello"
+ln "$work/compiler-version" "$work/compiler-version-hardlink"
+expect_reject compiler-hardlink run_compiler "$work/compiler-hardlinked" "$work/compiler-version-hardlink" "$work/compiler-version"
+expect_reject compiler-mid-copy-mutation run_compiler_mutation "$work/compiler-mutated" "$work/compiler-version" "$work/compiler-hello"
+expect_reject compiler-nondesignated "$producer" --host linux --guest arm64 --output "$work/compiler-nondesignated" --admission "$work/admission" \
+    --qemu-binary "$work/qemu" --qemu-argv-file "$work/argv" --qemu-version-file "$work/version" --accelerator tcg \
+    --firmware "$work/firmware" --firmware-id opensbi-fixture --firmware-mode opensbi-bios --firmware-version 2026.08 \
+    --firmware-stages 'opensbi-entry>opensbi-handoff>guest-entry' --boot-correlation-marker "$boot_marker" --kernel "$work/kernel" --image "$work/image" \
+    --program "$work/program" --transcript "$work/transcript" --required-markers-file "$work/markers" --nonce "$nonce" \
+    --owner fixture-owner --reviewer fixture-reviewer --compiler-identity simple-selfhost:fixture --compiler-in-filesystem false \
+    --compiler-version-evidence "$work/compiler-version" --compiler-hello-evidence "$work/compiler-hello" --source "$fixture"
 
 cp "$work/admission" "$work/bad-admission"
 sed 's/^accelerator_probe_status=pass$/accelerator_probe_status=fail/' "$work/bad-admission" > "$work/t" && mv "$work/t" "$work/bad-admission"
@@ -110,10 +144,10 @@ cp "$work/admission" "$work/open-admission"
 echo attacker_field=accepted-by-open-schema >> "$work/open-admission"
 expect_reject open-admission run "$work/out-open-admission" "$work/open-admission"
 
-printf '%s\n' opensbi-entry opensbi-handoff guest-entry > "$work/transcript"
+printf '%s\n' opensbi-entry opensbi-handoff "$boot_marker" guest-entry > "$work/transcript"
 expect_reject nonce run "$work/out-nonce" "$work/admission"
 
-printf '%s\n' opensbi-entry opensbi-handoff guest-entry "$nonce" > "$work/transcript"
+printf '%s\n' opensbi-entry opensbi-handoff "$boot_marker" guest-entry "$nonce" > "$work/transcript"
 printf '%s\n%s\n' '/fixture/qemu -machine virt' '-accel tcg' > "$work/argv"
 expect_reject multiline-argv run "$work/out-multiline-argv" "$work/admission"
 printf '%s\n' '/fixture/qemu -machine virt -accel tcg' > "$work/argv"
@@ -121,6 +155,21 @@ echo dirty > "$fixture/dirty"
 expect_reject dirty run "$work/out-dirty" "$work/admission"
 
 rm "$fixture/dirty"
-printf '%s\n' opensbi-entry guest-entry "$nonce" > "$work/transcript"
-expect_reject stage run "$work/out-stage" "$work/admission"
+printf '%s\n' opensbi-entry "$boot_marker" "$nonce" guest-entry > "$work/transcript"
+expect_reject missing-stage run "$work/out-missing-stage" "$work/admission"
+printf '%s\n' opensbi-handoff opensbi-entry "$boot_marker" guest-entry "$nonce" > "$work/transcript"
+expect_reject reversed-stage run "$work/out-reversed-stage" "$work/admission"
+printf '%s\n' opensbi-entry opensbi-handoff "$boot_marker" opensbi-handoff guest-entry "$nonce" > "$work/transcript"
+expect_reject duplicate-stage run "$work/out-duplicate-stage" "$work/admission"
+printf '%s\n' opensbi-entry opensbi-handoff "$boot_marker" guest-entry "$nonce" "$nonce" > "$work/transcript"
+run "$work/out-repeatable-nonce" "$work/admission" > "$work/repeatable-nonce.out"
+grep -q 'sosix_qemu_native_pass_bundle_status=pass' "$work/repeatable-nonce.out"
+# Static reachability receipt: all firmware sabotages sit after the canonical
+# live-policy and fixture-designation checks and each invokes the producer.
+for firmware_case in missing-stage reversed-stage duplicate-stage; do
+    test -f "$work/$firmware_case.out"
+done
+. "$repo_root/scripts/check/lib/sosix-qemu-firmware-transcript.shs"
+printf '%s\n' direct-kernel-boot-correlation guest-entry direct-kernel-nonce-0001 > "$work/direct-kernel-transcript"
+sosix_qemu_validate_firmware_transcript firmware-none guest-entry direct-kernel-boot-correlation direct-kernel-nonce-0001 "$work/direct-kernel-transcript"
 echo 'produce-sosix-qemu-native-pass-bundle self-test: PASS'

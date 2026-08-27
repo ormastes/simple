@@ -1,8 +1,6 @@
 # Agent tasks: Web iframe Draw IR embedding
 
-Status: source/spec/manual tranche STATIC REVIEW PASS;
-qualified execution and legacy pixel parity remain required before any caller
-migration.
+Status: design landed; lane 1 awaits a fresh bounded docgen/runtime session
 
 Frozen names:
 

@@ -1,0 +1,249 @@
+"""Typed pure-Simple facade for the hosted GPU provider ABI-v1 table."""
+
+use std.nogc_sync_mut.ptr.raw.{
+    raw_alloc, raw_free, raw_read_i32, raw_write_i64, rt_ptr_read_i64
+}
+
+extern fn rt_gpu_provider_loaded(backend_bit: i64) -> i64
+extern fn rt_gpu_provider_abi_version(backend_bit: i64) -> i64
+extern fn rt_gpu_provider_capability_bits(backend_bit: i64) -> i64
+extern fn rt_gpu_provider_identity(backend_bit: i64) -> i64
+extern fn rt_gpu_provider_path(backend_bit: i64) -> text
+extern fn rt_gpu_provider_unload(backend_bit: i64) -> i64
+extern fn rt_gpu_provider_session_open(backend_bit: i64, device: i64) -> i64
+extern fn rt_gpu_provider_session_close(backend_bit: i64, session: i64) -> i64
+extern fn rt_gpu_provider_resource_alloc(backend_bit: i64, session: i64,
+    size_bytes: i64, flags: i64, usage_bits: i64) -> i64
+extern fn rt_gpu_provider_resource_release(backend_bit: i64, session: i64,
+    resource: i64) -> i64
+extern fn rt_gpu_provider_submit_raw(backend_bit: i64, session: i64,
+    format: i64, data: i64, length: i64, correlation_id: i64) -> i64
+extern fn rt_gpu_provider_wait_raw(backend_bit: i64, session: i64,
+    completion: i64, timeout_ns: i64, receipt_ptr: i64) -> i64
+extern fn rt_gpu_provider_readback_raw(backend_bit: i64, session: i64,
+    resource: i64, bytes_ptr: i64) -> i64
+extern fn rt_gpu_provider_completion_release(backend_bit: i64, session: i64,
+    completion: i64) -> i64
+
+val GPU_PROVIDER_BACKEND_CUDA: i64 = 1
+val GPU_PROVIDER_BACKEND_VULKAN: i64 = 2
+val GPU_PROVIDER_BACKEND_METAL: i64 = 4
+val GPU_PROVIDER_STATUS_OK: i64 = 0
+val GPU_PROVIDER_STATUS_UNAVAILABLE: i64 = -1
+val GPU_PROVIDER_STATUS_INCOMPATIBLE: i64 = -2
+val GPU_PROVIDER_STATUS_INVALID: i64 = -3
+val GPU_PROVIDER_STATUS_BUSY: i64 = -4
+val GPU_PROVIDER_STATUS_TIMEOUT: i64 = -5
+val GPU_PROVIDER_STATUS_FAILED: i64 = -6
+val GPU_PROVIDER_RECEIPT_BYTES: i64 = 56
+val GPU_PROVIDER_BYTES_BYTES: i64 = 24
+
+struct GpuProviderInfo:
+    loaded: bool
+    backend: i64
+    abi_version: i64
+    capability_bits: i64
+    provider_identity: i64
+    provider_path: text
+
+class GpuProviderSession:
+    backend: i64
+    handle: i64
+
+    fn is_open() -> bool:
+        self.handle > 0
+
+    me close() -> bool:
+        if self.handle <= 0:
+            return false
+        val status = rt_gpu_provider_session_close(self.backend, self.handle)
+        if status != GPU_PROVIDER_STATUS_OK:
+            return false
+        self.handle = 0
+        true
+
+class GpuProviderResource:
+    backend: i64
+    session: i64
+    handle: i64
+    size_bytes: i64
+
+    fn is_live() -> bool:
+        self.handle > 0
+
+    me release() -> bool:
+        if self.handle <= 0 or self.session <= 0:
+            return false
+        val status = rt_gpu_provider_resource_release(
+            self.backend, self.session, self.handle)
+        if status != GPU_PROVIDER_STATUS_OK:
+            return false
+        self.handle = 0
+        true
+
+class GpuProviderCompletion:
+    backend: i64
+    session: i64
+    handle: i64
+    correlation_id: i64
+
+    fn is_live() -> bool:
+        self.handle > 0
+
+    me release() -> bool:
+        if self.handle <= 0 or self.session <= 0:
+            return false
+        val status = rt_gpu_provider_completion_release(
+            self.backend, self.session, self.handle)
+        if status != GPU_PROVIDER_STATUS_OK:
+            return false
+        self.handle = 0
+        true
+
+struct GpuProviderReceipt:
+    valid: bool
+    status: i64
+    correlation_id: i64
+    provider_identity: i64
+    device_identity: i64
+    resource: i64
+    checksum: i64
+    device_elapsed_ns: i64
+
+struct GpuProviderReadback:
+    valid: bool
+    status: i64
+    length: i64
+
+fn gpu_provider_info(backend: i64) -> GpuProviderInfo:
+    val loaded = rt_gpu_provider_loaded(backend) == 1
+    GpuProviderInfo(
+        loaded: loaded,
+        backend: backend,
+        abi_version: if loaded: rt_gpu_provider_abi_version(backend) else: 0,
+        capability_bits: if loaded: rt_gpu_provider_capability_bits(backend) else: 0,
+        provider_identity: if loaded: rt_gpu_provider_identity(backend) else: 0,
+        provider_path: if loaded: rt_gpu_provider_path(backend) else: "")
+
+fn gpu_provider_unload(backend: i64) -> bool:
+    if (backend != GPU_PROVIDER_BACKEND_CUDA and
+        backend != GPU_PROVIDER_BACKEND_VULKAN and
+        backend != GPU_PROVIDER_BACKEND_METAL):
+        return false
+    rt_gpu_provider_unload(backend) == 1
+
+fn gpu_provider_open(backend: i64, device: i64) -> GpuProviderSession:
+    val info = gpu_provider_info(backend)
+    if (not info.loaded or info.abi_version != 1 or
+        info.provider_identity <= 0 or device < 0):
+        return GpuProviderSession(backend: backend, handle: 0)
+    GpuProviderSession(
+        backend: backend,
+        handle: rt_gpu_provider_session_open(backend, device))
+
+fn gpu_provider_resource_alloc(session: GpuProviderSession,
+                               size_bytes: i64,
+                               flags: i64,
+                               usage_bits: i64) -> GpuProviderResource:
+    if not session.is_open() or size_bytes <= 0 or flags < 0 or usage_bits < 0:
+        return GpuProviderResource(
+            backend: session.backend, session: session.handle,
+            handle: 0, size_bytes: 0)
+    val handle = rt_gpu_provider_resource_alloc(
+        session.backend, session.handle, size_bytes, flags, usage_bits)
+    GpuProviderResource(
+        backend: session.backend, session: session.handle,
+        handle: handle, size_bytes: if handle > 0: size_bytes else: 0)
+
+fn gpu_provider_submit_raw(session: GpuProviderSession, format: i64,
+                           data: i64, length: i64,
+                           correlation_id: i64) -> GpuProviderCompletion:
+    if (not session.is_open() or format < 0 or data == 0 or length <= 0 or
+        correlation_id <= 0):
+        return GpuProviderCompletion(
+            backend: session.backend, session: session.handle,
+            handle: 0, correlation_id: correlation_id)
+    val handle = rt_gpu_provider_submit_raw(
+        session.backend, session.handle, format, data, length, correlation_id)
+    GpuProviderCompletion(
+        backend: session.backend, session: session.handle,
+        handle: handle, correlation_id: correlation_id)
+
+fn _gpu_provider_receipt_invalid(status: i64) -> GpuProviderReceipt:
+    GpuProviderReceipt(
+        valid: false, status: status, correlation_id: 0,
+        provider_identity: 0, device_identity: 0, resource: 0,
+        checksum: 0, device_elapsed_ns: 0)
+
+fn gpu_provider_wait(session: GpuProviderSession,
+                     completion: GpuProviderCompletion,
+                     timeout_ns: i64) -> GpuProviderReceipt:
+    if (not session.is_open() or not completion.is_live() or
+        completion.backend != session.backend or
+        completion.session != session.handle or timeout_ns <= 0):
+        return _gpu_provider_receipt_invalid(GPU_PROVIDER_STATUS_INVALID)
+    val receipt_ptr = raw_alloc(GPU_PROVIDER_RECEIPT_BYTES)
+    if receipt_ptr == 0:
+        return _gpu_provider_receipt_invalid(GPU_PROVIDER_STATUS_FAILED)
+    raw_write_i64(receipt_ptr, 0, GPU_PROVIDER_RECEIPT_BYTES)
+    val call_status = rt_gpu_provider_wait_raw(
+        session.backend, session.handle, completion.handle,
+        timeout_ns, receipt_ptr)
+    val receipt_status = raw_read_i32(receipt_ptr, 4).to_i64()
+    val correlation_id = rt_ptr_read_i64(receipt_ptr, 8)
+    val provider_identity = rt_ptr_read_i64(receipt_ptr, 16)
+    val device_identity = rt_ptr_read_i64(receipt_ptr, 24)
+    val resource = rt_ptr_read_i64(receipt_ptr, 32)
+    val checksum = rt_ptr_read_i64(receipt_ptr, 40)
+    val device_elapsed_ns = rt_ptr_read_i64(receipt_ptr, 48)
+    raw_free(receipt_ptr, GPU_PROVIDER_RECEIPT_BYTES)
+    val valid = (call_status == GPU_PROVIDER_STATUS_OK and
+        receipt_status == GPU_PROVIDER_STATUS_OK and
+        correlation_id == completion.correlation_id and
+        provider_identity > 0 and device_identity > 0 and
+        checksum > 0 and device_elapsed_ns > 0)
+    GpuProviderReceipt(
+        valid: valid,
+        status: if call_status == GPU_PROVIDER_STATUS_OK: receipt_status else: call_status,
+        correlation_id: correlation_id,
+        provider_identity: provider_identity,
+        device_identity: device_identity,
+        resource: resource,
+        checksum: checksum,
+        device_elapsed_ns: device_elapsed_ns)
+
+fn gpu_provider_readback_raw(session: GpuProviderSession,
+                             resource: GpuProviderResource,
+                             destination: i64,
+                             capacity: i64) -> GpuProviderReadback:
+    if (not session.is_open() or not resource.is_live() or
+        resource.backend != session.backend or resource.session != session.handle or
+        destination == 0 or capacity <= 0):
+        return GpuProviderReadback(
+            valid: false, status: GPU_PROVIDER_STATUS_INVALID, length: 0)
+    val bytes_ptr = raw_alloc(GPU_PROVIDER_BYTES_BYTES)
+    if bytes_ptr == 0:
+        return GpuProviderReadback(
+            valid: false, status: GPU_PROVIDER_STATUS_FAILED, length: 0)
+    raw_write_i64(bytes_ptr, 0, GPU_PROVIDER_BYTES_BYTES)
+    raw_write_i64(bytes_ptr, 8, destination)
+    raw_write_i64(bytes_ptr, 16, capacity)
+    val status = rt_gpu_provider_readback_raw(
+        session.backend, session.handle, resource.handle, bytes_ptr)
+    val length = rt_ptr_read_i64(bytes_ptr, 16)
+    raw_free(bytes_ptr, GPU_PROVIDER_BYTES_BYTES)
+    GpuProviderReadback(
+        valid: status == GPU_PROVIDER_STATUS_OK and length >= 0 and length <= capacity,
+        status: status,
+        length: if length >= 0 and length <= capacity: length else: 0)
+
+export GPU_PROVIDER_BACKEND_CUDA, GPU_PROVIDER_BACKEND_VULKAN
+export GPU_PROVIDER_BACKEND_METAL, GPU_PROVIDER_STATUS_OK
+export GPU_PROVIDER_STATUS_UNAVAILABLE, GPU_PROVIDER_STATUS_INCOMPATIBLE
+export GPU_PROVIDER_STATUS_INVALID, GPU_PROVIDER_STATUS_BUSY
+export GPU_PROVIDER_STATUS_TIMEOUT, GPU_PROVIDER_STATUS_FAILED
+export GpuProviderInfo, GpuProviderSession, GpuProviderResource
+export GpuProviderCompletion, GpuProviderReceipt, GpuProviderReadback
+export gpu_provider_info, gpu_provider_open, gpu_provider_resource_alloc
+export gpu_provider_submit_raw, gpu_provider_wait, gpu_provider_readback_raw
+export gpu_provider_unload

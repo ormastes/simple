@@ -2,9 +2,33 @@
 
 > Verifies selected Feature C and NFR C production authentication, origin, request-boundary, generated-client, and login burst behavior.
 
+<!-- sdn-diagram:id=web_auth_hardening_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=web_auth_hardening_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+web_auth_hardening_spec -> std
+web_auth_hardening_spec -> app
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=web_auth_hardening_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 21 | 21 | 0 | 0 |
+| 19 | 19 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -20,11 +44,8 @@ Verifies selected Feature C and NFR C production authentication, origin, request
 | Category | Application |
 | Status | Active |
 | Requirements | doc/02_requirements/nfr/simple_web_browser_production_hardening.md |
-| Plan | doc/03_plan/sys_test/simple_web_browser_production_hardening.md |
-| Design | doc/05_design/ui/web/simple_web_browser_production_hardening.md |
-| Research | doc/01_research/local/simple_web_browser_production_hardening.md |
 | Source | `test/01_unit/app/ui/web_auth_hardening_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -32,166 +53,9 @@ Verifies selected Feature C and NFR C production authentication, origin, request
 Verifies selected Feature C and NFR C production authentication, origin,
 request-boundary, generated-client, and login burst behavior.
 
-**Plan:** doc/03_plan/sys_test/simple_web_browser_production_hardening.md
-**Design:** doc/05_design/ui/web/simple_web_browser_production_hardening.md
-**Research:** doc/01_research/local/simple_web_browser_production_hardening.md
 **Requirements:** doc/02_requirements/feature/simple_web_browser_production_hardening.md
 **Requirements:** doc/02_requirements/nfr/simple_web_browser_production_hardening.md
 **Traceability:** REQ-WEB-HARD-001, REQ-WEB-HARD-002, REQ-WEB-HARD-003, REQ-WEB-HARD-004, REQ-WEB-HARD-005, REQ-WEB-HARD-008, REQ-WEB-HARD-011, NFR-WEB-HARD-001, NFR-WEB-HARD-002, NFR-WEB-HARD-003, NFR-WEB-HARD-004, NFR-WEB-HARD-005, NFR-WEB-HARD-010, NFR-WEB-HARD-011
-
-## Syntax
-
-Run this focused unit specification from the repository root:
-
-```sh
-bin/simple test test/01_unit/app/ui/web_auth_hardening_spec.spl --mode=interpreter
-```
-
-Regenerate its manual after changing the executable specification:
-
-```sh
-bin/simple spipe-docgen test/01_unit/app/ui/web_auth_hardening_spec.spl --output doc/06_spec
-```
-
-## Security Model
-
-Production startup requires a token-signing secret.
-
-The insecure development fallback requires explicit opt-in.
-
-TLS never accepts the insecure fallback.
-
-Each server process owns a random 256-bit login grant.
-
-Each server process also owns a distinct random token grant claim.
-
-The login grant is rendered only as lowercase hex.
-
-The root document publishes it through a same-origin meta element.
-
-Generated browser JavaScript reads that meta element.
-
-Generated WM JavaScript reads that meta element.
-
-Static `wm.js` reads that meta element.
-
-No client sends the former `legacy`, `wm`, or `dev` literals.
-
-Login grant equality uses a constant-time comparison.
-
-A missing login grant is forbidden.
-
-An attacker-chosen login grant is forbidden.
-
-The distinct token grant claim is forbidden as login proof.
-
-Only the exact login grant is accepted.
-
-The serialized token contains the token grant claim.
-
-The serialized token does not contain the login grant.
-
-The token remains bound to its accepted origin.
-
-## Exact Oracles
-
-```text
-missing login grant                  -> forbidden
-attacker-chosen login grant          -> forbidden
-serialized token grant replay        -> forbidden
-exact per-process login grant        -> ok
-unsafe login-grant HTML input        -> no meta insertion
-safe 64-character lowercase hex      -> exact meta insertion
-```
-
-The tests use exact status strings where policy has multiple outcomes.
-
-The tests inspect response-producing client text directly.
-
-The tests do not hide HTTP or token behavior behind boolean wrappers.
-
-The tests reject static login grant literals in generated clients.
-
-The tests require the positive `loginGrant()` request body expression.
-
-## Origin And Bearer Rules
-
-Missing login origins fail closed.
-
-Disallowed login origins fail closed.
-
-Default loopback policy accepts loopback origins only with ports 1 through
-65535.
-
-Duplicate Origin headers fail closed, including identical duplicates.
-
-Explicit allowlists remain exact.
-
-Sensitive API state routes require a bearer.
-
-Resume routes require a bearer.
-
-WebSocket routes require a bearer.
-
-Wrong-origin tokens fail verification.
-
-Expired tokens fail verification.
-
-Malformed tokens fail verification.
-
-Query bearer decoding remains single-pass.
-
-Bearer-like request identifiers are never reflected.
-
-## Request Boundary Rules
-
-Unauthenticated JSON bodies are bounded.
-
-Oversized content lengths fail before allocation.
-
-Duplicate content lengths are rejected.
-
-Malformed content lengths are rejected.
-
-Unsupported transfer encodings are rejected.
-
-Request heads are bounded.
-
-Request lines are bounded.
-
-Individual header lines are bounded.
-
-Inbound WebSocket frames are bounded.
-
-Login attempts remain fixed-window rate limited.
-
-## Response Rules
-
-JSON responses are no-store.
-
-JSON responses disable MIME sniffing.
-
-HTML responses deny framing.
-
-HTML responses disable referrer disclosure.
-
-HTML responses use restrictive permissions policy.
-
-HTML responses use a restrictive content security policy.
-
-## Scope
-
-This unit specification covers pure policy and generated-client contracts.
-
-The live TCP behavior is covered by
-`test/03_system/gui/simple_web_browser_production_hardening_spec.spl`.
-
-Normal and shared-WM root extraction, mismatch rejection, token-claim replay
-rejection, valid redemption, and rate limiting are live system-test concerns.
-
-Renderer parity and host GPU evidence remain separate release gates.
-
-No bootstrap, package, release, or deployment behavior is exercised here.
 
 ## Scenarios
 
@@ -199,42 +63,30 @@ No bootstrap, package, release, or deployment behavior is exercised here.
 
 #### requires explicit opt-in before using an insecure dev token secret
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-WEB-HARD-001
-# @req REQ-WEB-HARD-002
-# @req REQ-WEB-HARD-003
-# @req REQ-WEB-HARD-004
-# @req REQ-WEB-HARD-005
-# @req REQ-WEB-HARD-008
-# @req REQ-WEB-HARD-011
+expect(_allow_insecure_dev_secret_flag("")).to_be(false)
+expect(_allow_insecure_dev_secret_flag("0")).to_be(false)
+expect(_allow_insecure_dev_secret_flag("1")).to_be(true)
+expect(_allow_insecure_dev_secret_flag("true")).to_be(true)
 ```
 
 </details>
 
 #### keeps missing secrets fatal in TLS and production non-TLS modes
 
-- keeps missing secrets fatal in TLS and production non-TLS modes
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("keeps missing secrets fatal in TLS and production non-TLS modes")
 expect(_missing_secret_fatal(true, false)).to_be(true)
 expect(_missing_secret_fatal(true, true)).to_be(true)
 expect(_missing_secret_fatal(false, false)).to_be(true)
@@ -245,18 +97,13 @@ expect(_missing_secret_fatal(false, true)).to_be(false)
 
 #### fails closed when login origin headers are missing or disallowed
 
-- fails closed when login origin headers are missing or disallowed
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("fails closed when login origin headers are missing or disallowed")
 val guard = OriginGuard(allowed: ["https://localhost"])
 val missing = guard.check("Host: localhost\n")
 val disallowed = guard.check("Origin: https://evil.example\n")
@@ -273,18 +120,13 @@ expect(allowed.is_ok()).to_be(true)
 
 #### allows loopback browser origins with ports only under the default policy
 
-- allows loopback browser origins with ports only under the default policy
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("allows loopback browser origins with ports only under the default policy")
 val default_guard = OriginGuard(allowed: ["https://localhost", "http://localhost"])
 expect(_is_loopback_origin("http://localhost:8080")).to_be(true)
 expect(_is_loopback_origin("https://127.0.0.1:8443")).to_be(true)
@@ -301,69 +143,15 @@ expect(strict_guard.check("Origin: http://localhost:8080\n").is_err()).to_be(tru
 
 </details>
 
-<details>
-<summary>Advanced: rejects ambiguous origins and out-of-range loopback ports</summary>
-
-#### rejects ambiguous origins and out-of-range loopback ports
-
-- rejects ambiguous origins and out-of-range loopback ports
-- Accept the lowest valid loopback port
-- Accept the highest valid loopback port
-- Reject duplicate Origin headers
-- Reject invalid loopback ports
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 23 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-APP
-step("rejects ambiguous origins and out-of-range loopback ports")
-step("Accept the lowest valid loopback port")
-expect(_is_loopback_origin("http://localhost:1")).to_be(true)
-
-step("Accept the highest valid loopback port")
-expect(_is_loopback_origin("https://[::1]:65535")).to_be(true)
-
-step("Reject duplicate Origin headers")
-val guard = OriginGuard(allowed: ["https://localhost"])
-expect(guard.check(
-    "Origin: https://localhost\nOrigin: https://evil.example\n"
-).is_err()).to_be(true)
-expect(guard.check(
-    "Origin: https://localhost\nOrigin: https://localhost\n"
-).is_err()).to_be(true)
-
-step("Reject invalid loopback ports")
-expect(_is_loopback_origin("http://localhost:0")).to_be(false)
-expect(_is_loopback_origin("http://localhost:65536")).to_be(false)
-expect(_is_loopback_origin(
-    "http://127.0.0.1:999999999999999999999"
-)).to_be(false)
-```
-
-</details>
-
-
-</details>
-
 #### parses explicit origin allowlists as trimmed exact entries
 
-- parses explicit origin allowlists as trimmed exact entries
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("parses explicit origin allowlists as trimmed exact entries")
 val guard = OriginGuard.from_env_value(" https://app.example , http://localhost:8080, ")
 expect(guard.check("Origin: https://app.example\n").is_ok()).to_be(true)
 expect(guard.check("Origin: http://localhost:8080\n").is_ok()).to_be(true)
@@ -374,23 +162,13 @@ expect(guard.check("Origin: http://localhost:9090\n").is_err()).to_be(true)
 
 #### requires origin-bound bearer tokens for sensitive api routes
 
-- requires origin-bound bearer tokens for sensitive api routes
-   - Expected: ui_web_authorization_status("Origin: https://localhost\n", "/api/state", guard, secret, now) equals `missing_bearer`
-   - Expected: ui_web_authorization_status("Origin: https://localhost\n", "/api/widgets", guard, secret, now) equals `missing_bearer`
-   - Expected: ui_web_authorization_status("Origin: https://localhost\n", "/api/clients", guard, secret, now) equals `missing_bearer`
-   - Expected: ui_web_authorization_status("Origin: https://evil.example\nAuthorization: Bearer malformed\n", "/api/state", guard, secret, now) equals `forbidden_origin`
-   - Expected: ui_web_authorization_status("Origin: https://localhost\nAuthorization: Bearer malformed\n", "/api/state", guard, secret, now) equals `invalid_bearer`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("requires origin-bound bearer tokens for sensitive api routes")
 val guard = OriginGuard(allowed: ["https://localhost"])
 val secret = "unit-test-secret"
 val now = 1000u64
@@ -406,23 +184,13 @@ expect(ui_web_request_authorized("Origin: https://localhost\nAuthorization: Bear
 
 #### requires origin-bound bearer tokens for websocket and resume routes
 
-- requires origin-bound bearer tokens for websocket and resume routes
-   - Expected: ui_web_authorization_status("Origin: https://localhost\n", "/ui/resume", guard, secret, 1000u64) equals `missing_bearer`
-   - Expected: ui_web_authorization_status("Origin: https://evil.example\nAuthorization: Bearer {token}\n", "/ui/resume", guard, secret, 1000u64) equals `forbidden_origin`
-   - Expected: ui_web_authorization_status("Origin: https://localhost\nAuthorization: Bearer malformed\n", "/ui/resume", guard, secret, 1000u64) equals `invalid_bearer`
-   - Expected: ui_web_authorization_status(headers, "/ui/resume", guard, secret, 1000u64) equals `ok`
-   - Expected: ui_web_authorization_status(ws_headers, "/ui/ws", guard, secret, 1000u64) equals `ok`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("requires origin-bound bearer tokens for websocket and resume routes")
 val guard = OriginGuard(allowed: ["https://localhost"])
 val secret = "unit-test-secret"
 val token = SessionToken.issue("resume-grant", "https://localhost", 3600000u64, secret).serialize()
@@ -440,18 +208,13 @@ expect(ui_web_authorization_status(ws_headers, "/ui/ws", guard, secret, 1000u64)
 
 #### rejects malformed, expired, and wrong-origin serialized tokens before authorization succeeds
 
-- rejects malformed, expired, and wrong-origin serialized tokens before authorization succeeds
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("rejects malformed, expired, and wrong-origin serialized tokens before authorization succeeds")
 val expired = SessionToken(token_id: "tok", grant_id: "grant", origin: "https://localhost", expires_at_ms: 100u64, signature: "sig").serialize()
 val wrong_origin = SessionToken(token_id: "tok", grant_id: "grant", origin: "https://localhost", expires_at_ms: 5000u64, signature: "sig").serialize()
 
@@ -464,23 +227,15 @@ expect(verify(wrong_origin, "https://other.example", "unit-test-secret", 1000u64
 
 #### generates token-authenticated websocket clients for browser and wm paths
 
-- generates token-authenticated websocket clients for browser and wm paths
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 25 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("generates token-authenticated websocket clients for browser and wm paths")
 val legacy_js = generate_js(8080)
 expect(legacy_js).to_contain("fetch('/ui/login'")
-expect(legacy_js).to_contain("meta[name=\"simple-ui-login-grant\"]")
-expect(legacy_js).to_contain("capability_grant: loginGrant()")
-expect(legacy_js.contains("capability_grant: 'legacy'")).to_be(false)
 expect(legacy_js).to_contain("new WebSocket(browserWsUrl(), ['simple-ui', 'bearer.' + encodeURIComponent(authToken)])")
 expect(legacy_js).to_contain("return wsProto + '://' + wsHost + '/ui/ws'")
 expect(legacy_js.contains("legacyWsUrl")).to_be(false)
@@ -488,73 +243,24 @@ expect(legacy_js.contains("/ws?token=")).to_be(false)
 expect(legacy_js.contains("'/ws'")).to_be(false)
 val wm_js = generate_wm_js(8080)
 expect(wm_js).to_contain("fetch('/ui/login'")
-expect(wm_js).to_contain("meta[name=\"simple-ui-login-grant\"]")
-expect(wm_js).to_contain("capability_grant: loginGrant()")
-expect(wm_js.contains("capability_grant: 'wm'")).to_be(false)
 expect(wm_js).to_contain("new WebSocket(wsProto + '://' + wsHost + '/ui/ws', ['simple-ui', 'bearer.' + encodeURIComponent(authToken)])")
 expect(wm_js.contains("/ui/ws?token=")).to_be(false)
 val static_wm_js = rt_file_read_text("src/app/ui.web/wm.js")
-expect(static_wm_js).to_contain("meta[name=\"simple-ui-login-grant\"]")
-expect(static_wm_js).to_contain("capability_grant: loginGrant")
-expect(static_wm_js.contains("capability_grant: 'dev'")).to_be(false)
 expect(static_wm_js).to_contain("new WebSocket(url, ['simple-ui', 'bearer.' + encodeURIComponent(this.token)])")
 expect(static_wm_js.contains("/ui/ws?token=")).to_be(false)
 ```
 
 </details>
 
-#### publishes and accepts only the exact server-owned bootstrap grant
-
-- publishes and accepts only the exact server-owned bootstrap grant
-   - Expected: ui_web_with_login_grant("<html><head></head></html>", "not-hex") equals `<html><head></head></html>`
-   - Expected: ui_web_login_grant_status("", grant) equals `forbidden`
-   - Expected: ui_web_login_grant_status(attacker_grant, grant) equals `forbidden`
-   - Expected: ui_web_login_grant_status(token_grant_id, grant) equals `forbidden`
-   - Expected: ui_web_login_grant_status(grant, grant) equals `ok`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 15 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-APP
-step("publishes and accepts only the exact server-owned bootstrap grant")
-val grant = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-val attacker_grant = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
-val token_grant_id = "1111111111111111111111111111111111111111111111111111111111111111"
-val page = ui_web_with_login_grant("<html><head>\n<title>Simple</title></head></html>", grant)
-val serialized = SessionToken.issue(token_grant_id, "http://localhost:8080", 3600000u64, "secret").serialize()
-expect(page).to_contain("<meta name=\"simple-ui-login-grant\" content=\"{grant}\">")
-expect(ui_web_with_login_grant("<html><head></head></html>", "not-hex")).to_equal("<html><head></head></html>")
-expect(ui_web_login_grant_status("", grant)).to_equal("forbidden")
-expect(ui_web_login_grant_status(attacker_grant, grant)).to_equal("forbidden")
-expect(ui_web_login_grant_status(token_grant_id, grant)).to_equal("forbidden")
-expect(ui_web_login_grant_status(grant, grant)).to_equal("ok")
-expect(serialized.contains(grant)).to_be(false)
-expect(serialized).to_contain(token_grant_id)
-```
-
-</details>
-
 #### decodes browser-encoded query bearer tokens once before verification
 
-- decodes browser-encoded query bearer tokens once before verification
-   - Expected: ui_web_query_percent_decode("abc%252Edef%253Aghi") equals `abc%2Edef%3Aghi`
-   - Expected: ui_web_query_percent_decode("a%2Eb%2Fc%20d%2Be") equals `a.b/c d+e`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("decodes browser-encoded query bearer tokens once before verification")
 expect(ui_web_query_percent_decode("abc%252Edef%253Aghi")).to_equal("abc%2Edef%3Aghi")
 expect(ui_web_query_percent_decode("a%2Eb%2Fc%20d%2Be")).to_equal("a.b/c d+e")
 ```
@@ -563,22 +269,13 @@ expect(ui_web_query_percent_decode("a%2Eb%2Fc%20d%2Be")).to_equal("a.b/c d+e")
 
 #### sanitizes request ids without echoing bearer-like values
 
-- sanitizes request ids without echoing bearer-like values
-   - Expected: ui_web_sanitize_request_id("browser-req_01.2") equals `browser-req_01.2`
-   - Expected: ui_web_sanitize_request_id("Bearer secret-token") equals ``
-   - Expected: ui_web_request_id("X-Request-Id: browser-req-7\nAuthorization: Bearer secret-token\n", "fallback") equals `browser-req-7`
-   - Expected: ui_web_request_id("X-Request-Id: Bearer secret-token\n", "fallback") equals `fallback`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("sanitizes request ids without echoing bearer-like values")
 expect(ui_web_sanitize_request_id("browser-req_01.2")).to_equal("browser-req_01.2")
 expect(ui_web_sanitize_request_id("Bearer secret-token")).to_equal("")
 expect(ui_web_request_id("X-Request-Id: browser-req-7\nAuthorization: Bearer secret-token\n", "fallback")).to_equal("browser-req-7")
@@ -589,19 +286,13 @@ expect(ui_web_request_id("X-Request-Id: Bearer secret-token\n", "fallback")).to_
 
 #### adds cache and sniffing guards to json responses
 
-- adds cache and sniffing guards to json responses
-   - Expected: ui_web_json_security_headers("text/html") equals ``
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("adds cache and sniffing guards to json responses")
 val headers = ui_web_json_security_headers("application/json")
 expect(headers).to_contain("Cache-Control: no-store")
 expect(headers).to_contain("Pragma: no-cache")
@@ -613,19 +304,13 @@ expect(ui_web_json_security_headers("text/html")).to_equal("")
 
 #### adds browser document security headers to html responses
 
-- adds browser document security headers to html responses
-   - Expected: ui_web_html_security_headers("application/json") equals ``
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("adds browser document security headers to html responses")
 val headers = ui_web_html_security_headers("text/html")
 expect(headers).to_contain("X-Content-Type-Options: nosniff")
 expect(headers).to_contain("X-Frame-Options: DENY")
@@ -640,23 +325,13 @@ expect(ui_web_html_security_headers("application/json")).to_equal("")
 
 #### uses bounded shared json field extraction for auth path bodies
 
-- uses bounded shared json field extraction for auth path bodies
-   - Expected: ui_web_auth_json_field(login_body, "capability_grant") equals `grant"one`
-   - Expected: ui_web_auth_json_field(login_body, "snapshot_revision") equals `42`
-   - Expected: ui_web_auth_json_field(login_body, "last_sequence") equals `7`
-   - Expected: ui_web_auth_json_field(login_body, "missing") equals ``
-   - Expected: ui_web_auth_json_field(oversized, "capability_grant") equals ``
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("uses bounded shared json field extraction for auth path bodies")
 val login_body = "{\"capability_grant\":\"grant\\\"one\",\"snapshot_revision\":42,\"last_sequence\":7}"
 expect(ui_web_auth_json_field(login_body, "capability_grant")).to_equal("grant\"one")
 expect(ui_web_auth_json_field(login_body, "snapshot_revision")).to_equal("42")
@@ -670,23 +345,13 @@ expect(ui_web_auth_json_field(oversized, "capability_grant")).to_equal("")
 
 #### rejects malformed resume bodies after authorization
 
-- rejects malformed resume bodies after authorization
-   - Expected: ui_web_resume_body_status(valid) equals `ok`
-   - Expected: ui_web_resume_body_status(oversized) equals `body_too_large`
-   - Expected: ui_web_resume_body_status(missing_session) equals `missing_session_id`
-   - Expected: ui_web_resume_body_status(invalid_revision) equals `invalid_snapshot_revision`
-   - Expected: ui_web_resume_body_status(invalid_sequence) equals `invalid_last_sequence`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("rejects malformed resume bodies after authorization")
 val valid = "{\"session_id\":\"session-1\",\"snapshot_revision\":42,\"last_sequence\":7}"
 val missing_session = "{\"snapshot_revision\":42,\"last_sequence\":7}"
 val invalid_revision = "{\"session_id\":\"session-1\",\"snapshot_revision\":\"4x\",\"last_sequence\":7}"
@@ -703,20 +368,13 @@ expect(ui_web_resume_body_status(invalid_sequence)).to_equal("invalid_last_seque
 
 #### fails oversized unauthenticated login bodies from content length alone
 
-- fails oversized unauthenticated login bodies from content length alone
-   - Expected: ui_web_content_length(headers) equals `8193`
-   - Expected: ui_web_request_body_status(headers) equals `request_body_too_large`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("fails oversized unauthenticated login bodies from content length alone")
 val headers = "Host: 127.0.0.1\nOrigin: http://localhost:8080\nContent-Length: 8193\n"
 expect(ui_web_content_length(headers)).to_equal(8193)
 expect(ui_web_body_exceeds_unauth_limit(headers)).to_be(true)
@@ -727,23 +385,13 @@ expect(ui_web_request_body_status(headers)).to_equal("request_body_too_large")
 
 #### rejects malformed or ambiguous request body framing
 
-- rejects malformed or ambiguous request body framing
-   - Expected: ui_web_request_body_status("Content-Length: 42\n") equals `ok`
-   - Expected: ui_web_request_body_status("Content-Length: -1\n") equals `invalid_request_framing`
-   - Expected: ui_web_request_body_status("Content-Length: nope\n") equals `invalid_request_framing`
-   - Expected: ui_web_request_body_status("Content-Length: 4\nContent-Length: 4\n") equals `invalid_request_framing`
-   - Expected: ui_web_request_body_status("Transfer-Encoding: chunked\n") equals `invalid_request_framing`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("rejects malformed or ambiguous request body framing")
 expect(ui_web_request_body_status("Content-Length: 42\n")).to_equal("ok")
 expect(ui_web_request_body_status("Content-Length: -1\n")).to_equal("invalid_request_framing")
 expect(ui_web_request_body_status("Content-Length: nope\n")).to_equal("invalid_request_framing")
@@ -757,22 +405,13 @@ expect(ui_web_request_body_framing_valid("Transfer-Encoding: chunked\n")).to_be(
 
 #### bounds request heads before shared wm route dispatch
 
-- bounds request heads before shared wm route dispatch
-   - Expected: ui_web_request_head_status("GET / HTTP/1.1", "Host: localhost\n") equals `ok`
-   - Expected: ui_web_request_head_status("GET /{oversized_request_path} HTTP/1.1", "Host: localhost\n") equals `request_head_too_large`
-   - Expected: ui_web_request_head_status("GET / HTTP/1.1", "X-Pad: {oversized_header_value}\n") equals `request_head_too_large`
-   - Expected: ui_web_request_head_status("GET / HTTP/1.1", "X-Pad: {oversized_head_value}\n") equals `request_head_too_large`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("bounds request heads before shared wm route dispatch")
 expect(ui_web_request_head_allowed(UI_WEB_MAX_REQUEST_HEAD_BYTES)).to_be(true)
 expect(ui_web_request_head_allowed(UI_WEB_MAX_REQUEST_HEAD_BYTES + 1)).to_be(false)
 expect(ui_web_request_line_allowed(UI_WEB_MAX_REQUEST_LINE_BYTES)).to_be(true)
@@ -792,24 +431,13 @@ expect(ui_web_request_head_status("GET / HTTP/1.1", "X-Pad: {oversized_head_valu
 
 #### bounds login attempts with a fixed burst window
 
-- bounds login attempts with a fixed burst window
-   - Expected: first.1 equals `1000u64`
-   - Expected: first.2 equals `1`
-   - Expected: last_allowed.2 equals `UI_WEB_LOGIN_RATE_MAX_ATTEMPTS`
-   - Expected: limited.1 equals `1000u64`
-   - Expected: limited.2 equals `UI_WEB_LOGIN_RATE_MAX_ATTEMPTS`
-   - Expected: reset.2 equals `1`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("bounds login attempts with a fixed burst window")
 val first = ui_web_login_rate_decision(0u64, 0, 1000u64)
 expect(first.0).to_be(true)
 expect(first.1).to_equal(1000u64)
@@ -835,8 +463,8 @@ expect(reset.2).to_equal(1)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 21 |
-| Active scenarios | 21 |
+| Total scenarios | 19 |
+| Active scenarios | 19 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
@@ -844,71 +472,7 @@ expect(reset.2).to_equal(1)
 
 ## Related Documentation
 
-- **Requirements:** `doc/02_requirements/nfr/simple_web_browser_production_hardening.md`
-- **Plan:** `doc/03_plan/sys_test/simple_web_browser_production_hardening.md`
-- **Design:** `doc/05_design/ui/web/simple_web_browser_production_hardening.md`
-- **Research:** `doc/01_research/local/simple_web_browser_production_hardening.md`
+- **Requirements:** [doc/02_requirements/nfr/simple_web_browser_production_hardening.md](doc/02_requirements/nfr/simple_web_browser_production_hardening.md)
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-APP`
-- `REQ-WEB-HARD-001`
-- `REQ-WEB-HARD-002`
-- `REQ-WEB-HARD-003`
-- `REQ-WEB-HARD-004`
-- `REQ-WEB-HARD-005`
-- `REQ-WEB-HARD-008`
-- `REQ-WEB-HARD-011`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `7dee3ad7ca9f2572cf31693e1da69afd50b332f0f4778baa97c6f537d5cd87ee`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `7dee3ad7ca9f2572cf31693e1da69afd50b332f0f4778baa97c6f537d5cd87ee`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `7dee3ad7ca9f2572cf31693e1da69afd50b332f0f4778baa97c6f537d5cd87ee`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **85/100**; effective score: **85/100**; blockers: **0**.
-
-SSpec documentization score: 85/100
-source: test/01_unit/app/ui/web_auth_hardening_spec.spl
-mirror: doc/06_spec/01_unit/app/ui/web_auth_hardening_spec.md (current)
-findings: 7 blockers: 0
-  narrative=100 structure=90 oracle=70
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/app/ui/web_auth_hardening_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/app/ui/web_auth_hardening_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, assumptions/preconditions, primary workflow, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/app/ui/web_auth_hardening_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 3 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/01_unit/app/ui/web_auth_hardening_spec.spl:195:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'requires explicit opt-in before using an insecure dev token secret' has no visible step flow
-  why: Ordered visible actions make the manual operable.
-  improve: Add ordered step("...") calls for meaningful actions.
-test/01_unit/app/ui/web_auth_hardening_spec.spl:217:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'keeps missing secrets fatal in TLS and production non-TLS modes' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/ui/web_auth_hardening_spec.spl:225:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'fails closed when login origin headers are missing or disallowed' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/ui/web_auth_hardening_spec.spl:236:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'allows loopback browser origins with ports only under the default policy' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

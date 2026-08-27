@@ -2,6 +2,29 @@
 
 > Tests individual EasyFix rule definitions including pattern matching, fix generation, and rule priority ordering. Verifies that each rule correctly identifies its target error pattern and produces valid code transformations.
 
+<!-- sdn-diagram:id=easy_fix_rules_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=easy_fix_rules_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+easy_fix_rules_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=easy_fix_rules_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 100 | 100 | 0 | 0 |
@@ -20,7 +43,7 @@ Tests individual EasyFix rule definitions including pattern matching, fix genera
 | Category | Application |
 | Status | In Progress |
 | Source | `test/03_system/feature/app/easy_fix_rules_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -37,18 +60,17 @@ identifies its target error pattern and produces valid code transformations.
 
 #### detects print() in spec file
 
-- detects print() in spec file
+1. expect fixes[0] id contains
+2. expect fixes len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("detects print() in spec file")
 val source = "it \"test\":\n    print(42)\n"
 val fixes = check_print_in_test_spec(source, "my_spec.spl")
 expect fixes[0].id.contains("print_in_test_spec")
@@ -59,18 +81,16 @@ expect fixes.len() == 1
 
 #### detects print with string arg
 
-- detects print with string arg
+1. expect fixes len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("detects print with string arg")
 val source = "it \"test\":\n    print(\"hello\")\n"
 val fixes = check_print_in_test_spec(source, "my_spec.spl")
 expect fixes.len() == 1
@@ -80,18 +100,16 @@ expect fixes.len() == 1
 
 #### detects print with expression
 
-- detects print with expression
+1. expect fixes len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("detects print with expression")
 val source = "it \"test\":\n    print(x + y)\n"
 val fixes = check_print_in_test_spec(source, "test_spec.spl")
 expect fixes.len() == 1
@@ -101,18 +119,16 @@ expect fixes.len() == 1
 
 #### detects multiple prints
 
-- detects multiple prints
+1. expect fixes len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("detects multiple prints")
 val source = "it \"a\":\n    print(1)\n    print(2)\n    print(3)\n"
 val fixes = check_print_in_test_spec(source, "test_spec.spl")
 expect fixes.len() == 3
@@ -122,18 +138,17 @@ expect fixes.len() == 3
 
 #### generates correct replacement
 
-- generates correct replacement
+1. expect fixes[0] replacements[0] new text contains
+2. expect fixes len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("generates correct replacement")
 val source = "    print(42)"
 val fixes = check_print_in_test_spec(source, "test_spec.spl")
 expect fixes[0].replacements[0].new_text.contains("expect")
@@ -144,18 +159,17 @@ expect fixes.len() == 1
 
 #### preserves indentation
 
-- preserves indentation
+1. expect fixes len
+2. expect rep new text starts with
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("preserves indentation")
 val source = "        print(x)"
 val fixes = check_print_in_test_spec(source, "test_spec.spl")
 val rep = fixes[0].replacements[0]
@@ -169,18 +183,16 @@ expect rep.new_text.starts_with("        ")
 
 #### ignores print in regular .spl files
 
-- ignores print in regular .spl files
+1. expect fixes len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("ignores print in regular .spl files")
 val source = "fn main():\n    print(42)\n"
 val fixes = check_print_in_test_spec(source, "main.spl")
 expect fixes.len() == 0
@@ -190,18 +202,16 @@ expect fixes.len() == 0
 
 #### ignores print in non-spl files
 
-- ignores print in non-spl files
+1. expect fixes len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("ignores print in non-spl files")
 val source = "print(42)"
 val fixes = check_print_in_test_spec(source, "test.txt")
 expect fixes.len() == 0
@@ -213,18 +223,16 @@ expect fixes.len() == 0
 
 #### handles empty file
 
-- handles empty file
+1. expect fixes len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("handles empty file")
 val fixes = check_print_in_test_spec("", "test_spec.spl")
 expect fixes.len() == 0
 ```
@@ -233,18 +241,16 @@ expect fixes.len() == 0
 
 #### handles file with only comments
 
-- handles file with only comments
+1. expect fixes len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("handles file with only comments")
 val source = "# comment\n# another\n"
 val fixes = check_print_in_test_spec(source, "test_spec.spl")
 expect fixes.len() == 0
@@ -254,18 +260,17 @@ expect fixes.len() == 0
 
 #### has Likely confidence
 
-- has Likely confidence
+1. expect fixes len
+2.  : fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("has Likely confidence")
 val source = "    print(42)"
 val fixes = check_print_in_test_spec(source, "test_spec.spl")
 expect fixes.len() > 0
@@ -282,18 +287,16 @@ match fixes[0].confidence:
 
 #### detects fn with two same types
 
-- detects fn with two same types
+1. expect fixes len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("detects fn with two same types")
 val source = "fn add(Int, Int) -> Int:\n    0\n"
 val fixes = check_unnamed_duplicate_typed_args(source, "test.spl")
 expect fixes.len() == 1
@@ -303,18 +306,17 @@ expect fixes.len() == 1
 
 #### generates named params
 
-- generates named params
+1. expect rep new text contains
+2. expect rep new text contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("generates named params")
 val source = "fn add(Int, Int) -> Int:\n    0\n"
 val fixes = check_unnamed_duplicate_typed_args(source, "test.spl")
 val rep = fixes[0].replacements[0]
@@ -326,18 +328,16 @@ expect rep.new_text.contains("int2: Int")
 
 #### detects three same types
 
-- detects three same types
+1. expect fixes len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("detects three same types")
 val source = "fn triple(String, String, String):\n    pass\n"
 val fixes = check_unnamed_duplicate_typed_args(source, "test.spl")
 expect fixes.len() == 1
@@ -347,18 +347,19 @@ expect fixes.len() == 1
 
 #### rewrites declaration and same-file positional call
 
-- rewrites declaration and same-file positional call
+1. expect fixes len
+2. expect fixes[0] replacements len
+3. expect fixed contains
+4. expect fixed contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("rewrites declaration and same-file positional call")
 val source = "fn add(Int, Int) -> Int:\n    0\nval total = add(1, 2)\n"
 val fixes = check_unnamed_duplicate_typed_args(source, "test.spl")
 expect fixes.len() == 1
@@ -381,18 +382,17 @@ match result:
 
 #### rewrites same-file positional call when duplicate typed params already have names
 
-- rewrites same-file positional call when duplicate typed params already have names
+1. expect fixes len
+2. expect fixes[0] replacements len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("rewrites same-file positional call when duplicate typed params already have names")
 val source = "fn clamp(min: Int, max: Int, value: Int) -> Int:\n    value\nval result = clamp(1, 5, current)\n"
 val fixes = check_unnamed_duplicate_typed_args(source, "test.spl")
 expect fixes.len() == 1
@@ -404,18 +404,16 @@ expect fixes[0].replacements[0].new_text == "min: 1, max: 5, value: current"
 
 #### rewrites same-file method calls
 
-- rewrites same-file method calls
+1. expect fixes len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("rewrites same-file method calls")
 val source = "me move(dx: Int, dy: Int):\n    pass\nval _ = point.move(3, 4)\n"
 val fixes = check_unnamed_duplicate_typed_args(source, "test.spl")
 expect fixes.len() == 1
@@ -428,18 +426,16 @@ expect fixes[0].replacements[0].new_text == "dx: 3, dy: 4"
 
 #### ignores named params
 
-- ignores named params
+1. expect fixes len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("ignores named params")
 val source = "fn add(a: Int, b: Int) -> Int:\n    a + b\n"
 val fixes = check_unnamed_duplicate_typed_args(source, "test.spl")
 expect fixes.len() == 0
@@ -449,18 +445,16 @@ expect fixes.len() == 0
 
 #### ignores single type-only param
 
-- ignores single type-only param
+1. expect fixes len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("ignores single type-only param")
 val source = "fn identity(Int) -> Int:\n    0\n"
 val fixes = check_unnamed_duplicate_typed_args(source, "test.spl")
 expect fixes.len() == 0
@@ -470,18 +464,16 @@ expect fixes.len() == 0
 
 #### ignores different types
 
-- ignores different types
+1. expect fixes len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("ignores different types")
 val source = "fn convert(Int, String) -> Bool:\n    true\n"
 val fixes = check_unnamed_duplicate_typed_args(source, "test.spl")
 expect fixes.len() == 0
@@ -491,18 +483,16 @@ expect fixes.len() == 0
 
 #### does not rewrite already named calls
 
-- does not rewrite already named calls
+1. expect fixes len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("does not rewrite already named calls")
 val source = "fn clamp(min: Int, max: Int, value: Int) -> Int:\n    value\nval result = clamp(min: 1, max: 5, value: current)\n"
 val fixes = check_unnamed_duplicate_typed_args(source, "test.spl")
 expect fixes.len() == 0
@@ -512,18 +502,16 @@ expect fixes.len() == 0
 
 #### does not rewrite ambiguous same-name call targets
 
-- does not rewrite ambiguous same-name call targets
+1. expect fixes len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("does not rewrite ambiguous same-name call targets")
 val source = "fn move(dx: Int, dy: Int):\n    pass\nfn move(x: Int, y: Int):\n    pass\nval _ = move(1, 2)\n"
 val fixes = check_unnamed_duplicate_typed_args(source, "test.spl")
 expect fixes.len() == 0
@@ -533,18 +521,16 @@ expect fixes.len() == 0
 
 #### does not rewrite mismatched arity calls
 
-- does not rewrite mismatched arity calls
+1. expect fixes len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("does not rewrite mismatched arity calls")
 val source = "fn clamp(min: Int, max: Int, value: Int) -> Int:\n    value\nval result = clamp(1, 5)\n"
 val fixes = check_unnamed_duplicate_typed_args(source, "test.spl")
 expect fixes.len() == 0
@@ -556,18 +542,16 @@ expect fixes.len() == 0
 
 #### handles empty file
 
-- handles empty file
+1. expect fixes len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("handles empty file")
 val fixes = check_unnamed_duplicate_typed_args("", "test.spl")
 expect fixes.len() == 0
 ```
@@ -576,18 +560,16 @@ expect fixes.len() == 0
 
 #### handles me methods
 
-- handles me methods
+1. expect fixes len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("handles me methods")
 val source = "me move(Int, Int):\n    pass\n"
 val fixes = check_unnamed_duplicate_typed_args(source, "test.spl")
 expect fixes.len() == 1
@@ -597,18 +579,16 @@ expect fixes.len() == 1
 
 #### handles static fn
 
-- handles static fn
+1. expect fixes len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("handles static fn")
 val source = "static fn create(String, String) -> Self:\n    pass\n"
 val fixes = check_unnamed_duplicate_typed_args(source, "test.spl")
 expect fixes.len() == 1
@@ -618,18 +598,17 @@ expect fixes.len() == 1
 
 #### has Uncertain confidence
 
-- has Uncertain confidence
+1. expect fixes len
+2.  : fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("has Uncertain confidence")
 val source = "fn f(Int, Int):\n    pass\n"
 val fixes = check_unnamed_duplicate_typed_args(source, "test.spl")
 expect fixes.len() > 0
@@ -646,18 +625,16 @@ match fixes[0].confidence:
 
 #### detects val x = open(...)
 
-- detects val x = open(...)
+1. expect fixes len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("detects val x = open(...)")
 val source = "val f = open(\"file.txt\")\n"
 val fixes = check_resource_leak(source, "test.spl")
 expect fixes.len() == 1
@@ -667,18 +644,16 @@ expect fixes.len() == 1
 
 #### detects File.open
 
-- detects File.open
+1. expect fixes len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("detects File.open")
 val source = "val f = File.open(\"path\")\n"
 val fixes = check_resource_leak(source, "test.spl")
 expect fixes.len() == 1
@@ -688,18 +663,16 @@ expect fixes.len() == 1
 
 #### detects connect
 
-- detects connect
+1. expect fixes len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("detects connect")
 val source = "val conn = connect(\"localhost:8080\")\n"
 val fixes = check_resource_leak(source, "test.spl")
 expect fixes.len() == 1
@@ -709,18 +682,16 @@ expect fixes.len() == 1
 
 #### generates with block
 
-- generates with block
+1. expect rep new text contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("generates with block")
 val source = "val f = open(\"file.txt\")\n"
 val fixes = check_resource_leak(source, "test.spl")
 val rep = fixes[0].replacements[0]
@@ -733,18 +704,16 @@ expect rep.new_text.contains("with f = open")
 
 #### ignores non-resource assignments
 
-- ignores non-resource assignments
+1. expect fixes len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("ignores non-resource assignments")
 val source = "val x = compute(42)\n"
 val fixes = check_resource_leak(source, "test.spl")
 expect fixes.len() == 0
@@ -754,18 +723,16 @@ expect fixes.len() == 0
 
 #### ignores var assignments
 
-- ignores var assignments
+1. expect fixes len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("ignores var assignments")
 val source = "var f = open(\"file\")\n"
 val fixes = check_resource_leak(source, "test.spl")
 expect fixes.len() == 0
@@ -777,18 +744,16 @@ expect fixes.len() == 0
 
 #### handles empty file
 
-- handles empty file
+1. expect fixes len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("handles empty file")
 val fixes = check_resource_leak("", "test.spl")
 expect fixes.len() == 0
 ```
@@ -797,18 +762,17 @@ expect fixes.len() == 0
 
 #### has Uncertain confidence
 
-- has Uncertain confidence
+1. expect fixes len
+2.  : fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("has Uncertain confidence")
 val source = "val f = open(\"x\")\n"
 val fixes = check_resource_leak(source, "test.spl")
 expect fixes.len() > 0
@@ -825,18 +789,17 @@ match fixes[0].confidence:
 
 #### detects describe without docstring
 
-- detects describe without docstring
+1. expect fixes[0] id contains
+2. expect fixes len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("detects describe without docstring")
 val source = "describe \"My Feature\":\n    it \"works\":\n        expect true\n"
 val fixes = check_spipe_missing_docstrings(source, "test_spec.spl")
 expect fixes[0].id.contains("spipe_missing_docstrings")
@@ -847,18 +810,16 @@ expect fixes.len() >= 1
 
 #### detects context without docstring
 
-- detects context without docstring
+1. expect fixes len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("detects context without docstring")
 val source = "describe \"X\":\n    \"\"\"\n    ## X\n    \"\"\"\n    context \"when Y\":\n        it \"works\":\n            expect true\n"
 val fixes = check_spipe_missing_docstrings(source, "test_spec.spl")
 # context block should be detected (describe has docstring)
@@ -869,18 +830,17 @@ expect fixes.len() >= 1
 
 #### generates docstring template
 
-- generates docstring template
+1. expect rep new text contains
+2. expect rep new text contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("generates docstring template")
 val source = "describe \"My Feature\":\n    it \"works\":\n        expect true\n"
 val fixes = check_spipe_missing_docstrings(source, "test_spec.spl")
 val rep = fixes[0].replacements[0]
@@ -894,18 +854,16 @@ expect rep.new_text.contains("My Feature")
 
 #### ignores describe with docstring
 
-- ignores describe with docstring
+1. expect fixes len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("ignores describe with docstring")
 val source = "describe \"X\":\n    \"\"\"\n    ## X\n    \"\"\"\n    it \"works\":\n        expect true\n"
 val fixes = check_spipe_missing_docstrings(source, "test_spec.spl")
 expect fixes.len() == 0
@@ -915,18 +873,16 @@ expect fixes.len() == 0
 
 #### ignores non-spec files
 
-- ignores non-spec files
+1. expect fixes len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("ignores non-spec files")
 val source = "describe \"X\":\n    pass\n"
 val fixes = check_spipe_missing_docstrings(source, "main.spl")
 expect fixes.len() == 0
@@ -938,18 +894,16 @@ expect fixes.len() == 0
 
 #### handles empty file
 
-- handles empty file
+1. expect fixes len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("handles empty file")
 val fixes = check_spipe_missing_docstrings("", "test_spec.spl")
 expect fixes.len() == 0
 ```
@@ -958,18 +912,17 @@ expect fixes.len() == 0
 
 #### has Safe confidence
 
-- has Safe confidence
+1. expect fixes len
+2.  : fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("has Safe confidence")
 val source = "describe \"X\":\n    it \"y\":\n        expect true\n"
 val fixes = check_spipe_missing_docstrings(source, "test_spec.spl")
 expect fixes.len() > 0
@@ -986,18 +939,16 @@ match fixes[0].confidence:
 
 #### detects if x: fail()
 
-- detects if x: fail()
+1. expect fixes len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("detects if x: fail()")
 val source = "    if x > 5: fail(\"too big\")\n"
 val fixes = check_spipe_manual_assertions(source, "test_spec.spl")
 expect fixes.len() == 1
@@ -1007,18 +958,16 @@ expect fixes.len() == 1
 
 #### detects if not x: fail()
 
-- detects if not x: fail()
+1. expect fixes len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("detects if not x: fail()")
 val source = "    if not valid: fail(\"invalid\")\n"
 val fixes = check_spipe_manual_assertions(source, "test_spec.spl")
 expect fixes.len() == 1
@@ -1028,18 +977,17 @@ expect fixes.len() == 1
 
 #### generates expect for positive condition
 
-- generates expect for positive condition
+1. expect rep new text contains
+2. expect rep new text contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("generates expect for positive condition")
 val source = "    if x > 5: fail(\"too big\")\n"
 val fixes = check_spipe_manual_assertions(source, "test_spec.spl")
 val rep = fixes[0].replacements[0]
@@ -1051,18 +999,17 @@ expect rep.new_text.contains("to_be_falsy")
 
 #### generates expect for negated condition
 
-- generates expect for negated condition
+1. expect rep new text contains
+2. expect rep new text contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("generates expect for negated condition")
 val source = "    if not valid: fail(\"invalid\")\n"
 val fixes = check_spipe_manual_assertions(source, "test_spec.spl")
 val rep = fixes[0].replacements[0]
@@ -1074,18 +1021,16 @@ expect rep.new_text.contains("to_be_truthy")
 
 #### detects multiple manual assertions
 
-- detects multiple manual assertions
+1. expect fixes len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("detects multiple manual assertions")
 val source = "    if a: fail(\"a\")\n    if b: fail(\"b\")\n"
 val fixes = check_spipe_manual_assertions(source, "test_spec.spl")
 expect fixes.len() == 2
@@ -1097,18 +1042,16 @@ expect fixes.len() == 2
 
 #### ignores if without fail
 
-- ignores if without fail
+1. expect fixes len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("ignores if without fail")
 val source = "    if x > 5: print(x)\n"
 val fixes = check_spipe_manual_assertions(source, "test_spec.spl")
 expect fixes.len() == 0
@@ -1118,18 +1061,16 @@ expect fixes.len() == 0
 
 #### ignores non-spec files
 
-- ignores non-spec files
+1. expect fixes len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("ignores non-spec files")
 val source = "    if x: fail(\"err\")\n"
 val fixes = check_spipe_manual_assertions(source, "main.spl")
 expect fixes.len() == 0
@@ -1141,18 +1082,16 @@ expect fixes.len() == 0
 
 #### handles empty file
 
-- handles empty file
+1. expect fixes len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("handles empty file")
 val fixes = check_spipe_manual_assertions("", "test_spec.spl")
 expect fixes.len() == 0
 ```
@@ -1161,18 +1100,17 @@ expect fixes.len() == 0
 
 #### has Likely confidence
 
-- has Likely confidence
+1. expect fixes len
+2.  : fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("has Likely confidence")
 val source = "    if x: fail(\"y\")\n"
 val fixes = check_spipe_manual_assertions(source, "test_spec.spl")
 expect fixes.len() > 0
@@ -1185,18 +1123,16 @@ match fixes[0].confidence:
 
 #### preserves indentation
 
-- preserves indentation
+1. expect rep new text starts with
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("preserves indentation")
 val source = "        if x: fail(\"y\")\n"
 val fixes = check_spipe_manual_assertions(source, "test_spec.spl")
 val rep = fixes[0].replacements[0]
@@ -1211,18 +1147,16 @@ expect rep.new_text.starts_with("        ")
 
 #### detects match without case _
 
-- detects match without case _
+1. expect fixes len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("detects match without case _")
 val source = "match x:\n    case 1: \"one\"\n    case 2: \"two\"\nval y = 0\n"
 val fixes = check_non_exhaustive_match(source, "test.spl")
 expect fixes.len() == 1
@@ -1232,18 +1166,17 @@ expect fixes.len() == 1
 
 #### generates catch-all arm with todo
 
-- generates catch-all arm with todo
+1. expect rep new text contains
+2. expect rep new text contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("generates catch-all arm with todo")
 val source = "match x:\n    case 1: \"one\"\nval y = 0\n"
 val fixes = check_non_exhaustive_match(source, "test.spl")
 val rep = fixes[0].replacements[0]
@@ -1257,18 +1190,16 @@ expect rep.new_text.contains("todo(")
 
 #### ignores match with case _
 
-- ignores match with case _
+1. expect fixes len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("ignores match with case _")
 val source = "match x:\n    case 1: \"one\"\n    case _: \"other\"\nval y = 0\n"
 val fixes = check_non_exhaustive_match(source, "test.spl")
 expect fixes.len() == 0
@@ -1280,18 +1211,16 @@ expect fixes.len() == 0
 
 #### handles empty file
 
-- handles empty file
+1. expect fixes len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("handles empty file")
 val fixes = check_non_exhaustive_match("", "test.spl")
 expect fixes.len() == 0
 ```
@@ -1300,18 +1229,17 @@ expect fixes.len() == 0
 
 #### has Safe confidence
 
-- has Safe confidence
+1. expect fixes len
+2.  : fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("has Safe confidence")
 val source = "match x:\n    case 1: \"one\"\nval y = 0\n"
 val fixes = check_non_exhaustive_match(source, "test.spl")
 expect fixes.len() > 0
@@ -1328,18 +1256,16 @@ match fixes[0].confidence:
 
 #### returns 0 for identical strings
 
-- returns 0 for identical strings
+1. expect levenshtein
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns 0 for identical strings")
 expect levenshtein("hello", "hello") == 0
 ```
 
@@ -1347,18 +1273,17 @@ expect levenshtein("hello", "hello") == 0
 
 #### returns length for empty string
 
-- returns length for empty string
+1. expect levenshtein
+2. expect levenshtein
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns length for empty string")
 expect levenshtein("", "abc") == 3
 expect levenshtein("abc", "") == 3
 ```
@@ -1367,18 +1292,16 @@ expect levenshtein("abc", "") == 3
 
 #### returns 1 for single insertion
 
-- returns 1 for single insertion
+1. expect levenshtein
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns 1 for single insertion")
 expect levenshtein("helo", "hello") == 1
 ```
 
@@ -1386,18 +1309,16 @@ expect levenshtein("helo", "hello") == 1
 
 #### returns 1 for single deletion
 
-- returns 1 for single deletion
+1. expect levenshtein
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns 1 for single deletion")
 expect levenshtein("hello", "helo") == 1
 ```
 
@@ -1405,18 +1326,16 @@ expect levenshtein("hello", "helo") == 1
 
 #### returns 1 for single substitution
 
-- returns 1 for single substitution
+1. expect levenshtein
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns 1 for single substitution")
 expect levenshtein("hello", "hallo") == 1
 ```
 
@@ -1424,18 +1343,17 @@ expect levenshtein("hello", "hallo") == 1
 
 #### returns 2 for two edits
 
-- returns 2 for two edits
+1. expect levenshtein
+2. expect levenshtein
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns 2 for two edits")
 expect levenshtein("kitten", "sitten") == 1
 expect levenshtein("kitten", "sittin") == 2
 ```
@@ -1444,18 +1362,16 @@ expect levenshtein("kitten", "sittin") == 2
 
 #### handles completely different strings
 
-- handles completely different strings
+1. expect levenshtein
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("handles completely different strings")
 expect levenshtein("abc", "xyz") == 3
 ```
 
@@ -1463,18 +1379,17 @@ expect levenshtein("abc", "xyz") == 3
 
 #### handles single character strings
 
-- handles single character strings
+1. expect levenshtein
+2. expect levenshtein
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("handles single character strings")
 expect levenshtein("a", "b") == 1
 expect levenshtein("a", "a") == 0
 ```
@@ -1483,18 +1398,16 @@ expect levenshtein("a", "a") == 0
 
 #### handles both empty
 
-- handles both empty
+1. expect levenshtein
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("handles both empty")
 expect levenshtein("", "") == 0
 ```
 
@@ -1504,18 +1417,16 @@ expect levenshtein("", "") == 0
 
 #### suggests close match
 
-- suggests close match
+1. expect fix id contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("suggests close match")
 val known = ["println", "print", "format"]
 val result = suggest_typo_fix("test.spl", 1, 1, 0, 5, "prnt", known)
 match result:
@@ -1530,18 +1441,13 @@ match result:
 
 #### returns None for no close match
 
-- returns None for no close match
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns None for no close match")
 val known = ["println", "print", "format"]
 val result = suggest_typo_fix("test.spl", 1, 1, 0, 10, "xyzxyzxyz", known)
 match result:
@@ -1555,18 +1461,16 @@ match result:
 
 #### has Likely confidence
 
-- has Likely confidence
+1.  : fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("has Likely confidence")
 val known = ["hello"]
 val result = suggest_typo_fix("test.spl", 1, 1, 0, 4, "helo", known)
 match result:
@@ -1582,18 +1486,13 @@ match result:
 
 #### picks closest match
 
-- picks closest match
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("picks closest match")
 val known = ["print", "println", "printf"]
 val result = suggest_typo_fix("test.spl", 1, 1, 0, 5, "prnt", known)
 match result:
@@ -1611,18 +1510,16 @@ match result:
 
 #### detects async static fn
 
-- detects async static fn
+1. expect fixes len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("detects async static fn")
 val source = "async static fn serve():\n    pass\n"
 val fixes = check_parser_contextual_keyword(source, "test.spl")
 expect fixes.len() == 1
@@ -1632,18 +1529,13 @@ expect fixes.len() == 1
 
 #### generates correct reorder
 
-- generates correct reorder
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("generates correct reorder")
 val source = "async static fn serve():\n    pass\n"
 val fixes = check_parser_contextual_keyword(source, "test.spl")
 val rep = fixes[0].replacements[0]
@@ -1654,18 +1546,17 @@ expect rep.new_text == "static async fn "
 
 #### has Safe confidence
 
-- has Safe confidence
+1. expect fixes len
+2.  : fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("has Safe confidence")
 val source = "async static fn serve():\n    pass\n"
 val fixes = check_parser_contextual_keyword(source, "test.spl")
 expect fixes.len() > 0
@@ -1680,18 +1571,16 @@ match fixes[0].confidence:
 
 #### detects static pub fn
 
-- detects static pub fn
+1. expect fixes len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("detects static pub fn")
 val source = "static pub fn factory():\n    pass\n"
 val fixes = check_parser_contextual_keyword(source, "test.spl")
 expect fixes.len() == 1
@@ -1701,18 +1590,13 @@ expect fixes.len() == 1
 
 #### generates pub static fn
 
-- generates pub static fn
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("generates pub static fn")
 val source = "static pub fn factory():\n    pass\n"
 val fixes = check_parser_contextual_keyword(source, "test.spl")
 val rep = fixes[0].replacements[0]
@@ -1725,18 +1609,16 @@ expect rep.new_text == "pub static fn "
 
 #### detects pub async static fn
 
-- detects pub async static fn
+1. expect fixes len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("detects pub async static fn")
 val source = "pub async static fn handler():\n    pass\n"
 val fixes = check_parser_contextual_keyword(source, "test.spl")
 expect fixes.len() == 1
@@ -1746,18 +1628,13 @@ expect fixes.len() == 1
 
 #### generates pub static async fn
 
-- generates pub static async fn
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("generates pub static async fn")
 val source = "pub async static fn handler():\n    pass\n"
 val fixes = check_parser_contextual_keyword(source, "test.spl")
 val rep = fixes[0].replacements[0]
@@ -1770,18 +1647,16 @@ expect rep.new_text == "pub static async fn "
 
 #### ignores correct static async fn
 
-- ignores correct static async fn
+1. expect fixes len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("ignores correct static async fn")
 val source = "static async fn serve():\n    pass\n"
 val fixes = check_parser_contextual_keyword(source, "test.spl")
 expect fixes.len() == 0
@@ -1791,18 +1666,16 @@ expect fixes.len() == 0
 
 #### ignores plain fn
 
-- ignores plain fn
+1. expect fixes len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("ignores plain fn")
 val source = "fn simple():\n    pass\n"
 val fixes = check_parser_contextual_keyword(source, "test.spl")
 expect fixes.len() == 0
@@ -1812,18 +1685,16 @@ expect fixes.len() == 0
 
 #### ignores pub static fn
 
-- ignores pub static fn
+1. expect fixes len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("ignores pub static fn")
 val source = "pub static fn factory():\n    pass\n"
 val fixes = check_parser_contextual_keyword(source, "test.spl")
 expect fixes.len() == 0
@@ -1835,18 +1706,16 @@ expect fixes.len() == 0
 
 #### handles empty file
 
-- handles empty file
+1. expect fixes len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("handles empty file")
 val fixes = check_parser_contextual_keyword("", "test.spl")
 expect fixes.len() == 0
 ```
@@ -1855,18 +1724,16 @@ expect fixes.len() == 0
 
 #### handles indented keywords
 
-- handles indented keywords
+1. expect fixes len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("handles indented keywords")
 val source = "    async static fn serve():\n        pass\n"
 val fixes = check_parser_contextual_keyword(source, "test.spl")
 expect fixes.len() == 1
@@ -1880,18 +1747,16 @@ expect fixes.len() == 1
 
 #### suggests .to_string() for Int to String
 
-- suggests .to_string() for Int to String
+1. expect fix replacements[0] new text == " to string
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("suggests .to_string() for Int to String")
 val result = suggest_type_coercion_fix("test.spl", 1, 10, 15, "String", "Int")
 match result:
     case Some(fix):
@@ -1904,18 +1769,16 @@ match result:
 
 #### suggests .to_string() for Float to String
 
-- suggests .to_string() for Float to String
+1. expect fix replacements[0] new text == " to string
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("suggests .to_string() for Float to String")
 val result = suggest_type_coercion_fix("test.spl", 1, 10, 15, "String", "Float")
 match result:
     case Some(fix):
@@ -1928,18 +1791,16 @@ match result:
 
 #### suggests .to_string() for Bool to String
 
-- suggests .to_string() for Bool to String
+1. expect fix replacements[0] new text == " to string
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("suggests .to_string() for Bool to String")
 val result = suggest_type_coercion_fix("test.spl", 1, 10, 15, "String", "Bool")
 match result:
     case Some(fix):
@@ -1952,18 +1813,16 @@ match result:
 
 #### suggests .to_int() for Float to Int
 
-- suggests .to_int() for Float to Int
+1. expect fix replacements[0] new text == " to int
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("suggests .to_int() for Float to Int")
 val result = suggest_type_coercion_fix("test.spl", 1, 10, 15, "Int", "Float")
 match result:
     case Some(fix):
@@ -1976,18 +1835,16 @@ match result:
 
 #### suggests .to_float() for Int to Float
 
-- suggests .to_float() for Int to Float
+1. expect fix replacements[0] new text == " to float
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("suggests .to_float() for Int to Float")
 val result = suggest_type_coercion_fix("test.spl", 1, 10, 15, "Float", "Int")
 match result:
     case Some(fix):
@@ -2000,18 +1857,13 @@ match result:
 
 #### suggests != 0 for Int to Bool
 
-- suggests != 0 for Int to Bool
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("suggests != 0 for Int to Bool")
 val result = suggest_type_coercion_fix("test.spl", 1, 10, 15, "Bool", "Int")
 match result:
     case Some(fix):
@@ -2026,18 +1878,13 @@ match result:
 
 #### returns None for unknown type pair
 
-- returns None for unknown type pair
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns None for unknown type pair")
 val result = suggest_type_coercion_fix("test.spl", 1, 10, 15, "MyType", "OtherType")
 match result:
     case Some(_):
@@ -2050,18 +1897,13 @@ match result:
 
 #### returns None for same types
 
-- returns None for same types
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns None for same types")
 val result = suggest_type_coercion_fix("test.spl", 1, 10, 15, "Int", "Int")
 match result:
     case Some(_):
@@ -2076,18 +1918,16 @@ match result:
 
 #### has Likely confidence
 
-- has Likely confidence
+1.  : fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("has Likely confidence")
 val result = suggest_type_coercion_fix("test.spl", 1, 10, 15, "String", "Int")
 match result:
     case Some(fix):
@@ -2102,18 +1942,13 @@ match result:
 
 #### inserts at correct position
 
-- inserts at correct position
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("inserts at correct position")
 val result = suggest_type_coercion_fix("test.spl", 5, 20, 42, "String", "Int")
 match result:
     case Some(fix):
@@ -2133,18 +1968,16 @@ match result:
 
 #### returns empty for clean file
 
-- returns empty for clean file
+1. expect fixes len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns empty for clean file")
 val source = "fn main():\n    val x = 42\n"
 val fixes = check_all_rules(source, "main.spl")
 expect fixes.len() == 0
@@ -2154,18 +1987,16 @@ expect fixes.len() == 0
 
 #### collects fixes from multiple rules
 
-- collects fixes from multiple rules
+1. expect fixes len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("collects fixes from multiple rules")
 val source = "async static fn serve():\n    pass\n"
 val fixes = check_all_rules(source, "test.spl")
 # At minimum: parser_contextual_keyword should fire
@@ -2176,18 +2007,16 @@ expect fixes.len() >= 1
 
 #### collects spec-related fixes for spec files
 
-- collects spec-related fixes for spec files
+1. expect fixes len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("collects spec-related fixes for spec files")
 val source = "describe \"X\":\n    it \"y\":\n        print(42)\n        if z: fail(\"err\")\n"
 val fixes = check_all_rules(source, "test_spec.spl")
 # Should get: missing docstring + print_in_test + manual assertion
@@ -2200,18 +2029,17 @@ expect fixes.len() >= 2
 
 #### each fix has unique ID
 
-- each fix has unique ID
+1. expect not ids contains
+2. ids push
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("each fix has unique ID")
 val source = "describe \"X\":\n    it \"y\":\n        print(1)\n        print(2)\n"
 val fixes = check_all_rules(source, "test_spec.spl")
 var ids: List<String> = []
@@ -2228,18 +2056,17 @@ for fix in fixes:
 
 #### fixing async static fn clears the warning
 
-- fixing async static fn clears the warning
+1. expect fixes len
+2. expect recheck len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("fixing async static fn clears the warning")
 val source = "async static fn serve():\n    pass\n"
 val fixes = check_parser_contextual_keyword(source, "test.spl")
 expect fixes.len() == 1
@@ -2259,18 +2086,17 @@ expect recheck.len() == 0
 
 #### fixing print clears the warning
 
-- fixing print clears the warning
+1. expect fixes len
+2. expect recheck len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("fixing print clears the warning")
 val source = "    print(42)"
 val fixes = check_print_in_test_spec(source, "test_spec.spl")
 expect fixes.len() == 1
@@ -2290,18 +2116,16 @@ expect recheck.len() == 0
 
 #### applies parser keyword fix
 
-- applies parser keyword fix
+1. expect new sources["test spl"] contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("applies parser keyword fix")
 val source = "async static fn serve():\n    pass\n"
 val fixes = check_parser_contextual_keyword(source, "test.spl")
 
@@ -2320,18 +2144,18 @@ match result:
 
 #### applies multiple rule fixes without conflict
 
-- applies multiple rule fixes without conflict
+1. expect fixes len
+2. expect fixed contains
+3. expect fixed contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("applies multiple rule fixes without conflict")
 val source = "async static fn serve():\n    pass\nstatic pub fn make():\n    pass\n"
 val fixes = check_parser_contextual_keyword(source, "test.spl")
 expect fixes.len() == 2
@@ -2363,51 +2187,3 @@ match result:
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `89b580e47e78faacd3e4b992a88f08aad4ecb7289d3c01d2feb3fd14b10e1b8a`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `89b580e47e78faacd3e4b992a88f08aad4ecb7289d3c01d2feb3fd14b10e1b8a`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `89b580e47e78faacd3e4b992a88f08aad4ecb7289d3c01d2feb3fd14b10e1b8a`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/03_system/feature/app/easy_fix_rules_spec.spl
-mirror: doc/06_spec/03_system/feature/app/easy_fix_rules_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/feature/app/easy_fix_rules_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/feature/app/easy_fix_rules_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/feature/app/easy_fix_rules_spec.spl:65:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'detects print() in spec file' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/app/easy_fix_rules_spec.spl:73:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'detects print with string arg' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/app/easy_fix_rules_spec.spl:80:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'detects print with expression' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

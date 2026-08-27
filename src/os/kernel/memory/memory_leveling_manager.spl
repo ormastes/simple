@@ -19,9 +19,6 @@ use std.memory_leveling.{
     MEMORY_PAGE_STATE_MIGRATING,
     MEMORY_PAGE_STATE_SWAPPED,
     MEMORY_PAGE_STATE_RELEASED,
-    MEMORY_DMA_DIRECTION_BIDIRECTIONAL,
-    MEMORY_DMA_DIRECTION_TO_DEVICE,
-    MEMORY_DMA_DIRECTION_FROM_DEVICE,
     MEMORY_DMA_DIRECTION_NONE,
     memory_tier_cpu_cold,
     memory_tier_dma_pinned,
@@ -30,6 +27,7 @@ use std.memory_leveling.{
     memory_allocation_from_intent,
     memory_leveling_stats_empty
 }
+use os.kernel.memory.pmm.{pmm_is_live_contiguous_allocation}
 
 const MEMORY_LEVELING_MAX_PRESSURE_CANDIDATES: u64 = 64
 
@@ -211,16 +209,6 @@ fn _memory_leveling_batch_limit(config: SimpleOsMemoryLevelingConfig) -> u64:
         return MEMORY_LEVELING_MAX_PRESSURE_CANDIDATES
     config.pressure_batch_limit
 
-fn _memory_leveling_direction_matches(allocation_direction: text, requested_direction: text) -> bool:
-    if requested_direction == MEMORY_DMA_DIRECTION_NONE:
-        return false
-    if allocation_direction == MEMORY_DMA_DIRECTION_BIDIRECTIONAL:
-        return true
-    allocation_direction == requested_direction
-
-fn _memory_leveling_map_device_direction(allocation: MemoryAllocation, direction: text) -> bool:
-    _memory_leveling_direction_matches(allocation.dma_direction, direction)
-
 fn placement_tier_for_cpu(allocation: MemoryAllocation) -> MemoryTier:
     # Swap candidates are cold CPU allocations; hot refault promotion is a
     # separate policy decision.
@@ -350,8 +338,21 @@ impl MemoryLevelingManager:
         if config_reason != "ok":
             me.stats.failure_count = me.stats.failure_count + 1
             return _memory_leveling_operation(false, config_reason, allocation_id, "failed")
-        if owner_id == 0 or byte_length == 0 or page_count == 0 or (allocation_id != 0 and me._find(allocation_id) >= 0):
+        if owner_id == 0 or byte_length == 0 or (allocation_id != 0 and me._find(allocation_id) >= 0):
             return _memory_leveling_operation(false, "invalid-request", allocation_id, "failed")
+        val expected_page_count = ((byte_length - 1) / 4096) + 1
+        if page_count == 0 or page_count != expected_page_count:
+            return _memory_leveling_operation(false, "invalid-page-sizing", allocation_id, "failed")
+        if dma_direction != MEMORY_DMA_DIRECTION_TO_DEVICE and dma_direction != MEMORY_DMA_DIRECTION_FROM_DEVICE and dma_direction != MEMORY_DMA_DIRECTION_BIDIRECTIONAL:
+            return _memory_leveling_operation(false, "invalid-dma-direction", allocation_id, "failed")
+        if not coherent:
+            return _memory_leveling_operation(false, "unsupported-noncoherent", allocation_id, "failed")
+        if not contiguous:
+            return _memory_leveling_operation(false, "unsupported-scatter-gather", allocation_id, "failed")
+        if physical_base == 0 or physical_base % 4096 != 0:
+            return _memory_leveling_operation(false, "invalid-physical-base", allocation_id, "failed")
+        if not pmm_is_live_contiguous_allocation(physical_base, page_count):
+            return _memory_leveling_operation(false, "unproven-contiguous", allocation_id, "failed")
         val admission = me._admission_reason(domain.name, byte_length)
         if admission != "ok":
             me.stats.failure_count = me.stats.failure_count + 1
@@ -437,8 +438,6 @@ impl MemoryLevelingManager:
             return _memory_leveling_operation(false, "not-owner", allocation_id, allocation.state.name)
         if allocation.state.name != MEMORY_PAGE_STATE_CPU_OWNED or direction == MEMORY_DMA_DIRECTION_NONE:
             return _memory_leveling_operation(false, "invalid-state", allocation_id, allocation.state.name)
-        if not _memory_leveling_map_device_direction(allocation, direction):
-            return _memory_leveling_operation(false, "invalid-direction", allocation_id, allocation.state.name)
         val syncing = memory_page_state(MEMORY_PAGE_STATE_SYNCING_FOR_DEVICE, false, false)
         me.allocations[index] = _memory_leveling_updated(allocation, allocation.tier, syncing, allocation.pin_count, allocation.in_flight_count, allocation.mapping_count + 1, direction, coherent, allocation.access_epoch, allocation.cooldown_epoch, false, allocation.swap_slot_id)
         me.stats.mapping_count = me.stats.mapping_count + 1
@@ -505,25 +504,12 @@ impl MemoryLevelingManager:
         val cpu_owned = memory_page_state(MEMORY_PAGE_STATE_CPU_OWNED, false, true)
         val mappings = allocation.mapping_count - 1
         val reclaimable = mappings == 0 and allocation.pin_count == 0
-        me.allocations[index] = _memory_leveling_updated(allocation, allocation.tier, cpu_owned, allocation.pin_count, 0, mappings, allocation.dma_direction, true, allocation.access_epoch, allocation.cooldown_epoch, reclaimable, allocation.swap_slot_id)
+        me.allocations[index] = _memory_leveling_updated(allocation, allocation.tier, cpu_owned, allocation.pin_count, 0, mappings, MEMORY_DMA_DIRECTION_NONE, true, allocation.access_epoch, allocation.cooldown_epoch, reclaimable, allocation.swap_slot_id)
         me.stats.mapping_count = me.stats.mapping_count - 1
         me.stats.transition_count = me.stats.transition_count + 1
         if reclaimable:
             me._enqueue(index)
         _memory_leveling_operation(true, "ok", allocation_id, cpu_owned.name)
-
-    me can_release(allocation_id: u64, owner_id: u64) -> MemoryLevelingOperation:
-        val index = me._find(allocation_id)
-        if index < 0:
-            return _memory_leveling_operation(false, "not-found", allocation_id, "failed")
-        val allocation = me.allocations[index]
-        if allocation.owner_id != owner_id:
-            return _memory_leveling_operation(false, "not-owner", allocation_id, allocation.state.name)
-        if allocation.pin_count > 0 or allocation.in_flight_count > 0 or allocation.mapping_count > 0 or allocation.state.name == MEMORY_PAGE_STATE_DEVICE_OWNED or allocation.state.name == MEMORY_PAGE_STATE_MIGRATING:
-            return _memory_leveling_operation(false, "protected", allocation_id, allocation.state.name)
-        if allocation.state.name == MEMORY_PAGE_STATE_RELEASED:
-            return _memory_leveling_operation(false, "released", allocation_id, allocation.state.name)
-        _memory_leveling_operation(true, "ok", allocation_id, allocation.state.name)
 
     me release(allocation_id: u64, owner_id: u64) -> MemoryLevelingOperation:
         val index = me._find(allocation_id)

@@ -1,0 +1,107 @@
+# @cover src/app/dap/target_session.spl 85%
+# @req REQ-001 REQ-003 REQ-007
+"""DAP remains a facade over the centrally owned DebugServiceV1 registry."""
+
+use std.spec.{describe, it, expect, fail}
+use app.dap.target_session.{target_dap_session_launch, target_dap_session_launch_with_policy}
+use std.common.debug.session_core.{attach_opts_default}
+use std.common.debug.contracts_v1.{debug_policy_development_v1}
+use std.notebook.gpu_config.{default_gpu_config}
+use std.notebook.gpu_mode_resolver.{GpuBackendProbe}
+use std.common.debug.service_v1.{
+    central_debug_service_v1_session, central_debug_service_v1_receipts,
+}
+
+val FIXTURE = "test/fixtures/dap/host_debug_target_program.spl"
+
+class NoProbe:
+    calls: i64
+
+impl GpuBackendProbe for NoProbe:
+    me probe_backend(backend: text) -> text:
+        self.calls = self.calls + 1
+        "skip:unexpected-{backend}"
+
+fn launch(build_id: text):
+    target_dap_session_launch(
+        "{\"type\":\"simple\",\"program\":\"{FIXTURE}\",\"buildId\":\"{build_id}\"}",
+        default_gpu_config(), NoProbe(calls: 0))
+
+describe "TargetDapSession DebugServiceV1 bridge":
+    it "retains a unique central session id bound to the requested build":
+        var first = launch("build-dap-first")
+        var second = launch("build-dap-second")
+        expect(first.session_id.value == "").to_equal(false)
+        expect(second.session_id.value == "").to_equal(false)
+        expect(first.session_id.value == second.session_id.value).to_equal(false)
+        match central_debug_service_v1_session(first.session_id):
+            case Some(record):
+                expect(record.build_id).to_equal("build-dap-first")
+                expect(record.open).to_equal(true)
+            case None: fail("first DAP session was not centrally registered")
+        match central_debug_service_v1_session(second.session_id):
+            case Some(record): expect(record.build_id).to_equal("build-dap-second")
+            case None: fail("second DAP session was not centrally registered")
+        first.detach()
+        second.detach()
+
+    it "receipts launch and closes central ownership exactly once":
+        var session = launch("build-dap-close")
+        val id = session.session_id
+        val before = central_debug_service_v1_receipts(id)
+        expect(before[before.len() - 1].action).to_equal("dap.launch")
+        expect(before[before.len() - 1].build_id).to_equal("build-dap-close")
+        session.detach()
+        val after_first = central_debug_service_v1_receipts(id)
+        expect(after_first[after_first.len() - 2].action).to_equal("dap.detach")
+        expect(after_first[after_first.len() - 1].action).to_equal("session.close")
+        match central_debug_service_v1_session(id):
+            case Some(record): expect(record.open).to_equal(false)
+            case None: fail("closed session record must remain inspectable")
+        session.detach()
+        expect(central_debug_service_v1_receipts(id).len()).to_equal(after_first.len())
+
+    it "imports and constructs without starting the DAP stdio server":
+        # Reaching this assertion proves module import did not enter the
+        # blocking server loop; executable startup stays behind fn main().
+        var session = launch("build-dap-import")
+        expect(session.launched).to_equal(true)
+        session.detach()
+
+    it "preserves executable legacy break step inspect continue and detach behavior with receipts":
+        var session = launch("build-dap-legacy-flow")
+        val id = session.session_id
+        val break_response = session.handle("{\"seq\":1,\"command\":\"setBreakpoints\",\"arguments\":{\"breakpoints\":[{\"line\":7}]}}")
+        expect(break_response).to_contain("\"verified\":true")
+        val inspect_before = session.handle("{\"seq\":2,\"command\":\"stackTrace\"}")
+        expect(inspect_before).to_contain("\"pc\":4")
+        val step_response = session.handle("{\"seq\":3,\"command\":\"next\"}")
+        expect(step_response).to_contain("\"stopReason\":\"step\"")
+        val continue_response = session.handle("{\"seq\":4,\"command\":\"continue\"}")
+        expect(continue_response).to_contain("\"stopReason\":\"breakpoint\"")
+        expect(continue_response).to_contain("\"pc\":7")
+        val receipts = central_debug_service_v1_receipts(id)
+        expect(receipts.any(\r: r.action == "dap.breakpoint.set.outcome" and r.execution_changed)).to_equal(true)
+        expect(receipts.any(\r: r.action == "dap.stackTrace.outcome" and not r.execution_changed)).to_equal(true)
+        expect(receipts.any(\r: r.action == "dap.next.outcome" and r.execution_changed)).to_equal(true)
+        expect(receipts.all(\r: r.build_id == "build-dap-legacy-flow")).to_equal(true)
+        session.detach()
+
+    it "denies breakpoints before mutation while leaving legacy target state unchanged":
+        var policy = debug_policy_development_v1()
+        policy.allow_probe = false
+        var session = target_dap_session_launch_with_policy(
+            "{\"type\":\"simple\",\"program\":\"{FIXTURE}\",\"buildId\":\"build-dap-denied-probe\"}",
+            default_gpu_config(), NoProbe(calls: 0), attach_opts_default(), policy)
+        expect(session.launched).to_equal(true)
+        val before = session.handle("{\"seq\":5,\"command\":\"stackTrace\"}")
+        val denied = session.handle("{\"seq\":6,\"command\":\"setBreakpoints\",\"arguments\":{\"breakpoints\":[{\"line\":7}]}}")
+        val after = session.handle("{\"seq\":7,\"command\":\"stackTrace\"}")
+        expect(denied).to_contain("\"success\":false")
+        expect(denied).to_contain("DebugServiceV1 denied")
+        expect(before).to_contain("\"pc\":4")
+        expect(after).to_contain("\"pc\":4")
+        val receipts = central_debug_service_v1_receipts(session.session_id)
+        expect(receipts.any(\r: r.action == "dap.breakpoint.set" and not r.allowed)).to_equal(true)
+        expect(receipts.any(\r: r.action == "dap.breakpoint.set.outcome")).to_equal(false)
+        session.detach()

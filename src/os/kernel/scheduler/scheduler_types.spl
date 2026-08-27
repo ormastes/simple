@@ -41,14 +41,84 @@ pub val SCHED_RT_BASE_PRIORITY_UNSET: i64 = 9223372036854775807
 
 # Module-level task-id counter shared across all task-creation paths.
 var g_scheduler_next_task_id: u64 = 1
+var g_scheduler_next_lifecycle_generation: u64 = 1u64
+val g_scheduler_identity_allocator_mutex: i64 = mutex_raw_create()
+var g_scheduler_identity_allocator_quarantined: bool = false
+
+fn _scheduler_identity_allocator_lock_v1() -> bool:
+    g_scheduler_identity_allocator_mutex > 0 and
+        not g_scheduler_identity_allocator_quarantined and
+        mutex_raw_lock(g_scheduler_identity_allocator_mutex)
+
+fn _scheduler_identity_allocator_unlock_v1() -> bool:
+    if mutex_raw_unlock(g_scheduler_identity_allocator_mutex): return true
+    g_scheduler_identity_allocator_quarantined = true
+    false
+
+pub struct TaskLifecycleIdentityV1:
+    """Never-reused identity for exactly one published TCB lifetime."""
+    task_id: u64
+    lifecycle_generation: u64
+
+pub(package) struct SchedulerCurrentTaskAdmissionV1:
+    _task_id: u64
+    _lifecycle_generation: u64
+
+pub(package) fn scheduler_current_task_admission_matches_v1(
+    admission: SchedulerCurrentTaskAdmissionV1,
+    task_id: u64,
+    lifecycle_generation: u64
+) -> bool:
+    task_id != 0u64 and lifecycle_generation != 0u64 and
+        admission._task_id == task_id and
+        admission._lifecycle_generation == lifecycle_generation
+
+pub fn task_lifecycle_identity_valid_v1(identity: TaskLifecycleIdentityV1) -> bool:
+    identity.task_id != 0u64 and identity.lifecycle_generation != 0u64
+
+pub fn scheduler_next_task_lifecycle_identity_take_v1() -> TaskLifecycleIdentityV1?:
+    """Reserve a PID/generation pair; exhaustion or unlock failure burns it."""
+    if not _scheduler_identity_allocator_lock_v1(): return nil
+    if g_scheduler_next_task_id == 0u64 or
+        g_scheduler_next_task_id >= 0x40000000u64 or
+        g_scheduler_next_lifecycle_generation == 0u64 or
+        g_scheduler_next_lifecycle_generation == 0xffffffffffffffffu64:
+        val unlock_ignored = _scheduler_identity_allocator_unlock_v1()
+        return nil
+    val task_id = g_scheduler_next_task_id
+    val generation = g_scheduler_next_lifecycle_generation
+    g_scheduler_next_task_id = task_id + 1u64
+    g_scheduler_next_lifecycle_generation = generation + 1u64
+    if not _scheduler_identity_allocator_unlock_v1(): return nil
+    Some(TaskLifecycleIdentityV1(
+        task_id: task_id, lifecycle_generation: generation))
 
 pub fn scheduler_next_task_id_take() -> u64:
-    var next_id = g_scheduler_next_task_id
-    if next_id == 0 or next_id >= 0x40000000:
-        log_raw_println("[scheduler] create_task: normalized next_task_id")
-        next_id = 1
-    g_scheduler_next_task_id = next_id + 1
+    # TaskId is the scheduler's current-task lookup key. Reuse would make a
+    # `{task_id,lifecycle_generation}` authority impossible to derive safely
+    # from `Scheduler.current`, which intentionally carries only TaskId.
+    if not _scheduler_identity_allocator_lock_v1(): return 0u64
+    if g_scheduler_next_task_id == 0u64 or
+        g_scheduler_next_task_id >= 0x40000000u64:
+        log_raw_println("[scheduler] create_task: task id space exhausted")
+        _ = _scheduler_identity_allocator_unlock_v1()
+        return 0u64
+    val next_id = g_scheduler_next_task_id
+    g_scheduler_next_task_id = next_id + 1u64
+    if not _scheduler_identity_allocator_unlock_v1(): return 0u64
     next_id
+
+pub fn scheduler_next_lifecycle_generation_take_v1() -> u64:
+    """Take a never-wrapped task-lifetime identity; zero means exhausted."""
+    if not _scheduler_identity_allocator_lock_v1(): return 0u64
+    if g_scheduler_next_lifecycle_generation == 0u64 or
+        g_scheduler_next_lifecycle_generation == 0xFFFFFFFFFFFFFFFFu64:
+        _ = _scheduler_identity_allocator_unlock_v1()
+        return 0u64
+    val generation = g_scheduler_next_lifecycle_generation
+    g_scheduler_next_lifecycle_generation = generation + 1u64
+    if not _scheduler_identity_allocator_unlock_v1(): return 0u64
+    generation
 
 @cfg(x86_64)
 pub fn sched_exec_arch() -> Architecture:
@@ -99,6 +169,14 @@ pub struct TaskControlBlock:
     assigned_cpu: u32
     exit_code: i32
     ticks_remaining: u64
+    # Appended so legacy ABI offsets remain stable.
+    lifecycle_generation: u64
+    # Opaque locators retained by their architecture-specific mapping owners.
+    arm32_mapping_handle: SchedulerArm32MappingHandleV1
+    riscv32_mapping_handle: SchedulerRiscv32MappingHandleV1
+    x86_32_mapping_handle: SchedulerX8632MappingHandleV1
+    # Rotates only after a successful in-place executable replacement.
+    exec_generation: u64
 
 pub struct WaitCollectResult:
     """Result of collecting child exit state for waitpid-compatible syscalls."""
@@ -117,6 +195,30 @@ pub fn wait_collect_result_error(result: WaitCollectResult) -> i32:
 
 pub fn task_control_pid(task: TaskControlBlock) -> u64:
     task.id.id
+
+pub fn task_control_lifecycle_generation_v1(task: TaskControlBlock) -> u64:
+    task.lifecycle_generation
+
+pub fn task_control_lifecycle_identity_v1(task: TaskControlBlock) -> TaskLifecycleIdentityV1?:
+    val identity = TaskLifecycleIdentityV1(
+        task_id: task.id.id, lifecycle_generation: task.lifecycle_generation)
+    if not task_lifecycle_identity_valid_v1(identity): return nil
+    Some(identity)
+
+pub(package) fn task_control_arm32_mapping_handle_v1(
+    task: TaskControlBlock
+) -> SchedulerArm32MappingHandleV1:
+    task.arm32_mapping_handle
+
+pub(package) fn task_control_riscv32_mapping_handle_v1(
+    task: TaskControlBlock
+) -> SchedulerRiscv32MappingHandleV1:
+    task.riscv32_mapping_handle
+
+pub(package) fn task_control_x86_32_mapping_handle_v1(
+    task: TaskControlBlock
+) -> SchedulerX8632MappingHandleV1:
+    task.x86_32_mapping_handle
 
 pub fn task_control_parent_pid(task: TaskControlBlock) -> u64:
     if task.parent == nil:
@@ -226,31 +328,7 @@ pub fn _scheduler_uses_direct_load_arena() -> bool:
 pub fn _scheduler_mapped_entry(user_as: AddressSpace, file_bytes: [u8], entry: u64) -> u64:
     direct_load_entry_point(user_as, file_bytes, entry)
 
-@cfg(arm32)
-pub fn _scheduler_mapped_entry(user_as: AddressSpace, file_bytes: [u8], entry: u64) -> u64:
-    val _user_as = user_as
-    val _file_bytes = file_bytes
-    entry
-
-@cfg(riscv64)
-pub fn _scheduler_mapped_entry(user_as: AddressSpace, file_bytes: [u8], entry: u64) -> u64:
-    val _user_as = user_as
-    val _file_bytes = file_bytes
-    entry
-
-@cfg(riscv32)
-pub fn _scheduler_mapped_entry(user_as: AddressSpace, file_bytes: [u8], entry: u64) -> u64:
-    val _user_as = user_as
-    val _file_bytes = file_bytes
-    entry
-
-@cfg(x86_64)
-pub fn _scheduler_mapped_entry(user_as: AddressSpace, file_bytes: [u8], entry: u64) -> u64:
-    val _user_as = user_as
-    val _file_bytes = file_bytes
-    entry
-
-@cfg(x86)
+@cfg(not(arm64))
 pub fn _scheduler_mapped_entry(user_as: AddressSpace, file_bytes: [u8], entry: u64) -> u64:
     val _user_as = user_as
     val _file_bytes = file_bytes
@@ -610,6 +688,10 @@ pub class Scheduler:
     """Priority-based preemptive scheduler."""
     tasks: [TaskControlBlock?]
     current: TaskId
+    # Exact cache for `current`. Scheduler-owned selection updates this with
+    # the TCB table, allowing consumers that must bind current execution to
+    # reject an absent/stale slot without a second task-table scan.
+    current_slot: i32
     current_by_cpu: [TaskId]
     preempt_pending_by_cpu: [TaskId?]
     ready_queues: [ReadyQueue]
@@ -630,11 +712,6 @@ pub class Scheduler:
     trace_count: i32
     tick_count: u64
     next_task_id: u64
-    executable_adoption_state: SchedulerExecutableAdoptionOwnerStateV1
-    executable_adoption_pid: u64
-    executable_adoption_token_slot: i64
-    executable_adoption_token_generation: u64
-    executable_adoption_token_nonce: u64
     green_execution_state: GreenCarrierExecutionState
     green_parallelism_state: GreenCarrierParallelismState
 

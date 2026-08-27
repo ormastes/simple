@@ -67,11 +67,9 @@ before another submission.
 
 The executor derives each request generation from an idle wire slot rather than
 mutable executor state, because the baremetal shell passes executor values by
-copy. With a negotiated host, it builds one host-target Draw IR composition and
-presents a valid correlated receipt synchronously. If that attempt fails and
-the host and local targets differ, it lazily recomposes the identical filtered
-inputs for the immutable CPU/CPU-SIMD target before local Engine2D presentation.
-A local-only or equal-target path builds only one local composition. The current
+copy. It builds one `auto` Draw IR composition: a valid correlated host receipt
+is presented synchronously, while unavailable mapping, capacity, negotiation,
+receipt, or presentation selects the existing local Engine2D path. The current
 3840x2160 entry therefore remains local under TODO 552's 8 MiB capacity ceiling.
 For a nonzero production BAR, the executor emits exactly one scoped
 `HOST_GPU_MAP_OK` marker before any negotiation attempt or final decision; the
@@ -162,46 +160,23 @@ Guest/daemon/wrapper negotiation keeps the DirectX render mask independent
 from CUDA/Vulkan processing masks. Prepared-Windows receipt evidence remains
 open, so the Windows QEMU row is not yet classified as accelerated.
 
-### Host-daemon entry-closure boundary
-
-The macOS host daemon does not import the monolithic `Engine2D` owner merely to
-execute Draw IR. The implemented seam is one narrow internal Draw IR
-render/readback target. It
-owns create/clear/draw/present/read-pixels/shutdown plus strict backend identity
-and checked device provenance. Existing `Engine2D` implements the target for
-normal applications; a Metal-only host adapter implements it for the macOS
-daemon. The Draw IR composition, command semantics, font lowering, readback
-record, protocol, CPU/SIMD oracle, and public Engine2D API remain unchanged.
-This is dependency inversion at the existing renderer boundary, not a private
-renderer or a platform-specific Draw IR fork.
-
-`main_macos.spl` composes the shared daemon runner with
-`SimpleOsGpuHostMacPlatform`. Its verified 202-file dependency closure excludes
-`engine.spl` and Vulkan, CUDA, DirectX, OpenGL, WebGPU, and other non-Metal
-providers. Native artifact production and live HVF receipts remain separate
-verification gates; narrowing the closure alone is not acceleration evidence.
-
 Vulkan ProcessingIR hashes the runtime-selected driver identity, which includes
 device name, vendor/device IDs, driver version, and API version. Storage-buffer handles remain per-request resource handles and
 must never be reused as device provenance. Vulkan processing is negotiated only
 after a bounded real ProcessingIR probe returns both values.
-CUDA ProcessingIR uses a nonzero 60-bit hash of the CUDA Driver API device UUID
-so the identity remains positive through Simple's three-bit integer tagging.
+CUDA ProcessingIR uses a nonzero 63-bit hash of the CUDA Driver API device UUID.
 The runtime prefers `cuDeviceGetUuid_v2` so MIG compute instances retain their
 own identity and falls back to the legacy symbol for older drivers;
 device ordinal and compute capability are capability metadata, not identity.
 UUID lookup failure or an all-zero UUID rejects CUDA negotiation instead of
 manufacturing positive provenance from the ordinal.
-Every numeric device identity crossing the Simple `i64` ABI must fit the
-positive 60-bit tagged payload; ROCm and DirectX native hashes use this bound,
-while Vulkan and Metal's existing 31-bit hashes already satisfy it.
 
 ## Platform Classification
 
 | Host | Rendering | Processing | Classification rule |
 |---|---|---|---|
 | Linux | Vulkan | Vulkan; CUDA on prepared NVIDIA host | pass only with device receipt |
-| macOS | Metal implementation; Metal-only daemon closure and native receipt still required | dedicated Metal ProcessingIR FillU32, native receipt still required | never infer processing from an Engine2D clear; no accelerated classification until the supported daemon links and HVF returns device-origin parity |
+| macOS | Metal implementation, native receipt still required | dedicated Metal ProcessingIR FillU32, native receipt still required | never infer processing from an Engine2D clear |
 | Windows | bounded native D3D11 owner and QEMU negotiation implemented; receipt pending | CUDA preferred, Vulkan fallback | require independent masks, positive hardware identity/target handle, and exact readback; ivshmem mapping permits concurrent QEMU/daemon writes |
 | Any missing prerequisite | CPU/software | CPU | `unsupported` or `blocked`, never accelerated |
 
@@ -242,17 +217,6 @@ top-level attachments as canonical little-endian records in the negotiated
 readback arena. The daemon snapshots and validates them before execution, then
 rechecks request generation before reusing that arena for output. This must not
 be replaced by a producer-specific full-frame copy.
-
-The executor retains an immutable local CPU/CPU-SIMD Draw IR target alongside
-the negotiated host target. It builds the host-target composition once for a
-host attempt and returns immediately on a valid host presentation. If that
-attempt fails and the targets differ, it rebuilds the same filtered scene,
-taskbar, and checksum-valid content frames only for local presentation. This
-lazy recomposition preserves concrete material intent: Metal device-glass
-requests and receipts never masquerade as CPU-composited fallback, while a
-Vulkan target continues to request CPU-composited material through its host
-presentation path. A local-only or equal-target frame builds one local
-composition and does not recompose.
 
 The local fallback uses
 `engine2d_draw_ir_adv_composition_present_with_images`: the existing Draw IR

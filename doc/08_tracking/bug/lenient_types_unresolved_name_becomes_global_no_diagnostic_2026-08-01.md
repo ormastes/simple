@@ -3,8 +3,7 @@
 - **Date:** 2026-08-01
 - **Component:** `src/compiler_rust/compiler/src/hir/lower` (Rust seed HIR lowering)
 - **Severity:** systemic diagnostic failure (not a miscompile)
-- Status: CLOSED (not reproducible)
-- Status re-verified 2026-08-17 by source inspection (triage shard 02).
+- **Status:** attribution landed; the leniency itself is retained by design
 
 ## Symptom
 

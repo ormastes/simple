@@ -1,7 +1,6 @@
 ---
 id: bootstrap_stage4_graph_load_timeout_2026-07-05
-Status: OPEN (P2)
-Status re-verified 2026-08-17 by source inspection (triage shard 00).
+status: OPEN
 severity: high
 discovered: 2026-07-05
 discovered_by: Stage-4 bootstrap execution on Apple M4
@@ -27,15 +26,6 @@ Stage-4 bootstrap's interpreted native-build worker exceeded the default 7200-se
 ## Impact
 
 Stage-4 bootstrap remains incomplete and cannot produce a fresh pure-Simple binary. The long timeout blocks verification builds and prevents rapid iteration on bootstrap fixes.
-
-## Linux confirmation 2026-07-10
-
-The same interpreted-worker bottleneck blocks the full-size CPU-SIMD exporter
-on x86_64 Linux. A patched debug bootstrap passed strict stub validation, then
-timed out before codegen/output at both `--timeout 120` and `--timeout 600` while
-loading/parsing the reachable `src/app` + `src/lib` closure. No exporter binary
-was produced. This confirms the blocker is not Apple-only and must be removed
-before a fresh retained 4K/8K CPU-SIMD/Cairo comparison can be accepted.
 
 ## Scope
 
@@ -178,123 +168,105 @@ The misleading timeout hint in `native_build_main.spl`
 shares the same interpreted parse. (File was under concurrent edit; not
 patched here to avoid a clobber.)
 
-## Linux confirmation 2026-07-19 — source fix landed, parse wall remains
+## Linux confirmation 2026-07-17 — compiled in-process Stage 4 still exceeds 40 minutes
 
-A fresh cache-preserving Stage2/3 rebuild from `ac4d2094bd` passed compiler
-sanity and Stage2 native-build capability. One bounded Stage2-driven Stage4
-attempt then reached the 1200-second cap while still in phase 2 parse:
+A clean x86_64 Linux publication worktree built `bootstrap_main.spl` with a
+pure-Simple Stage 3 compiler in 484.6 seconds (715 compiled, 0 failed). The
+result then entered the authorized compiled in-process Stage 4 path for
+`src/app/cli/main.spl`, with `--entry-closure`, one thread, a warm 53 MiB
+native cache, and the `core-c-bootstrap` runtime lane.
 
-- reachable sources: 1764 collected / 1282 unique;
-- elapsed: 20:00.51; peak RSS: 3,263,384 KiB;
-- no `mut counts` parser failure, statement-tag OOB, missing-tag marker, failed
-  module, or stub fallback was emitted; the bounded attempt completed 86 files
-  and did not reach `collection_opt_core.spl`, so this is non-reproduction, not
-  independent end-to-end proof;
-- examples of the remaining linear interpreter wall include
-  `src/std/log.spl` at about 97 seconds and
-  `src/app/mcp_t32/session_tools.spl` at about 118 seconds.
+The process remained continuously CPU-active and produced no output before
+the explicit 2400-second timeout. RSS grew gradually to about 10.5 GiB. After
+the timeout flushed the log, it contained repeated statement-arena diagnostics
+for even indices 1706 through 1756 against a live arena length of 462, followed
+by `[flat-bridge] missing stmt tag`. A concurrent independent Stage 4 run
+showed the same one-CPU profile beyond 46 minutes, ruling out a local
+cache/output collision.
 
-Evidence is retained in
-`build/native_probe/stage4-current-stage2.{log,time}`. The
-impl/class-body mutable-parameter source gap is fixed and covered by
-`test/01_unit/compiler/parser/impl_method_mut_param_spec.spl`; do not edit
-`collection_opt_core.spl` to avoid the old symptom. The remaining root task is
-still item 1 above: route this frontend work through compiled execution rather
-than raising the timeout or adding another cache/wrapper.
+Evidence:
 
-## Compiled-route correction and restored lexer fix — 2026-07-19
+- worktree: `/tmp/simple-font-publish-20260717`
+- log: `build/native_probe/full-cycle3.log` (78 lines after timeout)
+- intended output: `build/native_probe/full-cycle3/simple` (not produced)
+- result: exit 124 after 2400 seconds
 
-The preceding dispatch diagnosis is superseded. Current Stage2 and Stage3
-execute the frontend as native compiled code: both binaries contain strong
-symbols for `compiler_driver_run_compile`, `parse_full_frontend`,
-`parse_and_build_module`, and `parse_module_body`; bounded debugger probes hit
-that chain in order. `bootstrap_main.spl` also calls the compiled driver
-directly for the explicit Stage4 path. No interpreter-wrapper fix is needed.
+Initial evidence suggested an arena/environment provenance split, and the
+2026-07-17 repair restored local count slots, arena-preferred reads, disabled
+environment mirrors, in-place arena reuse, and arena-only declaration tags.
+Those are valid ownership/performance repairs, but a rebuilt Cycle 5 candidate
+still reproduced the exact OOB series. Reset tracing then localized the first
+series (204, 207, 210, 213 against 64 statements) to the four fat-arrow arms
+in `src/lib/common/ui/widget.spl`. `parse_match_arms_common` stored each raw
+expression ID directly in `arm_body`, whose declared and consumed contract is
+statement IDs; the bridge therefore passed expression-arena IDs to
+`stmt_get_tag`. The root fix wraps the expression with the existing
+`stmt_expr_stmt` constructor. `bootstrap_expr_stmt_arena_spec.spl` now checks
+that fat-arrow arm bodies contain `STMT_EXPR` nodes.
+A fresh Stage-4 admission run remains required before closing the performance
+incident.
 
-The retained Stage4 profile is not linear in source size. Across 86 completed
-files, normalized parse cost rose by chronological quartile from about 300 to
-729, 1175, and 2427 ms/KiB. That cumulative degradation is consistent with the
-no-GC allocation registry growing during repeated parses.
+## Cycle 6 evidence — cross-arena OOB removed
 
-History identified an already-reviewed fix in `cfd3cf7778`: `CoreLexer` keeps
-SimpleOS-safe indexed character reads but collects a token span and joins it
-once, avoiding immutable prefix growth in `char_slice`. The unrelated
-`fd51a8dd6d` sweep later restored the quadratic concatenation and removed its
-regression scenario. The original two-file implementation and scenario are
-restored; the focused lexer spec passes 5/5 under the explicitly bounded Rust
-repair runner and regenerated its SPipe manual. Product optimizer and runtime
-evidence remain pending because no admitted pure-Simple `bin/simple` exists.
-The manual now also carries a sixth bounded scenario for exact long UTF-8
-triple-string text and EOF. A current pure-Simple run was stopped before the
-scenario body when the test runner traversed 600+ library files and grew past
-820 MiB; it is not recorded as execution proof.
-The next permitted step is one incremental Stage2/Stage3 rebuild followed by
-one bounded Stage4 profile; do not add another dispatch layer.
+The rebuilt Cycle 6 candidate compiled 4 changed units with 711 cache hits.
+Its bounded Stage-4 run emitted none of the prior statement-arena OOB or
+`missing stmt tag` diagnostics. It advanced through frontend loading and then
+failed normally in phase 2 at
+`src/compiler/60.mir_opt/mir_opt/collection_opt_core.spl:470`: the bootstrap
+parser rejected the `mut counts` parameter in `count_inst_uses` with
+`expected ), got Ident 'counts'`. This is the next admission blocker; the
+fat-arrow match-arm arena defect is no longer the stopping point.
 
-That incremental rebuild passed Stage2/Stage3 sanity and Stage2 native-build
-capability in 16:32 at 317,880 KiB peak RSS. The resulting compiler hashes are
-`c57e3126ce2f4ef9cf5f32464cc46c7d1d0d5f553696452efdfda3d1ac3dbf93`
-(Stage2) and
-`af1265e4860ee91216be8b98f0b545ebb92ea34d8e412b41a70f491929be9e8f`
-(Stage3).
+## Cycles 7–9 evidence — three parser gaps removed, admission still open
 
-The single refreshed Stage4 profile then reached the 1,200-second cap during
-active phase-two parsing. It completed 116 of 1,283 files, versus 86 of 1,282
-before the lexer restoration, and peaked at 2,006,488 KiB versus 3,263,384 KiB.
-The last completed file was
-`src/lib/nogc_async_mut/test_runner/test_runner_config.spl`; the active file was
-`src/app/test_daemon/session_scheduler.spl`. No parser error, arena OOB,
-missing-tag, allocation-failure, or phase-failure signature appeared. This
-proves material progress and lower retained memory, but not Stage4 completion
-or full-CLI admission; another focused cumulative-allocation fix is required
-before the next permitted Stage4 attempt.
+The mandatory three-cycle follow-up preserved the warm native cache and used
+only pure-Simple bootstrap compilers. Each bootstrap candidate rebuilt all 715
+units with zero compilation failures and linked successfully:
 
-Concurrent server-contract repair restored `/health` JSON, `/` HTML, canonical
-listener markers, the socket-facade readiness guard, and same-boot database
-evidence. Bounded seed diagnostics passed the route spec 11/11, database specs
-32/32, and HTTP integration spec 7/7. The RV64 system spec reached its mandatory
-three-cycle cap at 21/22 on a test-only literal-brace construction; that source
-assertion is corrected but intentionally not rerun in this session. Its manual
-therefore remains stale, and no live QEMU web/DB claim is made.
+- Cycle 7 taught impl/class method parsing to consume canonical
+  `mut name: Type`, preserve the marker when implicit `self` is prepended, and
+  write the aligned `PARAM_MUTS` arena. Stage 4 passed `collection_opt_core.spl`
+  and next rejected keyword-named parameter uses such as `loop.header`.
+- Cycle 8 disambiguated `loop:` control flow from the established keyword-as-
+  identifier forms at both primary-expression and statement dispatch. Stage 4
+  passed `loop_licm.spl` and next rejected the widely used `me fn name(...)`
+  mutable-method spelling in `src/lib/nogc_sync_mut/db/accel.spl`.
+- Cycle 9 accepted both `me name(...)` and `me fn name(...)` through the same
+  mutable-method path. Its bounded Stage-4 run passed every earlier blocker,
+  then stopped in phase 2 at
+  `src/std/nogc_sync_mut/env/variables.spl:362` with
+  `expected =, got (` for the destructuring binding
+  `val Some(dollar_idx) = dollar_pos`.
 
-## Short-string cache restoration — 2026-07-19
+The direct pure-parser regression now checks aligned method names/mutability,
+leading `loop.header`, both fat-arrow statement wrappers, and `me fn` parsing.
+The full CLI and its test runner were not produced, so executable spec evidence,
+font/pixel/performance evidence, production verification, and publication remain
+open. Per the three-cycle cap, the `val Some(...)` parser gap is recorded here
+for the next scoped session rather than repaired or retried in this one.
 
-History found a second reviewed optimization in `ee4d21b4bf`: immutable empty
-and one-byte runtime strings are interned in a fixed 257-entry cache. The Rust
-runtime re-registers those stable objects after test-only registry clearing;
-the Core-C runtime uses the same fixed mapping. The unrelated 262-file
-`fa1ee50c35` snapshot deleted both implementations and their regression
-assertions without a cache-specific rationale. The exact Rust and Core-C
-implementations and tests are restored.
+## Cycles 10–11 evidence — `Some(...)` binding repaired, graph timeout remains
 
-Focused evidence passes for Rust string identity/Unicode/`char_at`/slice,
-Rust registry-clear lifecycle, and a compiled Core-C identity/`char_at`/slice
-probe. Incremental seed and `simple-native-all` builds pass, followed by fresh
-Stage2/Stage3 compiler sanity and Stage2 native-build capability. The admitted
-compiler hashes are
-`c6112ca01b528efffedb80cba443bd9d4346d62ac9efdcbe91a37fb957a3f0c6`
-(Stage2) and
-`9013f8d0c0b4681d9347a428832e3a42f9e0859eb3e05672b6a850dbec339f5a`
-(Stage3).
+The next scoped session added direct pure-parser support for the production
+`val Some(name) = expression` and `var Some(name) = expression` forms. The
+binding evaluates the initializer once and lowers its payload to
+`expression.unwrap()`. Plain `val Some = expression` remains an ordinary name.
+Malformed constructor bindings consume their initializer and return a recovery
+statement instead of falling through at `=` and cascading diagnostics.
 
-The source-matched Stage4 profile did not stop cleanly at 380.08 seconds. The
-outer timeout exited while its compiler child survived, and the orphaned child
-continued at 99.9% CPU until it was found and terminated at about 749 seconds.
-Only 43 files had completed. While parsing
-`src/compiler/10.frontend/core/parser.spl`, the valid nested
-`if tc > mc:` at line 331 produced `expected :, got Ident ''`; the process then
-made no phase progress for roughly 373 seconds, reached 8,372,380 KiB RSS, and
-expanded `build/native_probe/stage4-short-cache-restore.log` to about 16 MiB
-with approximately 15.78 million blank lines. This is a genuine frontend
-resource-corruption/runaway failure, not a termination-signal artifact.
+Cycle 11 rebuilt the reviewed final source with the retained cache and the
+Cycle 10 pure-Simple bootstrap candidate: all 715 units compiled, zero failed,
+and `build/native_probe/simple-cycle11` linked in 401.5 seconds. A higher-model
+review reported PASS for the token progress, recovery, AST lowering, and the
+positive, mutable, malformed, and fallback parser regressions.
 
-The older 344-file/163-second cache-bearing tree cannot be attributed to the
-short-string cache alone: it also contained the `f0a5601842`/`ee4d21b4bf`
-arena-owner fast paths. The unrelated `fa1ee50c35` snapshot removed cached
-expression/statement arena modes and counts, arena-preferred declaration
-accessors, integer environment reads, and their focused stale-environment
-test. Restore that reviewed bundle and pass its focused tests before the next
-single bounded Stage4 attempt. No Stage4 completion or full-CLI claim is made.
+The one bounded Cycle 11 Stage-4 admission run used that exact candidate and
+continued at full CPU with no parser/lowering diagnostic, including no
+recurrence of the earlier `variables.spl` error. It reached the 900-second
+timeout before linking `build/native_probe/full-cycle11/simple`. Therefore the
+grammar blocker is repaired, but full-graph admission performance remains open.
+No Rust-seed fallback was used, and the missing admitted full CLI still blocks
+execution of the focused specs, font/pixel evidence, verification, and push.
 
 ## Frontend arena-owner restoration — 2026-07-19
 

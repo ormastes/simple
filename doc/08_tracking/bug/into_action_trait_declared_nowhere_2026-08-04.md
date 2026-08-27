@@ -1,7 +1,6 @@
 # `IntoAction` and `CommonAction` are imported and implemented but declared nowhere
 
-- Status: FIXED
-- Status re-verified 2026-08-17 by source inspection (triage shard 02).
+- **Status:** CLOSED (fixed 2026-08-04 — see Resolution below)
 - **Found:** 2026-08-04, by `scripts/check/check-trait-arity.spl` while closing
   the not-found bucket of
   `doc/08_tracking/bug/trait_conformance_check_ignores_arity_2026-08-04.md`

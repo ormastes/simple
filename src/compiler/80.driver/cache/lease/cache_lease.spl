@@ -1,0 +1,171 @@
+# Cache leases — the anti-dangling-hit mechanism (schema gc.lease, design §18.3)
+#
+# Agent C3. THE invariant this file serves:
+#
+#     GC may cause a false MISS but NEVER a dangling successful hit.
+#
+# A lease is acquired BEFORE an artifact is materialized or mapped, and released
+# after the consumer is done. While a lease references a digest, that digest is
+# a GC ROOT (protection class GC_CLASS_ACTIVE_LEASE, the highest) and is
+# unconditionally excluded from every eviction and sweep decision. A consumer
+# that holds a lease can therefore never observe its artifact disappear.
+#
+# Reclaiming a stale lease is the one place this could go wrong, so it is
+# deliberately conservative: a lease is reclaimable ONLY when
+#   (a) the owning process/session is PROVEN dead, or
+#   (b) a conservative timeout has elapsed AND the heartbeat generation observed
+#       at the start of the timeout still matches the one recorded now.
+# The generation check is what makes (b) safe: a live owner that heartbeats at
+# any point during the window bumps the generation and defeats the reclaim.
+# A probe that cannot decide liveness must report `owner_alive = true`
+# (fail-closed: an unknown owner is treated as alive and its lease survives).
+
+use compiler.driver.cache.metadata.cache_metadata.{GC_CLASS_ACTIVE_LEASE}
+
+val LEASE_DEFAULT_TIMEOUT_SECONDS: i64 = 900     # 15 min, conservative
+
+struct CacheLease:
+    """One consumer's claim on a set of manifests/artifacts. LOCAL_STATE."""
+    lease_id: text
+    process_identity: text               # e.g. "<host>:<pid>:<boot-id>"
+    created_at: i64
+    heartbeat_generation: i64
+    last_heartbeat_at: i64
+    referenced_manifests: [text]
+    referenced_artifacts: [text]
+    released: bool
+
+struct LeaseTable:
+    leases: [CacheLease]
+
+fn lease_table_new() -> LeaseTable:
+    LeaseTable(leases: [])
+
+fn lease_protection_class() -> i64:
+    GC_CLASS_ACTIVE_LEASE
+
+# Acquire a lease. MUST be called BEFORE materializing/mapping the artifacts, so
+# there is no window in which a concurrent GC can see them unreferenced.
+fn lease_acquire(table: LeaseTable, lease_id: text, process_identity: text,
+                 now: i64, manifests: [text], artifacts: [text]) -> LeaseTable:
+    val lease = CacheLease(
+        lease_id: lease_id,
+        process_identity: process_identity,
+        created_at: now,
+        heartbeat_generation: 1,
+        last_heartbeat_at: now,
+        referenced_manifests: manifests,
+        referenced_artifacts: artifacts,
+        released: false,
+    )
+    var out = table.leases
+    out = out.push(lease)
+    LeaseTable(leases: out)
+
+fn lease_find(table: LeaseTable, lease_id: text) -> CacheLease?:
+    for l in table.leases:
+        if l.lease_id == lease_id:
+            return l
+    nil
+
+fn lease_heartbeat(table: LeaseTable, lease_id: text, now: i64) -> LeaseTable:
+    var out: [CacheLease] = []
+    for l in table.leases:
+        if l.lease_id == lease_id and not l.released:
+            out = out.push(CacheLease(
+                lease_id: l.lease_id,
+                process_identity: l.process_identity,
+                created_at: l.created_at,
+                heartbeat_generation: l.heartbeat_generation + 1,
+                last_heartbeat_at: now,
+                referenced_manifests: l.referenced_manifests,
+                referenced_artifacts: l.referenced_artifacts,
+                released: false,
+            ))
+        else:
+            out = out.push(l)
+    LeaseTable(leases: out)
+
+fn lease_release(table: LeaseTable, lease_id: text) -> LeaseTable:
+    var out: [CacheLease] = []
+    for l in table.leases:
+        if l.lease_id == lease_id:
+            out = out.push(CacheLease(
+                lease_id: l.lease_id,
+                process_identity: l.process_identity,
+                created_at: l.created_at,
+                heartbeat_generation: l.heartbeat_generation,
+                last_heartbeat_at: l.last_heartbeat_at,
+                referenced_manifests: l.referenced_manifests,
+                referenced_artifacts: l.referenced_artifacts,
+                released: true,
+            ))
+        else:
+            out = out.push(l)
+    LeaseTable(leases: out)
+
+fn lease_is_active(l: CacheLease) -> bool:
+    not l.released
+
+# Every digest referenced by an ACTIVE lease. These are GC roots.
+fn lease_referenced_digests(table: LeaseTable) -> [text]:
+    var out: [text] = []
+    for l in table.leases:
+        if lease_is_active(l):
+            for d in l.referenced_manifests:
+                out = out.push(d)
+            for d in l.referenced_artifacts:
+                out = out.push(d)
+    out
+
+fn lease_protects(table: LeaseTable, digest: text) -> bool:
+    for d in lease_referenced_digests(table):
+        if d == digest:
+            return true
+    false
+
+# ---------------------------------------------------------------------------
+# Stale-lease reclamation — the conservative path
+# ---------------------------------------------------------------------------
+
+# `observed_generation` is the generation recorded when the timeout window was
+# OPENED. `owner_alive` is the result of a liveness probe and MUST be true when
+# liveness cannot be determined.
+fn lease_is_reclaimable(l: CacheLease, now: i64, timeout_seconds: i64,
+                        owner_alive: bool, observed_generation: i64) -> bool:
+    if l.released:
+        return true
+    if not owner_alive:
+        return true                              # (a) owner proven dead
+    if now - l.last_heartbeat_at < timeout_seconds:
+        return false
+    observed_generation == l.heartbeat_generation  # (b) timeout AND no heartbeat since
+
+# Reclaim stale leases. `alive_flags` and `observed_generations` are parallel to
+# `table.leases` (index-aligned) — no closures are used, because nested closure
+# capture cannot modify outer state in this language.
+# A short `alive_flags`/`observed_generations` list fails CLOSED: a lease with no
+# probe result is treated as alive and kept.
+fn lease_reclaim_stale(table: LeaseTable, now: i64, timeout_seconds: i64,
+                       alive_flags: [bool], observed_generations: [i64]) -> LeaseTable:
+    var out: [CacheLease] = []
+    var i: i64 = 0
+    while i < table.leases.len():
+        val l = table.leases[i]
+        var alive = true
+        var gen = -1
+        if i < alive_flags.len():
+            alive = alive_flags[i]
+        if i < observed_generations.len():
+            gen = observed_generations[i]
+        if not lease_is_reclaimable(l, now, timeout_seconds, alive, gen):
+            out = out.push(l)
+        i = i + 1
+    LeaseTable(leases: out)
+
+fn lease_active_count(table: LeaseTable) -> i64:
+    var n: i64 = 0
+    for l in table.leases:
+        if lease_is_active(l):
+            n = n + 1
+    n

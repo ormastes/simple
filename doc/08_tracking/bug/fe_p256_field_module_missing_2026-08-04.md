@@ -1,7 +1,6 @@
 # `std.common.math.field.fe_p256` does not exist; 2 specs and 43 examples cannot run
 
-Status: OPEN (P2)
-Status re-verified 2026-08-17 by source inspection (triage shard 01).
+**Status:** OPEN
 **Found:** 2026-08-04
 **Severity:** medium — P-256 field arithmetic is the base layer under
 `crypto/ecdsa_p256.spl`, and its two spec files have never executed a single

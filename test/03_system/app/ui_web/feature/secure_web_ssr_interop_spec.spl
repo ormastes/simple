@@ -1,0 +1,189 @@
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_ssr_evidence.spl 0%
+# @req REQ-003 REQ-004 REQ-006 REQ-008 REQ-012 NFR-001 NFR-002 NFR-007 NFR-010 NFR-011
+
+"""Live HTTPS and canonical server-side GUI rendering acceptance.
+
+No builder-only or synthetic screenshot evidence can satisfy these scenarios.
+"""
+
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_ssr_evidence.{
+    simple_web_ssr_render_evidence
+}
+use std.gc_async_mut.http_server.ssr_submitter.{
+    SsrAsyncConfig, render_ssr_request
+}
+use std.http_server.types.{HttpRequestData}
+use std.gc_async_mut.gpu.browser_engine.net.browser_http_transport.{
+    BrowserHttpTransport
+}
+use std.gc_async_mut.gpu.browser_engine.net.entity.request_types.{
+    FetchRequest, RequestMode
+}
+use std.gc_async_mut.gpu.browser_engine.net.entity.url_types.{Url}
+use std.gc_async_mut.gpu.browser_engine.net.h1_client.{
+    MockResponseRegistry, observed_mock_request, set_mock_registry
+}
+
+extern fn rt_text_to_bytes(value: text) -> [u8]
+extern fn rt_bytes_to_text(value: [u8]) -> text
+
+fn nontransparent_pixel_count(pixels: [u32]) -> i64:
+    var count = 0
+    for pixel in pixels:
+        if pixel != 0u32: count = count + 1
+    count
+
+fn ssr_http_request(method: text, html: text) -> HttpRequestData:
+    HttpRequestData(
+        method: method,
+        path: "/render",
+        query: "",
+        version: "HTTP/1.1",
+        headers: [("Content-Type", "text/html")],
+        body: html,
+        params: {},
+        peer_addr: "127.0.0.1"
+    )
+
+fn png_u32_be(bytes: [u8], offset: u64) -> i64:
+    (bytes[offset].to_i64() << 24) |
+        (bytes[offset + 1u64].to_i64() << 16) |
+        (bytes[offset + 2u64].to_i64() << 8) |
+        bytes[offset + 3u64].to_i64()
+
+# @inline
+fn setup_linux_fixture():
+    fail("UNRESOLVED ORACLE: Linux HTTPS and browser fixture")
+
+# @inline
+fn send_http_exchange():
+    fail("UNRESOLVED ORACLE: live bounded HTTP TLS socket exchange")
+
+fn check_protocol_transcript():
+    fail("UNRESOLVED ORACLE: HTTP/1.1 TLS 1.3 protocol transcript")
+
+fn check_fail_closed():
+    fail("UNRESOLVED ORACLE: malformed unauthenticated downgraded and replayed HTTP input")
+
+fn check_interop_oracle():
+    fail("UNRESOLVED ORACLE: Simple browser Chromium Firefox and OpenSSL interoperability")
+
+fn check_live_worker_ssr_progress():
+    fail("UNRESOLVED ORACLE: live Worker SSR completion and unrelated-client progress counters")
+
+describe "secure web SSR interoperability":
+    describe "REQ-004: canonical server-side semantic and pixel rendering":
+        it "should preserve browser POST semantics into the hosted SSR adapter":
+            # @capture(protocol)
+            step("Dispatch an SSR POST through BrowserHttpTransport and capture the canonical H1 request")
+            var registry = MockResponseRegistry.create()
+            registry.register("simple-ssr.test/render", 202, "fixture-accepted")
+            set_mock_registry(registry)
+            var browser_transport = BrowserHttpTransport.new()
+            val browser_response = browser_transport.fetch(FetchRequest(
+                method: "POST",
+                url: Url.parse_or_opaque("http://simple-ssr.test/render"),
+                headers: "Content-Type: text/html\r\nX-SSR-Width: 96\r\n",
+                body: rt_text_to_bytes("<main><h1>Browser SSR</h1></main>"),
+                mode: RequestMode.SameOrigin,
+                credentials: "same-origin"
+            ))
+            val observed = observed_mock_request("simple-ssr.test/render")
+            step("Verify browser method, headers, body, and socket-neutral fixture status")
+            expect(browser_response.status).to_equal(202)
+            expect(browser_response.body_text()).to_equal("fixture-accepted")
+            expect(observed.is_some()).to_equal(true)
+            expect(observed.unwrap().method).to_equal("POST")
+            expect(observed.unwrap().headers).to_contain("Content-Type: text/html")
+            expect(observed.unwrap().headers).to_contain("X-SSR-Width: 96")
+            expect(rt_bytes_to_text(observed.unwrap().body)).to_equal(
+                "<main><h1>Browser SSR</h1></main>"
+            )
+            step("Pass the captured browser payload through the real hosted SSR request adapter")
+            val server_response = render_ssr_request(
+                ssr_http_request(
+                    observed.unwrap().method,
+                    rt_bytes_to_text(observed.unwrap().body)
+                ),
+                SsrAsyncConfig.production(96, 64, 4096, "cpu")
+            )
+            step("Verify the independently produced server status and PNG dimensions")
+            expect(server_response.status).to_equal(200)
+            expect(server_response.headers).to_contain(("Content-Type", "image/png"))
+            expect(server_response.body).to_equal("")
+            expect(server_response.body_bytes.len()).to_be_greater_than(24)
+            expect(png_u32_be(server_response.body_bytes, 16u64)).to_equal(96)
+            expect(png_u32_be(server_response.body_bytes, 20u64)).to_equal(64)
+
+        it "should lower representative HTML through Draw IR and Engine2D readback":
+            # @capture(html)
+            step("Lower representative HTML through the canonical semantic evidence path")
+            val evidence = simple_web_ssr_render_evidence(
+                "<main style='background:#102030;color:#ffffff'><h1>Simple SSR</h1><button>Continue</button></main>",
+                96, 64, "cpu")
+            step("Verify semantic composition and independent pixel readback")
+            expect(evidence.composition_schema).to_equal("simple-draw-ir-v2")
+            expect(evidence.composition_id.len()).to_be_greater_than(0)
+            expect(evidence.batch_count).to_be_greater_than(0)
+            expect(evidence.command_count).to_be_greater_than(0)
+            expect(evidence.backend_target).to_equal("cpu")
+            expect(evidence.pixels.len()).to_equal(96 * 64)
+            expect(nontransparent_pixel_count(evidence.pixels)).to_be_greater_than(0)
+
+        it "should return a dimensioned PNG through the hosted SSR request adapter":
+            # @capture(binary)
+            step("Submit in-memory HTML to the hosted asynchronous SSR renderer")
+            val response = render_ssr_request(
+                ssr_http_request(
+                    "POST",
+                    "<main><h1>Simple SSR</h1><button>Continue</button></main>"
+                ),
+                SsrAsyncConfig.production(96, 64, 4096, "cpu")
+            )
+            step("Verify the HTTP response and independent PNG container dimensions")
+            expect(response.status).to_equal(200)
+            expect(response.headers).to_contain(("Content-Type", "image/png"))
+            expect(response.body).to_equal("")
+            expect(response.body_bytes.len()).to_be_greater_than(24)
+            expect(response.body_bytes[0u64]).to_equal(137u8)
+            expect(response.body_bytes[1u64]).to_equal(80u8)
+            expect(response.body_bytes[2u64]).to_equal(78u8)
+            expect(response.body_bytes[3u64]).to_equal(71u8)
+            expect(png_u32_be(response.body_bytes, 16u64)).to_equal(96)
+            expect(png_u32_be(response.body_bytes, 20u64)).to_equal(64)
+
+        it "should reject invalid hosted SSR requests before rendering":
+            step("Submit invalid method, empty HTML, and oversized HTML")
+            val config = SsrAsyncConfig.production(8, 8, 8, "cpu")
+            val wrong_method = render_ssr_request(
+                ssr_http_request("GET", "<p>x</p>"), config)
+            val empty = render_ssr_request(
+                ssr_http_request("POST", ""), config)
+            val oversized = render_ssr_request(
+                ssr_http_request("POST", "<p>too large</p>"), config)
+            step("Verify deterministic fail-closed HTTP statuses without PNG bytes")
+            expect(wrong_method.status).to_equal(405)
+            expect(wrong_method.body_bytes.len()).to_equal(0)
+            expect(empty.status).to_equal(400)
+            expect(empty.body_bytes.len()).to_equal(0)
+            expect(oversized.status).to_equal(413)
+            expect(oversized.body_bytes.len()).to_equal(0)
+
+    describe "REQ-003 REQ-006 REQ-008: bounded secure web service":
+        it "should exchange HTTP over TLS with independent clients":
+            step("negotiate secure protocol")
+            setup_linux_fixture()
+            step("exchange over bound socket")
+            send_http_exchange()
+            check_protocol_transcript()
+            check_interop_oracle()
+
+        it "should reject malformed unauthenticated downgraded and replayed input":
+            step("reject malformed/unauthenticated/downgraded/replayed input")
+            check_fail_closed()
+
+    describe "REQ-004 REQ-012: canonical server-side GUI rendering":
+        it "should complete hosted rendering without blocking an unrelated client":
+            step("Run concurrent render and unrelated-client requests through the live Worker")
+            check_live_worker_ssr_progress()

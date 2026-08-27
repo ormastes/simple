@@ -1,0 +1,207 @@
+# codex-impl
+# Closed compiler-owned contract for @rt(hal, ...).  This module deliberately
+# stores only fixed scalars plus one bounded canonical row; runtime providers
+# consume the pointer-free V1 manifest owned by std.structural.hal_provider.
+
+val RT_HAL_MAX_ATTRIBUTE_BYTES: i64 = 2048
+val RT_HAL_MAX_FIELDS: i64 = 32
+val RT_HAL_PROVIDER_PURE: i64 = 1
+val RT_HAL_PROVIDER_C: i64 = 2
+val RT_HAL_PROVIDER_RUST: i64 = 4
+val RT_HAL_PROVIDER_ALL: i64 = 7
+
+struct RtHalCompileContractV1:
+    present: bool
+    valid: bool
+    diagnostic: text
+    operation: text
+    assurance_rank: i64
+    providers_mask: i64
+    capabilities_mask: i64
+    comparator_id: i64
+    normalizer_id: i64
+    side_effect_policy: i64
+    request_bytes: i64
+    result_bytes: i64
+    trace_operations: i64
+    trace_bytes: i64
+    diff_rows: i64
+    report_bytes: i64
+    log_bytes: i64
+    deadline_ticks: i64
+    error_schema_id: i64
+    environment_schema_id: i64
+    preferred_provider: i64
+    rationale: text
+
+fn _rt_hal_failure(message: text) -> RtHalCompileContractV1:
+    RtHalCompileContractV1(false, false, message, "", 3, 7, 0, 1, 1, 1,
+        512, 512, 32, 4096, 16, 4096, 4096, 1000, 1, 1, 0, "")
+
+fn _rt_hal_unquote(raw: text) -> text:
+    val value = raw.trim()
+    if value.len() >= 2:
+        val first = value.substring(0, 1)
+        val last = value.substring(value.len() - 1, value.len())
+        if (first == "\"" and last == "\"") or (first == "'" and last == "'"):
+            return value.substring(1, value.len() - 1)
+    value
+
+fn _rt_hal_uint(raw: text) -> i64:
+    val value = _rt_hal_unquote(raw)
+    if value == "": return -1
+    var out: i64 = 0
+    for ch in value:
+        if ch < "0" or ch > "9": return -1
+        out = out * 10
+        if ch == "1": out = out + 1
+        elif ch == "2": out = out + 2
+        elif ch == "3": out = out + 3
+        elif ch == "4": out = out + 4
+        elif ch == "5": out = out + 5
+        elif ch == "6": out = out + 6
+        elif ch == "7": out = out + 7
+        elif ch == "8": out = out + 8
+        elif ch == "9": out = out + 9
+        if out > 4194304: return -1
+    out
+
+fn _rt_hal_rank(raw: text) -> i64:
+    val value = _rt_hal_unquote(raw).lower()
+    if value == "moderate": return 0
+    if value == "strict": return 1
+    if value == "robust": return 2
+    if value == "critical" or value == "mission_critical": return 3
+    if value == "verified": return 4
+    -1
+
+fn _rt_hal_provider(raw: text) -> i64:
+    val value = _rt_hal_unquote(raw).lower()
+    if value == "pure" or value == "pure_simple": return 0
+    if value == "c": return 1
+    if value == "rust": return 2
+    -1
+
+fn _rt_hal_provider_mask(raw: text) -> i64:
+    var value = raw.trim().lower().replace("[", "").replace("]", "")
+    if value == "" or value == "all": return RT_HAL_PROVIDER_ALL
+    var mask: i64 = 0
+    for item in value.split("|"):
+        for provider in item.split("+"):
+            for lane in provider.split(";"):
+                for name in lane.split("/"):
+                    val clean = _rt_hal_unquote(name).trim()
+                    if clean == "pure" or clean == "pure_simple": mask = mask | RT_HAL_PROVIDER_PURE
+                    elif clean == "c": mask = mask | RT_HAL_PROVIDER_C
+                    elif clean == "rust": mask = mask | RT_HAL_PROVIDER_RUST
+                    elif clean != "": return -1
+    mask
+
+fn _rt_hal_effect(raw: text) -> i64:
+    val value = _rt_hal_unquote(raw).lower()
+    if value == "pure": return 0
+    if value == "plan_then_commit": return 1
+    if value == "replay_only": return 2
+    -1
+
+fn _rt_hal_key_value(field: text) -> (text, text):
+    val colon = field.find(":")
+    if colon <= 0: return ("", "")
+    (field.substring(0, colon).trim(), field.substring(colon + 1).trim())
+
+fn parse_rt_hal_contract_v1(raw: text) -> RtHalCompileContractV1:
+    """Parse a closed @rt payload. Defaults are Critical, all providers,
+    Pure preferred, alpha-safe comparison, and bounded 4 KiB trace/report/log.
+    Explicit lower assurance requires a bounded non-empty rationale."""
+    if raw.len() == 0 or raw.len() > RT_HAL_MAX_ATTRIBUTE_BYTES:
+        return _rt_hal_failure("E-RT-HAL-001: @rt payload must be 1..2048 bytes")
+    val fields = raw.split(",")
+    if fields.len() == 0 or fields.len() > RT_HAL_MAX_FIELDS:
+        return _rt_hal_failure("E-RT-HAL-002: @rt payload exceeds 32 fields")
+    if _rt_hal_unquote(fields[0]).lower() != "hal":
+        return _rt_hal_failure("E-RT-HAL-003: @rt first argument must be hal")
+    var operation = ""
+    var assurance = 3
+    var providers = RT_HAL_PROVIDER_ALL
+    var capabilities: i64 = 0
+    var comparator: i64 = 1
+    var normalizer: i64 = 1
+    var effect: i64 = 1
+    var request_bytes: i64 = 512
+    var result_bytes: i64 = 512
+    var trace_operations: i64 = 32
+    var trace_bytes: i64 = 4096
+    var diff_rows: i64 = 16
+    var report_bytes: i64 = 4096
+    var log_bytes: i64 = 4096
+    var deadline_ticks: i64 = 1000
+    var error_schema: i64 = 1
+    var environment_schema: i64 = 1
+    var preferred: i64 = 0
+    var rationale = ""
+    var index: i64 = 1
+    while index < fields.len():
+        val (key, value) = _rt_hal_key_value(fields[index])
+        if key == "":
+            if operation == "": operation = _rt_hal_unquote(fields[index])
+            else: return _rt_hal_failure("E-RT-HAL-004: every field after operation must be keyed")
+        elif key == "operation": operation = _rt_hal_unquote(value)
+        elif key == "assurance": assurance = _rt_hal_rank(value)
+        elif key == "providers": providers = _rt_hal_provider_mask(value)
+        elif key == "capabilities": capabilities = _rt_hal_uint(value)
+        elif key == "comparator": comparator = _rt_hal_uint(value)
+        elif key == "normalizer": normalizer = _rt_hal_uint(value)
+        elif key == "effects": effect = _rt_hal_effect(value)
+        elif key == "request_bytes": request_bytes = _rt_hal_uint(value)
+        elif key == "result_bytes": result_bytes = _rt_hal_uint(value)
+        elif key == "trace_operations": trace_operations = _rt_hal_uint(value)
+        elif key == "trace_bytes": trace_bytes = _rt_hal_uint(value)
+        elif key == "diff_rows": diff_rows = _rt_hal_uint(value)
+        elif key == "report_bytes": report_bytes = _rt_hal_uint(value)
+        elif key == "log_bytes": log_bytes = _rt_hal_uint(value)
+        elif key == "deadline_ticks": deadline_ticks = _rt_hal_uint(value)
+        elif key == "error_schema": error_schema = _rt_hal_uint(value)
+        elif key == "environment_schema": environment_schema = _rt_hal_uint(value)
+        elif key == "preferred": preferred = _rt_hal_provider(value)
+        elif key == "rationale": rationale = _rt_hal_unquote(value)
+        else: return _rt_hal_failure("E-RT-HAL-005: unknown @rt(hal) field '" + key + "'")
+        index = index + 1
+    if operation == "" or operation.len() > 128:
+        return _rt_hal_failure("E-RT-HAL-006: operation identity must be 1..128 bytes")
+    if assurance < 0 or assurance > 4:
+        return _rt_hal_failure("E-RT-HAL-007: invalid assurance")
+    if assurance < 3 and (rationale == "" or rationale.len() > 256):
+        return _rt_hal_failure("E-RT-HAL-008: lower assurance requires a 1..256 byte rationale")
+    if providers <= 0 or providers > 7 or capabilities < 0 or comparator <= 0 or normalizer <= 0 or effect < 0:
+        return _rt_hal_failure("E-RT-HAL-009: invalid provider/capability/comparison policy")
+    if preferred < 0 or (providers & (1 << preferred)) == 0:
+        return _rt_hal_failure("E-RT-HAL-010: preferred provider is not admitted")
+    val capacities = [request_bytes, result_bytes, trace_operations, trace_bytes,
+        diff_rows, report_bytes, log_bytes, deadline_ticks, error_schema, environment_schema]
+    for capacity in capacities:
+        if capacity <= 0 or capacity > 4194304:
+            return _rt_hal_failure("E-RT-HAL-011: capacities and schema IDs must be 1..4194304")
+    RtHalCompileContractV1(true, true, "", operation, assurance, providers,
+        capabilities, comparator, normalizer, effect, request_bytes, result_bytes,
+        trace_operations, trace_bytes, diff_rows, report_bytes, log_bytes,
+        deadline_ticks, error_schema, environment_schema, preferred, rationale)
+
+fn rt_hal_contract_requires_sealed_archive(value: RtHalCompileContractV1) -> bool:
+    value.valid and value.assurance_rank >= 3
+
+fn rt_hal_contract_canonical_v1(value: RtHalCompileContractV1) -> text:
+    if not value.valid: return ""
+    "rt-hal-v1|operation=" + value.operation + "|assurance=" + value.assurance_rank.to_text()
+        + "|providers=" + value.providers_mask.to_text() + "|capabilities=" + value.capabilities_mask.to_text()
+        + "|comparator=" + value.comparator_id.to_text() + "|normalizer=" + value.normalizer_id.to_text()
+        + "|effects=" + value.side_effect_policy.to_text() + "|request=" + value.request_bytes.to_text()
+        + "|result=" + value.result_bytes.to_text() + "|trace_ops=" + value.trace_operations.to_text()
+        + "|trace_bytes=" + value.trace_bytes.to_text() + "|diff_rows=" + value.diff_rows.to_text()
+        + "|report=" + value.report_bytes.to_text() + "|log=" + value.log_bytes.to_text()
+        + "|deadline=" + value.deadline_ticks.to_text() + "|error=" + value.error_schema_id.to_text()
+        + "|environment=" + value.environment_schema_id.to_text() + "|preferred=" + value.preferred_provider.to_text()
+        + "|rationale=" + value.rationale
+
+export RtHalCompileContractV1, parse_rt_hal_contract_v1
+export rt_hal_contract_requires_sealed_archive, rt_hal_contract_canonical_v1
+export RT_HAL_MAX_ATTRIBUTE_BYTES, RT_HAL_MAX_FIELDS

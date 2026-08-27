@@ -1,7 +1,5 @@
 # Part of src/compiler/50.mir/mir_lowering.spl: module/struct/class type lowering, asm target-spec accessors
-use compiler.mir._MirLowering.bootstrap_globals.*
-use compiler.mir._MirLowering.function_lowering.*
-use compiler.mir._MirLowering.asm_and_targets.*
+use compiler.mir.mir_lowering.*
 # MIR Lowering - HIR to MIR Transformation
 #
 # This module handles lowering from HIR (High-level IR) to MIR (Mid-level IR).
@@ -20,18 +18,17 @@ use compiler.mir._MirLowering.asm_and_targets.*
 
 use compiler.mir.mir_data.*
 use compiler.mir.mir_instructions.{MirModule, MirFunction, mir_operand_const_int}
-use compiler.hir.hir_types.*
-use compiler.hir.hir_definitions.*
+use compiler.hir.hir.*
+use compiler.hir.hir_lowering.types.{HirLowering}
 use compiler.frontend.flat_ast_bridge.{flat_bootstrap_function_count, flat_bootstrap_function_at}
 use compiler.common.diagnostics.span.{Span}
-use compiler.common.attributes.{FunctionAttr}
 use compiler.blocks.value.BlockValue
 use compiler.types.type_layout.{compute_struct_layout, layoutattr_default_, FieldLayout}
 use std.array.{array_sort_by}
 use compiler.common._Attributes.decl_attrs.{DriverManifestAttr, DriverManifestAttrKind, vhdl_hardware_metadata_default}
 use compiler.common.dependency.visibility.{Visibility}
+use compiler.common.value_access.{compiler_value_discriminant}
 use compiler.mir.mir_types.{MirConstant, MirFieldDef, MirStatic, MirTypeDefKind}
-use std.io_runtime.{env_get_opt}
 
 # The canonical runtime contract yields nil for both unset and explicitly empty
 # values. Every call below treats that state as disabled.
@@ -55,53 +52,20 @@ fn _text_list_eq(a: [text], b: [text]) -> bool:
     true
 
 fn mir_lower_trace_enabled() -> bool:
-    val trace = mir_lower_env_get("SIMPLE_COMPILER_TRACE") ?? ""
-    val phase = mir_lower_env_get("SIMPLE_COMPILER_PHASE_PROFILE") ?? ""
-    val diag = mir_lower_env_get("SIMPLE_BOOTSTRAP_DIAG") ?? ""
-    if trace == "1":
-        return true
-    if phase == "1":
-        return true
-    diag == "1"
+    mir_trace_requested(
+        mir_lower_env_get("SIMPLE_COMPILER_TRACE") ?? "",
+        mir_lower_env_get("SIMPLE_BOOTSTRAP_DIAG") ?? "",
+        mir_lower_env_get("SIMPLE_MIRB_TRACE") ?? "")
 use compiler.core.types.{TYPE_BOOL, TYPE_I64, TYPE_F64}
 use compiler.mir.synthetic_driver_codegen.{apply_synthetic_driver_codegen}
-
-pub fn mir_dynamic_module_init_name(module_name_raw: text, bootstrap_module_index: i64 = -1) -> text:
-    var module_name = ""
-    var has_identity_char = false
-    var index = 0
-    val count = module_name_raw.len()
-    while index < count:
-        val ch = module_name_raw.char_code_at(index)
-        if (ch >= 97 and ch <= 122) or (ch >= 65 and ch <= 90) or
-           (ch >= 48 and ch <= 57) or ch == 95:
-            module_name = module_name + module_name_raw.char_at(index)
-            has_identity_char = true
-        else:
-            module_name = module_name + "_"
-        index = index + 1
-    var unique_name = module_name
-    if not has_identity_char:
-        var fallback_name = bootstrap_module_index
-        if fallback_name < 0:
-            fallback_name = hm_hash_text(module_name_raw)
-            if fallback_name < 0:
-                fallback_name = 0 - (fallback_name + 1)
-        unique_name = "mod_" + fallback_name.to_text()
-    elif bootstrap_module_index >= 0:
-        unique_name = unique_name + "_" + bootstrap_module_index.to_text()
-    "__module_init_" + unique_name + "_dynamic"
 use compiler.frontend.core.types.{custom_primitive_underlying_type_tag_by_symbol}
 use compiler.core.interpreter.hashmap.{hm_hash_text}
 
 # Import struct definitions from types module
 use compiler.mir.mir_lowering_types.{MirLowering, MirError}
-use compiler.common.mir_target_context.{MirTargetContext, mir_target_context_from}
 
 # Import split modules so their impl blocks are linked
-use compiler.mir._MirLoweringExpr.expr_dispatch.*
-use compiler.mir._MirLoweringExpr.switch_operators_calls.*
-use compiler.mir._MirLoweringExpr.method_calls_literals.*
+use compiler.mir.mir_lowering_expr.*
 use compiler.mir.mir_lowering_stmts.*
 use compiler.mir.mir_lowering_ml.*
 
@@ -110,25 +74,34 @@ fn string_literal_has_runtime_interpolations(interps: [HirInterpolation]?) -> bo
         return parts.len() > 0
     false
 
+fn runtime_module_initializer_is_top_level_expr(const_: HirConst) -> bool:
+    val name = const_.name
+    if not name.starts_with("_expr_") or name.len() <= 6:
+        return false
+    var i = 6
+    while i < name.len():
+        val ch = name.char_code_at(i)
+        if ch < 48 or ch > 57:
+            return false
+        i = i + 1
+    true
+
 fn runtime_module_initializer_supported(const_: HirConst) -> bool:
+    # The flat bridge represents a bare top-level expression as a generated
+    # `_expr_N` binding when it must run through the module initializer.  Its
+    # result is deliberately discarded: it is executable work, not an
+    # addressable module static, and therefore needs no derivable value type.
+    if runtime_module_initializer_is_top_level_expr(const_):
+        return true
     match const_.value.kind:
         case IntLit(_, _) | FloatLit(_, _) | BoolLit(_): false
         case StringLit(_, interps): string_literal_has_runtime_interpolations(interps)
         # Preserve the pre-existing call path; additionally admit wrapped
         # expressions only when every native backend can declare the scalar.
         case Call(_, _, _): true
-        # Compound module `val` whose initializer is a runtime expression, e.g.
-        # `val X = OTHER + "/sub"` (string concat) or `X.method()`: needs a
-        # runtime-initialized global slot, exactly like a Call init. Without
-        # this the binding got NO static slot, so a reference to it emitted an
-        # undefined local rendered as i64 (native_compound_module_val_runtime_
-        # init 2026-07-23: main_lazy_assistant ASSIST_TIMELINES = ASSIST_ROOT
-        # + "/timelines" -> `rt_raw_i64_to_string(i64 %undef)`).
-        case Binary(_, _, _): true
-        case MethodCall(_, _, _, _): true
         case _:
             match const_.type_.kind:
-                case Int(_, _) | Float(_) | Bool | Str: true
+                case Int(_, _) | Float(_) | Bool: true
                 case _: false
 
 fn runtime_module_initializers_in_declaration_order(consts: [HirConst]) -> [HirConst]:
@@ -136,13 +109,6 @@ fn runtime_module_initializers_in_declaration_order(consts: [HirConst]) -> [HirC
     for const_ in consts:
         if runtime_module_initializer_supported(const_):
             dynamic.push(const_)
-    array_sort_by(dynamic, \a, b:
-        if a.span.start < b.span.start: -1
-        elif a.span.start > b.span.start: 1
-        elif a.symbol.id < b.symbol.id: -1
-        elif a.symbol.id > b.symbol.id: 1
-        else: 0
-    )
 
 fn mir_layout_module_segment_is_tier(seg: text) -> bool:
     """True for an all-digit layer segment ("50" in compiler.50.mir.*).
@@ -223,12 +189,6 @@ fn mir_layout_canonical_module_name(name: text) -> text:
 
 impl MirLowering:
     static fn new(symbols: SymbolTable) -> MirLowering:
-        val target_context = mir_target_context_from("", "unknown", "unknown", "llvm", -1)
-        MirLowering.new_for_target(symbols, target_context)
-
-    static fn new_for_target(symbols: SymbolTable, target_context: MirTargetContext) -> MirLowering:
-        val empty_loop_stack: [(BlockId, BlockId)] = []
-        val empty_errors: [MirError] = []
         MirLowering(
             builder: MirBuilder.new(),
             symbols: symbols,
@@ -243,8 +203,11 @@ impl MirLowering:
             current_function_symbols: [],
             current_function_names: [],
             loop_stack: empty_loop_stack,
-            unsafe_depth: 0,
             errors: empty_errors,
+            type_transport_receipts: 0,
+            type_transport_owner: "",
+            type_transport_context: "",
+            type_transport_param_index: -1,
             field_map: {},
             bitfield_map: {},
             bitfield_value_syms: {},
@@ -253,10 +216,8 @@ impl MirLowering:
             struct_field_has_default: {},
             struct_field_default_expr: {},
             class_type_names: {},
-            struct_field_type_ownership_key: {},
             struct_field_type_name: {},
             struct_field_repr_name: {},
-            struct_field_hir_type: {},
             struct_field_array_element_type_name: {},
             struct_field_array_elem_type: {},
             struct_value_syms: {},
@@ -264,7 +225,6 @@ impl MirLowering:
             struct_method_ambiguous: {},
             struct_method_return_names: {},
             struct_method_return_is_array: {},
-            struct_method_return_is_optional: {},
             enum_payload_struct_names: {},
             enum_single_payload_types: {},
             enum_variant_payload_types: {},
@@ -273,7 +233,6 @@ impl MirLowering:
             enum_tuple_text_slots: {},
             runtime_array_locals: {},
             runtime_dict_locals: {},
-            runtime_elem_value_type: {},
             array_element_struct_syms: {},
             runtime_value_local_ids: [],
             tagged_text_locals: {},
@@ -281,7 +240,6 @@ impl MirLowering:
             nil_locals: {},
             enum_variant_index: {},
             enum_variant_discriminants: {},
-            enum_variant_owners: {},
             enum_bare_name_collisions: {},
             enum_variant_index_q: {},
             enum_variant_discriminants_q: {},
@@ -293,28 +251,37 @@ impl MirLowering:
             lambda_bindings: {},
             lambda_capture_snapshot: {},
             current_has_vhdl_metadata: false,
-            current_gpu_kernel_target: "",
-            current_fn_returns_bool: false,
             canonical_type_symbols: {},
             next_canonical_type_symbol: 1000000000,
             global_symbol_ids: {},
             global_const_exprs: {},
             array_global_mutation_warned: {},
             target_context: target_context,
-            allow_ambient_bootstrap_policy: true,
+            mcdc_policy: mcdc_policy,
+            mcdc_authored_path: "",
+            mcdc_source_digest: 0,
+            mcdc_current_function_name: "",
+            mcdc_current_decision_runtime_id: 0,
+            mcdc_current_decision_semantic_id: "",
+            mcdc_evaluated_mask_slot: LocalId(id: -1),
+            mcdc_true_mask_slot: LocalId(id: -1),
+            mcdc_next_condition_ordinal: 0,
+            mcdc_condition_count: 0,
+            mcdc_manifest_semantic_ids: [],
+            mcdc_manifest_decision_ids: [],
+            mcdc_manifest_source_digests: [],
+            mcdc_manifest_condition_counts: [],
+            mcdc_manifest_token_offsets: [],
+            mcdc_manifest_token_counts: [],
+            mcdc_manifest_token_opcodes: [],
+            mcdc_manifest_token_conditions: [],
             resource_owned_locals: [],
             consumed_resource_locals: {}
         )
 
-    me use_explicit_semantic_policy():
-        self.allow_ambient_bootstrap_policy = false
-
-    me ambient_bootstrap_enabled() -> bool:
-        self.allow_ambient_bootstrap_policy and
-            (mir_lower_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
-
     fn symbol_id_value(symbol: SymbolId) -> i64:
-        symbol.id
+        match symbol:
+            case SymbolId(id): id
 
     fn composite_layout_key(symbol: HirSymbol) -> text:
         # DELIBERATELY NOT normalized yet -- see the BLOCKER section of
@@ -331,34 +298,6 @@ impl MirLowering:
         if defining_module != "":
             return "{defining_module}::{symbol.name}"
         symbol.name
-
-    # Bare struct name for a `MirTypeKind.Struct(symbol)`.
-    #
-    # `canonical_mir_type_symbol` above MINTS ids from 1000000000 up that exist
-    # only in `canonical_type_symbols` -- `symbols.get_symbol_raw` knows nothing
-    # about them. So a consumer that only asked the symbol table got nil for
-    # every canonicalized struct type and silently fell back to "unknown type".
-    # That is what left `for f in d.values()` with no element struct name and
-    # collapsed every field read to offset 0 (see the bug comment in
-    # _MirLoweringExpr/method_calls_literals.spl's values/keys arm). Try the
-    # real symbol table first, then reverse the canonical map, returning the
-    # bare name (the segment after the last '.') because that is the form
-    # `struct_value_syms` / `resolve_field_index` are keyed on.
-    me mir_struct_symbol_name(symbol: SymbolId) -> text:
-        match self.symbols.get_symbol_raw(symbol.id):
-            case Some(info):
-                if info != nil and info.name != "": return info.name
-            case None: ()
-        val canonical_keys = self.canonical_type_symbols.keys()
-        var cki = 0
-        while cki < canonical_keys.len():
-            val canonical_key = canonical_keys[cki]
-            if self.canonical_type_symbols[canonical_key] == symbol.id:
-                val canonical_parts = canonical_key.split(".")
-                if canonical_parts.len() == 0: return canonical_key
-                return canonical_parts[canonical_parts.len() - 1]
-            cki = cki + 1
-        ""
 
     me canonical_mir_type_symbol(symbol: SymbolId) -> SymbolId:
         val symbol_info = self.symbols.get_symbol_raw(symbol.id)
@@ -400,10 +339,6 @@ impl MirLowering:
             return
         self.enum_runtime_id_names[id_key] = runtime_name
         self.enum_runtime_id_index[enum_name] = runtime_id
-        # Dual key (step c): runtime_name is unique per declaration, so this
-        # write never evicts another enum's identity the way the bare-keyed
-        # write above does.
-        self.enum_runtime_id_index_q[runtime_name] = runtime_id
 
     me register_enum_runtime_id(enum_def: HirEnum):
         self.register_enum_runtime_name(enum_def.runtime_name, enum_def.name, Some(enum_def.span))
@@ -422,11 +357,19 @@ impl MirLowering:
         Seeds only what is missing, exactly like the bare seeds it accompanies,
         so user code that legitimately declares its own `Option` still wins."""
         if not self.enum_variant_index_q.has(bare_name):
-            self.enum_variant_index_q[bare_name] = names
-            self.enum_variant_discriminants_q[bare_name] = discriminants
-            self.enum_runtime_to_bare[bare_name] = bare_name
+            var vq = self.enum_variant_index_q
+            vq[bare_name] = names
+            self.enum_variant_index_q = vq
+            var dq = self.enum_variant_discriminants_q
+            dq[bare_name] = discriminants
+            self.enum_variant_discriminants_q = dq
+            var rb = self.enum_runtime_to_bare
+            rb[bare_name] = bare_name
+            self.enum_runtime_to_bare = rb
         if not self.enum_runtime_id_index_q.has(bare_name):
-            self.enum_runtime_id_index_q[bare_name] = runtime_id
+            var rq = self.enum_runtime_id_index_q
+            rq[bare_name] = runtime_id
+            self.enum_runtime_id_index_q = rq
 
     me enum_variant_payload_arity(payload_key: text) -> i64:
         """Declared payload slot count for "{enum}::{variant}", 0 when unknown.
@@ -519,7 +462,9 @@ impl MirLowering:
                         full_names.push("")
                         pti = pti + 1
                     if payload_types.len() == 1:
-                        self.enum_single_payload_types[payload_key] = payload_types[0]
+                        var single_payload_types = self.enum_single_payload_types
+                        single_payload_types[payload_key] = payload_types[0]
+                        self.enum_single_payload_types = single_payload_types
                 case HirVariantKind.Struct(payload_fields):
                     payload_kind = "struct"
                     var pfi = 0
@@ -528,9 +473,15 @@ impl MirLowering:
                         full_names.push(payload_fields[pfi].name)
                         pfi = pfi + 1
                 case _: ()
-            self.enum_variant_payload_types[payload_key] = full_types
-            self.enum_variant_payload_names[payload_key] = full_names
-            self.enum_variant_payload_kind[payload_key] = payload_kind
+            var vpt = self.enum_variant_payload_types
+            vpt[payload_key] = full_types
+            self.enum_variant_payload_types = vpt
+            var vpn = self.enum_variant_payload_names
+            vpn[payload_key] = full_names
+            self.enum_variant_payload_names = vpn
+            var vpk = self.enum_variant_payload_kind
+            vpk[payload_key] = payload_kind
+            self.enum_variant_payload_kind = vpk
             next_value = value + 1
             vi = vi + 1
         # Bare-name collision registry (2026-08-01). enum_variant_index is keyed
@@ -544,21 +495,31 @@ impl MirLowering:
             if not _text_list_eq(prior_names, names):
                 val prior_text = prior_names.join(", ")
                 val new_text = names.join(", ")
-                self.enum_bare_name_collisions[enum_def.name] = "previously registered as [{prior_text}], now overwritten by [{new_text}] (runtime_name '{enum_def.runtime_name}')"
+                var collisions = self.enum_bare_name_collisions
+                collisions[enum_def.name] = "previously registered as [{prior_text}], now overwritten by [{new_text}] (runtime_name '{enum_def.runtime_name}')"
+                self.enum_bare_name_collisions = collisions
                 # Step (c) ambiguity flag. Readers that could not derive a
                 # runtime_name and fell back to the bare key consult this to
                 # tell "one enum owns this name" from "the survivor of a
                 # contest". Set only on DIVERGENCE, so the 192 benign identical
                 # re-registrations never raise it.
-                self.enum_bare_ambiguous[enum_def.name] = true
+                var ambiguous = self.enum_bare_ambiguous
+                ambiguous[enum_def.name] = true
+                self.enum_bare_ambiguous = ambiguous
         # Dual key (step c): the qualified maps are keyed by runtime_name, which
         # is unique per declaration, so BOTH sides of a bare-name contest are
         # retained here in full. Written before the bare maps below purely so a
         # reader observing a half-updated state sees the complete set, never a
         # partial one.
-        self.enum_variant_index_q[enum_def.runtime_name] = names
-        self.enum_variant_discriminants_q[enum_def.runtime_name] = discriminants
-        self.enum_runtime_to_bare[enum_def.runtime_name] = enum_def.name
+        var variant_index_q = self.enum_variant_index_q
+        variant_index_q[enum_def.runtime_name] = names
+        self.enum_variant_index_q = variant_index_q
+        var variant_discriminants_q = self.enum_variant_discriminants_q
+        variant_discriminants_q[enum_def.runtime_name] = discriminants
+        self.enum_variant_discriminants_q = variant_discriminants_q
+        var runtime_to_bare = self.enum_runtime_to_bare
+        runtime_to_bare[enum_def.runtime_name] = enum_def.name
+        self.enum_runtime_to_bare = runtime_to_bare
         # Captured BEFORE the bare-key write below, which is last-wins: these
         # are the variant leaves this owner currently contributes to
         # `enum_variant_owners` and must be withdrawn before the new set is
@@ -567,9 +528,12 @@ impl MirLowering:
             self.enum_variant_index[enum_def.name]
         else:
             []
-        self.enum_variant_index[enum_def.name] = names
-        self.reindex_enum_variant_owners(enum_def.name, prior_variant_names, names)
-        self.enum_variant_discriminants[enum_def.name] = discriminants
+        var variant_index = self.enum_variant_index
+        variant_index[enum_def.name] = names
+        self.enum_variant_index = variant_index
+        var variant_discriminants = self.enum_variant_discriminants
+        variant_discriminants[enum_def.name] = discriminants
+        self.enum_variant_discriminants = variant_discriminants
 
     # O(1) inverse of `enum_variant_index`, maintained at every bare-key write.
     # `prior_names` is the variant set this owner previously had registered
@@ -583,16 +547,17 @@ impl MirLowering:
     # here. The scan itself ran once per method call and allocated a fresh
     # `.keys()` array each time -- the phase-5 MIR allocation runaway.
     me reindex_enum_variant_owners(owner_name: text, prior_names: [text], names: [text]):
+        var owners = self.enum_variant_owners
         for prior_variant in prior_names:
-            if self.enum_variant_owners.has(prior_variant):
+            if owners.has(prior_variant):
                 var kept_owners: [text] = []
-                for existing_owner in self.enum_variant_owners[prior_variant]:
+                for existing_owner in owners[prior_variant]:
                     if existing_owner != owner_name:
                         kept_owners.push(existing_owner)
-                self.enum_variant_owners[prior_variant] = kept_owners
+                owners[prior_variant] = kept_owners
         for variant_name in names:
-            var current_owners: [text] = if self.enum_variant_owners.has(variant_name):
-                self.enum_variant_owners[variant_name]
+            var current_owners: [text] = if owners.has(variant_name):
+                owners[variant_name]
             else:
                 []
             var owner_already_listed = false
@@ -601,7 +566,8 @@ impl MirLowering:
                     owner_already_listed = true
             if not owner_already_listed:
                 current_owners.push(owner_name)
-            self.enum_variant_owners[variant_name] = current_owners
+            owners[variant_name] = current_owners
+        self.enum_variant_owners = owners
 
     fn hir_bitfield_fields(bitfield_def: HirBitfield) -> [HirBitfieldField]:
         match bitfield_def:
@@ -627,7 +593,7 @@ impl MirLowering:
                 is_mutable: false,
                 is_const: false,
                 is_extern: true,
-                func_attr: FunctionAttr.default(),
+                func_attr: nil,
                 has_export_attr: false,
                 export_attr: nil,
                 has_driver_manifest_attr: false,
@@ -640,8 +606,7 @@ impl MirLowering:
                 span: Span.empty(),
                 verification_contract: nil
             )
-        for raw_fn in module.functions.values():
-            val fn_: HirFunction = raw_fn
+        for fn_ in module.functions.values():
             val fn_id = self.symbol_id_value(fn_.symbol)
             if fn_id == target_id:
                 return fn_
@@ -661,7 +626,7 @@ impl MirLowering:
             is_mutable: false,
             is_const: false,
             is_extern: true,
-            func_attr: FunctionAttr.default(),
+            func_attr: nil,
             has_export_attr: false,
             export_attr: nil,
             has_driver_manifest_attr: false,
@@ -684,19 +649,15 @@ impl MirLowering:
     fn bootstrap_default_return_operand(return_type: MirType) -> MirOperand?:
         if return_type.kind == MirTypeKind.Unit:
             return nil
-        # Explicit tail: mixed return/implicit-tail returns 0 on the stage4
-        # native lane — non-unit bootstrap stubs then fed a garbage Ret
-        # payload into the adapter (SIGILL in cl_translate_operand). The Some
-        # box itself is CORRECT here (Ret payload consumers are box-paired).
-        return Some(MirOperand(kind: MirOperandKind.Const(MirConstValue.Zero, return_type)))
+        Some(MirOperand(kind: MirOperandKind.Const(MirConstValue.Zero, return_type)))
 
     me lower_bootstrap_stub_function(symbol: SymbolId, name: text) -> MirFunction:
         if mir_lower_trace_enabled():
             print "[mir-lower] bootstrap-stub:start {name}"
-        val signature = self.bootstrap_function_signature(name)
+        val signature = MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)
         var bldr = self.builder
         bldr.begin_function(symbol, name, signature, nil)
-        bldr.terminate_return(self.bootstrap_default_return_operand(signature.return_type))
+        bldr.terminate_return(Some(mir_operand_const_int(0)))
         val fn_result = bldr.end_function()
         self.builder = bldr
         if mir_lower_trace_enabled():
@@ -732,7 +693,12 @@ impl MirLowering:
 
         if mir_lower_trace_enabled():
             print "[mir-lower] bootstrap-flat:start {name}"
-        self.reset_function_local_tracking()
+        self.local_map = {}
+        self.local_hir_types = {}
+        self.runtime_array_locals = {}
+        self.runtime_dict_locals = {}
+        self.runtime_value_locals = {}
+        self.nil_locals = {}
         val signature = self.bootstrap_function_signature(name)
         var bldr = self.builder
         bldr.begin_function(symbol, name, signature, nil)
@@ -743,7 +709,7 @@ impl MirLowering:
             if result.?:
                 bldr2.terminate_return(Some(mir_operand_copy(result ?? LocalId(id: 0))))
             else:
-                bldr2.terminate_return(self.bootstrap_default_return_operand(signature.return_type))
+                bldr2.terminate_return(Some(mir_operand_const_int(0)))
         self.builder = bldr2
         var bldr3 = self.builder
         val fn_result = bldr3.end_function()
@@ -783,9 +749,7 @@ impl MirLowering:
         """Register name-keyed struct/class field metadata."""
         var field_names: [text] = []
         var field_type_names: [text] = []
-        var field_type_ownership_keys: [text] = []
         var field_repr_names: [text] = []
-        var field_hir_types: [HirType] = []
         var field_array_element_type_names: [text] = []
         var field_elem_types: [HirType] = []
         var fi = 0
@@ -793,21 +757,17 @@ impl MirLowering:
             val field = fields[fi]
             field_names.push(field.name)
             var field_type_name = ""
-            var field_type_ownership_key = ""
             var field_repr_name = ""
             var field_array_element_type_name = ""
             var field_elem_type = HirType(kind: HirTypeKind.Error, span: field.span)
-            var field_hir_type = HirType(kind: HirTypeKind.Error, span: field.span)
             if field.type_ != nil:
-                field_hir_type = field.type_
                 match field.type_.kind:
                     case Str:
                         field_repr_name = "str"
                     case Named(field_type_sym, _):
-                        val field_type_symbol = symbols.get_symbol_raw(field_type_sym.id)
+                        val field_type_symbol = symbols.get_symbol(field_type_sym)
                         if field_type_symbol.?:
                             field_type_name = field_type_symbol.name
-                            field_type_ownership_key = self.composite_layout_key(field_type_symbol)
                     case Array(field_element_type, _):
                         field_array_element_type_name = "__runtime_array__"
                         # Bug (native_class_array_field_mutation_segfault /
@@ -827,7 +787,7 @@ impl MirLowering:
                         field_elem_type = field_element_type
                         match field_element_type.kind:
                             case Named(field_element_sym, _):
-                                val field_element_symbol = symbols.get_symbol_raw(field_element_sym.id)
+                                val field_element_symbol = symbols.get_symbol(field_element_sym)
                                 if field_element_symbol.?:
                                     field_array_element_type_name = field_element_symbol.name
                             case _: ()
@@ -836,13 +796,12 @@ impl MirLowering:
                         field_elem_type = field_slice_element_type
                         match field_slice_element_type.kind:
                             case Named(field_slice_element_sym, _):
-                                val field_slice_element_symbol = symbols.get_symbol_raw(field_slice_element_sym.id)
+                                val field_slice_element_symbol = symbols.get_symbol(field_slice_element_sym)
                                 if field_slice_element_symbol.?:
                                     field_array_element_type_name = field_slice_element_symbol.name
                             case _: ()
                     case _: ()
             field_type_names.push(field_type_name)
-            field_type_ownership_keys.push(field_type_ownership_key)
             field_repr_names.push(field_repr_name)
             field_hir_types.push(field_hir_type)
             field_array_element_type_names.push(field_array_element_type_name)
@@ -888,12 +847,8 @@ impl MirLowering:
             self.struct_field_order[name] = field_names
         if overwrite or not self.struct_field_type_name.has(name):
             self.struct_field_type_name[name] = field_type_names
-        if overwrite or not self.struct_field_type_ownership_key.has(name):
-            self.struct_field_type_ownership_key[name] = field_type_ownership_keys
         if overwrite or not self.struct_field_repr_name.has(name):
             self.struct_field_repr_name[name] = field_repr_names
-        if overwrite or not self.struct_field_hir_type.has(name):
-            self.struct_field_hir_type[name] = field_hir_types
         if overwrite or not self.struct_field_array_element_type_name.has(name):
             self.struct_field_array_element_type_name[name] = field_array_element_type_names
         if overwrite or not self.struct_field_array_elem_type.has(name):
@@ -1031,28 +986,6 @@ impl MirLowering:
                     bootstrap_fn_param_defaults_register(prescan_defaults_dotted, prescan_fn.params)
             if not prescan_fn.is_method:
                 bootstrap_fn_ret_hir_type_register(prescan_fn.name, prescan_fn.return_type)
-            # Cross-module METHOD return types (native_build_cross_module_
-            # result_payload_struct_name_collision_2026-08-09 mechanism #2):
-            # a method's SYMBOL name is already owner-qualified
-            # ("{module}.{Type}::{method}") and therefore globally unique, so
-            # registering the declared return HirType under it is
-            # collision-free. resolved_call_hir_return_type's name-keyed
-            # lookup (found_sym.name) then recovers e.g. `FileHandle.open`'s
-            # `Result<FileHandle, text>` while lowering the ENTRY module,
-            # before the defining dependency module has been lowered --
-            # module.impls/struct_method_syms never carry inline class
-            # methods, so this registry is the only pre-lowering source.
-            if prescan_call_name != prescan_fn.name:
-                bootstrap_fn_ret_hir_type_register(prescan_call_name, prescan_fn.return_type)
-                # The IMPORTING module's symbol table spells the same method
-                # with `_hir_symbol_owner_module`-sanitized module segments
-                # (dashes -> underscores), while the defining module's own
-                # symbol keeps the raw directory-derived name. Register the
-                # sanitized spelling too so the importing-side name-keyed
-                # lookup hits.
-                val prescan_sanitized_name = prescan_call_name.replace("-", "_")
-                if prescan_sanitized_name != prescan_call_name:
-                    bootstrap_fn_ret_hir_type_register(prescan_sanitized_name, prescan_fn.return_type)
                 var prescan_param_tys: [HirType] = []
                 for prescan_param in prescan_fn.params:
                     prescan_param_tys.push(prescan_param.type_)
@@ -1060,11 +993,31 @@ impl MirLowering:
 
     me lower_module(module: HirModule) -> MirModule:
         """Lower HIR module to MIR."""
-        self.unsafe_depth = 0
+        # Refresh before any expression can reach lower_expr_impl. This is a
+        # per-module lowering session, not a process-lifetime trace cache.
+        self.begin_expr_trace_session()
         self.symbols = module.symbols
+        var mcdc_path = module.path.replace("\\", "/")
+        val source_at = mcdc_path.find("src/")
+        if source_at >= 0:
+            mcdc_path = mcdc_path.substring(source_at)
+        elif mcdc_path == "" or mcdc_path.starts_with("/") or mcdc_path.contains(":"):
+            mcdc_path = "generated/" + module.name.replace(".", "/") + ".spl"
+        self.mcdc_authored_path = mcdc_path
+        # The lowering owner is reused across entry-closure modules. Reset the
+        # module-scoped manifest so transport never duplicates prior rows.
+        self.mcdc_manifest_semantic_ids = []
+        self.mcdc_manifest_decision_ids = []
+        self.mcdc_manifest_source_digests = []
+        self.mcdc_manifest_condition_counts = []
+        self.mcdc_manifest_token_offsets = []
+        self.mcdc_manifest_token_counts = []
+        self.mcdc_manifest_token_opcodes = []
+        self.mcdc_manifest_token_conditions = []
+        if self.mcdc_policy != "off" and self.mcdc_policy != "" and self.mcdc_source_digest == 0:
+            self.error_fatal("MCDC-E-SOURCE-DIGEST: instrumented MIR requires a nonzero source-content digest", nil)
         var function_names: [text] = []
-        for raw_func in module.functions.values():
-            val func: HirFunction = raw_func
+        for func in module.functions.values():
             function_names.push(func.name)
         self.current_function_names = function_names
         # Cross-module prescans keep the first definition. The module being
@@ -1100,25 +1053,20 @@ impl MirLowering:
         self.struct_method_return_is_array = {}
         self.struct_method_return_is_optional = {}
         self.global_symbol_ids = {}
-        val bootstrap_mode = self.ambient_bootstrap_enabled()
+        val bootstrap_mode = (mir_lower_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
         val trace_enabled = mir_lower_trace_enabled()
         val bootstrap_trace = bootstrap_mode and trace_enabled
         if bootstrap_trace:
-            print "[mir-lower] lower_module:start module={module.name} functions={module.functions.keys().len()}"
+            print "[mir-lower] lower_module:start module={module.name} functions={module.functions.len()}"
         # Copy-modify-reassign: nested field mutations don't propagate in interpreter
         var builder = self.builder
         if bootstrap_trace:
             print "[mir-lower] builder"
-        val output_name = if bootstrap_mode: builder.module.name else: module.name
-        var builder_module = MirModule(
-            name: output_name,
-            functions: {},
-            statics: {},
-            constants: {},
-            types: {}
-        )
+        var builder_module = builder.module
         if bootstrap_trace:
             print "[mir-lower] builder-module"
+        if not bootstrap_mode:
+            builder_module.name = module.name
         # Bug (entry-MIR duplication for __init__ re-export shims,
         # native_build_entry_mir_duplication_2026-07-13): callers that lower
         # several HIR modules in a loop on ONE shared MirLowering instance
@@ -1138,6 +1086,10 @@ impl MirLowering:
         # regardless of what a shared builder carried over from a prior
         # call. Single-shot callers (a fresh MirLowering per call) are
         # unaffected since these dicts already start empty for them.
+        builder_module.functions = {}
+        builder_module.statics = {}
+        builder_module.constants = {}
+        builder_module.types = {}
         if bootstrap_trace:
             print "[mir-lower] builder-name"
         builder.module = builder_module
@@ -1146,33 +1098,12 @@ impl MirLowering:
         self.builder = builder
         if not bootstrap_mode:
             self.enum_runtime_id_index = {}
-            # The qualified sibling must be cleared by the SAME gate as the bare
-            # map it shadows. Leaving it populated here would let a qualified-
-            # first read return a runtime ID from a previous module after the
-            # bare map was reset -- a stale hit is worse than the miss it
-            # replaces.
-            self.enum_runtime_id_index_q = {}
         if bootstrap_trace:
             print "[mir-lower] builder-done"
 
         if bootstrap_mode:
             if bootstrap_trace:
                 print "[mir-lower] fn-list:start"
-            # Module-level `val` constants MUST lower BEFORE function bodies:
-            # this branch returns before the non-bootstrap constants loop far
-            # below, so module `val`s were never registered -- an identifier
-            # reference then resolved through local_map/pre-dispatch to a
-            # nonexistent local and the backend emitted an uninitialized
-            # alloca+load (module globals read as stack garbage; LSP server
-            # startup SIGSEGV, native_module_val_globals 2026-07-23).
-            val bs_const_vals = module.constants.values()
-            if bootstrap_trace and bs_const_vals.len() > 0:
-                print "[mir-lower] constants:count {bs_const_vals.len()}"
-            var bs_ci = 0
-            while bs_ci < bs_const_vals.len():
-                self.lower_const(bs_const_vals[bs_ci])
-                self.lower_static(bs_const_vals[bs_ci])
-                bs_ci = bs_ci + 1
             bootstrap_mir_functions_reset()
             val bootstrap_function_keys = module.functions.keys()
             val bootstrap_function_count = bootstrap_function_keys.len()
@@ -1182,28 +1113,27 @@ impl MirLowering:
             while bootstrap_fni < bootstrap_function_count:
                 if bootstrap_trace:
                     print "[mir-lower] function-index {bootstrap_fni}"
-                val fn_sym = bootstrap_function_keys[bootstrap_fni]
+                var fn_sym = SymbolId(id: 1)
+                if bootstrap_fni == 1:
+                    fn_sym = SymbolId(id: 2)
+                if bootstrap_fni == 2:
+                    fn_sym = SymbolId(id: 3)
+                if bootstrap_fni == 3:
+                    fn_sym = SymbolId(id: 4)
+                if bootstrap_fni == 4:
+                    fn_sym = SymbolId(id: 5)
+                if bootstrap_fni == 5:
+                    fn_sym = SymbolId(id: 6)
                 if bootstrap_trace:
                     print "[mir-lower] function-symbol"
                 val fn_ = self.hir_module_function(module, fn_sym)
                 if bootstrap_trace:
                     print "[mir-lower] function-loaded"
-                # Declared-return-type registry (native_call_return_type_loss
-                # 2026-07-23) — Str-only, see bootstrap_globals.spl comment
-                # (registering degraded non-Str types shadowed the MIR
-                # builtin table, W93 regression).
-                match fn_.return_type.kind:
-                    case HirTypeKind.Str:
-                        bootstrap_fn_ret_type_register(fn_.name, self.lower_type(fn_.return_type))
-                    case _: ()
                 if not self.hir_function_is_extern(fn_):
                     if bootstrap_trace:
                         print "[mir-lower] function:start {fn_.name}"
-                    var mir_fn = self.lower_function(fn_)
-                    if fn_.has_vhdl_metadata:
-                        mir_fn.has_vhdl_metadata = true
-                        mir_fn.vhdl_metadata = fn_.vhdl_metadata
-                    bootstrap_mir_functions_add(fn_.name, mir_fn, 0)
+                    val mir_fn = self.lower_function(fn_)
+                    bootstrap_mir_functions_add(fn_.name, mir_fn)
                     var bldr = self.builder
                     var bldr_module = bldr.module
                     var functions = bldr_module.functions
@@ -1216,45 +1146,39 @@ impl MirLowering:
                 bootstrap_fni = bootstrap_fni + 1
             if bootstrap_trace:
                 print "[mir-lower] lower_module:done"
-            # bootstrap_mir_functions_reset() above clears the parallel static
-            # accumulators after constants/statics have already lowered. Re-add
-            # the now-complete module so its statics and module index are
-            # available to the flat bootstrap LLVM emitter.
-            bootstrap_mir_modules_add(self.builder.module)
             return self.builder.module
 
         # Build field map from struct and class definitions
         # (use while loops - for-in broken in compiled native code)
-        val struct_values = module.structs.values()
+        val struct_keys = module.structs.keys()
         var si = 0
-        while si < struct_values.len():
-            val struct_def = struct_values[si]
-            val sym_id = struct_def.symbol
+        while si < struct_keys.len():
+            val sym_id = struct_keys[si]
+            val struct_def = module.structs[sym_id]
             var field_names: [text] = []
-            var field_has_default: [bool] = []
-            var field_default_expr: [HirExpr] = []
             var fi = 0
             while fi < struct_def.fields.len():
                 field_names.push(struct_def.fields[fi].name)
-                field_has_default.push(struct_def.fields[fi].has_default)
-                field_default_expr.push(struct_def.fields[fi].default)
                 fi = fi + 1
             self.field_map[self.symbol_id_value(sym_id)] = field_names
-            self.struct_field_has_default[struct_def.name] = field_has_default
-            self.struct_field_default_expr[struct_def.name] = field_default_expr
             # Name-keyed struct field order: lower_call reclassifies a
             # `Point(x:3,y:4)` paren-constructor Call into aggregate construction
             # by looking up the callee name here (structs only, not classes).
             self.struct_field_order[struct_def.name] = field_names
             si = si + 1
 
-        # Build enum variant registry. Explicit values win; omitted variants
-        # continue from the previous value, matching enum declaration semantics.
+        # Build enum variant-index registry (enum NAME -> ordered variant names).
+        # A variant's index is its runtime discriminant. Name-keyed like structs.
         val enum_values = module.enums.values()
         var ei = 0
         while ei < enum_values.len():
             val enum_def = enum_values[ei]
-            self.register_enum_variants(enum_def)
+            var variant_names: [text] = []
+            var vi = 0
+            while vi < enum_def.variants.len():
+                variant_names.push(enum_def.variants[vi].name)
+                vi = vi + 1
+            self.enum_variant_index[enum_def.name] = variant_names
             self.register_enum_runtime_id(enum_def)
             ei = ei + 1
 
@@ -1265,11 +1189,9 @@ impl MirLowering:
         # to an undefined callee. Skip if user code shadows the name.
         if not self.enum_variant_index.has("Result"):
             self.enum_variant_index["Result"] = ["Ok", "Err"]
-            self.reindex_enum_variant_owners("Result", [], ["Ok", "Err"])
             self.enum_variant_discriminants["Result"] = [0, 1]
         if not self.enum_runtime_id_index.has("Result"):
             self.enum_runtime_id_index["Result"] = 0
-        self.register_builtin_enum_dual("Result", ["Ok", "Err"], [0, 1], 0)
 
         # Register the built-in Option enum so bare-variant construction
         # (`Some(v)` / `None`) and `match o: case Some(v)/None` resolve the same
@@ -1278,11 +1200,9 @@ impl MirLowering:
         # user code shadows the name.
         if not self.enum_variant_index.has("Option"):
             self.enum_variant_index["Option"] = ["Some", "None"]
-            self.reindex_enum_variant_owners("Option", [], ["Some", "None"])
             self.enum_variant_discriminants["Option"] = [0, 1]
         if not self.enum_runtime_id_index.has("Option"):
             self.enum_runtime_id_index["Option"] = 1
-        self.register_builtin_enum_dual("Option", ["Some", "None"], [0, 1], 1)
 
         # Build (struct NAME, method name) -> method SymbolId lookup from
         # module.impls. Bug #138/#156: a receiver with no HIR type inference
@@ -1298,7 +1218,7 @@ impl MirLowering:
         while mfi < module_fn_values.len():
             # module.functions also contains impl methods; retain their static
             # marker for the separate static receiver lookup below.
-            val module_fn: HirFunction = module_fn_values[mfi]
+            val module_fn = module_fn_values[mfi]
             if module_fn.is_static:
                 static_method_symbol_ids[self.symbol_id_value(module_fn.symbol)] = true
             mfi = mfi + 1
@@ -1307,17 +1227,13 @@ impl MirLowering:
         while impl_mi < module.impls.len():
             val impl_def = module.impls[impl_mi]
             var impl_type_name = ""
-            var impl_type_key = ""
             match impl_def.type_.kind:
                 case Named(impl_type_sym, _):
-                    val impl_type_symbol = self.symbols.get_symbol_raw(impl_type_sym.id)
+                    val impl_type_symbol = self.symbols.get_symbol(impl_type_sym)
                     if impl_type_symbol.?:
                         impl_type_name = impl_type_symbol.name
-                        impl_type_key = self.composite_layout_key(impl_type_symbol)
                 case _: ()
             if impl_type_name != "":
-                if impl_type_key == "":
-                    impl_type_key = impl_type_name
                 val impl_method_names = impl_def.methods.keys()
                 var mni = 0
                 while mni < impl_method_names.len():
@@ -1325,8 +1241,6 @@ impl MirLowering:
                     val impl_method_id = impl_def.methods[impl_method_name]
                     val impl_method_key = "{impl_type_name}::{impl_method_name}"
                     self.struct_method_syms[impl_method_key] = impl_method_id
-                    if impl_type_key != impl_type_name:
-                        self.struct_method_syms["{impl_type_key}::{impl_method_name}"] = impl_method_id
                     val impl_method_is_static = static_method_symbol_ids.has(self.symbol_id_value(impl_method_id))
                     if impl_method_is_static:
                         self.struct_method_syms["static::{impl_method_key}"] = impl_method_id
@@ -1338,8 +1252,6 @@ impl MirLowering:
                     val impl_ret_struct_name = impl_def.method_return_struct_names.get(impl_method_name)
                     if impl_ret_struct_name != nil and impl_ret_struct_name != "":
                         self.struct_method_return_names["{impl_type_name}::{impl_method_name}"] = impl_ret_struct_name
-                        if impl_type_key != impl_type_name:
-                            self.struct_method_return_names["{impl_type_key}::{impl_method_name}"] = impl_ret_struct_name
                     # Methchain lane construct #5 (`obj.items()[0]`): thread
                     # whether the method returns an Array/Slice so the call
                     # result registers into runtime_array_locals (see
@@ -1347,33 +1259,20 @@ impl MirLowering:
                     val impl_ret_is_array = impl_def.method_return_is_array.get(impl_method_name)
                     if impl_ret_is_array != nil and impl_ret_is_array:
                         self.struct_method_return_is_array["{impl_type_name}::{impl_method_name}"] = true
-                        if impl_type_key != impl_type_name:
-                            self.struct_method_return_is_array["{impl_type_key}::{impl_method_name}"] = true
-                    val impl_ret_is_optional = impl_def.method_return_is_optional.get(impl_method_name)
-                    if impl_ret_is_optional != nil and impl_ret_is_optional:
-                        self.struct_method_return_is_optional["{impl_type_name}::{impl_method_name}"] = true
-                        if impl_type_key != impl_type_name:
-                            self.struct_method_return_is_optional["{impl_type_key}::{impl_method_name}"] = true
                     mni = mni + 1
             impl_mi = impl_mi + 1
 
         val class_values = module.classes.values()
         var ci = 0
-        while ci < class_values.len():
-            val class_def = class_values[ci]
-            val sym_id = class_def.symbol
+        while ci < class_keys.len():
+            val sym_id = class_keys[ci]
+            val class_def = module.classes[sym_id]
             var field_names: [text] = []
-            var field_has_default: [bool] = []
-            var field_default_expr: [HirExpr] = []
             var fi = 0
             while fi < class_def.fields.len():
                 field_names.push(class_def.fields[fi].name)
-                field_has_default.push(class_def.fields[fi].has_default)
-                field_default_expr.push(class_def.fields[fi].default)
                 fi = fi + 1
             self.field_map[self.symbol_id_value(sym_id)] = field_names
-            self.struct_field_has_default[class_def.name] = field_has_default
-            self.struct_field_default_expr[class_def.name] = field_default_expr
             # Name-keyed, same as the struct loop above: `lower_call`'s
             # paren-constructor reclassification and struct_value_syms'
             # field/method-dispatch bookkeeping both key off
@@ -1387,37 +1286,29 @@ impl MirLowering:
             # real struct once both satisfy struct_field_order.
             self.struct_field_order[class_def.name] = field_names
             self.class_type_names[class_def.name] = true
-            # Also record the module-qualified ownership key, so a nested
-            # field whose declared type resolves to THIS class is recognised
-            # as a class even when another module declares a value struct of
-            # the same bare name.
-            val class_owner_symbol = module.symbols.get_symbol_raw(sym_id.id)
-            if class_owner_symbol != nil:
-                self.class_type_names[self.composite_layout_key(class_owner_symbol)] = true
             ci = ci + 1
 
-        val bitfield_values = module.bitfields.values()
+        val bitfield_keys = module.bitfields.keys()
         var bi = 0
-        while bi < bitfield_values.len():
-            val bitfield_def = bitfield_values[bi]
-            val sym_id = bitfield_def.symbol
-            # Key by direct .id access: symbol_id_value's match-destructure
-            # of SymbolId returns nil in the interpreter, silently keying
-            # the whole map by nil.
-            self.bitfield_map[sym_id.id] = self.hir_bitfield_fields(bitfield_def)
+        while bi < bitfield_keys.len():
+            val sym_id = bitfield_keys[bi]
+            val bitfield_def = module.bitfields[sym_id]
+            self.bitfield_map[self.symbol_id_value(sym_id)] = self.hir_bitfield_fields(bitfield_def)
             bi = bi + 1
 
         # Lower type definitions so headers/export wrappers can consume real MIR types.
-        val struct_type_values = module.structs.values()
+        val struct_type_keys = module.structs.keys()
         var sti = 0
-        while sti < struct_type_values.len():
-            self.lower_struct_type(struct_type_values[sti])
+        while sti < struct_type_keys.len():
+            val sym_id = struct_type_keys[sti]
+            self.lower_struct_type(module.structs[sym_id])
             sti = sti + 1
 
-        val class_type_values = module.classes.values()
+        val class_type_keys = module.classes.keys()
         var cti = 0
-        while cti < class_type_values.len():
-            self.lower_class_type(class_type_values[cti])
+        while cti < class_type_keys.len():
+            val sym_id = class_type_keys[cti]
+            self.lower_class_type(module.classes[sym_id])
             cti = cti + 1
 
         # Lower module-level constants/statics BEFORE any function body is
@@ -1439,10 +1330,8 @@ impl MirLowering:
         var coni = 0
         while coni < const_vals.len():
             self.lower_const(const_vals[coni])
-            self.lower_static(const_vals[coni])
+            self.lower_static(const_vals[coni], module.name)
             coni = coni + 1
-
-        self.lower_runtime_module_initializers(module, const_vals)
 
         # Order-independent pre-pass: walk every function body (read-only,
         # no MIR emitted) to seed struct_field_type_name from its real
@@ -1458,55 +1347,45 @@ impl MirLowering:
         # (`outer`) had not yet been visited by the real lowering loop below.
         val prescan_fn_values = module.functions.values()
         var psi = 0
-        # Level-gated (default OFF), retained per the log-retention policy.
-        val prescan_trace = mir_lower_trace_enabled()
-        if prescan_trace:
-            eprint("[mir-prescan-module] start module={module.name} functions={prescan_fn_values.len()}")
         while psi < prescan_fn_values.len():
             val prescan_fn: HirFunction = prescan_fn_values[psi]
-            if prescan_trace:
-                eprint("[mir-prescan-function] start module={module.name} index={psi} name={prescan_fn.name}")
             if not prescan_fn.is_extern:
                 self.prescan_block_for_struct_types(prescan_fn.body)
-            if prescan_trace:
-                eprint("[mir-prescan-function] done module={module.name} index={psi} name={prescan_fn.name}")
             psi = psi + 1
-        if prescan_trace:
-            eprint("[mir-prescan-module] done module={module.name}")
 
         # Lower functions (skip extern declarations - they have no body)
-        val fn_values = module.functions.values()
+        val fn_keys = module.functions.keys()
         if bootstrap_trace:
             print "[mir-lower] function-keys"
         var fni = 0
         while fni < fn_values.len():
-            val fn_: HirFunction = fn_values[fni]
+            val fn_ = fn_values[fni]
             if self.hir_function_is_extern(fn_):
                 fni = fni + 1
                 # skip extern functions
             else:
                 if bootstrap_trace:
                     print "[mir-lower] function:start"
-                var mir_fn = self.lower_function(fn_)
-                if fn_.has_vhdl_metadata:
-                    mir_fn.has_vhdl_metadata = true
-                    mir_fn.vhdl_metadata = fn_.vhdl_metadata
-                    if trace_enabled:
-                        print "[mir-vhdl-store] before name={fn_.name} hardware={mir_fn.has_vhdl_metadata}"
+                val mir_fn = self.lower_function(fn_)
                 # Copy-modify-reassign: nested field mutations don't propagate in the
                 # bootstrap interpreter, so update builder.module.functions explicitly.
                 var bldr = self.builder
                 var bldr_module = bldr.module
                 var functions = bldr_module.functions
                 functions[mir_fn.symbol] = mir_fn
-                if fn_.has_vhdl_metadata and trace_enabled:
-                    print "[mir-vhdl-store] after name={fn_.name} hardware={functions[mir_fn.symbol].has_vhdl_metadata}"
                 bldr_module.functions = functions
                 bldr.module = bldr_module
                 self.builder = bldr
                 if bootstrap_trace:
                     print "[mir-lower] function:added"
                 fni = fni + 1
+
+        # Lower constants
+        val const_vals = module.constants.values()
+        var coni = 0
+        while coni < const_vals.len():
+            self.lower_const(const_vals[coni])
+            coni = coni + 1
 
         if bootstrap_trace:
             print "[mir-lower] lower_module:done"
@@ -1538,14 +1417,11 @@ impl MirLowering:
     # `MirModule.statics` real and populated; wiring an actual read/write
     # through it is the documented follow-up.
     me lower_static(const_: HirConst):
-        """Lower a module-level HIR binding that needs storage into a MIR
-        static. Literal immutable bindings remain compile-time constants;
-        non-folded bindings receive runtime initialization."""
-        val folded = self.lower_const_expr(const_.value)
-        if folded.?:
-            if not const_.is_mutable:
-                return
-        elif not runtime_module_initializer_supported(const_):
+        """Lower a mutable (`var`) module-level HIR binding into a MIR
+        static-storage slot (MirModule.statics), independent of the
+        always-populated `MirModule.constants` entry `lower_const` already
+        produces for the same binding."""
+        if not const_.is_mutable:
             return
         val static_type = match folded:
             case Some(const_value):
@@ -1604,38 +1480,22 @@ impl MirLowering:
         var statics = module_.statics
         statics[const_.symbol] = MirStatic(
             symbol: const_.symbol,
-            name: global_link_name,
+            name: const_.name,
             type_: static_type,
             init: init_const,
-            is_mutable: const_.is_mutable
+            is_mutable: true
         )
         module_.statics = statics
         bldr.module = module_
         self.builder = bldr
 
-    me lower_runtime_module_initializers(module: HirModule, consts: [HirConst], bootstrap_module_index: i64 = -1):
-        self.lower_runtime_module_initializers_named(module.name, consts, bootstrap_module_index)
-
-    me hir_const_is_function_slot(const_: HirConst) -> bool:
-        """True for a module-level `var` whose initializer NAMES a top-level
-        function -- a function-pointer slot (`var cleanup: fn() =
-        default_cleanup`).
-
-        Such a binding is not a compile-time constant and `const_.type_.kind`
-        arrives as `Any` (the `fn()` annotation does not survive HIR
-        lowering), so `runtime_module_initializer_supported`'s type-driven
-        fallback rejects it and it used to get NO static slot at all: the
-        assignment in another function was dropped and every call through the
-        slot was bound DIRECTLY at lowering time. Bug
-        module_global_fn_pointer_lowered_as_direct_call_2026-08-21.
-        """
-        if not const_.is_mutable:
-            return false
-        match const_.value.kind:
-            case NamedVar(_, name): self.is_known_top_level_function(name)
-            case _: false
+    me lower_runtime_module_initializers(module: HirModule, consts: [HirConst]):
+        self.lower_runtime_module_initializers_named(module.name, consts)
 
     me lower_runtime_module_initializers_named(module_name_raw: text, consts: [HirConst], bootstrap_module_index: i64 = -1):
+        # Bootstrap helpers invoke this entry before lower_function, and its
+        # initializer bodies lower expressions directly.
+        self.begin_expr_trace_session()
         var dynamic = runtime_module_initializers_in_declaration_order(consts)
         # Function-pointer slots need the same runtime-initialized global
         # storage, but cannot be recognised by the free type-driven predicate
@@ -1654,15 +1514,47 @@ impl MirLowering:
         if dynamic.len() == 0:
             return
 
+        var module_name = ""
+        var has_identity_char = false
+        var _mn_i = 0
+        val _mn_n = module_name_raw.len()
+        while _mn_i < _mn_n:
+            val ch = module_name_raw.char_code_at(_mn_i)
+            if (ch >= 97 and ch <= 122) or (ch >= 65 and ch <= 90) or (ch >= 48 and ch <= 57) or ch == 95:
+                module_name = module_name + module_name_raw.char_at(_mn_i)
+                has_identity_char = true
+            else:
+                module_name = module_name + "_"
+            _mn_i = _mn_i + 1
+        var module_name_uniq = module_name
+        if not has_identity_char:
+            var fallback_name = bootstrap_module_index
+            if fallback_name < 0:
+                fallback_name = hm_hash_text(module_name_raw)
+                if fallback_name < 0:
+                    fallback_name = 0 - (fallback_name + 1)
+            module_name_uniq = "mod_" + fallback_name.to_text()
+        elif bootstrap_module_index >= 0:
+            module_name_uniq = module_name_uniq + "_" + bootstrap_module_index.to_text()
         # This symbol is external because the aggregate linker discovers and
         # calls it, but it must be unique in every per-module worker object.
-        val init_name = mir_dynamic_module_init_name(
-            module_name_raw, bootstrap_module_index)
+        # Explicit concatenation is required here: the bootstrap compiler can
+        # lose this interpolation and emit the legacy bare symbol in all
+        # objects, producing duplicate definitions at final link.
+        val init_name = "__module_init_" + module_name_uniq + "_dynamic"
+        assert init_name != "__module_init_dynamic", "dynamic module initializer must have a stable module identity"
         var symbols = self.symbols
         val init_symbol = symbols.define(init_name, SymbolKind.Function, nil, Span.empty(), Visibility.Private, false, nil)
         self.symbols = symbols
 
-        self.reset_function_local_tracking()
+        self.local_map = {}
+        self.local_hir_types = {}
+        self.runtime_array_locals = {}
+        self.runtime_dict_locals = {}
+        self.runtime_elem_value_type = {}
+        self.runtime_value_locals = {}
+        self.option_value_locals = {}
+        self.nil_locals = {}
 
         val signature = MirSignature(params: [], return_type: MirType.unit(), is_variadic: false)
         var bldr = self.builder
@@ -1671,25 +1563,21 @@ impl MirLowering:
 
         for const_ in dynamic:
             val value = self.lower_expr(const_.value)
+            # Preserve the expression's side effects exactly once, but do not
+            # turn its discarded result into a synthetic global or StoreGlobal.
+            if runtime_module_initializer_is_top_level_expr(const_):
+                continue
             val value_type = self.lookup_local_type(value)
             var value_builder = self.builder
             var value_module = value_builder.module
             var statics = value_module.statics
-            var runtime_global_owner = module_name_raw
-            if val runtime_symbol_info = self.symbols.get_symbol_raw(const_.symbol.id):
-                if val runtime_defining_module = runtime_symbol_info.defining_module:
-                    if runtime_defining_module != "":
-                        runtime_global_owner = runtime_defining_module
-            val runtime_owner_dots = runtime_global_owner.replace(".", "_")
-            val runtime_owner_slashes = runtime_owner_dots.replace("/", "_")
-            val runtime_owner_safe = runtime_owner_slashes.replace("-", "_")
-            val runtime_global_link_name = if runtime_owner_safe == "": const_.name else: "{runtime_owner_safe}__{const_.name}"
             statics[const_.symbol] = MirStatic(
                 symbol: const_.symbol,
-                name: runtime_global_link_name,
+                name: const_.name,
                 type_: value_type,
                 init: nil,
-                is_mutable: const_.is_mutable
+                is_mutable: const_.is_mutable,
+                is_rt_struct_alloc_registered: false
             )
             value_module.statics = statics
             value_builder.module = value_module
@@ -1705,8 +1593,6 @@ impl MirLowering:
         result_module.functions = functions
         finish.module = result_module
         self.builder = finish
-        if bootstrap_module_index >= 0:
-            bootstrap_mir_functions_add(init_function.name, init_function, bootstrap_module_index)
 
     me lower_struct_type(struct_def: HirStruct):
         """Lower a HIR struct definition into MIR type metadata."""
@@ -1724,7 +1610,7 @@ impl MirLowering:
             val field_offset: i64 = field_layout.offset
             val errors_before = self.errors.len()
             if (struct_def.name == "BackendError" and hir_field.name == "span") or (struct_def.name == "CompiledUnit" and hir_field.name == "entry_point"):
-                val actual_disc = rt_enum_discriminant(hir_field.type_.kind)
+                val actual_disc = compiler_value_discriminant(hir_field.type_.kind)
                 eprint("[mir-field-type] struct={struct_def.name} field={hir_field.name} actual={actual_disc}\n")
             val lowered_field_type = self.lower_type(hir_field.type_)
             if self.errors.len() > errors_before:
@@ -1732,10 +1618,10 @@ impl MirLowering:
                 # handle, which names nothing. Print the runtime discriminant
                 # too -- it is DefaultHasher(variant-name) truncated to u32, so
                 # it identifies the HirTypeKind variant exactly.
-                eprint("[bootstrap-type-registration] struct={struct_def.name} field={hir_field.name} field_index={fi} hir_kind={hir_field.type_.kind} disc={rt_enum_discriminant(hir_field.type_.kind)} any={rt_enum_discriminant(HirTypeKind.Any)} fn={rt_enum_discriminant(HirTypeKind.Function([], hir_field.type_, []))} infer={rt_enum_discriminant(HirTypeKind.Infer(0, 0))}\n")
+                eprint("[bootstrap-type-registration] struct={struct_def.name} field={hir_field.name} field_index={fi} hir_kind={hir_field.type_.kind} disc={compiler_value_discriminant(hir_field.type_.kind)} any={compiler_value_discriminant(HirTypeKind.Any)} fn={compiler_value_discriminant(HirTypeKind.Function([], hir_field.type_, []))} infer={compiler_value_discriminant(HirTypeKind.Infer(0, 0))}\n")
             fields.push(MirFieldDef(
                 name: hir_field.name,
-                type_: lowered_field_type,
+                type_: self.lower_type(hir_field.type_),
                 offset: field_offset,
                 has_bits_attr: hir_field.has_bits_attr,
                 bits_width: hir_field.bits_width
@@ -1745,9 +1631,8 @@ impl MirLowering:
         var bldr = self.builder
         var module = bldr.module
         var types = module.types
-        val canonical_symbol = self.canonical_mir_type_symbol(struct_def.symbol)
-        types[canonical_symbol] = MirTypeDef(
-            symbol: canonical_symbol,
+        types[struct_def.symbol] = MirTypeDef(
+            symbol: struct_def.symbol,
             name: struct_def.name,
             kind: MirTypeDefKind.Struct(fields),
             is_export_c: false,
@@ -1789,9 +1674,8 @@ impl MirLowering:
         var bldr = self.builder
         var module = bldr.module
         var types = module.types
-        val canonical_symbol = self.canonical_mir_type_symbol(class_def.symbol)
-        types[canonical_symbol] = MirTypeDef(
-            symbol: canonical_symbol,
+        types[class_def.symbol] = MirTypeDef(
+            symbol: class_def.symbol,
             name: class_def.name,
             kind: MirTypeDefKind.Struct(fields),
             is_export_c: is_export_c,
@@ -1814,12 +1698,9 @@ impl MirLowering:
             return "Result"
         if name == "Some" or name == "None":
             return "Option"
-        # Step (c): scan the QUALIFIED keyspace so an evicted same-bare-named
-        # declaration is still found, and return the BARE owner name -- this
-        # prescan's result feeds struct_field_type_name, which is bare-keyed.
-        val owner_keys = self.variant_owner_keys(name)
-        if owner_keys.len() > 0:
-            return self.enum_bare_of(owner_keys[0])
+        for ename in self.enum_variant_index.keys():
+            if enum_variant_disc(self.enum_variant_index[ename], name) >= 0:
+                return ename
         ""
 
     me prescan_block_for_struct_types(block: HirBlock):
@@ -1835,14 +1716,28 @@ impl MirLowering:
         if block.has:
             self.prescan_expr_for_struct_types(block.value)
 
+    me prescan_owner_function_for_struct_types(owner: BootstrapHirModuleOwner, function_index: i64):
+        """Prescan one promoted function without transporting its HirBlock.
+
+        The bootstrap-flat owner is process-owned and remains authoritative.
+        Only statement/expression elements cross into the existing recursive
+        walkers; the large root HirBlock and HirFunction aggregates do not.
+        """
+        var si = 0
+        while si < owner.functions[function_index].body.stmts.len():
+            self.prescan_stmt_for_struct_types(owner.functions[function_index].body.stmts[si])
+            si = si + 1
+        if owner.functions[function_index].body.has:
+            self.prescan_expr_for_struct_types(owner.functions[function_index].body.value)
+
     me prescan_stmt_for_struct_types(stmt: HirStmt):
         val nil_span = Span.empty()
         val nil_type = HirType(kind: HirTypeKind.Unit, span: nil_span)
         val nil_expr = HirExpr(kind: HirExprKind.NilLit, has_type_: true, type_: nil_type, span: nil_span)
         val empty_block = HirBlock(stmts: [], has: false, value: nil_expr, span: nil_span)
         val stmt_kind: HirStmtKind = stmt.kind
-        val stmt_disc = rt_enum_discriminant(stmt_kind)
-        val expr_stmt_disc = rt_enum_discriminant(HirStmtKind.Expr(nil_expr))
+        val stmt_disc = compiler_value_discriminant(stmt_kind)
+        val expr_stmt_disc = compiler_value_discriminant(HirStmtKind.Expr(nil_expr))
         if stmt_disc == expr_stmt_disc:
             match stmt_kind:
                 case HirStmtKind.Expr(expr):
@@ -1853,7 +1748,7 @@ impl MirLowering:
                     return
                 case _:
                     ()
-        val let_disc = rt_enum_discriminant(HirStmtKind.Let(SymbolId(id: -1), nil_type, nil_expr))
+        val let_disc = compiler_value_discriminant(HirStmtKind.Let(SymbolId(id: -1), nil_type, nil_expr))
         if stmt_disc == let_disc:
             match stmt_kind:
                 case HirStmtKind.Let(_, _, init):
@@ -1862,7 +1757,7 @@ impl MirLowering:
                     return
                 case _:
                     ()
-        val assign_disc = rt_enum_discriminant(HirStmtKind.Assign(nil_expr, HirAssignOp.Add, nil_expr))
+        val assign_disc = compiler_value_discriminant(HirStmtKind.Assign(nil_expr, HirAssignOp.Add, nil_expr))
         if stmt_disc == assign_disc:
             match stmt_kind:
                 case HirStmtKind.Assign(_, _, value):
@@ -1871,7 +1766,7 @@ impl MirLowering:
                     return
                 case _:
                     ()
-        val stmt_block_disc = rt_enum_discriminant(HirStmtKind.Block(empty_block))
+        val stmt_block_disc = compiler_value_discriminant(HirStmtKind.Block(empty_block))
         if stmt_disc == stmt_block_disc:
             match stmt_kind:
                 case HirStmtKind.Block(inner_block):
@@ -1890,8 +1785,8 @@ impl MirLowering:
         val nil_span = Span.empty()
         val nil_expr = HirExpr(kind: HirExprKind.NilLit, has_type_: true, type_: HirType(kind: HirTypeKind.Unit, span: nil_span), span: nil_span)
         val expr_kind: HirExprKind = expr.kind
-        val block_disc = rt_enum_discriminant(HirExprKind.Block(HirBlock(stmts: [], has: false, value: nil_expr, span: nil_span)))
-        if rt_enum_discriminant(expr_kind) == block_disc:
+        val block_disc = compiler_value_discriminant(HirExprKind.Block(HirBlock(stmts: [], has: false, value: nil_expr, span: nil_span)))
+        if compiler_value_discriminant(expr_kind) == block_disc:
             match expr_kind:
                 case HirExprKind.Block(inner_block):
                     if mir_lower_trace_enabled():
@@ -1906,7 +1801,7 @@ impl MirLowering:
                 var name = ""
                 match callee.kind:
                     case Var(sym):
-                        val s = self.symbols.get_symbol_raw(sym.id)
+                        val s = self.symbols.get_symbol(sym)
                         if s.?: name = s.name
                     case NamedVar(_, n):
                         name = n
@@ -1962,19 +1857,23 @@ impl MirLowering:
                 # Not a direct struct construct: maybe a call to a known
                 # function whose declared return type is a Named struct
                 # (mirrors resolved_call_return_type's own symbol lookup).
-                val callee_symbol: SymbolId? = match callee.kind:
-                    case Var(sym2): Some(sym2)
-                    case NamedVar(sym2, _): Some(sym2)
-                    case _: nil
+                var callee_symbol: SymbolId? = nil
+                match callee.kind:
+                    case Var(sym2):
+                        callee_symbol = Some(sym2)
+                    case NamedVar(sym2, _):
+                        callee_symbol = Some(sym2)
+                    case _:
+                        ()
                 if val cs = callee_symbol:
-                    val fn_sym = self.symbols.get_symbol_raw(cs.id)
+                    val fn_sym = self.symbols.get_symbol(cs)
                     if fn_sym.?:
                         if val fn_type = fn_sym.type_:
                             match fn_type.kind:
                                 case HirTypeKind.Function(_, ret, _):
                                     match ret.kind:
                                         case Named(ret_sym, _):
-                                            val ret_symbol = self.symbols.get_symbol_raw(ret_sym.id)
+                                            val ret_symbol = self.symbols.get_symbol(ret_sym)
                                             if ret_symbol.?:
                                                 return ret_symbol.name
                                         case _:
@@ -1983,10 +1882,13 @@ impl MirLowering:
                                     ()
                 ""
             case Return(value):
-                if val rv = value:
-                    self.prescan_expr_for_struct_types(rv)
+                if value.is_some():
+                    self.prescan_expr_for_struct_types(value.unwrap())
                 else:
                     ""
+            case Block(inner_block):
+                self.prescan_block_for_struct_types(inner_block)
+                ""
             case If(cond, then_, else_):
                 self.prescan_expr_for_struct_types(cond)
                 self.prescan_block_for_struct_types(then_)
@@ -2014,7 +1916,7 @@ impl MirLowering:
                 var mc_recv_enum_name = ""
                 match mc_receiver.kind:
                     case Var(mc_rsym):
-                        val mc_rs = self.symbols.get_symbol_raw(mc_rsym.id)
+                        val mc_rs = self.symbols.get_symbol(mc_rsym)
                         if mc_rs.?: mc_recv_enum_name = mc_rs.name
                     case NamedVar(_, mc_rname):
                         mc_recv_enum_name = mc_rname
@@ -2044,7 +1946,7 @@ impl MirLowering:
                 var elit_enum_name = ""
                 match type_.kind:
                     case Named(elit_sym, _):
-                        val elit_s = self.symbols.get_symbol_raw(elit_sym.id)
+                        val elit_s = self.symbols.get_symbol(elit_sym)
                         if elit_s.?: elit_enum_name = elit_s.name
                     case _:
                         ()

@@ -1,6 +1,29 @@
-# Test Db Serializer Specification
+# Test DB Serializer Specification
 
-> Tests covering serialize_volatile_db.
+> Tests SDN serialization: version header output, field formatting. Note: Full roundtrip tests involving StringInterner work in compiled mode but have interpreter limitations with self-mutation.
+
+<!-- sdn-diagram:id=test_db_serializer_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=test_db_serializer_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+test_db_serializer_spec -> app
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=test_db_serializer_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -9,7 +32,26 @@
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Test Db Serializer Specification
+# Test DB Serializer Specification
+
+Tests SDN serialization: version header output, field formatting. Note: Full roundtrip tests involving StringInterner work in compiled mode but have interpreter limitations with self-mutation.
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Feature IDs | #DB-SERIALIZER |
+| Category | Tooling |
+| Status | Implemented |
+| Source | `test/01_unit/app/tooling/test_db_serializer_spec.spl` |
+| Updated | 2026-06-01 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Tests SDN serialization: version header output, field formatting.
+Note: Full roundtrip tests involving StringInterner work in compiled mode
+but have interpreter limitations with self-mutation.
 
 ## Scenarios
 
@@ -17,23 +59,13 @@
 
 #### includes version header
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- includes version header
-   - Expected: output.starts_with("# version: 3.0") is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("includes version header")
 val output = serialize_volatile_db([], [], [], [], [])
 expect(output.starts_with("# version: 3.0")).to_equal(true)
 ```
@@ -42,19 +74,13 @@ expect(output.starts_with("# version: 3.0")).to_equal(true)
 
 #### includes counters table header with new fields
 
-- includes counters table header with new fields
-   - Expected: output contains `counters |test_id, total_runs, passed, failed, flaky_count, last_change, last... (full value in folded executable source)`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("includes counters table header with new fields")
 val output = serialize_volatile_db([], [], [], [], [])
 expect(output.contains("counters |test_id, total_runs, passed, failed, flaky_count, last_change, last_10_runs, failure_rate_pct|")).to_equal(true)
 ```
@@ -63,20 +89,13 @@ expect(output.contains("counters |test_id, total_runs, passed, failed, flaky_cou
 
 #### includes timing table header with extended fields
 
-- includes timing table header with extended fields
-   - Expected: output contains `p99`
-   - Expected: output contains `baseline_update_reason`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("includes timing table header with extended fields")
 val output = serialize_volatile_db([], [], [], [], [])
 expect(output.contains("p99")).to_equal(true)
 expect(output.contains("baseline_update_reason")).to_equal(true)
@@ -86,19 +105,13 @@ expect(output.contains("baseline_update_reason")).to_equal(true)
 
 #### serializes counter record
 
-- serializes counter record
-   - Expected: has_data_row is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("serializes counter record")
 val counters = [CounterRecord(
     test_id: 0, total_runs: 10, passed: 8, failed: 2,
     flaky_count: 1, last_change: "no_change",
@@ -118,19 +131,13 @@ expect(has_data_row).to_equal(true)
 
 #### serializes timing record
 
-- serializes timing record
-   - Expected: has_timing_data is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("serializes timing record")
 val timing = [TimingSummary(
     test_id: 0, last_ms: 100.0, p50: 95.0, p90: 110.0,
     p95: 120.0, baseline_median: 90.0,
@@ -153,20 +160,13 @@ expect(has_timing_data).to_equal(true)
 
 #### serializes timing_runs table
 
-- serializes timing_runs table
-   - Expected: output contains `timing_runs`
-   - Expected: output contains `42.5`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("serializes timing_runs table")
 val runs = [TimingRun(
     test_id: 0, timestamp: "2026-01-01T00:00:00Z",
     duration_ms: 42.5, outlier: false
@@ -180,20 +180,13 @@ expect(output.contains("42.5")).to_equal(true)
 
 #### serializes changes table
 
-- serializes changes table
-   - Expected: output contains `changes`
-   - Expected: output contains `pass_to_fail`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("serializes changes table")
 val changes = [ChangeEvent(
     test_id: 0, change_type: "pass_to_fail", run_id: "run_123"
 )]
@@ -206,21 +199,13 @@ expect(output.contains("pass_to_fail")).to_equal(true)
 
 #### serializes test_runs table
 
-- serializes test_runs table
-   - Expected: output contains `test_runs`
-   - Expected: output contains `run_1`
-   - Expected: output contains `myhost`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("serializes test_runs table")
 val runs = [RunRecord(
     run_id: "run_1", start_time: "2026-01-01T00:00:00Z",
     end_time: "2026-01-01T00:01:00Z", pid: 1234,
@@ -237,19 +222,13 @@ expect(output.contains("myhost")).to_equal(true)
 
 #### serializes empty counters with no data rows
 
-- serializes empty counters with no data rows
-   - Expected: has_counter_data is false
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("serializes empty counters with no data rows")
 val output = serialize_volatile_db([], [], [], [], [])
 val lines = output.split("\n")
 # Should have header lines but no data rows with leading spaces
@@ -268,21 +247,6 @@ expect(has_counter_data).to_equal(false)
 
 </details>
 
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Application |
-| Status | Active |
-| Source | `test/01_unit/app/tooling/test_db_serializer_spec.spl` |
-| Updated | 2026-08-26 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering serialize_volatile_db.
-- serialize_volatile_db
-
 ## Scenario Summary
 
 | Metric | Count |
@@ -295,51 +259,3 @@ Tests covering serialize_volatile_db.
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-UNIT`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `54403c2d4d486800ff499da115e244422cbf19d87297fedab0184fa3e930e325`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `54403c2d4d486800ff499da115e244422cbf19d87297fedab0184fa3e930e325`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `54403c2d4d486800ff499da115e244422cbf19d87297fedab0184fa3e930e325`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/01_unit/app/tooling/test_db_serializer_spec.spl
-mirror: doc/06_spec/01_unit/app/tooling/test_db_serializer_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/app/tooling/test_db_serializer_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/app/tooling/test_db_serializer_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/app/tooling/test_db_serializer_spec.spl:30:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'includes version header' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/tooling/test_db_serializer_spec.spl:36:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'includes counters table header with new fields' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/tooling/test_db_serializer_spec.spl:42:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'includes timing table header with extended fields' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

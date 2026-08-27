@@ -1,24 +1,29 @@
-# Pure-Simple Cosmos+ FSBL handoff candidate.
+# Pure-Simple Cosmos+ FSBL handoff owner.
 #
-# Production firmware continues to link cosmos_fsbl.c. This candidate preserves
-# its C ABI and read-only, fixed-work behavior so ARM32 ET_REL/link admission can
-# be completed before a separate production cutover.
+# Production firmware links this module while retaining cosmos_fsbl.c only as a
+# provenance baseline. It preserves the historical C ABI and read-only,
+# fixed-work behavior; execution and hardware admission remain separate gates.
 
-use os.kernel.arch.arm32.cosmos.cosmos_fsbl_decision.cosmos_fsbl_handoff_valid_registers
+pub val COSMOS_FSBL_OK: i32 = 0
+pub val COSMOS_FSBL_UNAVAILABLE: i32 = 1
+pub val COSMOS_FSBL_INVALID: i32 = 2
+pub val COSMOS_FSBL_HW_ERROR: i32 = 4
 
-val COSMOS_OK: i32 = 0
-val COSMOS_UNAVAILABLE: i32 = 1
-val COSMOS_INVALID: i32 = 2
-val COSMOS_HW_ERROR: i32 = 4
+pub val COSMOS_FSBL_SLCR_BASE: u32 = 0xF8000000u32
+pub val COSMOS_FSBL_DEVCFG_BASE: u32 = 0xF8007000u32
+pub val COSMOS_FSBL_LOCKSTA_OFFSET: u32 = 0x000Cu32
+pub val COSMOS_FSBL_ARM_CLK_OFFSET: u32 = 0x0120u32
+pub val COSMOS_FSBL_DDR_CLK_OFFSET: u32 = 0x0124u32
+pub val COSMOS_FSBL_PSS_RST_OFFSET: u32 = 0x0200u32
+pub val COSMOS_FSBL_A9_RST_OFFSET: u32 = 0x0244u32
+pub val COSMOS_FSBL_DEVCFG_INT_STS_OFFSET: u32 = 0x000Cu32
 
-val COSMOS_SLCR_BASE: u32 = 0xf8000000u32
-val COSMOS_DEVCFG_BASE: u32 = 0xf8007000u32
-val COSMOS_SLCR_LOCKSTA_OFFSET: u32 = 0x000cu32
-val COSMOS_SLCR_ARM_CLK_OFFSET: u32 = 0x0120u32
-val COSMOS_SLCR_DDR_CLK_OFFSET: u32 = 0x0124u32
-val COSMOS_SLCR_PSS_RST_OFFSET: u32 = 0x0200u32
-val COSMOS_SLCR_A9_RST_OFFSET: u32 = 0x0244u32
-val COSMOS_DEVCFG_INT_STS_OFFSET: u32 = 0x000cu32
+pub val COSMOS_FSBL_SLCR_LOCKED: u32 = 0x00000001u32
+pub val COSMOS_FSBL_ARM_CLK_ACTIVE: u32 = 0x1F000000u32
+pub val COSMOS_FSBL_DDR_CLK_ACTIVE: u32 = 0x00000003u32
+pub val COSMOS_FSBL_PSS_PRIMARY_RESET: u32 = 0x00000001u32
+pub val COSMOS_FSBL_A9_CPU0_STOPPED: u32 = 0x00000111u32
+pub val COSMOS_FSBL_PCFG_DONE: u32 = 0x00000004u32
 
 # These two declarations are the unavoidable target ABI/runtime shims. They
 # own volatile I/O/platform detection, not FSBL validation policy.
@@ -26,49 +31,133 @@ extern fn cosmos_fsbl_mmio_read32(address: u32) -> u32
 extern fn cosmos_fsbl_platform_is_qemu() -> i32
 
 @export("C", name: "cosmos_fsbl_validate_handoff")
-fn cosmos_fsbl_validate_handoff() -> i32:
-    if cosmos_fsbl_platform_is_qemu() != 0:
-        return COSMOS_UNAVAILABLE
+pub fn cosmos_fsbl_validate_handoff() -> i32:
+    val bridge_unavailable = cosmos_fsbl_bridge_is_qemu() != 0
+    _fsbl_policy_coverage_record(7u32, bridge_unavailable)
+    if bridge_unavailable:
+        return COSMOS_FSBL_UNAVAILABLE
 
-    val locksta = cosmos_fsbl_mmio_read32(
-        COSMOS_SLCR_BASE + COSMOS_SLCR_LOCKSTA_OFFSET
+    val locksta = cosmos_fsbl_bridge_read32(
+        COSMOS_FSBL_SLCR_BASE + COSMOS_FSBL_LOCKSTA_OFFSET
     )
-    val arm_clk = cosmos_fsbl_mmio_read32(
-        COSMOS_SLCR_BASE + COSMOS_SLCR_ARM_CLK_OFFSET
+    val arm_clk = cosmos_fsbl_bridge_read32(
+        COSMOS_FSBL_SLCR_BASE + COSMOS_FSBL_ARM_CLK_OFFSET
     )
-    val ddr_clk = cosmos_fsbl_mmio_read32(
-        COSMOS_SLCR_BASE + COSMOS_SLCR_DDR_CLK_OFFSET
+    val ddr_clk = cosmos_fsbl_bridge_read32(
+        COSMOS_FSBL_SLCR_BASE + COSMOS_FSBL_DDR_CLK_OFFSET
     )
-    val pss_rst = cosmos_fsbl_mmio_read32(
-        COSMOS_SLCR_BASE + COSMOS_SLCR_PSS_RST_OFFSET
+    val pss_rst = cosmos_fsbl_bridge_read32(
+        COSMOS_FSBL_SLCR_BASE + COSMOS_FSBL_PSS_RST_OFFSET
     )
-    val a9_rst = cosmos_fsbl_mmio_read32(
-        COSMOS_SLCR_BASE + COSMOS_SLCR_A9_RST_OFFSET
+    val a9_rst = cosmos_fsbl_bridge_read32(
+        COSMOS_FSBL_SLCR_BASE + COSMOS_FSBL_A9_RST_OFFSET
     )
-    val devcfg_int_sts = cosmos_fsbl_mmio_read32(
-        COSMOS_DEVCFG_BASE + COSMOS_DEVCFG_INT_STS_OFFSET
+    val devcfg_int_sts = cosmos_fsbl_bridge_read32(
+        COSMOS_FSBL_DEVCFG_BASE + COSMOS_FSBL_DEVCFG_INT_STS_OFFSET
     )
-    if cosmos_fsbl_handoff_valid_registers(
+    cosmos_fsbl_handoff_status(
         locksta, arm_clk, ddr_clk, pss_rst, a9_rst, devcfg_int_sts
-    ):
-        COSMOS_OK
-    else:
-        COSMOS_HW_ERROR
+    )
+
+pub fn cosmos_fsbl_selftest_result(
+    arm_clk_offset: u32,
+    ddr_clk_offset: u32,
+    valid_status: i32,
+    missing_pcfg_status: i32
+) -> i32:
+    val arm_offset_invalid = _fsbl_arm_offset_invalid(arm_clk_offset)
+    _fsbl_policy_coverage_record(8u32, arm_offset_invalid)
+    if arm_offset_invalid:
+        return COSMOS_FSBL_INVALID
+    val ddr_offset_invalid = _fsbl_ddr_offset_invalid(ddr_clk_offset)
+    _fsbl_policy_coverage_record(9u32, ddr_offset_invalid)
+    if ddr_offset_invalid:
+        return COSMOS_FSBL_INVALID
+    val valid_status_invalid = _fsbl_valid_status_invalid(valid_status)
+    _fsbl_policy_coverage_record(10u32, valid_status_invalid)
+    if valid_status_invalid:
+        return COSMOS_FSBL_INVALID
+    val missing_pcfg_status_invalid =
+        _fsbl_missing_pcfg_status_invalid(missing_pcfg_status)
+    _fsbl_policy_coverage_record(11u32, missing_pcfg_status_invalid)
+    if missing_pcfg_status_invalid:
+        return COSMOS_FSBL_INVALID
+    COSMOS_FSBL_OK
 
 @export("C", name: "cosmos_fsbl_selftest")
-fn cosmos_fsbl_selftest() -> i32:
-    if (COSMOS_SLCR_ARM_CLK_OFFSET != 0x0120u32 or
-        COSMOS_SLCR_DDR_CLK_OFFSET != 0x0124u32):
-        return COSMOS_INVALID
-    if not cosmos_fsbl_handoff_valid_registers(
-        1u32, 0x1f000000u32, 3u32, 0u32, 0u32, 4u32
-    ):
-        return COSMOS_INVALID
-    if cosmos_fsbl_handoff_valid_registers(
-        1u32, 0x1f000000u32, 3u32, 0u32, 0u32, 0u32
-    ):
-        return COSMOS_INVALID
-    COSMOS_OK
-
-fn main() -> i64:
-    cosmos_fsbl_selftest() as i64
+pub fn cosmos_fsbl_selftest() -> i32:
+    # Exercise every fail-closed policy path through production functions. The
+    # runtime coverage bridge observes these real decisions; these calls do not
+    # write the outcome mask directly.
+    cosmos_fsbl_validate_snapshot(
+        true, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32
+    )
+    cosmos_fsbl_validate_snapshot(
+        false,
+        COSMOS_FSBL_SLCR_LOCKED,
+        COSMOS_FSBL_ARM_CLK_ACTIVE,
+        COSMOS_FSBL_DDR_CLK_ACTIVE,
+        0u32,
+        0u32,
+        COSMOS_FSBL_PCFG_DONE
+    )
+    cosmos_fsbl_handoff_status(
+        0u32, COSMOS_FSBL_ARM_CLK_ACTIVE, COSMOS_FSBL_DDR_CLK_ACTIVE,
+        0u32, 0u32, COSMOS_FSBL_PCFG_DONE
+    )
+    cosmos_fsbl_handoff_status(
+        COSMOS_FSBL_SLCR_LOCKED, 0u32, COSMOS_FSBL_DDR_CLK_ACTIVE,
+        0u32, 0u32, COSMOS_FSBL_PCFG_DONE
+    )
+    cosmos_fsbl_handoff_status(
+        COSMOS_FSBL_SLCR_LOCKED, COSMOS_FSBL_ARM_CLK_ACTIVE, 0u32,
+        0u32, 0u32, COSMOS_FSBL_PCFG_DONE
+    )
+    cosmos_fsbl_handoff_status(
+        COSMOS_FSBL_SLCR_LOCKED, COSMOS_FSBL_ARM_CLK_ACTIVE,
+        COSMOS_FSBL_DDR_CLK_ACTIVE, COSMOS_FSBL_PSS_PRIMARY_RESET,
+        0u32, COSMOS_FSBL_PCFG_DONE
+    )
+    cosmos_fsbl_handoff_status(
+        COSMOS_FSBL_SLCR_LOCKED, COSMOS_FSBL_ARM_CLK_ACTIVE,
+        COSMOS_FSBL_DDR_CLK_ACTIVE, 0u32, COSMOS_FSBL_A9_CPU0_STOPPED,
+        COSMOS_FSBL_PCFG_DONE
+    )
+    cosmos_fsbl_selftest_result(
+        0u32, COSMOS_FSBL_DDR_CLK_OFFSET,
+        COSMOS_FSBL_OK, COSMOS_FSBL_HW_ERROR
+    )
+    cosmos_fsbl_selftest_result(
+        COSMOS_FSBL_ARM_CLK_OFFSET, 0u32,
+        COSMOS_FSBL_OK, COSMOS_FSBL_HW_ERROR
+    )
+    cosmos_fsbl_selftest_result(
+        COSMOS_FSBL_ARM_CLK_OFFSET, COSMOS_FSBL_DDR_CLK_OFFSET,
+        COSMOS_FSBL_HW_ERROR, COSMOS_FSBL_HW_ERROR
+    )
+    cosmos_fsbl_selftest_result(
+        COSMOS_FSBL_ARM_CLK_OFFSET, COSMOS_FSBL_DDR_CLK_OFFSET,
+        COSMOS_FSBL_OK, COSMOS_FSBL_OK
+    )
+    val valid_status = cosmos_fsbl_handoff_status(
+        COSMOS_FSBL_SLCR_LOCKED,
+        COSMOS_FSBL_ARM_CLK_ACTIVE,
+        COSMOS_FSBL_DDR_CLK_ACTIVE,
+        0u32,
+        0u32,
+        COSMOS_FSBL_PCFG_DONE
+    )
+    val missing_pcfg_status = cosmos_fsbl_handoff_status(
+        COSMOS_FSBL_SLCR_LOCKED,
+        COSMOS_FSBL_ARM_CLK_ACTIVE,
+        COSMOS_FSBL_DDR_CLK_ACTIVE,
+        0u32,
+        0u32,
+        0u32
+    )
+    cosmos_fsbl_selftest_result(
+        COSMOS_FSBL_ARM_CLK_OFFSET,
+        COSMOS_FSBL_DDR_CLK_OFFSET,
+        valid_status,
+        missing_pcfg_status
+    )

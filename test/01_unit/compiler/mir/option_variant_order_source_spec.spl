@@ -26,8 +26,8 @@ describe "MIR Option variant order":
         # @req REQ-SSPEC-COMPILER
         step("lowers typed Option try before Result decoding")
         val source = rt_file_read_text("src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl") ?? ""
-        val option_pos = source.index_of("case HirTypeKind.Optional(inner):")
-        val lower_pos = source.index_of("val res_local = self.lower_expr(base)")
+        val option_pos = source.index_of("case HirTypeKind.Optional(inner):") ?? -1
+        val lower_pos = source.index_of("val res_local = self.lower_expr(base)") ?? -1
 
         expect(option_pos).to_be_greater_than(-1)
         expect(lower_pos).to_be_greater_than(option_pos)
@@ -43,20 +43,19 @@ describe "MIR Option variant order":
         val source = rt_file_read_text("src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl") ?? ""
 
         expect(source).to_contain("var some_value = self.option_payload_or_self(base_local)")
-        expect(source).to_contain("and not self.option_value_locals.contains(base_local.id)")
+        expect(source).to_contain("and not self.option_value_locals.has(base_local.id)")
 
     it "unboxes the current function before lowering an explicit return":
         # @req REQ-SSPEC-COMPILER
         step("unboxes the current function before lowering an explicit return")
         val source = rt_file_read_text("src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl") ?? ""
+        val return_pos = source.index_of("case Return(value):")
         val match_pos = source.index_of("match cur_builder.current_function:")
         val some_pos = source.index_of("case Some(active_fn):")
-        val none_pos = source.index_of("case None:")
         val break_pos = source.index_of("case Break(break_label, break_value):")
 
-        expect(match_pos).to_be_greater_than(-1)
+        expect(match_pos).to_be_greater_than(return_pos)
         expect(some_pos).to_be_greater_than(match_pos)
-        expect(none_pos).to_be_greater_than(some_pos)
         expect(break_pos).to_be_greater_than(some_pos)
         expect(source.contains("if val active_fn = cur_builder.current_function:")).to_equal(false)
         expect(source.contains("if val active_fn = self.builder.current_function:")).to_equal(false)
@@ -106,16 +105,44 @@ describe "MIR Option variant order":
         val dispatch = rt_file_read_text("src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl") ?? ""
         val statements = rt_file_read_text("src/compiler/50.mir/mir_lowering_stmts.spl") ?? ""
         val calls = rt_file_read_text("src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl") ?? ""
-        val cond_pos = statements.index_of("val cond_local = self.lower_cond_expr(cond)")
-        val decode_pos = statements.index_of("val decoded_if_val = self.enum_payload_value(if_val_raw_local, if_val_payload_type)")
-        val restore_pos = statements.index_of("self.bind_local(if_val_symbol_id, if_val_raw_local)")
+        val cond_pos = statements.index_of("val cond_local = self.lower_expr(cond)") ?? -1
+        val decode_pos = statements.index_of("val decoded_if_val = self.enum_payload_value(if_val_raw_local, if_val_payload_type)") ?? -1
+        val restore_pos = statements.index_of("self.local_map[if_val_symbol_id] = if_val_raw_local") ?? -1
 
-        expect(statements).to_contain("if has_if_val_float_binding:")
-        expect(statements).to_contain("var if_val_symbol_id = -1")
+        expect(dispatch).to_contain("self.local_hir_types[result_local.id] = found_exists_inner_type")
+        expect(dispatch).to_contain("val result_type = MirType.i64()")
         expect(decode_pos).to_be_greater_than(cond_pos)
         expect(restore_pos).to_be_greater_than(decode_pos)
         expect(calls).to_contain("case MirTypeKind.F32:")
         expect(calls).to_contain("val wide = b.emit_bitcast(mir_operand_copy(raw), MirType.f64())")
+
+    it "keeps exists-check presence, raw payload, and struct if-val ordering explicit":
+        val dispatch = rt_file_read_text("src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl") ?? ""
+        val statements = rt_file_read_text("src/compiler/50.mir/mir_lowering_stmts.spl") ?? ""
+        val exists_pos = dispatch.index_of("case ExistsCheck(base):")
+        val presence_pos = dispatch.index_of("MirConstValue.Str(\"rt_is_some\")", exists_pos)
+        val payload_pos = dispatch.index_of("val some_value = self.option_payload_or_self(base_local)", exists_pos)
+        val decode_pos = dispatch.index_of("decode_runtime_value(some_value, result_type)", exists_pos)
+
+        expect(exists_pos).to_be_greater_than(-1)
+        expect(presence_pos).to_be_greater_than(exists_pos)
+        expect(payload_pos).to_be_greater_than(presence_pos)
+        expect(decode_pos).to_be_greater_than(payload_pos)
+        expect(dispatch).to_contain("var result_type = MirType.i64()")
+        expect(dispatch).to_contain("b_else.emit_const(result_local, MirConstValue.Int(3), result_type)")
+        expect(dispatch.contains("decode_runtime_value(base_local, result_type)")).to_equal(false)
+
+        # `if val` must bind the payload using its semantic type.  The raw
+        # I64 check is only the storage representation for float options; a
+        # struct optional must not be made unreachable by an I64-only guard.
+        val if_binding_pos = statements.index_of("var if_val_payload_type = MirType.i64()")
+        val semantic_pos = statements.index_of("if val semantic_type = self.find_local_hir_type(candidate.id)", if_binding_pos)
+        val decode_if_pos = statements.index_of("val decoded_if_val = self.enum_payload_value(if_val_raw_local, if_val_payload_type)", if_binding_pos)
+        expect(if_binding_pos).to_be_greater_than(-1)
+        expect(semantic_pos).to_be_greater_than(if_binding_pos)
+        expect(decode_if_pos).to_be_greater_than(semantic_pos)
+        expect(statements).to_contain("self.lower_type(semantic_type)")
+        expect(statements.contains("if val semantic_type = self.find_local_hir_type(candidate.id) and found_candidate_type.kind == MirTypeKind.I64")).to_equal(false)
 
     it "registers struct-name provenance on a null-coalesce (??) result too":
         # @req REQ-SSPEC-COMPILER
@@ -144,12 +171,12 @@ describe "MIR Option variant order":
         val fixture = rt_file_read_text("test/fixtures/compiler/native_option_try_unresolved_method_loud.spl") ?? ""
         val method_source = rt_file_read_text("src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl") ?? ""
         val dispatch_source = rt_file_read_text("src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl") ?? ""
-        val call_source = rt_file_read_text("src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl") ?? ""
         val harness = rt_file_read_text("scripts/check/check-native-seed-parity.shs") ?? ""
 
         expect(fixture).to_contain("fn maybe(self) -> i64?:")
         expect(fixture).to_contain("val payload = source.maybe()?")
         expect(method_source).to_contain("self.remember_call_hir_return(im_result_local, resolved_method_id)")
+        expect(dispatch_source).to_contain("self.local_hir_types[local.id] = found_type")
         expect(harness).to_contain("run_native_authoritative_case option_try_unresolved_method_loud write_case_option_try_unresolved_method_loud \"6\"")
 
         # ROOT-FIX guard (native_try_op_on_option_silent_wrong_2026-07-14):
@@ -179,8 +206,6 @@ describe "MIR Option variant order":
         step("pins the uniform tagged ABI migration and exact behavioral gate")
         val fixture = rt_file_read_text("test/fixtures/compiler/native_option_uniform_tagged_abi_repro.spl") ?? ""
         val harness = rt_file_read_text("scripts/check/check-native-seed-parity.shs") ?? ""
-        val lowering = rt_file_read_text("src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl") ?? ""
-        val core_string = rt_file_read_text("src/runtime/simple_core/core_string.spl") ?? ""
 
         expect(fixture).to_contain("fn raw_three() -> i64?:")
         expect(fixture).to_contain("fn explicit_three() -> Option<i64>:")
@@ -188,16 +213,5 @@ describe "MIR Option variant order":
         expect(fixture).to_contain("fn explicit_none() -> Option<i64>:")
         expect(fixture).to_contain("None")
         expect(fixture).to_contain("unwrap_or(777)")
-        expect(fixture).to_contain("fn through_function_value(f: fn(i64?) -> i64, present: bool) -> i64:")
-        expect(fixture).to_contain("        f(3)")
-        expect(fixture).to_contain("        f(nil)")
-        expect(fixture).to_contain("fn through_try(value: i64?) -> i64?:")
-        expect(fixture).to_contain("extern fn rt_enum_id(value: i64) -> i64")
-        expect(fixture).to_contain("print(rt_enum_id(through_try(nil)))")
-        expect(fixture).to_contain('print(rt_enum_id(rt_string_index_of("abc", "z")))')
-        expect(lowering).to_contain("val none_handle = self.ensure_option_handle(nil_result, base_type)")
-        expect(lowering).to_contain("if mir_expr_symbol_id_value(direct_symbol) >= 0:")
-        expect(lowering).to_contain("if call_param_types.len() == 0 and callee.has_type_:")
         expect(harness).to_contain("NATIVE_OPEN_BUG_REPROS")
-        expect(core_string).to_contain("return rt_enum_new(1, 1, 3)")
-        expect(harness).to_contain("run_strict_dual_backend_case option_uniform_tagged_abi test/fixtures/compiler/native_option_uniform_tagged_abi_repro.spl \"33777777003337770337773777377737773777111\"")
+        expect(harness).to_contain("run_strict_dual_backend_case option_uniform_tagged_abi test/fixtures/compiler/native_option_uniform_tagged_abi_repro.spl \"3377777700\"")

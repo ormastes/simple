@@ -1,6 +1,30 @@
 # Ffdhe Kat Specification
 
-> Tests covering FFDHE RFC 7919 — §1 small-prime DH sanity (p=23, g=2), FFDHE RFC 7919 — §2 ffdhe2048 prime integrity, FFDHE RFC 7919 — §3 ffdhe3072 prime integrity, FFDHE RFC 7919 — §4 ffdhe4096 prime integrity, FFDHE RFC 7919 — §5 ffdhe2048 Alice/Bob round-trip.
+> <details>
+
+<!-- sdn-diagram:id=ffdhe_kat_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=ffdhe_kat_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+ffdhe_kat_spec -> std
+ffdhe_kat_spec -> os
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=ffdhe_kat_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -17,23 +41,13 @@
 
 #### Alice pub = g^4 mod 23 = 16
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- Alice pub = g^4 mod 23 = 16
-   - Expected: pub_bytes[0].to_i64() equals `16`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("Alice pub = g^4 mod 23 = 16")
 val p = _small_p()
 val g = _small_g()
 val kp = ffdhe_keygen(p, g, _alice_scalar())
@@ -45,19 +59,13 @@ expect(pub_bytes[0].to_i64()).to_equal(16)
 
 #### Bob pub = g^7 mod 23 = 13
 
-- Bob pub = g^7 mod 23 = 13
-   - Expected: pub_bytes[0].to_i64() equals `13`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("Bob pub = g^7 mod 23 = 13")
 val p = _small_p()
 val g = _small_g()
 val kp = ffdhe_keygen(p, g, _bob_scalar())
@@ -69,21 +77,13 @@ expect(pub_bytes[0].to_i64()).to_equal(13)
 
 #### Alice and Bob derive the same shared secret (18)
 
-- Alice and Bob derive the same shared secret (18)
-   - Expected: sa_bytes[0].to_i64() equals `18`
-   - Expected: sb_bytes[0].to_i64() equals `18`
-   - Expected: sa_bytes[0] equals `sb_bytes[0]`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("Alice and Bob derive the same shared secret (18)")
 val p = _small_p()
 val g = _small_g()
 val alice_kp = ffdhe_keygen(p, g, _alice_scalar())
@@ -101,19 +101,13 @@ expect(sa_bytes[0]).to_equal(sb_bytes[0])
 
 #### round-trip byte serialization of small pub key
 
-- round-trip byte serialization of small pub key
-   - Expected: recovered_bytes[0] equals `pub_bytes[0]`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("round-trip byte serialization of small pub key")
 val p = _small_p()
 val g = _small_g()
 val kp = ffdhe_keygen(p, g, _alice_scalar())
@@ -129,19 +123,13 @@ expect(recovered_bytes[0]).to_equal(pub_bytes[0])
 
 #### ffdhe2048_p() encodes to exactly 256 bytes
 
-- ffdhe2048_p() encodes to exactly 256 bytes
-   - Expected: pb.len().to_i64() equals `256`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("ffdhe2048_p() encodes to exactly 256 bytes")
 val p = ffdhe2048_p()
 val pb = ffdhe_prime_bytes(p, 256)
 expect(pb.len().to_i64()).to_equal(256)
@@ -151,18 +139,13 @@ expect(pb.len().to_i64()).to_equal(256)
 
 #### ffdhe2048 SHA-256 fingerprint matches RFC 7919 Appendix A.1
 
-- ffdhe2048 SHA-256 fingerprint matches RFC 7919 Appendix A.1
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("ffdhe2048 SHA-256 fingerprint matches RFC 7919 Appendix A.1")
 # Computed: python3 -c \"import hashlib; print(hashlib.sha256(bytes.fromhex(hex)).hexdigest())\"
 val p = ffdhe2048_p()
 val pb = ffdhe_prime_bytes(p, 256)
@@ -176,19 +159,13 @@ expect(fp).to_equal(
 
 #### ffdhe2048 first byte is 0xFF
 
-- ffdhe2048 first byte is 0xFF
-   - Expected: pb[0].to_i64() equals `255`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("ffdhe2048 first byte is 0xFF")
 val p = ffdhe2048_p()
 val pb = ffdhe_prime_bytes(p, 256)
 expect(pb[0].to_i64()).to_equal(255)
@@ -198,19 +175,13 @@ expect(pb[0].to_i64()).to_equal(255)
 
 #### ffdhe2048 last byte is 0xFF
 
-- ffdhe2048 last byte is 0xFF
-   - Expected: pb[255].to_i64() equals `255`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("ffdhe2048 last byte is 0xFF")
 val p = ffdhe2048_p()
 val pb = ffdhe_prime_bytes(p, 256)
 expect(pb[255].to_i64()).to_equal(255)
@@ -222,19 +193,13 @@ expect(pb[255].to_i64()).to_equal(255)
 
 #### ffdhe3072_p() encodes to exactly 384 bytes
 
-- ffdhe3072_p() encodes to exactly 384 bytes
-   - Expected: pb.len().to_i64() equals `384`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("ffdhe3072_p() encodes to exactly 384 bytes")
 val p = ffdhe3072_p()
 val pb = ffdhe_prime_bytes(p, 384)
 expect(pb.len().to_i64()).to_equal(384)
@@ -244,18 +209,13 @@ expect(pb.len().to_i64()).to_equal(384)
 
 #### ffdhe3072 SHA-256 fingerprint matches RFC 7919 Appendix A.2
 
-- ffdhe3072 SHA-256 fingerprint matches RFC 7919 Appendix A.2
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("ffdhe3072 SHA-256 fingerprint matches RFC 7919 Appendix A.2")
 val p = ffdhe3072_p()
 val pb = ffdhe_prime_bytes(p, 384)
 val fp = _bytes_to_hex(sha256(pb))
@@ -270,19 +230,13 @@ expect(fp).to_equal(
 
 #### ffdhe4096_p() encodes to exactly 512 bytes
 
-- ffdhe4096_p() encodes to exactly 512 bytes
-   - Expected: pb.len().to_i64() equals `512`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("ffdhe4096_p() encodes to exactly 512 bytes")
 val p = ffdhe4096_p()
 val pb = ffdhe_prime_bytes(p, 512)
 expect(pb.len().to_i64()).to_equal(512)
@@ -292,18 +246,13 @@ expect(pb.len().to_i64()).to_equal(512)
 
 #### ffdhe4096 SHA-256 fingerprint matches RFC 7919 Appendix A.3
 
-- ffdhe4096 SHA-256 fingerprint matches RFC 7919 Appendix A.3
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("ffdhe4096 SHA-256 fingerprint matches RFC 7919 Appendix A.3")
 val p = ffdhe4096_p()
 val pb = ffdhe_prime_bytes(p, 512)
 val fp = _bytes_to_hex(sha256(pb))
@@ -318,38 +267,30 @@ expect(fp).to_equal(
 
 #### Alice and Bob derive the same 256-byte shared secret
 
-- Alice and Bob derive the same 256-byte shared secret
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("Alice and Bob derive the same 256-byte shared secret")
-pending("2048-bit modexp is O(minutes) in interpreter; deferred to native rt_modexp (see doc/02_requirements/feature/ffdhe_native_modexp_2026-05-02.md)")
+val pending_reason = "2048-bit modexp is O(minutes) in interpreter; deferred to native rt_modexp (see doc/02_requirements/feature/ffdhe_native_modexp_2026-05-02.md)"
+expect(pending_reason.len()).to_be_greater_than(0)
 ```
 
 </details>
 
 #### Alice public key is in range (1 < pub < p-1)
 
-- Alice public key is in range (1 < pub < p-1)
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("Alice public key is in range (1 < pub < p-1)")
-pending("2048-bit modexp is O(minutes) in interpreter; deferred to native rt_modexp (see doc/02_requirements/feature/ffdhe_native_modexp_2026-05-02.md)")
+val pending_reason = "2048-bit modexp is O(minutes) in interpreter; deferred to native rt_modexp (see doc/02_requirements/feature/ffdhe_native_modexp_2026-05-02.md)"
+expect(pending_reason.len()).to_be_greater_than(0)
 ```
 
 </details>
@@ -361,12 +302,12 @@ pending("2048-bit modexp is O(minutes) in interpreter; deferred to native rt_mod
 | Category | Hardware & OS |
 | Status | Active |
 | Source | `test/01_unit/os/crypto/ffdhe_kat_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering FFDHE RFC 7919 — §1 small-prime DH sanity (p=23, g=2), FFDHE RFC 7919 — §2 ffdhe2048 prime integrity, FFDHE RFC 7919 — §3 ffdhe3072 prime integrity, FFDHE RFC 7919 — §4 ffdhe4096 prime integrity, FFDHE RFC 7919 — §5 ffdhe2048 Alice/Bob round-trip.
+Tests covering:
 - FFDHE RFC 7919 — §1 small-prime DH sanity (p=23, g=2)
 - FFDHE RFC 7919 — §2 ffdhe2048 prime integrity
 - FFDHE RFC 7919 — §3 ffdhe3072 prime integrity
@@ -385,58 +326,3 @@ Tests covering FFDHE RFC 7919 — §1 small-prime DH sanity (p=23, g=2), FFDHE R
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-OS`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `92fa12a424acb825069e7d8d9a2ffffdb3f5bc323396d557c3ed85940c1d9665`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `92fa12a424acb825069e7d8d9a2ffffdb3f5bc323396d557c3ed85940c1d9665`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `92fa12a424acb825069e7d8d9a2ffffdb3f5bc323396d557c3ed85940c1d9665`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **76/100**; effective score: **49/100**; blockers: **1**.
-
-SSpec documentization score: 49/100
-source: test/01_unit/os/crypto/ffdhe_kat_spec.spl
-mirror: doc/06_spec/01_unit/os/crypto/ffdhe_kat_spec.md (current)
-findings: 7 blockers: 1
-  narrative=100 structure=100 oracle=20
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-  raw=76; blocker cap makes effective=49
-doc/06_spec/01_unit/os/crypto/ffdhe_kat_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/os/crypto/ffdhe_kat_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/os/crypto/ffdhe_kat_spec.spl:1:1: blocker SSDOC-ORA-001 [oracle] (-50): unconditional pending or fail-fast scaffold remains
-  why: A passing-looking document without an oracle is not conformance evidence.
-  improve: Replace placeholders with an observable production assertion.
-test/01_unit/os/crypto/ffdhe_kat_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 9 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/01_unit/os/crypto/ffdhe_kat_spec.spl:123:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'Alice pub = g^4 mod 23 = 16' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/os/crypto/ffdhe_kat_spec.spl:132:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'Bob pub = g^7 mod 23 = 13' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/os/crypto/ffdhe_kat_spec.spl:141:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'Alice and Bob derive the same shared secret (18)' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

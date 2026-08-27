@@ -2,6 +2,49 @@
 
 > Advanced mixin patterns including mixin inheritance, private fields, default field values, static members, and conditional application.
 
+<!-- sdn-diagram:id=mixin_advanced_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=mixin_advanced_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+mixin_advanced_spec -> Rectangle
+mixin_advanced_spec -> Scored
+mixin_advanced_spec -> Mathable
+mixin_advanced_spec -> HasData
+mixin_advanced_spec -> Identified
+mixin_advanced_spec -> Priced
+mixin_advanced_spec -> Scalable
+mixin_advanced_spec -> Bounded
+mixin_advanced_spec -> Base
+mixin_advanced_spec -> Extended
+mixin_advanced_spec -> L1
+mixin_advanced_spec -> L2
+mixin_advanced_spec -> L3
+mixin_advanced_spec -> HasSecret
+mixin_advanced_spec -> Internal
+mixin_advanced_spec -> Configurable
+mixin_advanced_spec -> Configurable2
+mixin_advanced_spec -> Versioned
+mixin_advanced_spec -> Computable
+mixin_advanced_spec -> Labeled
+mixin_advanced_spec -> Cacheable
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=mixin_advanced_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 18 | 18 | 0 | 0 |
@@ -22,7 +65,7 @@ Advanced mixin patterns including mixin inheritance, private fields, default fie
 | Difficulty | 3/5 |
 | Status | Partial (basic mixins implemented, advanced features planned) |
 | Source | `test/03_system/feature/features/mixin_advanced_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -45,18 +88,17 @@ default field values, static members, and conditional application.
 
 #### mixin method accesses multiple fields
 
-- mixin method accesses multiple fields
+1. fn area
+2. expect b area
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("mixin method accesses multiple fields")
 mixin Rectangle:
     width: i64
     height: i64
@@ -76,18 +118,17 @@ expect b.area() == 12
 
 #### mixin method returns derived value
 
-- mixin method returns derived value
+1. fn total
+2. expect g total
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("mixin method returns derived value")
 mixin Scored:
     base: i64
     bonus: i64
@@ -106,18 +147,21 @@ expect g.total() == 150
 
 #### mixin with multiple computed methods
 
-- mixin with multiple computed methods
+1. fn doubled
+2. fn tripled
+3. fn squared
+4. expect n doubled
+5. expect n tripled
+6. expect n squared
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("mixin with multiple computed methods")
 mixin Mathable:
     val_: i64
 
@@ -145,18 +189,18 @@ expect n.squared() == 25
 
 #### trait impl uses mixin fields
 
-- trait impl uses mixin fields
+1. fn compute
+2. fn compute
+3. expect w compute
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("trait impl uses mixin fields")
 trait Computable:
     fn compute(self) -> i64:
         return 0
@@ -180,18 +224,21 @@ expect w.compute() == 21
 
 #### multiple traits on class with mixin
 
-- multiple traits on class with mixin
+1. fn label
+2. fn rank
+3. fn label
+4. fn rank
+5. expect p label
+6. expect p rank
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 29 lines folded for reproduction.
+Runnable source: 27 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("multiple traits on class with mixin")
 trait Displayable:
     fn label(self) -> text:
         return ""
@@ -225,18 +272,18 @@ expect p.rank() == 100
 
 #### dyn Trait works with mixin class
 
-- dyn Trait works with mixin class
+1. fn value
+2. fn value
+3. expect v value
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("dyn Trait works with mixin class")
 trait Valuable:
     fn value(self) -> i64:
         return 0
@@ -263,18 +310,19 @@ expect v.value() == 50
 
 #### mixin method takes parameters
 
-- mixin method takes parameters
+1. fn scale
+2. fn offset
+3. expect m scale
+4. expect m offset
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("mixin method takes parameters")
 mixin Scalable:
     base: i64
 
@@ -296,18 +344,19 @@ expect m.offset(5) == 15
 
 #### mixin method with multiple parameters
 
-- mixin method with multiple parameters
+1. fn clamp
+2. expect c1 clamp
+3. expect c2 clamp
+4. expect c3 clamp
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("mixin method with multiple parameters")
 mixin Bounded:
     val_: i64
 
@@ -335,18 +384,19 @@ expect c3.clamp(0, 10) == 10
 
 #### mixin can use another mixin
 
-- mixin can use another mixin
+1. fn get base
+2. fn get ext
+3. expect obj get base
+4. expect obj get ext
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("mixin can use another mixin")
 mixin Base:
     base_val: i64
 
@@ -372,18 +422,13 @@ expect obj.get_ext() == 20
 
 #### inherits all fields transitively
 
-- inherits all fields transitively
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("inherits all fields transitively")
 mixin L1:
     a: i64
 
@@ -410,18 +455,17 @@ expect obj.c == 3
 
 #### supports private mixin fields
 
-- supports private mixin fields
+1. fn reveal
+2. expect k reveal
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("supports private mixin fields")
 mixin HasSecret:
     _secret: i64
 
@@ -440,18 +484,17 @@ expect k.reveal() == 42
 
 #### private fields not exposed to class
 
-- private fields not exposed to class
+1. fn get internal
+2. expect w get internal
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("private fields not exposed to class")
 mixin Internal:
     _internal: i64
 
@@ -473,18 +516,17 @@ expect w.pub_val == 10
 
 #### mixins can provide default values
 
-- mixins can provide default values
+1. fn get timeout
+2. expect s get timeout
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("mixins can provide default values")
 mixin Configurable:
     timeout: i64 = 30
     retries: i64 = 3
@@ -505,18 +547,17 @@ expect s.retries == 3
 
 #### class can override defaults
 
-- class can override defaults
+1. fn get timeout
+2. expect s get timeout
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("class can override defaults")
 mixin Configurable2:
     timeout: i64 = 30
 
@@ -537,18 +578,17 @@ expect s.get_timeout() == 60
 
 #### supports static fields in mixins
 
-- supports static fields in mixins
+1. static fn version
+2. expect App version
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("supports static fields in mixins")
 mixin Versioned:
     ver: i64
 
@@ -565,18 +605,17 @@ expect App.version() == 1
 
 #### supports static methods in mixins
 
-- supports static methods in mixins
+1. static fn double
+2. expect Calculator double
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("supports static methods in mixins")
 mixin Computable:
     val_: i64
 
@@ -595,18 +634,20 @@ expect Calculator.double(5) == 10
 
 #### applies mixin based on trait
 
-- applies mixin based on trait
+1. fn label
+2. fn get tag
+3. fn label
+4. expect item label
+5. expect item get tag
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 23 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("applies mixin based on trait")
 trait Printable:
     fn label(self) -> text:
         return ""
@@ -634,18 +675,20 @@ expect item.get_tag() == "urgent"
 
 #### validates conditions at compile time
 
-- validates conditions at compile time
+1. fn serialize
+2. fn get key
+3. fn serialize
+4. expect r serialize
+5. expect r get key
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 23 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("validates conditions at compile time")
 trait Serializable:
     fn serialize(self) -> text:
         return ""
@@ -683,51 +726,3 @@ expect r.get_key() == "k1"
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `78949efb47662499261eb3ea899b554e2c7df7349f8cb8c265a51adadecd684a`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `78949efb47662499261eb3ea899b554e2c7df7349f8cb8c265a51adadecd684a`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `78949efb47662499261eb3ea899b554e2c7df7349f8cb8c265a51adadecd684a`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/03_system/feature/features/mixin_advanced_spec.spl
-mirror: doc/06_spec/03_system/feature/features/mixin_advanced_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/feature/features/mixin_advanced_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/feature/features/mixin_advanced_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/feature/features/mixin_advanced_spec.spl:39:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'mixin method accesses multiple fields' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/features/mixin_advanced_spec.spl:56:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'mixin method returns derived value' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/features/mixin_advanced_spec.spl:72:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'mixin with multiple computed methods' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

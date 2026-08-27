@@ -1,0 +1,69 @@
+# @feature mcdc_hal_runtime_hardening
+# @req REQ-011 REQ-013 REQ-014
+
+use std.spec.*
+use std.common.structural.hal_provider.*
+
+fn capacity() -> HalCapacityV1:
+    hal_capacity_v1(64, 64, 8, 512, 4, 512, 512, 100)
+
+fn operation() -> HalOperationV1:
+    hal_operation_v1_default_critical(101, 7, 0, 11, 12,
+        HalSideEffectPolicy.PlanThenCommit, capacity(), 13, 14,
+        HalProviderKind.PureSimple)
+
+fn request() -> HalProviderRequestV1:
+    hal_provider_request_v1(101, 7, 9, 0, 32, 64, 8)
+
+fn isolation(provider: HalProviderKind) -> HalIsolationReceiptV1:
+    hal_isolation_receipt_v1(provider, 7,
+        100 + hal_provider_kind_to_i64(provider),
+        200 + hal_provider_kind_to_i64(provider), 0, 0, 0, true, true)
+
+fn result(provider: HalProviderKind) -> HalProviderResultV1:
+    hal_provider_result_v1(provider, 7, HalStatusV1.Ok, 0,
+        10, 20, 30, 40, 32, 64, 8, 8,
+        HalOverflowKindV1.None, -1, 0, 5)
+
+describe "isolated rt(hal) provider execution":
+    it "admits Pure Simple, C, and Rust only with isolated sealed receipts":
+        expect(hal_execution_receipt_admitted(
+            operation(), request(), isolation(HalProviderKind.PureSimple),
+            result(HalProviderKind.PureSimple))).to_be(true)
+        expect(hal_execution_receipt_admitted(
+            operation(), request(), isolation(HalProviderKind.C),
+            result(HalProviderKind.C))).to_be(true)
+        expect(hal_execution_receipt_admitted(
+            operation(), request(), isolation(HalProviderKind.Rust),
+            result(HalProviderKind.Rust))).to_be(true)
+
+    it "rejects ambient environment and shared mutable provider state":
+        val ambient = hal_isolation_receipt_v1(
+            HalProviderKind.C, 7, 101, 201, 0, 1, 0, true, true)
+        val shared = hal_isolation_receipt_v1(
+            HalProviderKind.Rust, 7, 102, 202, 0, 0, 1, true, true)
+        expect(hal_execution_receipt_admitted(
+            operation(), request(), ambient, result(HalProviderKind.C))).to_be(false)
+        expect(hal_execution_receipt_admitted(
+            operation(), request(), shared, result(HalProviderKind.Rust))).to_be(false)
+
+    it "requires completely supplied storage and zero post-seal allocations":
+        val exact = hal_sealed_storage_v1(
+            64, 64, 8, 512, 4, 512, 512, 0, true)
+        val allocated = hal_sealed_storage_v1(
+            64, 64, 8, 512, 4, 512, 512, 1, true)
+        expect(hal_sealed_storage_v1_admits(exact, operation())).to_be(true)
+        expect(hal_sealed_storage_v1_admits(allocated, operation())).to_be(false)
+
+    it "uses all lanes by default and commits deterministically":
+        val expected = hal_execution_expected_mask(operation(), hal_default_run_mode())
+        expect(expected).to_equal(7)
+        expect(hal_execution_complete(expected, 7)).to_be(true)
+        expect(hal_execution_may_commit(
+            HalRunMode.AlphaCompare, true, true, true)).to_be(true)
+        expect(hal_execution_may_commit(
+            HalRunMode.AlphaCompare, true, false, true)).to_be(false)
+        expect(hal_execution_may_commit(
+            HalRunMode.BetaCompare, true, false, true)).to_be(true)
+        expect(hal_execution_may_commit(
+            HalRunMode.NormalPreferred, false, true, true)).to_be(false)

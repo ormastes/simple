@@ -1,6 +1,29 @@
 # Pending On Specification
 
-> Tests covering pending_on, pending_skip, pending_on with failure, backward compatibility.
+> <details>
+
+<!-- sdn-diagram:id=pending_on_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=pending_on_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+pending_on_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=pending_on_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -17,23 +40,13 @@
 
 #### basic setup
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- basic setup
-   - Expected: 1 + 1 equals `2`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-STD
-step("basic setup")
 expect(1 + 1).to_equal(2)
 ```
 
@@ -41,19 +54,13 @@ expect(1 + 1).to_equal(2)
 
 #### another passing test
 
-- another passing test
-   - Expected: 1 equals `1`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-STD
-step("another passing test")
 expect(1).to_equal(1)
 ```
 
@@ -65,19 +72,13 @@ expect(1).to_equal(1)
 
 #### setup for fail case
 
-- setup for fail case
-   - Expected: 1 equals `1`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-STD
-step("setup for fail case")
 expect(1).to_equal(1)
 ```
 
@@ -87,18 +88,13 @@ expect(1).to_equal(1)
 
 #### regular test alongside pending
 
-- regular test alongside pending
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-STD
-step("regular test alongside pending")
 val marker = "regular test alongside pending"
 expect(marker).to_contain("pending")
 ```
@@ -112,12 +108,12 @@ expect(marker).to_contain("pending")
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/01_unit/std/pending_on_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering pending_on, pending_skip, pending_on with failure, backward compatibility.
+Tests covering:
 - pending_on
 - pending_skip
 - pending_on with failure
@@ -135,54 +131,3 @@ Tests covering pending_on, pending_skip, pending_on with failure, backward compa
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-STD`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `896b1e171a47b778ea2c639998f5bbd6f6006d4bc9f7ad36bbef6aa06c9911f9`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `896b1e171a47b778ea2c639998f5bbd6f6006d4bc9f7ad36bbef6aa06c9911f9`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `896b1e171a47b778ea2c639998f5bbd6f6006d4bc9f7ad36bbef6aa06c9911f9`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
-
-SSpec documentization score: 86/100
-source: test/01_unit/std/pending_on_spec.spl
-mirror: doc/06_spec/01_unit/std/pending_on_spec.md (current)
-findings: 6 blockers: 0
-  narrative=100 structure=100 oracle=70
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/std/pending_on_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/std/pending_on_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/std/pending_on_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 3 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/01_unit/std/pending_on_spec.spl:38:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'basic setup' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/std/pending_on_spec.spl:43:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'another passing test' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/std/pending_on_spec.spl:60:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'setup for fail case' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

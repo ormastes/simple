@@ -29,7 +29,3 @@ performance second.
 - `REQ-GPU-WDB-018`: NoSQL/vector mode keeps metadata filtering, persistence, durability, replication, and small writes on CPU/storage unless a later design proves otherwise.
 - `REQ-GPU-WDB-019`: GPU execution must use bounded batches and explicit completion evidence; per-request GPU dispatch is not the default.
 - `REQ-GPU-WDB-020`: DPU, SmartNIC, DOCA GPUNetIO, and full packet/TLS offload are out of current implementation scope.
-- `REQ-GPU-WDB-021`: A production GPU claim must carry completed device-origin
-  readback, a positive backend handle and device identity, an exact positive
-  CPU-oracle checksum, zero mismatches, and `cpu_fallback=false`; caller-supplied
-  availability or timing alone must not promote a result.

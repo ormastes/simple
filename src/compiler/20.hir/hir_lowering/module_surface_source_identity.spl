@@ -3,7 +3,6 @@
 use compiler.common.driver_core_types.{SourceFile}
 use compiler.frontend.parser_types.*
 use compiler.hir.hir_lowering.module_surface_types.{ModuleSurface, ModuleSurfacesByName}
-use compiler.hir.hir_lowering.module_surface_semantic_projection.{module_surface_semantic_projection, module_surface_semantic_hex_limb}
 
 extern fn rt_hash_text(content: text) -> i64
 extern fn rt_path_absolute(path: text) -> text
@@ -144,10 +143,7 @@ pub fn module_surface_canonical_path(path: text) -> text:
         if part == "" or part == ".":
             continue
         if part == ".." and parts.len() > 0 and parts[parts.len() - 1] != "..":
-            # Remove the final component in place. Prefix slicing recopied all
-            # retained components for every `..`, making deep normalization
-            # quadratic in the number of path components.
-            parts.pop()
+            parts = parts[0:parts.len() - 1]
         elif part == ".." and not absolute:
             parts = parts.push(part)
         elif part != "..":
@@ -158,42 +154,32 @@ pub fn module_surface_canonical_path(path: text) -> text:
     joined
 
 pub(package) fn module_surface_declaration_matches(surface: ModuleSurface, module: ParserModule) -> bool:
-    # Construction-only comparison: before freeze the four limbs are the
-    # declaration projection. This prevents a physical alias whose defaults,
-    # enum openness, contracts, or trait defaults differ from being coalesced
-    # merely because its declaration names/cardinalities happen to match.
-    val semantic_hex = module_surface_semantic_projection(module)
-    if not surface.semantic_cacheable or semantic_hex.len() != 64: return false
-    if (surface.semantic_hash0 != module_surface_semantic_hex_limb(semantic_hex, 0) or
-       surface.semantic_hash1 != module_surface_semantic_hex_limb(semantic_hex, 1) or
-       surface.semantic_hash2 != module_surface_semantic_hex_limb(semantic_hex, 2) or
-       surface.semantic_hash3 != module_surface_semantic_hex_limb(semantic_hex, 3)):
-        return false
     if surface.imports.len() != module.imports.len(): return false
     if surface.exports.len() != module.exports.len(): return false
-    # Native Dict.len() returns -1. Compare key-array lengths so aliases of one
-    # physical source are not rejected by corrupt dictionary cardinalities.
-    if surface.callables.keys().len() != module.functions.keys().len(): return false
-    if surface.composites.keys().len() != module.classes.keys().len() + module.actors.keys().len() + module.structs.keys().len(): return false
-    if surface.enums.keys().len() != module.enums.keys().len(): return false
-    if surface.traits.keys().len() != module.traits.keys().len(): return false
+    # Persistent streaming surfaces intentionally clear construction-only
+    # declaration Dicts. Their aligned name arrays preserve the same source
+    # identity without materializing Dict.keys() arrays.
+    if surface.callable_names.len() != module.functions.keys().len(): return false
+    if surface.composite_names.len() != module.classes.keys().len() + module.actors.keys().len() + module.structs.keys().len(): return false
+    if surface.enum_names.len() != module.enums.keys().len(): return false
+    if surface.trait_names.len() != module.traits.keys().len(): return false
     if surface.impls.len() != module.impls.len(): return false
-    if surface.type_aliases.keys().len() != module.type_aliases.keys().len(): return false
-    if surface.constants.keys().len() != module.constants.keys().len(): return false
+    if surface.type_alias_names.len() != module.type_aliases.keys().len(): return false
+    if surface.constant_names.len() != module.constants.keys().len(): return false
     for name in module.functions.keys():
-        if not surface.callables.contains_key(name): return false
+        if module_surface_name_position(surface.callable_names, name) < 0: return false
     for name in module.classes.keys():
-        if not surface.composites.contains_key(name): return false
+        if module_surface_name_position(surface.composite_names, name) < 0: return false
     for name in module.actors.keys():
-        if not surface.composites.contains_key(name): return false
+        if module_surface_name_position(surface.composite_names, name) < 0: return false
     for name in module.structs.keys():
-        if not surface.composites.contains_key(name): return false
+        if module_surface_name_position(surface.composite_names, name) < 0: return false
     for name in module.enums.keys():
-        if not surface.enums.contains_key(name): return false
+        if module_surface_name_position(surface.enum_names, name) < 0: return false
     for name in module.traits.keys():
-        if not surface.traits.contains_key(name): return false
+        if module_surface_name_position(surface.trait_names, name) < 0: return false
     for name in module.type_aliases.keys():
-        if not surface.type_aliases.contains_key(name): return false
+        if module_surface_name_position(surface.type_alias_names, name) < 0: return false
     for name in module.constants.keys():
-        if not surface.constants.contains_key(name): return false
+        if module_surface_name_position(surface.constant_names, name) < 0: return false
     true

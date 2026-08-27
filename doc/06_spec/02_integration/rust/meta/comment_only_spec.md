@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 2 | 2 | 0 | 0 |
+| 1 | 1 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -28,6 +28,8 @@ Feature: Pure-docstring .spl file support
 Category: Testing
 Status: Implemented
 
+Test whether Simple compiler supports pure-docstring .spl files without executable code.
+
 ## Scenarios
 
 ### Comment-Only Files
@@ -37,6 +39,9 @@ Status: Implemented
 - parse a docstring-only source through the real parser
    - Expected: parser_has_errors() is false
    - Expected: parser_get_errors().len() equals `0`
+
+
+- Verify: placeholder
 
 
 <details>
@@ -84,8 +89,8 @@ expect(parser_get_errors().len()).to_equal(0)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 2 |
-| Active scenarios | 2 |
+| Total scenarios | 1 |
+| Active scenarios | 1 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

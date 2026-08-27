@@ -1,6 +1,29 @@
 # Format Utils Specification
 
-> Tests covering Format Utilities, Table Formatting, Progress Bar, Spinner, Indentation, Box Text, Tree Formatting, ANSI Colors and Styles, Number Formatting, Byte Formatting, Duration Formatting.
+> 1. expect table headers len
+
+<!-- sdn-diagram:id=format_utils_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=format_utils_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+format_utils_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=format_utils_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -19,18 +42,18 @@
 
 #### creates table with headers
 
-- creates table with headers
+1. expect table headers len
+2. expect table rows len
+3. expect table column widths len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates table with headers")
 val table = create_table(["Name", "Age", "City"])
 expect table.headers.len() == 3
 expect table.rows.len() == 0
@@ -41,18 +64,19 @@ expect table.column_widths.len() == 3
 
 #### adds rows
 
-- adds rows
+1. var table = create table
+2. table = add row
+3. table = add row
+4. expect table rows len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("adds rows")
 var table = create_table(["Name", "Age"])
 table = add_row(table, ["Alice", "30"])
 table = add_row(table, ["Bob", "25"])
@@ -65,18 +89,18 @@ expect table.rows[1].cells[0] == "Bob"
 
 #### updates column widths
 
-- updates column widths
+1. var table = create table
+2. table = add row
+3. table = add row
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("updates column widths")
 var table = create_table(["ID", "Name"])
 table = add_row(table, ["1", "Alice"])
 table = add_row(table, ["2", "VeryLongName"])
@@ -87,18 +111,23 @@ expect table.column_widths[1] >= 12
 
 #### formats table with borders
 
-- formats table with borders
+1. var table = create table
+2. table = add row
+3. table = add row
+4. expect output contains
+5. expect output contains
+6. expect output contains
+7. expect output contains
+8. expect output contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("formats table with borders")
 var table = create_table(["Name", "Age"])
 table = add_row(table, ["Alice", "30"])
 table = add_row(table, ["Bob", "25"])
@@ -116,18 +145,18 @@ expect output.contains("Bob")
 
 #### shows empty bar
 
-- shows empty bar
+1. expect bar contains
+2. expect bar contains
+3. expect bar contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("shows empty bar")
 val bar = progress_bar(current=0, total=100, width=20)
 expect bar.contains("[")
 expect bar.contains("]")
@@ -138,18 +167,16 @@ expect bar.contains("0%")
 
 #### shows half bar
 
-- shows half bar
+1. expect bar contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("shows half bar")
 val bar = progress_bar(current=50, total=100, width=20)
 expect bar.contains("50%")
 ```
@@ -158,18 +185,16 @@ expect bar.contains("50%")
 
 #### shows full bar
 
-- shows full bar
+1. expect bar contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("shows full bar")
 val bar = progress_bar(current=100, total=100, width=20)
 expect bar.contains("100%")
 ```
@@ -178,18 +203,16 @@ expect bar.contains("100%")
 
 #### handles zero total
 
-- handles zero total
+1. expect bar contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("handles zero total")
 val bar = progress_bar(current=0, total=0, width=20)
 expect bar.contains("[")
 ```
@@ -200,18 +223,19 @@ expect bar.contains("[")
 
 #### returns correct frames
 
-- returns correct frames
+1. expect spinner frame
+2. expect spinner frame
+3. expect spinner frame
+4. expect spinner frame
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("returns correct frames")
 expect spinner_frame(0) == "|"
 expect spinner_frame(1) == "/"
 expect spinner_frame(2) == "-"
@@ -222,18 +246,17 @@ expect spinner_frame(3) == "\\"
 
 #### wraps around
 
-- wraps around
+1. expect spinner frame
+2. expect spinner frame
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("wraps around")
 expect spinner_frame(4) == "|"
 expect spinner_frame(5) == "/"
 ```
@@ -244,7 +267,24 @@ expect spinner_frame(5) == "/"
 
 #### indents single line
 
-- indents single line
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val result = indent_text("Hello", 4)
+expect result == "    Hello"
+```
+
+</details>
+
+#### indents multiple lines
+
+1. expect result contains
+2. expect result contains
+3. expect result contains
 
 
 <details>
@@ -254,28 +294,6 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("indents single line")
-val result = indent_text("Hello", 4)
-expect result == "    Hello"
-```
-
-</details>
-
-#### indents multiple lines
-
-- indents multiple lines
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 6 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-UNIT
-step("indents multiple lines")
 val result = indent_text("Line1\nLine2\nLine3", 2)
 expect result.contains("  Line1")
 expect result.contains("  Line2")
@@ -286,18 +304,13 @@ expect result.contains("  Line3")
 
 #### handles zero spaces
 
-- handles zero spaces
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("handles zero spaces")
 val result = indent_text("Hello", 0)
 expect result == "Hello"
 ```
@@ -308,18 +321,20 @@ expect result == "Hello"
 
 #### creates single border box
 
-- creates single border box
+1. expect result contains
+2. expect result contains
+3. expect result contains
+4. expect result contains
+5. expect result contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates single border box")
 val result = box_text(txt="Hello", style="single")
 expect result.contains("┌")
 expect result.contains("┐")
@@ -332,18 +347,19 @@ expect result.contains("Hello")
 
 #### creates double border box
 
-- creates double border box
+1. expect result contains
+2. expect result contains
+3. expect result contains
+4. expect result contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates double border box")
 val result = box_text(txt="Test", style="double")
 expect result.contains("╔")
 expect result.contains("╗")
@@ -355,18 +371,19 @@ expect result.contains("╝")
 
 #### creates rounded border box
 
-- creates rounded border box
+1. expect result contains
+2. expect result contains
+3. expect result contains
+4. expect result contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates rounded border box")
 val result = box_text(txt="Test", style="rounded")
 expect result.contains("╭")
 expect result.contains("╮")
@@ -378,18 +395,18 @@ expect result.contains("╯")
 
 #### creates ASCII border box
 
-- creates ASCII border box
+1. expect result contains
+2. expect result contains
+3. expect result contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates ASCII border box")
 val result = box_text(txt="Test", style="ascii")
 expect result.contains("+")
 expect result.contains("-")
@@ -400,18 +417,17 @@ expect result.contains("|")
 
 #### handles multiline text
 
-- handles multiline text
+1. expect result contains
+2. expect result contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("handles multiline text")
 val result = box_text(txt="Line1\nLine2", style="single")
 expect result.contains("Line1")
 expect result.contains("Line2")
@@ -423,18 +439,17 @@ expect result.contains("Line2")
 
 #### formats single node
 
-- formats single node
+1. expect result contains
+2. expect result contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("formats single node")
 val node = TreeNode(label: "Root", children: [])
 val result = format_tree(node, "", true)
 expect result.contains("Root")
@@ -445,18 +460,20 @@ expect result.contains("└──")
 
 #### formats tree with children
 
-- formats tree with children
+1. expect result contains
+2. expect result contains
+3. expect result contains
+4. expect result contains
+5. expect result contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("formats tree with children")
 val child1 = TreeNode(label: "Child1", children: [])
 val child2 = TreeNode(label: "Child2", children: [])
 val root = TreeNode(label: "Root", children: [child1, child2])
@@ -474,18 +491,16 @@ expect result.contains("└──")
 
 #### applies color
 
-- applies color
+1. expect result contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("applies color")
 val result = ansi_color(txt="Error", color="red")
 expect result.contains("Error")
 ```
@@ -494,18 +509,16 @@ expect result.contains("Error")
 
 #### applies style
 
-- applies style
+1. expect result contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("applies style")
 val result = ansi_style(txt="Bold", style="bold")
 expect result.contains("Bold")
 ```
@@ -514,18 +527,16 @@ expect result.contains("Bold")
 
 #### applies combined styling
 
-- applies combined styling
+1. expect result contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("applies combined styling")
 val result = styled_text(txt="Important", color="red", style="bold")
 expect result.contains("Important")
 ```
@@ -536,18 +547,16 @@ expect result.contains("Important")
 
 #### formats small numbers
 
-- formats small numbers
+1. expect format number
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("formats small numbers")
 expect format_number(123, ",") == "123"
 ```
 
@@ -555,18 +564,16 @@ expect format_number(123, ",") == "123"
 
 #### formats thousands
 
-- formats thousands
+1. expect format number
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("formats thousands")
 expect format_number(1234, ",") == "1,234"
 ```
 
@@ -574,18 +581,16 @@ expect format_number(1234, ",") == "1,234"
 
 #### formats millions
 
-- formats millions
+1. expect format number
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("formats millions")
 expect format_number(1234567, ",") == "1,234,567"
 ```
 
@@ -593,18 +598,16 @@ expect format_number(1234567, ",") == "1,234,567"
 
 #### uses custom separator
 
-- uses custom separator
+1. expect format number
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("uses custom separator")
 expect format_number(1234567, ".") == "1.234.567"
 ```
 
@@ -612,18 +615,16 @@ expect format_number(1234567, ".") == "1.234.567"
 
 #### formats zero
 
-- formats zero
+1. expect format number
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("formats zero")
 expect format_number(0, ",") == "0"
 ```
 
@@ -633,18 +634,17 @@ expect format_number(0, ",") == "0"
 
 #### formats bytes
 
-- formats bytes
+1. expect result contains
+2. expect result contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("formats bytes")
 val result = format_bytes(512)
 expect result.contains("512")
 expect result.contains("B")
@@ -654,18 +654,17 @@ expect result.contains("B")
 
 #### formats kilobytes
 
-- formats kilobytes
+1. expect result contains
+2. expect result contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("formats kilobytes")
 val result = format_bytes(2048)
 expect result.contains("2")
 expect result.contains("KB")
@@ -675,18 +674,17 @@ expect result.contains("KB")
 
 #### formats megabytes
 
-- formats megabytes
+1. expect result contains
+2. expect result contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("formats megabytes")
 val result = format_bytes(2 * 1024 * 1024)
 expect result.contains("2")
 expect result.contains("MB")
@@ -696,18 +694,17 @@ expect result.contains("MB")
 
 #### formats gigabytes
 
-- formats gigabytes
+1. expect result contains
+2. expect result contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("formats gigabytes")
 val result = format_bytes(2 * 1024 * 1024 * 1024)
 expect result.contains("2")
 expect result.contains("GB")
@@ -719,18 +716,13 @@ expect result.contains("GB")
 
 #### formats milliseconds
 
-- formats milliseconds
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("formats milliseconds")
 val result = format_duration_ms(500)
 expect result == "500ms"
 ```
@@ -739,18 +731,17 @@ expect result == "500ms"
 
 #### formats seconds
 
-- formats seconds
+1. expect result contains
+2. expect result contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("formats seconds")
 val result = format_duration_ms(5000)
 expect result.contains("5")
 expect result.contains("s")
@@ -760,18 +751,17 @@ expect result.contains("s")
 
 #### formats minutes
 
-- formats minutes
+1. expect result contains
+2. expect result contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("formats minutes")
 val result = format_duration_ms(125000)
 expect result.contains("m")
 expect result.contains("s")
@@ -781,18 +771,17 @@ expect result.contains("s")
 
 #### formats hours
 
-- formats hours
+1. expect result contains
+2. expect result contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("formats hours")
 val result = format_duration_ms(7200000)
 expect result.contains("h")
 expect result.contains("m")
@@ -807,12 +796,12 @@ expect result.contains("m")
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/tooling/format_utils_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering Format Utilities, Table Formatting, Progress Bar, Spinner, Indentation, Box Text, Tree Formatting, ANSI Colors and Styles, Number Formatting, Byte Formatting, Duration Formatting.
+Tests covering:
 - Format Utilities
 - Table Formatting
 - Progress Bar
@@ -837,51 +826,3 @@ Tests covering Format Utilities, Table Formatting, Progress Bar, Spinner, Indent
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-UNIT`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `741d1391cacdfb19a25a9ccccd7f8f859c3cf34f9120ccfc587f130fb66756b1`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `741d1391cacdfb19a25a9ccccd7f8f859c3cf34f9120ccfc587f130fb66756b1`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `741d1391cacdfb19a25a9ccccd7f8f859c3cf34f9120ccfc587f130fb66756b1`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/01_unit/app/tooling/format_utils_spec.spl
-mirror: doc/06_spec/01_unit/app/tooling/format_utils_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/app/tooling/format_utils_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/app/tooling/format_utils_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/app/tooling/format_utils_spec.spl:255:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates table with headers' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/tooling/format_utils_spec.spl:263:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'adds rows' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/tooling/format_utils_spec.spl:273:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'updates column widths' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

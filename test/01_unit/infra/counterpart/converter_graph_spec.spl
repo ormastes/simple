@@ -426,3 +426,128 @@ describe "Counterpart converter graph refuses unsound routes":
             CHROME, OTHER, CounterpartRelation.semantic_equal, 12, "in-hash"))
         assert_false(resolution.resolved)
         assert_equal(resolution.rejection_code, "no_route")
+
+
+# ============================================================================
+# Registry query helpers and residual routing branches
+# ============================================================================
+# @manual_section: Registry queries
+
+describe "Counterpart converter registry queries":
+    it "splits a schema id into its name and refuses malformed ids":
+        step("Extract the name half of a pinned schema id")
+        assert_equal(schema_name_of(CHROME), "chrome.dom_snapshot")
+        step("Refuse ids with no or multiple version separators")
+        assert_equal(schema_name_of("no_version"), "")
+        assert_equal(schema_name_of("a@b@c"), "")
+        step("Refuse every malformed version form, never guessing a default")
+        assert_equal(schema_version_of("a@b@c"), -1)
+        assert_equal(schema_version_of("@1"), -1)
+        assert_equal(schema_version_of("a@"), -1)
+        assert_equal(schema_version_of("a@01"), -1)
+        assert_equal(schema_version_of("a@0"), -1)
+
+    it "registers a whole manifest list in order and indexes exact edges":
+        step("Register two edges in one call")
+        val registry = registry_register_all(converter_registry(), [
+            converter_manifest("e1", "1.0.0", CHROME, CHROME_IR, ConversionLoss.representation_only),
+            converter_manifest("e2", "1.0.0", CHROME_IR, CANON, ConversionLoss.canonicalizing)
+        ])
+        assert_equal(registry_edge_count(registry), 2)
+        step("Query the exact (from, to) pair and a converter by id")
+        assert_equal(registry_edges_between(registry, CHROME, CHROME_IR).len(), 1)
+        assert_equal(registry_edges_between(registry, CHROME, CANON).len(), 0)
+        val found = registry_converter_by_id(registry, "e2")
+        assert_true(found.?)
+        assert_nil(registry_converter_by_id(registry, "missing"))
+
+describe "Counterpart converter graph residual branches":
+    it "reports the unique dropped dimensions across a resolved route":
+        step("Resolve across an edge that drops one dimension twice and another once")
+        var registry = converter_registry()
+        registry = registry_register(registry, converter_manifest_full(
+            "droppy", "1.0.0", CHROME, CANON, ConversionLoss.canonicalizing,
+            true, [], ["color", "color", "layout"], []))
+        val resolution = resolve_route(registry, route_request(
+            CHROME, CANON, CounterpartRelation.multiset_equal, 3, "in-hash"))
+        assert_true(resolution.resolved)
+        step("Confirm duplicates are collapsed, order preserved")
+        val dropped = route_dropped_dimensions(resolution.route)
+        assert_equal(dropped.len(), 2)
+        assert_equal(dropped[0], "color")
+        assert_equal(dropped[1], "layout")
+
+    it "resolves an identity-loss edge with a zero loss rank":
+        step("Route across a single identity-loss converter")
+        var registry = converter_registry()
+        registry = registry_register(registry, converter_manifest(
+            "ident", "1.0.0", CHROME, CANON, ConversionLoss.identity))
+        val resolution = resolve_route(registry, route_request(
+            CHROME, CANON, CounterpartRelation.byte_exact, 3, "in-hash"))
+        assert_true(resolution.resolved)
+        assert_equal(resolution.route.loss_rank, 0)
+
+    it "refuses a chain deeper than the search depth bound":
+        step("Register a 9-edge linear chain, one past the depth bound of 8")
+        var registry = converter_registry()
+        var index = 0
+        while index < 9:
+            registry = registry_register(registry, converter_manifest(
+                "hop{index}", "1.0.0", "s{index}@1", "s{index + 1}@1",
+                ConversionLoss.representation_only))
+            index = index + 1
+        val resolution = resolve_route(registry, route_request(
+            "s0@1", "s9@1", CounterpartRelation.multiset_equal, 3, "in-hash"))
+        step("Confirm no route is resolved past the bound")
+        assert_false(resolution.resolved)
+
+    it "refuses an unpinned from_schema and an unpinned to_schema separately":
+        step("Request routes with each side unpinned in turn")
+        val registry = a_registry_with_a_clean_two_edge_chain()
+        val bad_from = resolve_route(registry, route_request(
+            "unpinned", CANON, CounterpartRelation.byte_exact, 3, "in-hash"))
+        assert_false(bad_from.resolved)
+        assert_equal(bad_from.rejection_code, "missing_schema_version")
+        val bad_to = resolve_route(registry, route_request(
+            CHROME, "unpinned", CounterpartRelation.byte_exact, 3, "in-hash"))
+        assert_false(bad_to.resolved)
+        assert_equal(bad_to.rejection_code, "missing_schema_version")
+
+    it "refuses a route requested with an empty input hash":
+        step("Request a valid route but with input_hash empty")
+        val registry = a_registry_with_a_clean_two_edge_chain()
+        val resolution = resolve_route(registry, route_request(
+            CHROME, CANON, CounterpartRelation.multiset_equal, 3, ""))
+        assert_false(resolution.resolved)
+        assert_equal(resolution.rejection_code, "missing_input_hash")
+
+    it "lets a later lower-loss candidate displace the first path found":
+        step("Register the lossy direct edge FIRST, then a clean two-edge chain")
+        var registry = converter_registry()
+        registry = registry_register(registry, converter_manifest(
+            "lossy_direct", "1.0.0", CHROME, CANON, ConversionLoss.semantic_projection))
+        registry = registry_register(registry, converter_manifest(
+            "clean_a", "1.0.0", CHROME, CHROME_IR, ConversionLoss.representation_only))
+        registry = registry_register(registry, converter_manifest(
+            "clean_b", "1.0.0", CHROME_IR, CANON, ConversionLoss.representation_only))
+        val resolution = resolve_route(registry, route_request(
+            CHROME, CANON, CounterpartRelation.multiset_equal, 3, "in-hash"))
+        step("Confirm the clean chain wins although it was found second")
+        assert_true(resolution.resolved)
+        assert_equal(route_edge_ids(resolution.route)[0], "clean_a")
+
+    it "lets a later same-loss but shorter candidate displace a longer chain":
+        step("Register a clean two-edge chain FIRST, then a clean direct edge")
+        var registry = converter_registry()
+        registry = registry_register(registry, converter_manifest(
+            "long_a", "1.0.0", CHROME, CHROME_IR, ConversionLoss.representation_only))
+        registry = registry_register(registry, converter_manifest(
+            "long_b", "1.0.0", CHROME_IR, CANON, ConversionLoss.representation_only))
+        registry = registry_register(registry, converter_manifest(
+            "short_direct", "1.0.0", CHROME, CANON, ConversionLoss.representation_only))
+        val resolution = resolve_route(registry, route_request(
+            CHROME, CANON, CounterpartRelation.multiset_equal, 3, "in-hash"))
+        step("Confirm the direct edge wins on length at equal loss")
+        assert_true(resolution.resolved)
+        assert_equal(resolution.route.edges.len(), 1)
+        assert_equal(route_edge_ids(resolution.route)[0], "short_direct")

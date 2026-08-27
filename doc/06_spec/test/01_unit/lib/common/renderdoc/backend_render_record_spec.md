@@ -2,6 +2,31 @@
 
 > Defines the operator-visible contract for creating, validating, serializing,
 
+<!-- sdn-diagram:id=backend_render_record_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=backend_render_record_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+backend_render_record_spec -> std
+backend_render_record_spec -> common
+backend_render_record_spec -> test
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=backend_render_record_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 6 | 6 | 0 | 0 |
@@ -20,7 +45,7 @@ Defines the operator-visible contract for creating, validating, serializing,
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/01_unit/lib/common/renderdoc/backend_render_record_spec.spl` |
-| Updated | 2026-07-27 |
+| Updated | 2026-07-10 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 Defines the operator-visible contract for creating, validating, serializing,

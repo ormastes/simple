@@ -98,17 +98,17 @@ fn _flags_to_pte_bits(flags: VmFlags) -> u64:
     """Convert VmFlags to x86_64 page table entry bits."""
     var bits: u64 = 0
 
-    if flags.present():
+    if flags.present:
         bits = bits | PTE_PRESENT
-    if flags.writable():
+    if flags.writable:
         bits = bits | PTE_WRITABLE
-    if flags.user():
+    if flags.user:
         bits = bits | PTE_USER
-    if flags.write_through():
+    if flags.write_through:
         bits = bits | PTE_WRITE_THROUGH
-    if flags.cache_disable():
+    if flags.cache_disable:
         bits = bits | PTE_CACHE_DISABLE
-    if flags.no_execute():
+    if flags.no_execute:
         bits = bits | PTE_NO_EXECUTE
 
     bits
@@ -143,33 +143,33 @@ fn _phys_to_virt(phys: u64) -> u64:
     """Convert physical to virtual address via HHDM."""
     phys + g_vmm.hhdm_offset
 
+# ============================================================================
+# PMM Interface (forward declarations)
+# ============================================================================
+
+extern fn pmm_alloc_page() -> PageFrame?
+extern fn pmm_free_page(frame: PageFrame)
+
 fn _alloc_table_page() -> u64:
     """Allocate a zeroed page for a new page table.
 
     Returns physical address of the new table, or 0 on failure.
-
-    Uses the scalar pmm_alloc_page_raw ABI, NOT pmm_alloc_page's
-    Option<PageFrame>: the if-val-Some-then-field shape miscompiles on the
-    baremetal native lane (nil-receiver panic trap on `f.pfn` — the
-    desktop_e2e boot crash; see
-    doc/08_tracking/bug/baremetal_option_field_unwrap_faults_class_2026-07-18.md
-    and desktop_e2e_entry_paging_alloc_crash_no_hhdm_2026-07-20.md).
-    vmm_core's _alloc_table_page already uses the raw ABI for the same
-    reason ("scalar ABI owner used by freestanding bootstrap paths").
     """
-    val phys = pmm_alloc_page_raw()
-    if phys == 0:
-        # Allocation failed
-        return 0
-    val virt = _phys_to_virt(phys)
+    val frame = pmm_alloc_page()
+    if val Some(f) = frame:
+        val phys = f.pfn * PAGE_SIZE
+        val virt = _phys_to_virt(phys)
 
-    # Zero the page table
-    var i: u64 = 0
-    while i < ENTRIES_PER_TABLE:
-        _write_pte(virt, i, 0)
-        i = i + 1
+        # Zero the page table
+        var i: u64 = 0
+        while i < ENTRIES_PER_TABLE:
+            _write_pte(virt, i, 0)
+            i = i + 1
 
-    phys
+        return phys
+
+    # Allocation failed
+    0
 
 # ============================================================================
 # Page Table Walk & Mapping
@@ -282,7 +282,7 @@ fn _identity_map_4gb():
 # Page Mapping (4KB pages)
 # ============================================================================
 
-fn x86_64_vmm_map_page(virt: VirtAddr, phys: PhysAddr, flags: VmFlags) -> bool:
+fn vmm_map_page(virt: VirtAddr, phys: PhysAddr, flags: VmFlags) -> bool:
     """Map a single 4KB virtual page to a physical frame.
 
     Walks the 4-level page table, creating intermediate tables as needed.
@@ -295,9 +295,16 @@ fn x86_64_vmm_map_page(virt: VirtAddr, phys: PhysAddr, flags: VmFlags) -> bool:
 
     # W^X enforcement: never map a page as both writable and executable
     var safe_flags = flags
-    if flags.writable() and not flags.no_execute():
+    if flags.writable and not flags.no_execute:
         # Writable pages must not be executable
-        safe_flags = VmFlags(bits: flags.bits | VM_NO_EXECUTE)
+        safe_flags = VmFlags(
+            present: flags.present,
+            writable: true,
+            user: flags.user,
+            write_through: flags.write_through,
+            cache_disable: flags.cache_disable,
+            no_execute: true
+        )
 
     val pml4_virt = _phys_to_virt(g_vmm.pml4_phys)
 
@@ -324,7 +331,7 @@ fn x86_64_vmm_map_page(virt: VirtAddr, phys: PhysAddr, flags: VmFlags) -> bool:
 
     true
 
-fn x86_64_vmm_unmap_page(virt: VirtAddr) -> bool:
+fn vmm_unmap_page(virt: VirtAddr) -> bool:
     """Unmap a single 4KB virtual page.
 
     Clears the page table entry and invalidates the TLB.
@@ -409,7 +416,7 @@ fn vmm_map_framebuffer(fb_phys: PhysAddr, fb_virt: VirtAddr, size: u64):
         val offset = i * PAGE_SIZE
         val virt = VirtAddr(addr: fb_virt.addr + offset)
         val phys = PhysAddr(addr: fb_phys.addr + offset)
-        x86_64_vmm_map_page(virt, phys, flags)
+        vmm_map_page(virt, phys, flags)
         i = i + 1
 
     log_raw_println("[VMM] Mapped framebuffer: {page_count} pages at virt 0x{fb_virt.addr}")
@@ -422,7 +429,7 @@ fn vmm_get_manager() -> VirtMemManager:
     """Get reference to the global VMM."""
     g_vmm
 
-fn x86_64_vmm_translate(virt: VirtAddr) -> PhysAddr?:
+fn vmm_translate(virt: VirtAddr) -> PhysAddr?:
     """Translate virtual address to physical by walking page tables.
 
     Returns nil if the address is not mapped.
@@ -471,7 +478,7 @@ fn x86_64_vmm_translate(virt: VirtAddr) -> PhysAddr?:
 
 fn _invlpg(vaddr: u64):
     """Invalidate TLB entry for a virtual address."""
-    mmio_invalidate_tlb(vaddr)
+    rt_invlpg(vaddr)
 
 # ============================================================================
 # X86Paging — HAL-Compatible Paging Interface
@@ -493,15 +500,15 @@ impl X86Paging:
 
     fn map_page(virt: VirtAddr, phys: PhysAddr, flags: VmFlags) -> bool:
         """Map a 4KB virtual page to a physical frame."""
-        x86_64_vmm_map_page(virt, phys, flags)
+        vmm_map_page(virt, phys, flags)
 
     fn unmap_page(virt: VirtAddr) -> bool:
         """Unmap a 4KB virtual page."""
-        x86_64_vmm_unmap_page(virt)
+        vmm_unmap_page(virt)
 
     fn translate(virt: VirtAddr) -> PhysAddr?:
         """Translate virtual to physical address."""
-        x86_64_vmm_translate(virt)
+        vmm_translate(virt)
 
     fn create_address_space() -> u64:
         """Create a new PML4 for a process."""

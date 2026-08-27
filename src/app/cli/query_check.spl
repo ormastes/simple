@@ -4,6 +4,7 @@
 # Handles error parsing, structured error splitting, error code extraction,
 # and workspace diagnostics.
 
+extern fn rt_file_read_text(path: text) -> text
 use std.io_runtime.{read_file_text}
 use std.io_runtime.{file_exists}
 use std.io_runtime.{dir_list}
@@ -11,12 +12,10 @@ use std.io_runtime.{dir_list}
 use app.cli.query_sanitize.{sanitize_path}
 use app.cli.query_helpers.{_extract_flag, _count_indent}
 use app.cli.query_error_codes.{query_extract_error_code}
-use app.cli.query_rich_common.{query_emit_mcp_diagnostics_wrapper, _parse_error_location, query_split_structured_error}
-use app.cli.query_lint.{_emit_source_lint_diagnostics, _diag_emit_or_collect, _DIAG_COLLECT_MODE, _DIAG_COLLECTED, _find_in_line, _check_closure_capture_text, _check_multiline_bool_text, _check_safety_text, _check_visibility_text}
+use app.cli.query_rich_common.{query_emit_mcp_diagnostics_wrapper}
+use app.cli.query_lint.{_emit_source_lint_diagnostics, _diag_emit_or_collect, _DIAG_COLLECT_MODE, _DIAG_COLLECTED, _find_in_line, _is_return_statement, _check_closure_capture_text, _check_multiline_bool_text, _check_safety_text, _check_visibility_text}
 use app.cli.query_lint_checks.{_query_indent_successor_index}
 use app.cli.query_lint_checks.{_check_ignored_return_text_indexed}
-use app.cli.query_lint_scan.{deprecated_new_columns}
-use app.cli.query_source_mask.{deprecated_dunder_facts}
 use compiler.driver.driver.{check_file}
 use compiler.driver.driver_types.{CompileResult}
 use std.report.emitter.lsp.{LspEmitter}
@@ -31,67 +30,82 @@ fn query_check(file: text, cmd_args: [text]) -> i64:
     match result:
         case CompileResult.Success(_):
             # Run source-based lint checks for additional diagnostics
-            if file_exists(file):
-                val source = read_file_text(file)
+            if rt_file_exists(file):
+                val source = rt_file_read_text(file) ?? ""
                 if source != "":
                     _emit_source_lint_diagnostics(file, source, format)
             if format == "json":
-                query_emit_mcp_diagnostics_wrapper(_DIAG_COLLECTED)
+                _emit_mcp_diagnostics_wrapper(_DIAG_COLLECTED)
                 _DIAG_COLLECT_MODE = false
             return 0
         case CompileResult.TypeError(errors):
             _emit_check_errors(file, errors, "TypeError", format)
             _emit_lint_if_readable(file, format)
             if format == "json":
-                query_emit_mcp_diagnostics_wrapper(_DIAG_COLLECTED)
+                _emit_mcp_diagnostics_wrapper(_DIAG_COLLECTED)
                 _DIAG_COLLECT_MODE = false
             return 1
         case CompileResult.ParseError(errors):
             _emit_check_errors(file, errors, "ParseError", format)
             if format == "json":
-                query_emit_mcp_diagnostics_wrapper(_DIAG_COLLECTED)
+                _emit_mcp_diagnostics_wrapper(_DIAG_COLLECTED)
                 _DIAG_COLLECT_MODE = false
             return 1
         case CompileResult.BlockError(errors):
             _emit_check_errors(file, errors, "BlockError", format)
             if format == "json":
-                query_emit_mcp_diagnostics_wrapper(_DIAG_COLLECTED)
+                _emit_mcp_diagnostics_wrapper(_DIAG_COLLECTED)
                 _DIAG_COLLECT_MODE = false
             return 1
         case CompileResult.ResolveError(errors):
             _emit_check_errors(file, errors, "ResolveError", format)
             _emit_lint_if_readable(file, format)
             if format == "json":
-                query_emit_mcp_diagnostics_wrapper(_DIAG_COLLECTED)
+                _emit_mcp_diagnostics_wrapper(_DIAG_COLLECTED)
                 _DIAG_COLLECT_MODE = false
             return 1
         case CompileResult.BorrowError(errors):
             _emit_check_errors(file, errors, "BorrowError", format)
             _emit_lint_if_readable(file, format)
             if format == "json":
-                query_emit_mcp_diagnostics_wrapper(_DIAG_COLLECTED)
+                _emit_mcp_diagnostics_wrapper(_DIAG_COLLECTED)
                 _DIAG_COLLECT_MODE = false
             return 1
         case CompileResult.CodegenError(msg):
             _emit_check_errors(file, [msg], "CodegenError", format)
             if format == "json":
-                query_emit_mcp_diagnostics_wrapper(_DIAG_COLLECTED)
+                _emit_mcp_diagnostics_wrapper(_DIAG_COLLECTED)
                 _DIAG_COLLECT_MODE = false
             return 1
         case CompileResult.RuntimeError(msg):
             _emit_check_errors(file, [msg], "RuntimeError", format)
             if format == "json":
-                query_emit_mcp_diagnostics_wrapper(_DIAG_COLLECTED)
+                _emit_mcp_diagnostics_wrapper(_DIAG_COLLECTED)
                 _DIAG_COLLECT_MODE = false
             return 1
         case _:
             if format == "json":
                 _DIAG_COLLECTED.push("{\"severity\":1,\"code\":\"E0000\",\"message\":\"check failed\",\"line\":1,\"col\":1,\"end_line\":1,\"end_col\":1,\"tags\":[],\"source\":\"simple\"}")
-                query_emit_mcp_diagnostics_wrapper(_DIAG_COLLECTED)
+                _emit_mcp_diagnostics_wrapper(_DIAG_COLLECTED)
                 _DIAG_COLLECT_MODE = false
             else:
                 print "{file}:1:1: error: check failed"
             return 1
+
+fn _emit_mcp_diagnostics_wrapper(diagnostics: [text]):
+    """Wrap collected diagnostics in MCP-compatible structured content format."""
+    val count = diagnostics.len()
+    val diags_array = "[" + diagnostics.join(",") + "]"
+    val summary = str(count) + " diagnostics found"
+    # Build MCP-compatible output:
+    # {"content":[{"type":"text","text":"N diagnostics found"}],
+    #  "structuredContent":{"diagnostics":[...],"count":N},
+    #  "isError":false}
+    var parts: [text] = []
+    parts.push("{\"content\":[{\"type\":\"text\",\"text\":\"" + summary + "\"}]")
+    parts.push(",\"structuredContent\":{\"diagnostics\":" + diags_array + ",\"count\":" + str(count) + "}")
+    parts.push(",\"isError\":false}")
+    print parts.join("")
 
 fn _emit_check_errors(file: text, errors: [text], error_kind: text, format: text):
     """Emit compiler errors in text or JSON format.
@@ -104,7 +118,7 @@ fn _emit_check_errors(file: text, errors: [text], error_kind: text, format: text
         val emitter = LspEmitter.default_emitter()
         for err in errors:
             # Split structured metadata from the core error
-            val structured = query_split_structured_error(err)
+            val structured = _split_structured_error(err)
             val core_err = structured.0
             val related_items = structured.1
             val help_text = structured.2
@@ -142,7 +156,7 @@ fn _emit_check_errors(file: text, errors: [text], error_kind: text, format: text
     else:
         for err in errors:
             # Strip structured metadata for text format
-            val structured = query_split_structured_error(err)
+            val structured = _split_structured_error(err)
             val core_err = structured.0
             val help_text = structured.2
             if help_text != "":
@@ -151,8 +165,79 @@ fn _emit_check_errors(file: text, errors: [text], error_kind: text, format: text
             else:
                 print "{file}:{core_err}"
 
+fn _parse_error_location(err: text) -> (i64, i64, text):
+    """Parse line:col:message from an error string. Returns (line, col, message)."""
+    var colon1 = -1
+    var colon2 = -1
+    var ci = 0
+    while ci < err.len():
+        if err.substring(ci, ci + 1) == ":":
+            if colon1 == -1:
+                colon1 = ci
+            elif colon2 == -1:
+                colon2 = ci
+                break
+        ci = ci + 1
+    if colon1 > 0 and colon2 > colon1:
+        val line_str = err.substring(0, colon1)
+        val col_str = err.substring(colon1 + 1, colon2)
+        val msg = err.substring(colon2 + 1).trim()
+        val line = line_str.to_int()
+        val col = col_str.to_int()
+        if line > 0:
+            return (line, if col > 0: col else: 1, msg)
+    (1, 1, err)
+
+fn _split_structured_error(err: text) -> (text, [text], text):
+    """Split a structured error string into (core_error, related_items, help_text).
+
+    Structured error format uses '|||' as segment separator:
+    - "core_error|||RELATED:line:col:message|||HELP:message"
+    - Multiple RELATED segments are allowed
+    - HELP segment is optional
+
+    Returns (core_error, [related_items as "line:col:message"], help_text).
+    """
+    var core = err
+    var related: [text] = []
+    var help = ""
+
+    # Check for structured metadata
+    val sep = "|||"
+    val sep_idx = _find_in_line_from(err, sep, 0)
+    if sep_idx < 0:
+        return (err, related, help)
+
+    # Split on the first ||| to get core error
+    core = err.substring(0, sep_idx)
+    val rest = err.substring(sep_idx)
+
+    # Parse remaining segments
+    val segments = rest.split(sep)
+    for segment in segments:
+        val trimmed = segment.trim()
+        if trimmed == "":
+            continue
+        if trimmed.starts_with("RELATED:"):
+            val rel_content = trimmed.substring(8)
+            related = related.push(rel_content)
+        elif trimmed.starts_with("HELP:"):
+            help = trimmed.substring(5)
+
+    (core, related, help)
+
 fn _extract_error_code(msg: text, error_kind: text) -> text:
     query_extract_error_code(msg, error_kind, "FFI error")
+
+fn _find_in_line_from(line: text, needle: text, start: i64) -> i64:
+    """Find needle in line starting from a given position. Returns -1 if not found."""
+    var i = start
+    val nlen = needle.len()
+    while i <= line.len() - nlen:
+        if line.substring(i, i + nlen) == needle:
+            return i
+        i = i + 1
+    -1
 
 fn _compile_result_error_kind(result: CompileResult) -> text:
     """Extract the error kind name from a CompileResult variant."""
@@ -169,8 +254,8 @@ fn _compile_result_error_kind(result: CompileResult) -> text:
 
 fn _emit_lint_if_readable(file: text, format: text):
     """Emit lint diagnostics if the file is readable."""
-    if file_exists(file):
-        val source = read_file_text(file)
+    if rt_file_exists(file):
+        val source = rt_file_read_text(file) ?? ""
         if source != "":
             _emit_source_lint_diagnostics(file, source, format)
 
@@ -223,7 +308,7 @@ fn query_workspace_diagnostics(dir_path: text, cmd_args: [text]) -> i64:
                     var diag_parts: [text] = []
                     for err in errors:
                         # Parse structured error metadata
-                        val structured = query_split_structured_error(err)
+                        val structured = _split_structured_error(err)
                         val core_err = structured.0
                         val related_items = structured.1
                         val help_text = structured.2
@@ -261,7 +346,7 @@ fn query_workspace_diagnostics(dir_path: text, cmd_args: [text]) -> i64:
                     json_file_entries.push("{\"file\":{emitter.encode_string(spl_file)},\"diagnostics\":[{diag_parts.join(\",\")}]}")
                 else:
                     for err in errors:
-                        val structured = query_split_structured_error(err)
+                        val structured = _split_structured_error(err)
                         val core_err = structured.0
                         val help_text = structured.2
                         if help_text != "":
@@ -272,8 +357,8 @@ fn query_workspace_diagnostics(dir_path: text, cmd_args: [text]) -> i64:
                         file_diag_count = file_diag_count + 1
 
         # Also run source-level lint checks
-        if file_exists(spl_file):
-            val source = read_file_text(spl_file)
+        if rt_file_exists(spl_file):
+            val source = rt_file_read_text(spl_file) ?? ""
             if source != "":
                 if format == "json":
                     # Capture lint diagnostics for this file
@@ -307,7 +392,7 @@ fn query_workspace_diagnostics(dir_path: text, cmd_args: [text]) -> i64:
 
 fn _collect_spl_files(dir: text, files: [text]):
     """Recursively collect all .spl files in a directory."""
-    val entries = dir_list(dir)
+    val entries = rt_dir_list(dir)
     for entry in entries:
         if entry == "." or entry == "..":
             continue
@@ -326,9 +411,6 @@ fn _collect_lint_diagnostics_json(file: text, source: text) -> (i64, text):
     var count = 0
     var parts: [text] = []
     val indent_successors = _query_indent_successor_index(lines)
-    val deprecated_columns = deprecated_new_columns(lines)
-    val deprecated_dunders = deprecated_dunder_facts(lines)
-    var deprecated_dunder_i = 0
 
     var li = 0
     while li < lines.len():
@@ -336,17 +418,9 @@ fn _collect_lint_diagnostics_json(file: text, source: text) -> (i64, text):
         val trimmed = line.trim()
         val line_num = li + 1
 
-        # DEPR001: deprecated Type__method() calls from shared lexical facts.
-        while (deprecated_dunder_i < deprecated_dunders.len() and
-            deprecated_dunders[deprecated_dunder_i].line == line_num):
-            val fact = deprecated_dunders[deprecated_dunder_i]
-            parts.push("{\"severity\":2,\"code\":\"DEPR001\",\"message\":\"'{fact.name}()' uses deprecated Type__method() syntax\",\"line\":{line_num},\"col\":{fact.start_column},\"end_line\":{line_num},\"end_col\":{fact.end_column},\"tags\":[2],\"source\":\"simple-lint\"}")
-            count = count + 1
-            deprecated_dunder_i = deprecated_dunder_i + 1
-
         # DEPR002: .new() calls
-        val col = deprecated_columns[li]
-        if col > 0:
+        if trimmed.contains(".new("):
+            val col = _find_in_line(trimmed, ".new(") + 1
             parts.push("{\"severity\":2,\"code\":\"DEPR002\",\"message\":\"'.new()' constructor is deprecated\",\"line\":{line_num},\"col\":{col},\"end_line\":{line_num},\"end_col\":{col + 5},\"tags\":[2],\"source\":\"simple-lint\"}")
             count = count + 1
 
@@ -357,14 +431,12 @@ fn _collect_lint_diagnostics_json(file: text, source: text) -> (i64, text):
                 count = count + 1
 
         # UNREACH: After return
-        if indent_successors.is_return_statement[li]:
+        if _is_return_statement(trimmed):
             val successor = indent_successors.next_same_or_shallower[li]
             if (successor >= 0 and
                 _count_indent(lines[successor]) == _count_indent(lines[li])):
                 val next_unreachable = successor + 1
-                val successor_col = indent_successors.first_executable_column[successor]
-                val successor_end_col = indent_successors.first_token_end_column[successor]
-                parts.push("{\"severity\":2,\"code\":\"UNREACH001\",\"message\":\"unreachable code after return\",\"line\":{next_unreachable},\"col\":{successor_col},\"end_line\":{next_unreachable},\"end_col\":{successor_end_col},\"tags\":[1],\"source\":\"simple-lint\"}")
+                parts.push("{\"severity\":2,\"code\":\"UNREACH001\",\"message\":\"unreachable code after return\",\"line\":{next_unreachable},\"col\":1,\"end_line\":{next_unreachable},\"end_col\":1,\"tags\":[1],\"source\":\"simple-lint\"}")
                 count = count + 1
 
         li = li + 1
@@ -376,12 +448,11 @@ fn _collect_lint_diagnostics_json(file: text, source: text) -> (i64, text):
     val prev_collected = _DIAG_COLLECTED
     _DIAG_COLLECTED = []
 
-    val clos_count = _check_closure_capture_text(lines, file, "json")
-    val ret_count = _check_ignored_return_text_indexed(
-        lines, file, "json", indent_successors)
-    val bool_count = _check_multiline_bool_text(lines, file, "json")
-    val safe_count = _check_safety_text(lines, file, "json")
-    val vis_count = _check_visibility_text(lines, file, "json")
+    val clos_count = _check_closure_capture_text(lines, file, "json", emitter)
+    val ret_count = _check_ignored_return_text(lines, file, "json", emitter)
+    val bool_count = _check_multiline_bool_text(lines, file, "json", emitter)
+    val safe_count = _check_safety_text(lines, file, "json", emitter)
+    val vis_count = _check_visibility_text(lines, file, "json", emitter)
 
     for d in _DIAG_COLLECTED:
         parts.push(d)

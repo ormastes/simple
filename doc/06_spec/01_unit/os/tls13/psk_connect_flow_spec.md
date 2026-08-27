@@ -2,14 +2,32 @@
 
 > Tests covering PSK connect-flow splice — RFC 8446 §4.1.4 + §4.2.11 + §4.2.9.
 
-| Tests | Active | Skipped | Pending |
-|-------|--------|---------|--------:|
-| 8 | 8 | 0 | 0 |
+```sdn id=psk_connect_flow_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+psk_connect_flow_spec -> std
+psk_connect_flow_spec -> os
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=psk_connect_flow_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Psk Connect Flow Specification
+# psk_connect_flow_spec
+
+Verifies the psk connect flow behaviour end to end so maintainers of this
 
 ## Scenarios
 
@@ -202,23 +220,8 @@ expect(sel).to_equal(-1)
 | Category | Hardware & OS |
 | Status | Active |
 | Source | `test/01_unit/os/tls13/psk_connect_flow_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering PSK connect-flow splice — RFC 8446 §4.1.4 + §4.2.11 + §4.2.9.
-- PSK connect-flow splice — RFC 8446 §4.1.4 + §4.2.11 + §4.2.9
-
-## Scenario Summary
-
-| Metric | Count |
-|--------|------:|
-| Total scenarios | 8 |
-| Active scenarios | 8 |
-| Slow scenarios | 0 |
-| Skipped scenarios | 0 |
-| Pending scenarios | 0 |
 
 
 </details>

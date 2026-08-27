@@ -68,7 +68,7 @@ expect(combined.contains("canonical_rewrite_uses_simple_supported_intersection")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -93,7 +93,7 @@ expect(_active_tier_model("definitely-not-a-tier", "scalar", "x86_64_avx2")).to_
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -124,7 +124,7 @@ expect(clamped[1]).to_equal("avx2")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -147,6 +147,19 @@ expect(candidates[2]).to_equal("libsimple_runtime.so")
    - Expected: candidates[0] equals `/tmp/runtime/libsimple_runtime.aarch64_neon.so`
    - Expected: candidates[1] equals `/tmp/runtime/libsimple_runtime.so`
 
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val candidates = _runtime_library_candidates("/tmp/runtime", "aarch64_sve2")
+expect(candidates.len()).to_equal(2)
+expect(candidates[0]).to_equal("/tmp/runtime/libsimple_runtime.aarch64_neon.so")
+expect(candidates[1]).to_equal("/tmp/runtime/libsimple_runtime.so")
+```
+
+</details>
+
+#### falls through lower compatible embedded variants until a present resource is found
 
 <details>
 <summary>Executable SSpec</summary>
@@ -204,7 +217,7 @@ expect(selected).to_equal("runtime/sse2.so")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -226,7 +239,7 @@ expect(_manifest_is_valid(false, false, false)).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -235,7 +248,7 @@ step("changes cache identity when the active tier changes")
 # evidence(protocol_json): asserted result fields below are the complete typed oracle
 val scalar_key = _cache_identity("object:main", "scalar")
 val sse2_key = _cache_identity("object:main", "x86_64_sse2")
-expect(scalar_key).to_not_equal(sse2_key)
+expect(scalar_key == sse2_key).to_equal(false)
 ```
 
 </details>
@@ -253,7 +266,7 @@ expect(scalar_key).to_not_equal(sse2_key)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -283,7 +296,7 @@ expect(sse2_roots[1]).to_equal("src/lib/std/src")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -311,7 +324,7 @@ expect(x86[2]).to_equal("scalar")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple

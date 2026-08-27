@@ -6,7 +6,12 @@
 # ownership and liveness state machine.
 
 use os.compositor.engine2d_wm_frame_executor.{Engine2dWmFrameExecutor}
-use os.compositor.rv64_process_owned_scene.{Rv64ProcessOwnedScene, rv64_process_owned_scene}
+use os.compositor.rv64_process_owned_scene.{
+    Rv64ProcessOwnedScene,
+    rv64_process_owned_scene,
+    rv64_process_owned_render_cardinality_valid,
+    rv64_process_owned_presentation_binding_valid
+}
 use os.compositor.rv64_wm_present_receipt.{rv64_wm_engine2d_present_receipt}
 use os.desktop.shell.{DesktopShell, Rv64WmShellRenderInputs}
 use os.services.launcher.launcher_registry.{launcher_launch_path_with_args}
@@ -49,19 +54,23 @@ pub class Arm64ProductionWmProducer:
             return Arm64ProductionWmSnapshot(ready_to_present: false, reason: self.adapter.failure_reason, owned_scene: dead_scene, render_inputs: dead_inputs)
 
         val owned_scene = rv64_process_owned_scene(shell.compositor, self.process_id)
-        if owned_scene.process_surface_count <= 0:
+        if owned_scene.scene.windows.len() == 0:
             val waiting_inputs = shell.rv64_wm_render_inputs_for_snapshot(owned_scene)
             return Arm64ProductionWmSnapshot(ready_to_present: false, reason: "wm-process-surface-not-published", owned_scene: owned_scene, render_inputs: waiting_inputs)
         val render_inputs = shell.rv64_wm_render_inputs_for_snapshot(owned_scene)
         if not render_inputs.consistent:
             return Arm64ProductionWmSnapshot(ready_to_present: false, reason: render_inputs.reason, owned_scene: owned_scene, render_inputs: render_inputs)
+        if not rv64_process_owned_render_cardinality_valid(owned_scene, render_inputs.content_frames.len()):
+            return Arm64ProductionWmSnapshot(ready_to_present: false, reason: "wm-process-content-cardinality-mismatch", owned_scene: owned_scene, render_inputs: render_inputs)
         Arm64ProductionWmSnapshot(ready_to_present: true, reason: "ready-to-present", owned_scene: owned_scene, render_inputs: render_inputs)
 
     pub me present_snapshot(executor: Engine2dWmFrameExecutor, snapshot: Arm64ProductionWmSnapshot) -> Rv64ProductionWmVerdict:
         if not snapshot.ready_to_present or not snapshot.render_inputs.consistent:
             self.adapter.mark_failed(snapshot.reason)
             return self.adapter.verdict()
-        if snapshot.owned_scene.process_id != self.process_id or snapshot.owned_scene.process_surface_count <= 0:
+        if not rv64_process_owned_presentation_binding_valid(
+            snapshot.owned_scene, self.process_id, snapshot.render_inputs.content_frames.len()
+        ):
             self.adapter.mark_failed("snapshot-process-mismatch")
             return self.adapter.verdict()
         val presented_revision = executor.render(

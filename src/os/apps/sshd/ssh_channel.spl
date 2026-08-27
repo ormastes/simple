@@ -15,8 +15,6 @@ use os.apps.sshd.ssh_packet.{ssh_put_u32, ssh_put_text, ssh_put_string, ssh_put_
 val SSH_MSG_CHANNEL_OPEN: u8 = 90
 val SSH_MSG_CHANNEL_OPEN_CONFIRMATION: u8 = 91
 val SSH_MSG_CHANNEL_OPEN_FAILURE: u8 = 92
-val SSH_INVALID_CHANNEL_ID: u32 = 4294967295u32
-val SSH_MAX_CHANNELS_PER_SESSION: i64 = 256
 val SSH_MSG_CHANNEL_WINDOW_ADJUST: u8 = 93
 val SSH_MSG_CHANNEL_DATA: u8 = 94
 val SSH_MSG_CHANNEL_EXTENDED_DATA: u8 = 95
@@ -51,17 +49,6 @@ enum ChannelState:
     Closing
     Closed
 
-enum ChannelTerminalRequestV1:
-    None
-    Shell
-    Exec
-    Subsystem
-
-enum ChannelPeerCloseDecisionV1:
-    Invalid
-    Reply
-    Acknowledged
-
 struct SshChannel:
     """State for one SSH channel."""
     local_id: u32
@@ -74,24 +61,8 @@ struct SshChannel:
     remote_max_packet: u32
     pty_requested: bool
     shell_requested: bool
-    terminal_request: ChannelTerminalRequestV1
     peer_eof: bool
     env_vars: [(text, text)]
-
-struct ChannelDataAdmissionV1:
-    admitted: bool
-    remote_id: u32
-    remote_max_packet: u32
-    window_adjustment: u32
-
-impl ChannelDataAdmissionV1:
-    static fn rejected() -> ChannelDataAdmissionV1:
-        ChannelDataAdmissionV1(
-            admitted: false,
-            remote_id: SSH_INVALID_CHANNEL_ID,
-            remote_max_packet: 0u32,
-            window_adjustment: 0u32
-        )
 
 class ChannelTable:
     """Manages all active SSH channels for one session."""
@@ -100,14 +71,12 @@ class ChannelTable:
 
 impl ChannelTable:
 
-    pub static fn new() -> ChannelTable:
+    static fn new() -> ChannelTable:
         """Create an empty channel table."""
         ChannelTable(channels: [], next_id: 0)
 
-    pub me open(channel_type: ChannelType, remote_id: u32, remote_window: u32, remote_max_packet: u32) -> u32:
+    me open(channel_type: ChannelType, remote_id: u32, remote_window: u32, remote_max_packet: u32) -> u32:
         """Allocate a new channel. Returns the local channel ID."""
-        if self.channels.len() >= SSH_MAX_CHANNELS_PER_SESSION or self.next_id == SSH_INVALID_CHANNEL_ID or self.has_remote_id(remote_id):
-            return SSH_INVALID_CHANNEL_ID
         val local_id = self.next_id
         self.channels.push(SshChannel(
             local_id: local_id,
@@ -120,7 +89,6 @@ impl ChannelTable:
             remote_max_packet: remote_max_packet,
             pty_requested: false,
             shell_requested: false,
-            terminal_request: ChannelTerminalRequestV1.None,
             peer_eof: false,
             env_vars: []
         ))
@@ -128,17 +96,9 @@ impl ChannelTable:
 
         local_id
 
-    pub me seed_open(local_id: u32, channel_type: ChannelType, remote_id: u32, remote_window: u32, remote_max_packet: u32) -> bool:
+    me seed_open(local_id: u32, channel_type: ChannelType, remote_id: u32, remote_window: u32, remote_max_packet: u32):
         """Seed a known-open channel without touching the C-side table."""
-        if local_id == SSH_INVALID_CHANNEL_ID:
-            return false
-        val idx = self._find_local_index(local_id)
-        # A repeated/replayed CHANNEL_OPEN must never overwrite an active
-        # entry or refresh its windows.  Callers send OPEN_FAILURE instead.
-        if idx >= 0 or self.has_remote_id(remote_id):
-            return false
-        if self.channels.len() >= SSH_MAX_CHANNELS_PER_SESSION:
-            return false
+        var idx = self._find_local_index(local_id)
         val seeded = SshChannel(
             local_id: local_id,
             remote_id: remote_id,
@@ -150,14 +110,15 @@ impl ChannelTable:
             remote_max_packet: remote_max_packet,
             pty_requested: false,
             shell_requested: false,
-            terminal_request: ChannelTerminalRequestV1.None,
             peer_eof: false,
             env_vars: []
         )
-        self.channels.push(seeded)
+        if idx >= 0:
+            self.channels[idx as u64] = seeded
+        else:
+            self.channels.push(seeded)
         if self.next_id <= local_id:
             self.next_id = local_id + 1
-        true
 
     pub fn has_remote_id(remote_id: u32) -> bool:
         for channel in self.channels:
@@ -166,14 +127,9 @@ impl ChannelTable:
         false
 
     pub me session_channel_open_response(remote_id: u32, remote_window: u32, remote_max_packet: u32) -> [u8]:
-        # Allocate through the sole channel-table owner.  Pinning every
-        # server-side identifier to zero made the first channel work but
-        # rejected every later RFC 4254 session on the same connection, even
-        # though this table owns a bounded multiplexed channel set.
-        val local_id = self.open(
-            ChannelType.Session, remote_id, remote_window, remote_max_packet)
-        if local_id == SSH_INVALID_CHANNEL_ID:
-            val reason = if self.has_remote_id(remote_id): "channel already open" else: "channel capacity exhausted"
+        val local_id: u32 = 0
+        if !self.seed_open(local_id, ChannelType.Session, remote_id, remote_window, remote_max_packet):
+            val reason = if self._find_local_index(local_id) >= 0 or self.has_remote_id(remote_id): "channel already open" else: "channel capacity exhausted"
             return ssh_build_channel_open_failure(remote_id, 4, reason)
         ssh_build_channel_open_confirmation(remote_id, local_id, DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET)
 
@@ -182,41 +138,6 @@ impl ChannelTable:
         val idx = self._find_local_index(local_id)
         if idx >= 0:
             self.channels[idx as u64].state = ChannelState.Closed
-            return true
-        false
-
-    pub me begin_local_close(local_id: u32) -> bool:
-        """Commit one locally-originated CHANNEL_CLOSE without losing ownership.
-
-        RFC 4254 requires the peer to answer CHANNEL_CLOSE.  Retaining the
-        channel in Closing state lets a multiplexed connection recognize that
-        acknowledgement instead of treating it as an unknown-channel attack.
-        """
-        val idx = self._find_local_index(local_id)
-        if idx < 0 or self.channels[idx as u64].state != ChannelState.Open:
-            return false
-        self.channels[idx as u64].state = ChannelState.Closing
-        true
-
-    pub me accept_peer_close(local_id: u32) -> ChannelPeerCloseDecisionV1:
-        """Atomically consume the peer half of the close handshake.
-
-        An open channel needs one close reply.  A Closing channel is an
-        acknowledgement of our earlier close and must not be echoed again.
-        Invalid, duplicate, and already-closed identifiers leave state intact.
-        """
-        val idx = self._find_local_index(local_id)
-        if idx < 0:
-            return ChannelPeerCloseDecisionV1.Invalid
-        match self.channels[idx as u64].state:
-            ChannelState.Open:
-                self.channels[idx as u64].state = ChannelState.Closed
-                ChannelPeerCloseDecisionV1.Reply
-            ChannelState.Closing:
-                self.channels[idx as u64].state = ChannelState.Closed
-                ChannelPeerCloseDecisionV1.Acknowledged
-            _:
-                ChannelPeerCloseDecisionV1.Invalid
 
     pub fn find(local_id: u32) -> SshChannel?:
         """Find a channel by local ID. Returns nil if not found."""
@@ -225,110 +146,24 @@ impl ChannelTable:
             return self.channels[idx as u64]
         nil
 
-    pub fn is_open_session(local_id: u32) -> bool:
-        """Return true only for a live RFC 4254 session channel."""
-        val idx = self._find_local_index(local_id)
-        if idx < 0:
-            return false
-        val channel = self.channels[idx as u64]
-        channel.state == ChannelState.Open and
-            channel.channel_type == ChannelType.Session
-
-    pub me begin_terminal_request(
-        local_id: u32, request: ChannelTerminalRequestV1
-    ) -> bool:
-        """Commit one shell, exec, or subsystem request exactly once.
-
-        The per-session ChannelTable is the sole mutable request-state owner.
-        Invalid channels and a second terminal request leave state unchanged.
-        """
-        if request == ChannelTerminalRequestV1.None:
-            return false
-        val idx = self._find_local_index(local_id)
-        if idx < 0:
-            return false
-        val channel = self.channels[idx as u64]
-        if channel.state != ChannelState.Open or
-            channel.channel_type != ChannelType.Session or
-            channel.terminal_request != ChannelTerminalRequestV1.None:
-            return false
-        if request == ChannelTerminalRequestV1.Shell:
-            # SshSession owns one interactive shell object. Admit exactly one
-            # channel as its input/output owner instead of aliasing that mutable
-            # shell across multiplexed siblings.
-            for existing in self.channels:
-                if existing.state != ChannelState.Closed and
-                    existing.terminal_request == ChannelTerminalRequestV1.Shell:
-                    return false
-        self.channels[idx as u64].terminal_request = request
-        self.channels[idx as u64].shell_requested =
-            request == ChannelTerminalRequestV1.Shell
-        true
-
-    pub fn shell_input_allowed(local_id: u32) -> bool:
-        """Return true only for the live channel owning the session shell."""
-        val idx = self._find_local_index(local_id)
-        if idx < 0:
-            return false
-        val channel = self.channels[idx as u64]
-        channel.state == ChannelState.Open and
-            channel.channel_type == ChannelType.Session and
-            channel.terminal_request == ChannelTerminalRequestV1.Shell
-
-    pub me mark_pty_requested_once(local_id: u32) -> bool:
-        """Commit one PTY request on an open session before its terminal request."""
-        val idx = self._find_local_index(local_id)
-        if idx < 0:
-            return false
-        val channel = self.channels[idx as u64]
-        if channel.state != ChannelState.Open or
-            channel.channel_type != ChannelType.Session or
-            channel.pty_requested or
-            channel.terminal_request != ChannelTerminalRequestV1.None:
-            return false
-        self.channels[idx as u64].pty_requested = true
-        true
-
-    pub fn window_change_allowed(local_id: u32) -> bool:
-        """Accept geometry updates only for a live PTY-backed shell."""
-        val idx = self._find_local_index(local_id)
-        if idx < 0:
-            return false
-        val channel = self.channels[idx as u64]
-        channel.state == ChannelState.Open and
-            channel.channel_type == ChannelType.Session and
-            channel.pty_requested and
-            channel.terminal_request == ChannelTerminalRequestV1.Shell
-
     fn find_mut(local_id: u32) -> SshChannel?:
         """Find a channel by local ID (mutable access).
         Delegates to find() which uses C-side table."""
         self.find(local_id)
 
-    pub me adjust_window(local_id: u32, bytes: u32) -> bool:
+    me adjust_window(local_id: u32, bytes: u32):
         """Increase local receive window by bytes."""
         val idx = self._find_local_index(local_id)
         if idx >= 0:
-            val current = self.channels[idx as u64].local_window
-            if bytes > 4294967295u32 - current:
-                return false
-            var new_window: u32 = current + bytes
+            var new_window: u32 = self.channels[idx as u64].local_window + bytes
             self.channels[idx as u64].local_window = new_window
-            return true
-        false
 
     pub me adjust_remote_window(local_id: u32, bytes: u32) -> bool:
         """Increase peer send window with checked u32 arithmetic."""
-        # RFC 4254 section 5.2 requires WINDOW_ADJUST to add a positive
-        # number of bytes.  Treat zero as malformed at the sole window owner;
-        # accepting it as a successful no-op lets a peer drive unproductive
-        # SFTP pump dispatch without transferring credit.
-        if bytes == 0u32:
-            return false
         val idx = self._find_local_index(local_id)
         if idx < 0:
             return false
-        if self.channels[idx as u64].state != ChannelState.Open:
+        if self.channels[idx as u64].state != ChannelState.Open or bytes == 0u32:
             return false
         val current = self.channels[idx as u64].remote_window
         if bytes > 4294967295u32 - current:
@@ -336,28 +171,12 @@ impl ChannelTable:
         self.channels[idx as u64].remote_window = current + bytes
         true
 
-    pub me apply_remote_window_adjust(payload: [u8]) -> bool:
-        """Atomically admit one exact RFC 4254 window-adjust message.
-
-        Framing, channel identity, lifecycle, and overflow
-        are checked before the sole mutable channel owner changes its window.
-        A rejected payload leaves every channel unchanged.
-        """
-        val parsed = ssh_parse_window_adjust(payload)
-        if parsed.is_err():
-            return false
-        val adjustment = parsed.unwrap()
-        self.adjust_remote_window(adjustment.0, adjustment.1)
-
     pub me consume_remote_window(local_id: u32, bytes: u32) -> bool:
         """Consume bytes from the remote send window. Returns false if insufficient."""
         val idx = self._find_local_index(local_id)
         if idx < 0:
             return false
-        # RFC 4254 forbids sending any more channel data after either side has
-        # sent CHANNEL_CLOSE.  Closing remains retained only to recognize the
-        # peer acknowledgement; it is not a writable state.
-        if self.channels[idx as u64].state != ChannelState.Open:
+        if self.channels[idx as u64].state == ChannelState.Closed:
             return false
         var rw = self.channels[idx as u64].remote_window
         if rw < bytes:
@@ -371,42 +190,14 @@ impl ChannelTable:
         The peer's string must fit both its remaining window and the maximum
         packet size that this endpoint advertised.
         """
-        self._admit_local_data(local_id, bytes, false).admitted
-
-    pub me admit_local_data(local_id: u32, bytes: u32) -> ChannelDataAdmissionV1:
-        """Atomically admit data and prepare receive-window replenishment.
-
-        ChannelTable is the sole window owner, so every protocol consumer
-        (shell, exec helpers, SCP, and SFTP) shares the same bounded policy.
-        The hot path resolves the channel once, validates lifecycle and packet
-        limits, consumes credit, snapshots peer routing limits, and restores
-        the low window. The caller advertises `window_adjustment` exactly once.
-        """
-        self._admit_local_data(local_id, bytes, true)
-
-    me _admit_local_data(
-        local_id: u32, bytes: u32, replenish: bool
-    ) -> ChannelDataAdmissionV1:
         val idx = self._find_local_index(local_id)
-        if idx < 0 or self.channels[idx as u64].state != ChannelState.Open:
-            return ChannelDataAdmissionV1.rejected()
-        val channel = self.channels[idx as u64]
-        if channel.peer_eof or bytes > channel.local_max_packet or
-            bytes > channel.local_window:
-            return ChannelDataAdmissionV1.rejected()
-        val remaining = channel.local_window - bytes
-        var adjustment = 0u32
-        if replenish and remaining < DEFAULT_WINDOW_SIZE / 2u32:
-            adjustment = DEFAULT_WINDOW_SIZE - remaining
-            self.channels[idx as u64].local_window = DEFAULT_WINDOW_SIZE
-        else:
-            self.channels[idx as u64].local_window = remaining
-        ChannelDataAdmissionV1(
-            admitted: true,
-            remote_id: channel.remote_id,
-            remote_max_packet: channel.remote_max_packet,
-            window_adjustment: adjustment
-        )
+        if idx >= 0:
+            var lw = self.channels[idx as u64].local_window
+            if lw < bytes:
+                return false
+            self.channels[idx as u64].local_window = lw - bytes
+            return true
+        false
 
     pub me mark_peer_eof(local_id: u32) -> bool:
         """Record the peer's receive half-close exactly once."""
@@ -501,8 +292,6 @@ fn ssh_parse_channel_data(data: [u8]) -> Result<(u32, [u8]), text>:
     var recipient: u32 = ssh_get_u32(data, 1)
     match ssh_get_string(data, 5):
         Ok(data_pair):
-            if data_pair.next_offset != data.len():
-                return Err("CHANNEL_DATA: trailing bytes")
             Ok((recipient, data_pair.data))
         Err(_):
             Err("CHANNEL_DATA: bad data field")
@@ -546,8 +335,8 @@ fn ssh_parse_window_adjust(data: [u8]) -> Result<(u32, u32), text>:
 
     Returns: (recipient_channel, bytes_to_add)
     """
-    if data.len() != 9:
-        return Err("WINDOW_ADJUST must be exactly 9 bytes")
+    if data.len() < 9:
+        return Err("WINDOW_ADJUST too short")
     if data[0] != SSH_MSG_CHANNEL_WINDOW_ADJUST:
         return Err("not a WINDOW_ADJUST")
 
@@ -557,20 +346,16 @@ fn ssh_parse_window_adjust(data: [u8]) -> Result<(u32, u32), text>:
 
 fn ssh_parse_channel_eof(data: [u8]) -> Result<u32, text>:
     """Parse SSH_MSG_CHANNEL_EOF. Returns recipient channel."""
-    if data.len() != 5:
-        return Err("CHANNEL_EOF must be exactly 5 bytes")
+    if data.len() < 5:
+        return Err("CHANNEL_EOF too short")
     if data[0] != SSH_MSG_CHANNEL_EOF:
         return Err("not a CHANNEL_EOF")
     Ok(ssh_get_u32(data, 1))
 
 fn ssh_parse_channel_close(data: [u8]) -> Result<u32, text>:
     """Parse SSH_MSG_CHANNEL_CLOSE. Returns recipient channel."""
-    # RFC 4254 section 5.3 defines no fields after the recipient channel.
-    # Require the exact packet extent just as CHANNEL_EOF does: accepting
-    # attacker-selected trailing bytes would silently discard ordered
-    # connection-layer input while still committing the close transition.
-    if data.len() != 5:
-        return Err("CHANNEL_CLOSE must be exactly 5 bytes")
+    if data.len() < 5:
+        return Err("CHANNEL_CLOSE too short")
     if data[0] != SSH_MSG_CHANNEL_CLOSE:
         return Err("not a CHANNEL_CLOSE")
     Ok(ssh_get_u32(data, 1))
@@ -643,8 +428,9 @@ fn ssh_build_channel_failure(recipient: u32) -> [u8]:
     buf = ssh_put_u32(buf, recipient)
     buf
 
-export ChannelTable, SshChannel, ChannelType, ChannelState, ChannelTerminalRequestV1
+export ChannelTable, SshChannel, ChannelType, ChannelState
 export ssh_parse_channel_open, ssh_parse_channel_data, ssh_parse_channel_request
+export ssh_parse_channel_data_header_v1, ChannelDataHeaderV1
 export ssh_parse_window_adjust, ssh_parse_channel_eof, ssh_parse_channel_close
 export ssh_build_channel_open_confirmation, ssh_build_channel_open_failure
 export ssh_build_channel_data, ssh_build_channel_window_adjust
@@ -652,5 +438,4 @@ export ssh_build_channel_eof, ssh_build_channel_close
 export ssh_build_channel_success, ssh_build_channel_failure
 export SSH_MSG_CHANNEL_OPEN, SSH_MSG_CHANNEL_OPEN_CONFIRMATION, SSH_MSG_CHANNEL_OPEN_FAILURE, SSH_MSG_CHANNEL_DATA, SSH_MSG_CHANNEL_EXTENDED_DATA, SSH_MSG_CHANNEL_WINDOW_ADJUST, SSH_INVALID_CHANNEL_ID, SSH_MAX_CHANNELS_PER_SESSION
 export SSH_MSG_CHANNEL_EOF, SSH_MSG_CHANNEL_CLOSE, SSH_MSG_CHANNEL_REQUEST
-export ChannelPeerCloseDecisionV1
-export DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET, SSH_OPEN_ADMINISTRATIVELY_PROHIBITED, SSH_OPEN_UNKNOWN_CHANNEL_TYPE, SSH_OPEN_RESOURCE_SHORTAGE
+export DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET

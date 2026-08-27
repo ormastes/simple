@@ -34,6 +34,31 @@
 - NFR-G2-012: Composed compressed decode has deterministic table order and an
   explicit legal/match signal per row. It must reject overlapping or unproven
   row admission rather than using canonical-zero inference.
+- NFR-G2-013: Every scalar provider boundary is fail-closed under forged
+  instruction/register/provider identity, invalid ready/valid ordering, stale
+  response identity, and child-graph substitution. Invalid or stalled payloads
+  are stable and normalized; sticky protocol faults are externally observable.
+- NFR-G2-014: M/Zmmul arithmetic uses one width-parameterized semantic source,
+  with deterministic structural identity and no host-width shortcut that can
+  change unsigned 64-bit, signed-high, division corner, or RV64 W behavior.
+- NFR-G2-015: System exception projection is deterministic and fail-closed:
+  invalid input normalizes every payload field, the concrete instruction and
+  privilege-derived cause are part of the typed graph receipt, and no system
+  provider may bypass the completion skid, trap normalizer, fault aggregator,
+  or sole retirement owner.
+- NFR-G2-016: Scalar-I arithmetic remains one monomorphized RV32/RV64 graph
+  family. Shift serialization must never convert an arbitrary XLEN-wide value
+  directly to VHDL INTEGER; out-of-range counts have defined typed behavior,
+  and no emitted graph contains runtime opcode, extension, or XLEN selection.
+- NFR-G2-017: CSR access is elaboration-time specialized and fail-closed. No
+  emitted graph contains runtime extension/provider selection, no denied access
+  asserts a CSR read or write effect, and a missing atomic CSR state owner must
+  remain an explicit qualification blocker rather than being represented as a
+  successful Zicsr product.
+- NFR-G2-018: Fence effects are explicit, deterministic, and atomic with the
+  accepted scalar event. A product must never lower a fence to a no-op, retire
+  it before effect acknowledgement, duplicate it while stalled, or admit a
+  future `memory-order` row as FENCE without an exact ISA identity contract.
 
 Evidence is implemented as focused unit and system scenarios,
 deterministic-render comparison, strict-route provenance/fail-closed tests,

@@ -1,0 +1,211 @@
+# SPipe Knowledge Compiler scalar identity model (Wave 2, v1).
+#
+# This module deliberately owns only ASCII wire identities and SHA-256 text.
+# Unicode-normalized semantic keys, revisions, and paths belong to a later
+# slice once the pure-Simple NFC prerequisite is admitted.
+
+use std.common.encoding.utf8.{text_is_ascii}
+
+pub enum KnowledgeModelErrorCode:
+    InvalidUid
+    InvalidHash
+
+pub struct KnowledgeModelError:
+    code: KnowledgeModelErrorCode
+    record_type: text
+    field: text
+    byte_offset: i64
+    detail: text
+
+pub struct WorkspaceId:
+    value: text
+
+pub struct ProjectId:
+    value: text
+
+pub struct WorktreeId:
+    value: text
+
+pub struct ArtifactUid:
+    value: text
+
+pub struct ProvisionalArtifactUid:
+    value: text
+    project_id: ProjectId
+    content_hash: ContentHash
+
+pub enum ArtifactIdentity:
+    Canonical(value: ArtifactUid)
+    Provisional(value: ProvisionalArtifactUid)
+
+pub struct SectionUid:
+    value: text
+
+pub struct EdgeUid:
+    value: text
+
+pub enum KnowledgeUid:
+    Workspace(value: WorkspaceId)
+    Project(value: ProjectId)
+    Worktree(value: WorktreeId)
+    Artifact(value: ArtifactUid)
+    Section(value: SectionUid)
+    Edge(value: EdgeUid)
+
+pub struct ContentHash:
+    value: text
+
+fn _error(code: KnowledgeModelErrorCode, record_type: text, field: text,
+          byte_offset: i64, detail: text) -> KnowledgeModelError:
+    KnowledgeModelError(code: code, record_type: record_type, field: field,
+        byte_offset: byte_offset, detail: detail)
+
+fn _ascii_at(value: text, index: i64) -> text:
+    value.slice(index, index + 1)
+
+fn _is_upper_hex(ch: text) -> bool:
+    "0123456789ABCDEF".contains(ch)
+
+fn _is_lower_hex(ch: text) -> bool:
+    "0123456789abcdef".contains(ch)
+
+fn _is_crockford(ch: text) -> bool:
+    "0123456789ABCDEFGHJKMNPQRSTVWXYZ".contains(ch)
+
+fn _validate_canonical_uid(value: text, prefix: text, record_type: text) -> Result<text, KnowledgeModelError>:
+    if not text_is_ascii(value):
+        return Err(_error(KnowledgeModelErrorCode.InvalidUid, record_type,
+            "value", 0, "identity must contain ASCII characters only"))
+    if not value.starts_with(prefix):
+        return Err(_error(KnowledgeModelErrorCode.InvalidUid, record_type,
+            "value", 0, "invalid identity prefix"))
+    val payload_len = value.len() - prefix.len()
+    if payload_len != 32 and payload_len != 26:
+        return Err(_error(KnowledgeModelErrorCode.InvalidUid, record_type,
+            "value", prefix.len(), "identity payload must be 32 uppercase hex or 26 Crockford characters"))
+    var i = prefix.len()
+    while i < value.len():
+        val ch = _ascii_at(value, i)
+        val valid = if payload_len == 32: _is_upper_hex(ch) else: _is_crockford(ch)
+        if not valid:
+            return Err(_error(KnowledgeModelErrorCode.InvalidUid, record_type,
+                "value", i, "invalid identity payload character"))
+        i = i + 1
+    Ok(value)
+
+pub fn parse_workspace_id_v1(value: text) -> Result<WorkspaceId, KnowledgeModelError>:
+    match _validate_canonical_uid(value, "WS-", "WorkspaceId"):
+        Ok(valid): Ok(WorkspaceId(value: valid))
+        Err(error): Err(error)
+
+pub fn parse_project_id_v1(value: text) -> Result<ProjectId, KnowledgeModelError>:
+    match _validate_canonical_uid(value, "P-", "ProjectId"):
+        Ok(valid): Ok(ProjectId(value: valid))
+        Err(error): Err(error)
+
+pub fn parse_worktree_id_v1(value: text) -> Result<WorktreeId, KnowledgeModelError>:
+    match _validate_canonical_uid(value, "WT-", "WorktreeId"):
+        Ok(valid): Ok(WorktreeId(value: valid))
+        Err(error): Err(error)
+
+pub fn parse_artifact_uid_v1(value: text) -> Result<ArtifactUid, KnowledgeModelError>:
+    match _validate_canonical_uid(value, "A-", "ArtifactUid"):
+        Ok(valid): Ok(ArtifactUid(value: valid))
+        Err(error): Err(error)
+
+pub fn parse_section_uid_v1(value: text) -> Result<SectionUid, KnowledgeModelError>:
+    match _validate_canonical_uid(value, "S-", "SectionUid"):
+        Ok(valid): Ok(SectionUid(value: valid))
+        Err(error): Err(error)
+
+pub fn parse_edge_uid_v1(value: text) -> Result<EdgeUid, KnowledgeModelError>:
+    match _validate_canonical_uid(value, "E-", "EdgeUid"):
+        Ok(valid): Ok(EdgeUid(value: valid))
+        Err(error): Err(error)
+
+pub fn parse_content_hash_v1(value: text) -> Result<ContentHash, KnowledgeModelError>:
+    if not text_is_ascii(value):
+        return Err(_error(KnowledgeModelErrorCode.InvalidHash, "ContentHash",
+            "value", 0, "SHA-256 text must contain ASCII characters only"))
+    val digest = if value.starts_with("sha256:"): value.slice(7, value.len()) else: value
+    val offset = if value.starts_with("sha256:"): 7 else: 0
+    if digest.len() != 64:
+        return Err(_error(KnowledgeModelErrorCode.InvalidHash, "ContentHash",
+            "value", offset, "SHA-256 digest must contain exactly 64 lowercase hexadecimal characters"))
+    var i = 0
+    while i < digest.len():
+        if not _is_lower_hex(_ascii_at(digest, i)):
+            return Err(_error(KnowledgeModelErrorCode.InvalidHash, "ContentHash",
+                "value", offset + i, "invalid lowercase SHA-256 character"))
+        i = i + 1
+    Ok(ContentHash(value: "sha256:" + digest))
+
+pub fn derive_provisional_artifact_uid_v1(project_id: ProjectId,
+        content_hash: ContentHash) -> ProvisionalArtifactUid:
+    val digest = content_hash.value.slice(7, content_hash.value.len())
+    ProvisionalArtifactUid(value: "P-" + project_id.value + "-" + digest,
+        project_id: project_id, content_hash: content_hash)
+
+pub fn parse_provisional_artifact_uid_v1(value: text) -> Result<ProvisionalArtifactUid, KnowledgeModelError>:
+    # A project ID has one of two closed payload widths. Try both exact cuts;
+    # neither parser repairs or changes the embedded representation.
+    val project_lengths = [34, 28]
+    var i = 0
+    while i < project_lengths.len():
+        val project_end = 2 + project_lengths[i]
+        if (value.len() == project_end + 1 + 64 and value.starts_with("P-") and
+                _ascii_at(value, project_end) == "-"):
+            val project_text = value.slice(2, project_end)
+            val digest = value.slice(project_end + 1, value.len())
+            match parse_project_id_v1(project_text):
+                Ok(project_id):
+                    match parse_content_hash_v1(digest):
+                        Ok(content_hash):
+                            val derived = derive_provisional_artifact_uid_v1(project_id, content_hash)
+                            if derived.value == value:
+                                return Ok(derived)
+                        Err(_): pass
+                Err(_): pass
+        i = i + 1
+    Err(_error(KnowledgeModelErrorCode.InvalidUid, "ProvisionalArtifactUid",
+        "value", 0, "expected P-<ProjectId>-<64 lowercase SHA-256 hex>"))
+
+pub fn parse_artifact_identity_v1(value: text) -> Result<ArtifactIdentity, KnowledgeModelError>:
+    if value.starts_with("A-"):
+        match parse_artifact_uid_v1(value):
+            Ok(uid): return Ok(ArtifactIdentity.Canonical(uid))
+            Err(error): return Err(error)
+    if value.starts_with("P-P-"):
+        match parse_provisional_artifact_uid_v1(value):
+            Ok(uid): return Ok(ArtifactIdentity.Provisional(uid))
+            Err(error): return Err(error)
+    Err(_error(KnowledgeModelErrorCode.InvalidUid, "ArtifactIdentity", "value",
+        0, "expected canonical A- identity or provisional P-P- identity"))
+
+pub fn parse_knowledge_uid_v1(value: text) -> Result<KnowledgeUid, KnowledgeModelError>:
+    if value.starts_with("WS-"):
+        match parse_workspace_id_v1(value):
+            Ok(uid): return Ok(KnowledgeUid.Workspace(uid))
+            Err(error): return Err(error)
+    if value.starts_with("WT-"):
+        match parse_worktree_id_v1(value):
+            Ok(uid): return Ok(KnowledgeUid.Worktree(uid))
+            Err(error): return Err(error)
+    if value.starts_with("A-"):
+        match parse_artifact_uid_v1(value):
+            Ok(uid): return Ok(KnowledgeUid.Artifact(uid))
+            Err(error): return Err(error)
+    if value.starts_with("S-"):
+        match parse_section_uid_v1(value):
+            Ok(uid): return Ok(KnowledgeUid.Section(uid))
+            Err(error): return Err(error)
+    if value.starts_with("E-"):
+        match parse_edge_uid_v1(value):
+            Ok(uid): return Ok(KnowledgeUid.Edge(uid))
+            Err(error): return Err(error)
+    if value.starts_with("P-"):
+        match parse_project_id_v1(value):
+            Ok(uid): return Ok(KnowledgeUid.Project(uid))
+            Err(error): return Err(error)
+    Err(_error(KnowledgeModelErrorCode.InvalidUid, "KnowledgeUid", "value", 0,
+        "unknown canonical knowledge identity prefix"))

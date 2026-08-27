@@ -26,6 +26,7 @@ use compiler.types.type_layout.{LayoutVerification, LayoutAttr, layoutattr_c_rep
 use compiler.hir.hir_definitions.{HirField}
 use compiler.hir.hir_types.{HirType}
 use compiler.common.diagnostics.span.{Span}
+use compiler.frontend.parser_types_expr.{AsmConstraintKind, AsmLocation}
 extern fn rt_enum_discriminant(value: Any) -> i64
 
 # Lane C7: render a MIR instruction's source span for a loud backend
@@ -107,21 +108,33 @@ impl MirToC:
 
             # === Function Calls ===
             case Call(dest, func, args):
-                val func_val = self.translate_operand(func)
-                # Try container call interception first
-                if self.translate_container_call(func_val, dest, args):
-                    pass_dn
-                else:
-                    var arg_vals: [text] = []
-                    for arg in args:
-                        arg_vals = arg_vals.push(self.translate_operand(arg))
-                    val args_str = arg_vals.join(", ")
-                    if dest.?:
-                        val dest_name = self.get_local(dest.unwrap().id)
-                        val ret_ty = self.get_local_type(dest.unwrap().id)
-                        self.builder.emit_assign(dest_name, func_val + r"(" + args_str + r")")
+                # A statically resolved MIR function is represented by
+                # Const(Str(symbol), FuncPtr(signature)).  It must lower as
+                # the symbol itself, rather than as the C string literal used
+                # for ordinary Str values.  This is what lets the compiler
+                # generated RT/HAL exact-exit arena helpers call their Pure
+                # Simple definitions through the normal forward declarations.
+                if val func_symbol = c_backend_direct_func_symbol(func):
+                    # Try container call interception first.
+                    if self.translate_container_call(func_symbol, dest, args):
+                        pass_dn
                     else:
-                        self.builder.emit(func_val + r"(" + args_str + r");")
+                        var arg_vals: [text] = []
+                        for arg in args:
+                            arg_vals = arg_vals.push(self.translate_operand(arg))
+                        val args_str = arg_vals.join(", ")
+                        if dest.?:
+                            val dest_name = self.get_local(dest.unwrap().id)
+                            val ret_ty = self.get_local_type(dest.unwrap().id)
+                            self.builder.emit_assign(dest_name, func_symbol + r"(" + args_str + r")")
+                        else:
+                            self.builder.emit(func_symbol + r"(" + args_str + r");")
+                else:
+                    # Do not guess an ABI or cast arbitrary data/function
+                    # values.  Indirect calls have their own MIR node and
+                    # lowering; a malformed direct Call must fail at compile
+                    # time instead of producing C++ with a text pointer call.
+                    self.emit_unsupported_panic("C backend requires CallIndirect for a non-symbol call target")
 
             case CallIndirect(dest, ptr, args, sig):
                 val ptr_val = self.translate_operand(ptr)
@@ -129,15 +142,23 @@ impl MirToC:
                 for arg in args:
                     arg_vals = arg_vals.push(self.translate_operand(arg))
                 val args_str = arg_vals.join(", ")
-                val ret_ty = if dest.?:
-                    self.get_local_type(dest.unwrap().id)
-                else:
-                    if sig.return_type == nil: "void" else: self.type_mapper.map_type(sig.return_type)
+                val ret_ty = self.type_mapper.map_type(sig.return_type)
                 if dest.?:
                     val dest_name = self.get_local(dest.unwrap().id)
                     self.builder.emit_assign(dest_name, r"((" + ret_ty + r"(*)(...))(" + ptr_val + r"))(" + args_str + r")")
                 else:
                     self.builder.emit(r"((" + ret_ty + r"(*)(...))(" + ptr_val + r"))(" + args_str + r");")
+
+            case RtHalEnvExecutorProvenance(_, _, _, _, _):
+                self.emit_unsupported_panic("C backend received unstripped RT/HAL executor provenance")
+
+            # RtHalExitCapture deliberately has no generic C object-byte
+            # lowering.  Passing `&value` plus `sizeof(value)` would observe
+            # padding and host layout, and pointer-bearing values would leak
+            # process addresses into the comparison transcript.  A generated
+            # canonical codec must lower this node before C emission.
+            case RtHalExitCapture(_, _, _, _, _, _, _, _, _, _, _, _):
+                self.emit_unsupported_panic("C backend requires a canonical RT/HAL V2 exit codec")
 
             # === Casts ===
             case Cast(dest, operand, target):
@@ -368,6 +389,9 @@ impl MirToC:
             case DebugValue(local, name):
                 pass_dn
 
+            case ResultMatchSemantic(_, _, _, _, _, _, _):
+                pass_dn("verification-only Result match witness is erased by the C backend")
+
             case Nop:
                 pass_dn
 
@@ -384,7 +408,7 @@ impl MirToC:
             case Spawn(dest, handler, args):
                 self.emit_unsupported_panic("C backend does not support async Spawn lowering")
 
-            case Send(target, message):
+            case Send(dest, target, message):
                 self.emit_unsupported_panic("C backend does not support actor Send lowering")
 
             case Receive(dest, timeout):
@@ -412,6 +436,8 @@ impl MirToC:
                 self.emit_unsupported_panic("C backend does not support GPU kernel definitions")
             case GpuLaunch(args):
                 self.emit_unsupported_panic("C backend does not support GPU launches")
+            case GpuLaunchConfigured(_, _, _):
+                self._unsupported_c_inst("GpuLaunchConfigured", inst.span)
             case GpuGlobalId(dest, dim):
                 self.emit_unsupported_panic("C backend does not support GpuGlobalId")
             case GpuLocalId(dest, dim):
@@ -428,6 +454,8 @@ impl MirToC:
                 self.emit_unsupported_panic("C backend does not support GpuMemFence")
             case GpuSharedAlloc(dest, type_, size):
                 self.emit_unsupported_panic("C backend does not support GpuSharedAlloc")
+            case GpuSharedAllocInit(_, _, _, _):
+                self._unsupported_c_inst("GpuSharedAllocInit", inst.span)
             case GpuAtomicOp(dest, op, ptr, value):
                 self.emit_unsupported_panic("C backend does not support GpuAtomicOp")
             case GpuAtomicCas(dest, ptr, expected, desired):
@@ -519,120 +547,6 @@ impl MirToC:
             case SimdHminF32x4(dest, a):
                 self.emit_unsupported_panic("C backend does not support SIMD hmin_f32x4")
 
-            # ----------------------------------------------------------------
-            # Lane C7 (backend coverage, hardening plan 2026-08-21 sections
-            # 11.3-11.6). EXPLICIT arms for the 36 MirInstKind variants that had
-            # NO arm at all in this match. Reaching one was an unnamed match
-            # failure inside code generation with nothing naming WHICH
-            # instruction the C backend cannot lower. Each now raises a stable,
-            # greppable, spanned E-BACKEND-C-INST-<Variant>.
-            # Universe: spec/compiler_schema/registry/compiler.mir.MirInstKind.sdn
-            # Table:    spec/compiler_schema/transitions/mir_inst_to_c_backend.sdn
-            # ----------------------------------------------------------------
-            case ConditionProbe(_, _, _, _, _, _, _, _):
-                self._unsupported_c_inst("ConditionProbe", inst.span)
-            case DecisionProbe(_, _, _, _, _, _):
-                self._unsupported_c_inst("DecisionProbe", inst.span)
-            case Drop(_):
-                # Deliberate no-op: Drop is a MIR-level marker with no C
-                # code-generation effect. Recorded `implemented` in the table.
-                pass_dn
-            case HostGpuLaneBegin(_, _):
-                self._unsupported_c_inst("HostGpuLaneBegin", inst.span)
-            case HostGpuLaneEnd(_):
-                self._unsupported_c_inst("HostGpuLaneEnd", inst.span)
-            case LoadGlobal(_, _):
-                self._unsupported_c_inst("LoadGlobal", inst.span)
-            case GlobalAddr(_, _, _):
-                self._unsupported_c_inst("GlobalAddr", inst.span)
-            case MaskFromCmp(_, _, _, _):
-                self._unsupported_c_inst("MaskFromCmp", inst.span)
-            case MaskedAdd(_, _, _, _):
-                self._unsupported_c_inst("MaskedAdd", inst.span)
-            case MaskedFma(_, _, _, _, _):
-                self._unsupported_c_inst("MaskedFma", inst.span)
-            case MaskedMul(_, _, _, _):
-                self._unsupported_c_inst("MaskedMul", inst.span)
-            case MirSimdBinop(_, _, _, _):
-                self._unsupported_c_inst("MirSimdBinop", inst.span)
-            case MirSimdCmp(_, _, _, _):
-                self._unsupported_c_inst("MirSimdCmp", inst.span)
-            case MirSimdGather(_, _, _, _):
-                self._unsupported_c_inst("MirSimdGather", inst.span)
-            case MirSimdLoad(_, _, _, _):
-                self._unsupported_c_inst("MirSimdLoad", inst.span)
-            case MirSimdMaskOp(_, _, _, _):
-                self._unsupported_c_inst("MirSimdMaskOp", inst.span)
-            case MirSimdPermute(_, _, _):
-                self._unsupported_c_inst("MirSimdPermute", inst.span)
-            case MirSimdReduce(_, _, _):
-                self._unsupported_c_inst("MirSimdReduce", inst.span)
-            case MirSimdScalableVsetvl(_, _, _):
-                self._unsupported_c_inst("MirSimdScalableVsetvl", inst.span)
-            case MirSimdScatter(_, _, _):
-                self._unsupported_c_inst("MirSimdScatter", inst.span)
-            case MirSimdSelect(_, _, _, _):
-                self._unsupported_c_inst("MirSimdSelect", inst.span)
-            case MirSimdShuffle(_, _, _, _):
-                self._unsupported_c_inst("MirSimdShuffle", inst.span)
-            case MirSimdSplat(_, _, _):
-                self._unsupported_c_inst("MirSimdSplat", inst.span)
-            case MirSimdStore(_, _, _):
-                self._unsupported_c_inst("MirSimdStore", inst.span)
-            case MirSimdTernop(_, _, _, _, _):
-                self._unsupported_c_inst("MirSimdTernop", inst.span)
-            case MirSimdUnop(_, _, _):
-                self._unsupported_c_inst("MirSimdUnop", inst.span)
-            case MirWarpActivesMask(_):
-                self._unsupported_c_inst("MirWarpActivesMask", inst.span)
-            case MirWarpBallot(_, _, _):
-                self._unsupported_c_inst("MirWarpBallot", inst.span)
-            case MirWarpReduce(_, _, _, _):
-                self._unsupported_c_inst("MirWarpReduce", inst.span)
-            case MirWarpShfl(_, _, _, _, _):
-                self._unsupported_c_inst("MirWarpShfl", inst.span)
-            case MirWarpSync(_):
-                self._unsupported_c_inst("MirWarpSync", inst.span)
-            case PredicatedAdd(_, _, _, _, _, _):
-                self._unsupported_c_inst("PredicatedAdd", inst.span)
-            case PredicatedFma(_, _, _, _, _, _, _):
-                self._unsupported_c_inst("PredicatedFma", inst.span)
-            case PredicatedMul(_, _, _, _, _, _):
-                self._unsupported_c_inst("PredicatedMul", inst.span)
-            case ResultMatchSemantic(_, _, _, _, _, _, _):
-                # Verification WITNESS, not an executable instruction. The whole
-                # Result match -- arm blocks, payload binds, result copies, merge
-                # terminator -- is ALREADY emitted before this marker is appended
-                # into the merge block (50.mir/_MirLoweringExpr/
-                # switch_operators_calls.spl:2848). It exists only so the Lean
-                # backend can recover the match shape (lean_mir_translate.spl:280,
-                # witness_count) and for perf_facts; verification_region_effects.spl
-                # :296 already classes it with Nop. Executable backends must skip
-                # it -- rejecting it made every Result-matching module
-                # native-unbuildable (E-BACKEND-LLVM-INST-ResultMatchSemantic).
-                ()
-            case ScalableVecFence(_):
-                self._unsupported_c_inst("ScalableVecFence", inst.span)
-            case StoreGlobal(_, _):
-                self._unsupported_c_inst("StoreGlobal", inst.span)
-
-            case _:
-                # Not a variant: every MirInstKind now has an arm above, so this
-                # is reachable only by a NEW upstream variant with no arm here,
-                # or by a mis-decoded enum handle. Named and spanned either way.
-                val unknown_c_inst_disc = rt_enum_discriminant(inst.kind)
-                eprint("[c-backend] E-BACKEND-C-INST-Unknown disc={unknown_c_inst_disc} at={c_backend_format_span(inst.span)}")
-                self.emit_unsupported_panic("E-BACKEND-C-INST-Unknown: no C backend arm for MIR instruction kind (discriminant {unknown_c_inst_disc}) at {c_backend_format_span(inst.span)}")
-
-    me _unsupported_c_inst(variant: text, span: Span?):
-        """NAMED, spanned diagnostic for a MirInstKind variant the C backend
-        does not lower (lane C7). `E-BACKEND-C-INST-<Variant>` is stable and
-        greppable; before C7 these variants had no arm here at all."""
-        val code = "E-BACKEND-C-INST-{variant}"
-        eprint("[c-backend] {code} at={c_backend_format_span(span)}")
-        self.emit_unsupported_panic("{code}: C backend does not lower {variant} at {c_backend_format_span(span)}")
-
-
     # === Terminators ===
 
     me translate_terminator(term: MirTerminator):
@@ -665,24 +579,12 @@ impl MirToC:
             case Abort(message):
                 self.builder.emit(r"spl_panic(" + "\"" + message + "\"" + r");")
 
-            case Throw(_, _):
-                panic("E-BACKEND-C-TERM-Throw: C++ backend cannot safely longjmp across generated aggregate locals")
-
-            case Resume(_, _):
-                panic("E-BACKEND-C-TERM-Resume: C++ backend cannot safely longjmp across generated aggregate locals")
-
-            case CallTerminator(dest, func, args, normal, unwind, _, _):
+            case CallTerminator(dest, func, args, normal, unwind):
                 val func_val = self.translate_operand(func)
                 var arg_vals: [text] = []
                 for arg in args:
                     arg_vals = arg_vals.push(self.translate_operand(arg))
                 val args_str = arg_vals.join(", ")
-                if unwind.?:
-                    # Generated C++ can contain non-trivially destructible
-                    # std::tuple locals. A longjmp across those activations is
-                    # undefined behavior, so the C backend must fail closed
-                    # until it owns a destructor-safe exception mechanism.
-                    panic("E-BACKEND-C-TERM-CallTerminator-Unwind: C++ backend cannot safely longjmp across generated aggregate locals")
                 if dest.?:
                     val dest_name = self.get_local(dest.unwrap().id)
                     self.builder.emit_assign(dest_name, func_val + r"(" + args_str + r")")
@@ -694,17 +596,51 @@ impl MirToC:
     # Shared Library Preamble
     # ================================================================
 
-    me emit_shared_library_preamble():
+    me emit_shared_library_preamble(module:MirModule):
         """Emit shared library lifecycle declarations when SPL_SHARED_LIBRARY is defined."""
+        # The generic C ABI has one explicit shutdown point. Detect the
+        # already-lowered exact-exit entry call rather than relying on source
+        # tags or an arbitrary function name, so ordinary libraries retain
+        # their zero-cost lifecycle preamble.
+        var has_rt_hal_export=false
+        for function in module.functions.values():
+            if function.is_export_c:
+                for block in function.blocks:
+                    for instruction in block.instructions:
+                        match instruction.kind:
+                            case Call(_,target,_):
+                                match target.kind:
+                                    case Const(MirConstValue.Str(name),_):
+                                        if name=="rt_hal_exact_exit_backend_begin_next":has_rt_hal_export=true
+                                    case _:()
+                            case _:()
         self.builder.emit_raw(r"#ifdef SPL_SHARED_LIBRARY")
-        self.builder.emit_raw(r"static int spl_library_initialized = 0;")
+        self.builder.emit_raw(r"#include <atomic>")
+        # 0=Closed, 1=Ready, 2=Draining. Atomic CAS prevents two callers from
+        # simultaneously entering library teardown; Ready init stays a safe
+        # idempotent no-op for C++ RAII wrappers.
+        self.builder.emit_raw(r"static std::atomic<int> spl_library_state{0};")
+        if has_rt_hal_export:
+            self.builder.emit_raw(r"extern void rt_hal_process_finalize_current_owner(void);")
         self.builder.emit_raw(r"extern " + "\"C\"" + r" void spl_library_init(void) {")
-        self.builder.emit_raw(r"    if (spl_library_initialized) return;")
-        self.builder.emit_raw(r"    spl_library_initialized = 1;")
+        self.builder.emit_raw(r"    int expected = 0;")
+        self.builder.emit_raw(r"    if (!spl_library_state.compare_exchange_strong(expected, 1)) {")
+        self.builder.emit_raw(r"        if (expected == 1) return;")
+        self.builder.emit_raw(r"        spl_panic(\"RTHAL-E-LIBRARY-REENTRY\");")
+        self.builder.emit_raw(r"    }")
         self.builder.emit_raw(r"}")
         self.builder.emit_raw(r"extern " + "\"C\"" + r" void spl_library_shutdown(void) {")
-        self.builder.emit_raw(r"    if (!spl_library_initialized) return;")
-        self.builder.emit_raw(r"    spl_library_initialized = 0;")
+        self.builder.emit_raw(r"    int expected = 1;")
+        self.builder.emit_raw(r"    if (!spl_library_state.compare_exchange_strong(expected, 2)) {")
+        self.builder.emit_raw(r"        if (expected == 0) return;")
+        self.builder.emit_raw(r"        spl_panic(\"RTHAL-E-LIBRARY-DRAINING\");")
+        self.builder.emit_raw(r"    }")
+        if has_rt_hal_export:
+            # Exported tagged calls initialize/seal on entry. This explicit
+            # library boundary owns the one drain/finalize sequence; never
+            # attach it to an arbitrary exported function return.
+            self.builder.emit_raw(r"    rt_hal_process_finalize_current_owner();")
+        self.builder.emit_raw(r"    spl_library_state.store(0);")
         self.builder.emit_raw(r"}")
         self.builder.emit_raw(r"")
         self.builder.emit_raw(r"// Auto-init for shared libraries")

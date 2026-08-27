@@ -1,95 +1,209 @@
 #!/bin/sh
-# check-cache-protocol-formal.shs — C6 formal gate for the cache protocol.
+# check-cache-protocol-formal.shs — C6 gate for the cache-protocol formal layer.
 #
-# Checks (all fail-closed):
-#   1. `lake build` of src/verification/cache_protocol succeeds.
-#   2. No `sorry` / `admit` / `native_decide` / unapproved `axiom` in the cache
-#      proof roots (cache_protocol AND the imported cache_identity).
-#   3. Coverage: schema KEY-field count + 1 (domain) == generated
-#      *_change_visible theorem count, and excluded_from_key count ==
-#      generated *_absent theorem count.
-#   4. Regeneration is clean: rerunning the generator reproduces the four
-#      generated artifacts byte-for-byte.
+# Fail-closed. Verdict is ALWAYS the last line of stdout:
+#   PASS — <what was checked>          (exit 0)
+#   FAIL — <reason>                    (exit 1)
+#   ERROR — nothing was checked ...    (exit 2)
 #
-# Verdict is the LAST line of stdout:
-#   PASS — <what ran>        exit 0
-#   FAIL — <reason>          exit 1
-#   ERROR — nothing was checked (<reason>)   exit 2
-# Run from the repo root. Anywhere else must yield ERROR (exit 2), never PASS.
+# A FATAL SELFTEST runs BEFORE every real scan (pattern:
+# scripts/check/check-tree-size-push.shs). It proves on tampered fixture
+# copies that each detector actually fires: an omitted canonical field, an
+# added schema field with no theorem, a tampered golden vector, and an
+# injected `sorry` must each FAIL their sub-check. If the selftest cannot
+# run, or any fixture behaves wrong, the whole script ERRORs (exit 2) — it
+# never proceeds to a scan whose failure modes are unproven.
+#
+# Checks, in order:
+#   0. selftest (8 fixtures: 4 positive controls + 4 negative), always, fatal
+#   1. lake build of src/verification/cache_protocol (all proofs re-checked)
+#   2. coverage gate: {names of schema canonical_order fields (+ domain)}
+#      == {names of `<field>_change_visible` theorems in
+#      src/CacheProtocol/Generated/FieldTheorems.lean} AND every schema
+#      excluded_from_key entry has a `<field>_absent` theorem.
+#   3. golden vectors: every expected byte string in
+#      src/app/gen_cache_model/generated/golden_vectors.txt (computed by the
+#      SIMPLE-side encoder) is pinned verbatim inside Generated/Golden.lean,
+#      whose theorems lake re-proves against the LEAN encoder by kernel decide.
+#   4. trust scan: no sorry / admit / axiom / native_decide / unsafe /
+#      extern attributes anywhere in the cache_protocol Lean sources.
 
 set -u
 
-err() { echo "ERROR — nothing was checked ($1)"; exit 2; }
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+PKG="$ROOT/src/verification/cache_protocol"
+SCHEMA="$ROOT/src/compiler/80.driver/cache/schema/cache_protocol.sdn"
+FT="$PKG/src/CacheProtocol/Generated/FieldTheorems.lean"
+GOLDEN="$PKG/src/CacheProtocol/Generated/Golden.lean"
+VECTORS="$ROOT/src/app/gen_cache_model/generated/golden_vectors.txt"
+
 fail() { echo "FAIL — $1"; exit 1; }
+err()  { echo "ERROR — nothing was checked: $1"; exit 2; }
 
-PROJ=src/verification/cache_protocol
-SCHEMA=src/compiler/80.driver/cache/schema/cache_protocol.sdn
-GEN=src/app/gen_cache_model/main.spl
-
-# ---- fail-closed on cwd ----------------------------------------------------
-[ -d "$PROJ" ] || err "no $PROJ under cwd $(pwd)"
-[ -f "$SCHEMA" ] || err "no schema at $SCHEMA"
-[ -f "$GEN" ] || err "no generator at $GEN"
-[ -d src/verification/cache_identity ] || err "no cache_identity project"
+[ -f "$SCHEMA" ]  || err "schema not found: $SCHEMA"
+[ -f "$FT" ]      || err "generated theorems not found: $FT"
+[ -f "$GOLDEN" ]  || err "golden file not found: $GOLDEN"
+[ -f "$VECTORS" ] || err "golden vectors not found: $VECTORS"
 command -v lake >/dev/null 2>&1 || err "lake not on PATH"
 
-# ---- 1. lake build ---------------------------------------------------------
-if ! (cd "$PROJ" && lake build >/tmp/cache_protocol_lake.log 2>&1); then
-  tail -20 /tmp/cache_protocol_lake.log
-  fail "lake build failed in $PROJ"
-fi
+# ---------------------------------------------------------------------------
+# Reusable sub-checks. Each takes explicit file args, prints diagnostics only
+# when VERBOSE=1, and RETURNS nonzero on failure (never exits) so the
+# selftest can drive them against tampered fixtures.
+# ---------------------------------------------------------------------------
+VERBOSE=0
+say() { [ "$VERBOSE" = "1" ] && echo "$1"; :; }
 
-# ---- 2. trust-bypass scan --------------------------------------------------
-# `axiom` has no approved instances in these roots today; any hit is a FAIL
-# until it is explicitly added to the allowlist below.
-BAD=$(grep -rnE "(^|[^A-Za-z_])(sorry|admit|native_decide)([^A-Za-z_]|$)|^[[:space:]]*axiom[[:space:]]" \
-        "$PROJ/src" src/verification/cache_identity/src --include='*.lean' \
-      | grep -v "allowed-axiom:" | grep -vE '`(sorry|admit|native_decide)`' || true)
-[ -z "$BAD" ] || { echo "$BAD"; fail "trust bypass (sorry/admit/native_decide/axiom) in cache proof roots"; }
+schema_canonical_fields() { # $1=schema
+  awk '
+    /canonical_order:/ {on=1; next}
+    on && /- \{/ { if (match($0, /name: *[a-z_]+/)) { s=substr($0, RSTART, RLENGTH); sub(/name: */, "", s); print s } ; next }
+    on && $0 !~ /^ / {on=0}
+  ' "$1"
+}
 
-# ---- 3. coverage: fields == theorems --------------------------------------
-key_fields=$(awk '
-  /canonical_order:/ { f=1; next }
-  f && /^[[:space:]]*- \{/ { n++; next }
-  f && /^[[:space:]]*#/ { next }
-  f { f=0 }
-  END { print n+0 }' "$SCHEMA")
-excluded=$(awk '
-  /excluded_from_key:/ { f=1; next }
-  f && /^[[:space:]]*- \{/ { n++; next }
-  f && /^[[:space:]]*#/ { next }
-  f { f=0 }
-  END { print n+0 }' "$SCHEMA")
-[ "$key_fields" -gt 0 ] || err "schema parse found 0 canonical_order rows"
-[ "$excluded" -gt 0 ] || err "schema parse found 0 excluded_from_key rows"
+schema_excluded_fields() { # $1=schema
+  awk '
+    /excluded_from_key:/ {on=1; next}
+    on && /- \{/ { if (match($0, /name: *[a-z_]+/)) { s=substr($0, RSTART, RLENGTH); sub(/name: */, "", s); print s } ; next }
+    on && $0 !~ /^ / {on=0}
+  ' "$1"
+}
 
-VIS="$PROJ/src/CacheProtocol/Generated/Visibility.lean"
-vis_count=$(grep -c '^theorem [a-z_0-9]*_change_visible (k1 k2 : ActionKey)' "$VIS" || true)
-abs_count=$(grep -c '^theorem [a-z_0-9]*_absent (r : FullRecord)' "$VIS" || true)
+coverage_check() { # $1=schema $2=field-theorems file ; sets COVERAGE_N_*
+  sfields=$(schema_canonical_fields "$1")
+  n_schema=$(printf '%s\n' "$sfields" | sed '/^$/d' | wc -l)
+  [ "$n_schema" -gt 0 ] || { say "  parsed 0 canonical_order fields"; return 1; }
+  tfields=$(sed -n 's/^theorem \([a-z_0-9]*\)_change_visible .*/\1/p' "$2" | sed '/^domain$/d')
+  a=$(printf '%s\n' "$sfields" | sed '/^$/d' | sort)
+  b=$(printf '%s\n' "$tfields" | sed '/^$/d' | sort)
+  if [ "$a" != "$b" ]; then
+    if [ "$VERBOSE" = "1" ]; then
+      n_thm=$(printf '%s\n' "$tfields" | sed '/^$/d' | wc -l)
+      echo "  schema fields ($n_schema) vs visibility theorems ($n_thm):"
+      printf '%s\n' "$a" > /tmp/ccp_schema.txt
+      printf '%s\n' "$b" > /tmp/ccp_thms.txt
+      diff /tmp/ccp_schema.txt /tmp/ccp_thms.txt | sed 's/^/    /'
+    fi
+    return 1
+  fi
+  grep -q '^theorem domain_change_visible ' "$2" || { say "  missing domain_change_visible"; return 1; }
+  excl=$(schema_excluded_fields "$1")
+  n_excl=$(printf '%s\n' "$excl" | sed '/^$/d' | wc -l)
+  [ "$n_excl" -gt 0 ] || { say "  parsed 0 excluded_from_key fields"; return 1; }
+  for x in $excl; do
+    grep -q "^theorem ${x}_absent " "$2" || { say "  missing ${x}_absent theorem"; return 1; }
+    printf '%s\n' "$sfields" | grep -qx "$x" && { say "  excluded '$x' appears in canonical_order"; return 1; }
+  done
+  COVERAGE_N_SCHEMA=$n_schema
+  COVERAGE_N_EXCL=$n_excl
+  return 0
+}
 
-want_vis=$((key_fields + 1))   # +1: domain (position 0, outer tag)
-[ "$vis_count" -eq "$want_vis" ] || \
-  fail "coverage: $key_fields KEY fields (+1 domain = $want_vis) but $vis_count *_change_visible theorems"
-[ "$abs_count" -eq "$excluded" ] || \
-  fail "coverage: $excluded excluded_from_key entries but $abs_count *_absent theorems"
+golden_check() { # $1=vectors file $2=golden lean file ; sets GOLDEN_N_VEC
+  n_vec=0
+  while IFS=' ' read -r name expected; do
+    [ -n "$name" ] || continue
+    grep -qF "$expected" "$2" || { say "  vector $name (Simple-side encoding) not pinned in Golden.lean"; return 1; }
+    n_vec=$((n_vec + 1))
+  done < "$1"
+  [ "$n_vec" -gt 0 ] || { say "  0 golden vectors compared"; return 1; }
+  n_pins=$(grep -c '^theorem golden_vector_' "$2")
+  [ "$n_pins" -eq "$n_vec" ] || { say "  golden pins ($n_pins) != vectors ($n_vec)"; return 1; }
+  GOLDEN_N_VEC=$n_vec
+  return 0
+}
 
-# ---- 4. regeneration is clean ---------------------------------------------
-[ -x bin/simple ] || [ -f bin/simple ] || err "bin/simple missing; cannot verify regeneration"
-TMP=$(mktemp -d) || err "mktemp failed"
+trust_check() { # $1=directory of Lean sources
+  bad=$(grep -rn -E '(^|[^a-zA-Z_])(sorry|admit|native_decide|axiom|unsafe)([^a-zA-Z_]|$)|@\[extern' \
+          "$1" | grep -v -i -E 'no sorry' || true)
+  if [ -n "$bad" ]; then
+    [ "$VERBOSE" = "1" ] && printf '%s\n' "$bad" | sed 's/^/    /'
+    return 1
+  fi
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# 0. FATAL SELFTEST — always runs first, on every invocation. Tampered
+# fixtures must FAIL their sub-check; pristine files must PASS it.
+# ---------------------------------------------------------------------------
+echo "[0/4] selftest (fatal)"
+TMP=$(mktemp -d) || err "selftest: mktemp failed"
 trap 'rm -rf "$TMP"' EXIT
-G1="$PROJ/src/CacheProtocol/Generated/Model.lean"
-G2="$PROJ/src/CacheProtocol/Generated/Visibility.lean"
-G3="$PROJ/src/CacheProtocol/Generated/Golden.lean"
-G4="$PROJ/golden/golden_vectors.sdn"
-for f in "$G1" "$G2" "$G3" "$G4"; do
-  [ -f "$f" ] || fail "generated artifact missing: $f"
-  cp "$f" "$TMP/$(basename "$f")"
-done
-OUT=$(SIMPLE_EXECUTION_MODE=interpreter bin/simple run "$GEN" 2>/dev/null | tail -1)
-[ "$OUT" = "GEN OK" ] || fail "generator did not report GEN OK (got: ${OUT:-<empty>})"
-for f in "$G1" "$G2" "$G3" "$G4"; do
-  cmp -s "$f" "$TMP/$(basename "$f")" || fail "regeneration changed $(basename "$f") — generated files are stale"
-done
 
-echo "PASS — lake build green; no trust bypass; $vis_count/$want_vis visibility + $abs_count/$excluded absence theorems; regeneration byte-clean"
+st_pass=0
+st_run() { # $1=label $2=expected(pass|fail), rest = command
+  label=$1; expect=$2; shift 2
+  if "$@" >/dev/null 2>&1; then got=pass; else got=fail; fi
+  if [ "$got" = "$expect" ]; then
+    echo "  ok: $label (must $expect: $got)"
+    st_pass=$((st_pass + 1))
+  else
+    echo "  SELFTEST FIXTURE MISBEHAVED: $label — expected $expect, got $got"
+    err "selftest fixture '$label' did not behave as required"
+  fi
+}
+
+# positive controls — each detector must pass on the pristine inputs,
+# otherwise a fixture "failure" below would prove nothing
+st_run "coverage detector on pristine files"   pass coverage_check "$SCHEMA" "$FT"
+st_run "golden detector on pristine files"     pass golden_check "$VECTORS" "$GOLDEN"
+st_run "trust detector on pristine sources"    pass trust_check "$PKG/src"
+st_run "vectors file non-empty"                pass test -s "$VECTORS"
+
+# (a) omitted canonical field: drop one _change_visible theorem from a COPY
+sed '/^theorem aop_weave_root_change_visible /,/^  field_change_visible/d' "$FT" > "$TMP/ft_omit.lean" \
+  || err "selftest: could not build omitted-field fixture"
+grep -q '^theorem aop_weave_root_change_visible ' "$TMP/ft_omit.lean" \
+  && err "selftest: omitted-field fixture still contains the theorem"
+st_run "(a) omitted canonical field"           fail coverage_check "$SCHEMA" "$TMP/ft_omit.lean"
+
+# (b) schema gains a key field that has no theorem
+awk '{ print } /name: result_kind,/ { print "      - { pos: 21,  name: injected_new_field,  tag: injectedNewField,  type: digest,  class: KEY }" }' \
+  "$SCHEMA" > "$TMP/schema_added.sdn" || err "selftest: could not build added-field fixture"
+grep -q 'injected_new_field' "$TMP/schema_added.sdn" || err "selftest: added-field fixture did not inject"
+st_run "(b) added schema field w/o theorem"    fail coverage_check "$TMP/schema_added.sdn" "$FT"
+
+# (c) tampered golden vector: corrupt the expected byte string in a COPY
+sed '1s/^\(vector_[0-9]* \)/\1TAMPERED/' "$VECTORS" > "$TMP/vectors_tampered.txt" \
+  || err "selftest: could not build tampered-vector fixture"
+cmp -s "$VECTORS" "$TMP/vectors_tampered.txt" \
+  && err "selftest: tampered-vector fixture is identical to the original"
+st_run "(c) tampered golden vector"            fail golden_check "$TMP/vectors_tampered.txt" "$GOLDEN"
+
+# (d) injected sorry in a COPY of the sources
+mkdir -p "$TMP/src_sorry" || err "selftest: mkdir failed"
+cp "$FT" "$TMP/src_sorry/FieldTheorems.lean" || err "selftest: cp failed"
+printf '\ntheorem injected_bad (k : Nat) : k = k := by sorry\n' >> "$TMP/src_sorry/FieldTheorems.lean"
+st_run "(d) injected sorry"                    fail trust_check "$TMP/src_sorry"
+
+echo "  selftest OK — $st_pass/8 fixtures behaved as required"
+
+# ---------------------------------------------------------------------------
+# Real scan
+# ---------------------------------------------------------------------------
+VERBOSE=1
+
+echo "[1/4] lake build"
+if ! (cd "$PKG" && lake build >/tmp/cache_protocol_lake.log 2>&1); then
+  tail -20 /tmp/cache_protocol_lake.log
+  fail "lake build failed (see above)"
+fi
+echo "  lake build OK"
+
+echo "[2/4] coverage gate"
+coverage_check "$SCHEMA" "$FT" || fail "coverage gate: canonical_order fields != field-visibility theorems (see above)"
+echo "  $COVERAGE_N_SCHEMA canonical fields + domain all have visibility theorems"
+echo "  $COVERAGE_N_EXCL excluded fields all have _absent theorems"
+
+echo "[3/4] golden vectors"
+golden_check "$VECTORS" "$GOLDEN" || fail "golden vectors: Simple-side encoding not pinned in Golden.lean (see above)"
+echo "  $GOLDEN_N_VEC Simple-side vectors pinned and re-proved by Lean (kernel decide)"
+
+echo "[4/4] trust scan"
+trust_check "$PKG/src" || fail "trust scan: forbidden declaration/tactic found (see above)"
+echo "  no sorry / admit / axiom / native_decide / unsafe / extern"
+
+echo "PASS — selftest 8/8; lake build OK; $COVERAGE_N_SCHEMA+1 field-visibility + $COVERAGE_N_EXCL field-absent theorems match schema; $GOLDEN_N_VEC golden vectors; trust scan clean"
 exit 0

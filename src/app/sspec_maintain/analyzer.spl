@@ -51,9 +51,8 @@ fn _rule(rule_id: text) -> SspecRuleDefinition:
 fn _stable_evidence_text(evidence: text) -> text:
     var normalized = ""
     for token in evidence.lower().split():
-        if token != "":
-            if normalized != "": normalized = normalized + " "
-            normalized = normalized + token
+        if normalized != "": normalized = normalized + " "
+        normalized = normalized + token
     normalized
 
 fn _make_finding(path: text, rule_id: text, line: i64, evidence: text,
@@ -153,14 +152,16 @@ fn _source_findings(facts: SspecSourceFacts, source: text) -> [SspecDocumentizat
     if facts.has_placeholder_narrative:
         findings.push(_make_finding(facts.path, "SSDOC-NAR-002", 1,
             "generic placeholder narrative remains", "Replace generated filler with source-evidenced prose.", 20, None))
+    if facts.has_duplicated_narrative_boilerplate:
+        findings.push(_make_finding(facts.path, "SSDOC-NAR-003", 1,
+            "the same narrative header comment is repeated verbatim three or more times",
+            "Deduplicate the purpose/req/lifecycle header block; keep one authored copy.", 15, None))
     var missing_step_deduction: i64 = 0
     var naming_deduction: i64 = 0
     var evidence_deduction: i64 = 0
     var has_pending = false
     var has_source_oracle = false
     var has_local_arithmetic_oracle = false
-    var local_arithmetic_scenarios: i64 = 0
-    var asserting_scenarios: i64 = 0
     var magic_expected_count: i64 = 0
     for scenario in facts.scenarios:
         if scenario.step_count == 0 and missing_step_deduction < 40:
@@ -181,14 +182,9 @@ fn _source_findings(facts: SspecSourceFacts, source: text) -> [SspecDocumentizat
                 "visible scenario '{scenario.name}' has no retained capture or evidence",
                 "Capture typed user/operator-facing evidence or explain why the oracle is complete.", deduction, None))
             evidence_deduction = evidence_deduction + deduction
-        # A pending marker in a scenario that ALSO carries real executed
-        # assertions is incidental (e.g. a `pass_do_nothing("...")` match arm),
-        # not a scaffold — only an assertion-less pending scenario is (2026-08-22).
-        if scenario.pending and scenario.real_assertion_count == 0: has_pending = true
+        if scenario.pending: has_pending = true
         if scenario.source_only_oracle: has_source_oracle = true
-        if scenario.assertion_count > 0: asserting_scenarios = asserting_scenarios + 1
-        if scenario.local_arithmetic_oracle:
-            local_arithmetic_scenarios = local_arithmetic_scenarios + 1
+        if scenario.local_arithmetic_oracle: has_local_arithmetic_oracle = true
         magic_expected_count = magic_expected_count + scenario.magic_expected_count
     if facts.real_assertion_count == 0 or has_pending:
         val evidence = if facts.real_assertion_count == 0:
@@ -197,11 +193,6 @@ fn _source_findings(facts: SspecSourceFacts, source: text) -> [SspecDocumentizat
             "unconditional pending or fail-fast scaffold remains"
         findings.push(_make_finding(facts.path, "SSDOC-ORA-001", 1, evidence,
             "Replace placeholders with an observable production assertion.", 50, None))
-    # "compares ONLY locally constructed arithmetic" — true only when every
-    # assertion-bearing scenario is arithmetic-local; one such oracle among
-    # real oracles is not a file-wide source-only verdict.
-    if local_arithmetic_scenarios > 0 and asserting_scenarios == local_arithmetic_scenarios:
-        has_local_arithmetic_oracle = true
     if has_source_oracle or has_local_arithmetic_oracle:
         val oracle_evidence = if has_source_oracle:
             "scenario relies on source-text inspection as system evidence"

@@ -13,7 +13,6 @@ use compiler.frontend.parser_types.*
 use compiler.frontend.parser_types_expr.*
 use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_lowering.types.{HirLowering, LoweringError, LoweringErrorKind}
-use compiler.hir.hir_lowering.type_equality.{hir_types_equal}
 use compiler.hir.hir_lowering.async_errors.{
     AsyncError,
     AsyncErrorCollector,
@@ -62,22 +61,23 @@ impl HirLowering:
         # Look up Future symbol (should be defined in std.async.future)
         val future_symbol_opt = self.symbols.lookup("Future")
 
-        if val future_symbol = future_symbol_opt:
-            # Create Future<T> as Named type with type argument
-            HirType(
-                kind: HirTypeKind.Named(future_symbol, [inner]),
-                span: span
-            )
-        else:
-            # Future symbol not found - create detailed error
-            val detailed_error = future_type_not_found(span)
+        match future_symbol_opt:
+            case Some(future_symbol):
+                # Create Future<T> as Named type with type argument
+                HirType(
+                    kind: HirTypeKind.Named(future_symbol, [inner]),
+                    span: span
+                )
+            case nil:
+                # Future symbol not found - create detailed error
+                val detailed_error = future_type_not_found(span)
 
-            # Add to error collector (if available in self)
-            # For now, report simple error
-            self.error("Future type not found - import std.async.future", span)
+                # Add to error collector (if available in self)
+                # For now, report simple error
+                self.error("Future type not found - import std.async.future", span)
 
-            # Return error type
-            HirType(kind: HirTypeKind.Error, span: span)
+                # Return error type
+                HirType(kind: HirTypeKind.Error, span: span)
 
     me is_poll_type(hir_type: HirType) -> bool:
         match hir_type.kind:
@@ -118,7 +118,7 @@ impl HirLowering:
 
             # Report detailed errors through lowering context
             for detail in check.detailed_errors:
-                self.recovered("async: {detail.message} at {detail.span}", detail.span)
+                self.warning("async: {detail.message} at {detail.span}", detail.span)
 
 struct AsyncFunctionCheck:
     is_valid: bool
@@ -141,7 +141,7 @@ impl HirLowering:
             inner_type: nil
         )
 
-        # Check 1: ParserFunction must return Future<T>
+        # Check 1: Function must return Future<T>
         if not self.is_future_type(func.return_type):
             check.is_valid = false
 
@@ -370,34 +370,88 @@ impl HirLowering:
         #
         # BUG FIX (2026-08-10): this used to `match (a, b):` -- matching the
         # HirType STRUCTS directly -- against bare HirTypeKind variant names
-        # (some of them not even real HirTypeKind variants). Matching a
-        # struct against an enum-variant pattern can never bind, so every arm
-        # fell through and `types_equal(Int(32,true), Str)` returned `true`.
-        # BUG FIX (2026-08-21): the kind-based rewrite still handled only a
-        # subset of HirTypeKind -- `Ref`, `Ptr`, `Isolated`, `Union`,
-        # `DynTrait`, `Projection`, `Tensor` and `Layer` all fell into the
-        # `case _: false` arm, so two structurally identical pointer or union
-        # types compared UNEQUAL, and `Array` ignored its size so `[i32; 3]`
-        # compared EQUAL to `[i32; 4]`.
-        hir_types_equal(a, b)
+        # (some of them not even real HirTypeKind variants: `String`,
+        # `ParserFunction`, `ParserTypeParam` do not exist on this enum; the
+        # real names are `Str`, `Function`, `TypeParam`). Matching a struct
+        # against an enum-variant pattern can never bind, so every arm
+        # silently fell through and the match always took the LAST
+        # structurally-plausible arm's fields as zero-valued defaults,
+        # observed concretely as `types_equal(Int(32,true), Str)` and
+        # `types_equal(Int(32,true), Bool)` both returning `true`. This is
+        # the equality oracle `check_poll_function_signature` uses to check
+        # a `poll` function's `Poll<T>` inner type against the async
+        # function's `Future<T>` inner type, so the check silently accepted
+        # any width/signedness/kind mismatch instead of reporting
+        # `future_type_param_mismatch`. Matching on `.kind` (real
+        # HirTypeKind) with the real variant names fixes it.
+        match (a.kind, b.kind):
+            case (Int(bits_a, signed_a), Int(bits_b, signed_b)):
+                bits_a == bits_b and signed_a == signed_b
+            case (Float(bits_a), Float(bits_b)):
+                bits_a == bits_b
+            case (Bool, Bool): true
+            case (Char, Char): true
+            case (Str, Str): true
+            case (Unit, Unit): true
+            case (Never, Never): true
+            case (Error, Error): true
+            case (Any, Any): true
 
-    # Explicit loop instead of `types.map(self.format_type(_))`.
-    #
-    # NOT a style preference: the placeholder-lambda form makes the enclosing
-    # function "creates a lambda/closure", and the seed's Cranelift JIT refuses
-    # to compile any module containing one -- its closure ABI does not tag-box
-    # lambda arguments/results and is incompatible with the runtime's
-    # RuntimeClosure layout, so it de-JITs the WHOLE program to the interpreter.
-    # These three `.map` calls alone were enough to keep the entire self-hosted
-    # native-build worker off the JIT. The underlying JIT gap is a real defect
-    # and is tracked separately -- see
-    # doc/08_tracking/bug/seed_jit_coverage_self_hosted_compiler_2026-08-21.md;
-    # this loop is the local unblock, not the fix.
-    me format_types(hir_types: [HirType]) -> [text]:
-        var out: [text] = []
-        for t in hir_types:
-            out = out.push(self.format_type(t))
-        out
+            case (Array(elem_a, _), Array(elem_b, _)):
+                self.types_equal(elem_a, elem_b)
+
+            case (Slice(elem_a), Slice(elem_b)):
+                self.types_equal(elem_a, elem_b)
+
+            case (Tuple(fields_a), Tuple(fields_b)):
+                if fields_a.len() != fields_b.len():
+                    return false
+                for i in 0..(fields_a.len()):
+                    if not self.types_equal(fields_a[i], fields_b[i]):
+                        return false
+                true
+
+            case (Function(params_a, ret_a, _), Function(params_b, ret_b, _)):
+                if params_a.len() != params_b.len():
+                    return false
+                for i in 0..(params_a.len()):
+                    if not self.types_equal(params_a[i], params_b[i]):
+                        return false
+                self.types_equal(ret_a, ret_b)
+
+            case (Optional(inner_a), Optional(inner_b)):
+                self.types_equal(inner_a, inner_b)
+
+            case (FacetRef(facet_a, witness_a), FacetRef(facet_b, witness_b)):
+                witness_a == witness_b and self.types_equal(facet_a, facet_b)
+
+            case (Result(ok_a, err_a), Result(ok_b, err_b)):
+                self.types_equal(ok_a, ok_b) and self.types_equal(err_a, err_b)
+
+            case (Dict(key_a, val_a), Dict(key_b, val_b)):
+                self.types_equal(key_a, key_b) and self.types_equal(val_a, val_b)
+
+            case (Named(sym_a, args_a), Named(sym_b, args_b)):
+                val symbol_a: SymbolId = sym_a
+                val symbol_b: SymbolId = sym_b
+                if symbol_a.id != symbol_b.id:
+                    return false
+                if args_a.len() != args_b.len():
+                    return false
+                for i in 0..(args_a.len()):
+                    if not self.types_equal(args_a[i], args_b[i]):
+                        return false
+                true
+
+            case (TypeParam(name_a, _), TypeParam(name_b, _)):
+                name_a == name_b
+
+            case (Infer(id_a, _), Infer(id_b, _)):
+                id_a == id_b
+
+            case _:
+                # Different type constructors
+                false
 
     me format_type(hir_type: HirType) -> text:
         match hir_type.kind:
@@ -429,13 +483,13 @@ impl HirLowering:
                         if args.len() == 0:
                             sym.name
                         else:
-                            val arg_strs = self.format_types(args)
+                            val arg_strs = args.map(self.format_type(_))
                             "{sym.name}<{arg_strs.join(\", \")}>"
                     case nil:
                         "<?>"
 
             case HirTypeKind.Tuple(elements):
-                val elem_strs = self.format_types(elements)
+                val elem_strs = elements.map(self.format_type(_))
                 "({elem_strs.join(\", \")})"
 
             case HirTypeKind.Array(elem, size):
@@ -444,11 +498,15 @@ impl HirLowering:
             case HirTypeKind.Optional(inner):
                 "{self.format_type(inner)}?"
 
+            case HirTypeKind.FacetRef(facet, witness_key):
+                val suffix = if witness_key == "": "" else: "@" + witness_key
+                "FacetRef<{self.format_type(facet)}>" + suffix
+
             case HirTypeKind.Result(ok, err):
                 "Result<{self.format_type(ok)}, {self.format_type(err)}>"
 
             case HirTypeKind.Function(params, ret, effects):
-                val param_strs = self.format_types(params)
+                val param_strs = params.map(self.format_type(_))
                 "fn({param_strs.join(\", \")}) -> {self.format_type(ret)}"
 
             case HirTypeKind.Infer(id, level):

@@ -1,0 +1,44 @@
+"""Optional direct-transfer simulation with explicit non-production capability."""
+
+use common.compute.placement_contracts.storage.{ArtifactId, artifact_id_valid}
+use common.compute.placement_contracts.residency.{ResidencyTier}
+use common.compute.placement_contracts.semantic.{BackendId, DeviceMask}
+use common.compute.placement_contracts.backend.{TransferReceipt, PlacementCapabilities}
+use std.gpu.placement_backends.staged.{placement_payload_checksum}
+
+class DirectPlacementBackend:
+    simulation_available: bool
+    unavailable_reason: text
+    _sequence: i64
+    _last_payload: [u8]
+
+    static fn create(simulation_available: bool, unavailable_reason: text) -> DirectPlacementBackend:
+        DirectPlacementBackend(simulation_available: simulation_available, unavailable_reason: unavailable_reason, _sequence: 0, _last_payload: [])
+
+    fn backend_probe() -> PlacementCapabilities:
+        PlacementCapabilities(
+            backend: BackendId(value: "direct_simulation"),
+            available: self.simulation_available,
+            production: false,
+            supported_tiers: if self.simulation_available: [ResidencyTier.HostHot] else: [],
+            device_mask: DeviceMask(bits: 0u64),
+            reason: if self.simulation_available: "cpu-payload-parity-only" else: self.unavailable_reason
+        )
+
+    me stage_transfer(artifact: ArtifactId, payload: [u8], requested_device_address: i64) -> TransferReceipt:
+        val capability = self.backend_probe()
+        if not capability.available:
+            return TransferReceipt(artifact_id: artifact, backend: capability.backend.value, sequence: self._sequence, ring_slot: -1, bytes_transferred: 0, device_address: 0, checksum: "", completed: false, error: capability.reason)
+        if not artifact_id_valid(artifact):
+            return TransferReceipt(artifact_id: artifact, backend: capability.backend.value, sequence: self._sequence, ring_slot: -1, bytes_transferred: 0, device_address: 0, checksum: "", completed: false, error: "invalid-artifact")
+        val sequence = self._sequence
+        self._sequence = sequence + 1
+        self._last_payload = payload
+        TransferReceipt(artifact_id: artifact, backend: capability.backend.value, sequence: sequence, ring_slot: -1, bytes_transferred: payload.len(), device_address: 0, checksum: placement_payload_checksum(payload), completed: true, error: "")
+
+    fn readback_bytes(receipt: TransferReceipt) -> [u8]:
+        if receipt.completed and receipt.backend == "direct_simulation" and receipt.sequence == self._sequence - 1:
+            return self._last_payload
+        []
+
+export DirectPlacementBackend

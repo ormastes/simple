@@ -20,8 +20,12 @@
 
 use compiler.core.ast.{
     DECL_FN, DECL_EXTERN_FN,
-    decl_get_tag, decl_get_name, decl_get_param_names, decl_get_span, span_is_valid, span_line
+    decl_tag, decl_name, decl_param_names
 }
+# span_is_valid / span_line are declared in compiler.core.types, NOT in
+# compiler.core.ast; naming them in the ast import bound nothing and lowering
+# hard-failed with `unresolved name: span_is_valid`.
+use compiler.core.types.{span_is_valid, span_line}
 
 # ============================================================================
 # Warning Struct
@@ -34,7 +38,6 @@ struct ArgCountWarning:
     hint: text
     fn_name: text
     param_count: i64
-    line: i64 = 0
 
     fn fmt() -> text:
         "[{self.code}] {self.severity}: {self.message} in '{self.fn_name}' ({self.param_count} params) — {self.hint}"
@@ -60,14 +63,14 @@ fn check_argument_count(decl_indices: [i64]) -> [ArgCountWarning]:
     var warnings: [ArgCountWarning] = []
 
     for idx in decl_indices:
-        val tag = decl_get_tag(idx)
+        val tag = decl_tag[idx]
 
         # Only check regular functions, skip extern fn (SFFI)
         if tag != DECL_FN:
             continue
 
-        val fn_name = decl_get_name(idx)
-        val params = decl_get_param_names(idx)
+        val fn_name = decl_name[idx]
+        val params = decl_param_names[idx]
         val count = params.len()
 
         # Skip functions with acceptable parameter counts
@@ -92,9 +95,6 @@ fn check_argument_count(decl_indices: [i64]) -> [ArgCountWarning]:
         if effective_count <= ARG_WARN_THRESHOLD:
             continue
 
-        val decl_span = decl_get_span(idx)
-        val warning_line = if span_is_valid(decl_span): span_line(decl_span) else: 0
-
         # ARG002: strict limit exceeded
         if effective_count > ARG_DENY_THRESHOLD:
             warnings.push(ArgCountWarning(
@@ -103,8 +103,7 @@ fn check_argument_count(decl_indices: [i64]) -> [ArgCountWarning]:
                 message: "Function has {effective_count} parameters (limit: {ARG_DENY_THRESHOLD})",
                 hint: "Group related parameters into a struct or use an options/config object",
                 fn_name: fn_name,
-                param_count: effective_count,
-                line: warning_line
+                param_count: effective_count
             ))
         else:
             # ARG001: warning threshold exceeded
@@ -114,8 +113,7 @@ fn check_argument_count(decl_indices: [i64]) -> [ArgCountWarning]:
                 message: "Function has {effective_count} parameters (recommended max: {ARG_WARN_THRESHOLD})",
                 hint: "Consider grouping related parameters into a struct",
                 fn_name: fn_name,
-                param_count: effective_count,
-                line: warning_line
+                param_count: effective_count
             ))
 
     warnings
@@ -123,3 +121,4 @@ fn check_argument_count(decl_indices: [i64]) -> [ArgCountWarning]:
 # ============================================================================
 # Exports
 # ============================================================================
+

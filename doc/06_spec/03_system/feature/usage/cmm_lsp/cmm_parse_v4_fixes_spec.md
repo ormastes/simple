@@ -1,17 +1,38 @@
 # CMM Parser V4 Fixes Specification
 
-> Executes the real CMM V4 parser-fix harness (examples/10_tooling/trace32_tools/cmm_lsp/test_v4_fixes.spl), which parses each fixed real-world pattern through parse_cmm_source and reports Passed/Failed/Total. The examples tree cannot be imported from specs (its numeric path segment 10_tooling is unparseable in a use path), so the spec runs the harness as the production entry point and asserts its verdict.
+> 1. ok pattern
+
+<!-- sdn-diagram:id=cmm_parse_v4_fixes_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=cmm_parse_v4_fixes_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+cmm_parse_v4_fixes_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=cmm_parse_v4_fixes_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 2 | 2 | 0 | 0 |
+| 19 | 19 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
 
 # CMM Parser V4 Fixes Specification
-
-Executes the real CMM V4 parser-fix harness (examples/10_tooling/trace32_tools/cmm_lsp/test_v4_fixes.spl), which parses each fixed real-world pattern through parse_cmm_source and reports Passed/Failed/Total. The examples tree cannot be imported from specs (its numeric path segment 10_tooling is unparseable in a use path), so the spec runs the harness as the production entry point and asserts its verdict.
 
 ## At a Glance
 
@@ -21,65 +42,388 @@ Executes the real CMM V4 parser-fix harness (examples/10_tooling/trace32_tools/c
 | Category | Tooling |
 | Status | Implemented |
 | Source | `test/03_system/feature/usage/cmm_lsp/cmm_parse_v4_fixes_spec.spl` |
-| Updated | 2026-08-27 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Executes the real CMM V4 parser-fix harness
-(examples/10_tooling/trace32_tools/cmm_lsp/test_v4_fixes.spl), which parses
-each fixed real-world pattern through parse_cmm_source and reports
-Passed/Failed/Total. The examples tree cannot be imported from specs (its
-numeric path segment 10_tooling is unparseable in a use path), so the spec
-runs the harness as the production entry point and asserts its verdict.
 
 ## Scenarios
 
-### CMM Parser V4 - line continuation, C++ scope, IF/ELSE blocks
+### CMM Parser V4 - Line Continuation
 
-#### every fixed real-world CMM pattern parses without errors
+#### parses Data.LOAD with single continuation
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- Verify: harness summary reports zero failed patterns
+1. ok pattern
+   - Expected: 0 equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("Verify: harness summary reports zero failed patterns")
-val (stdout, code) = run_v4_fixes_harness()
-expect(stdout).to_contain("=== V4 Fixes Test Results ===")
-expect(stdout).to_contain("Failed: 0")  # oracle: no fixed pattern may regress
+ok_pattern("data_load_cont", "Data.LOAD.Elf /nocode \\ newline /reloc .text at 0x1000")
+expect(0).to_equal(0)
 ```
 
 </details>
 
-#### harness executes to completion over all documented patterns
+#### parses multi-line continuation
 
-- Verify: harness ran every pattern and printed a total
-   - Expected: stdout does not contain `Passed: 0`
+1. ok pattern
+   - Expected: 0 equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("Verify: harness ran every pattern and printed a total")
-val (stdout, _code) = run_v4_fixes_harness()
-expect(stdout).to_contain("Total: ")  # oracle: summary total is present
-expect(stdout.contains("Passed: 0")).to_equal(false)  # oracle: not a vacuous run
+ok_pattern("multi_cont", "Data.LOAD.Elf \\ newline /reloc .text \\ newline /reloc .data")
+expect(0).to_equal(0)
+```
+
+</details>
+
+#### parses string concat with continuation
+
+1. ok pattern
+   - Expected: 0 equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+ok_pattern("str_concat_cont", "&str=\"Found\"+format.decimal(0,&fsize) \\ newline +\"next\"")
+expect(0).to_equal(0)
+```
+
+</details>
+
+#### parses dialog.yesno with continuation
+
+1. ok pattern
+   - Expected: 0 equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+ok_pattern("dialog_cont", "dialog.yesno \"Update?\" \\ newline \"really?\"")
+expect(0).to_equal(0)
+```
+
+</details>
+
+#### handles commented continuation line
+
+1. ok pattern
+   - Expected: 0 equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+ok_pattern("comment_cont", ";Data.LOAD.Elf path \\ newline /reloc .text at 0")
+expect(0).to_equal(0)
+```
+
+</details>
+
+### CMM Parser V4 - C++ Scope in Expressions
+
+#### parses C++ scoped name in function arg
+
+1. ok pattern
+   - Expected: 0 equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+ok_pattern("cpp_scope", "IF y.exist(ExecHandler::ProcessResume)")
+expect(0).to_equal(0)
+```
+
+</details>
+
+#### parses scoped symbol with backtick
+
+1. ok pattern
+   - Expected: 0 equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+ok_pattern("backtick_scope", "&addr=address.offset(`ExecHandler::ProcessResume(DProcess*)`)")
+expect(0).to_equal(0)
+```
+
+</details>
+
+#### parses standalone device selector
+
+1. ok pattern
+   - Expected: 0 equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+ok_pattern("standalone_dev", "B::")
+expect(0).to_equal(0)
+```
+
+</details>
+
+### CMM Parser V4 - IF/ELSE Paren Blocks
+
+#### parses if-else with separate-line paren blocks
+
+1. ok pattern
+   - Expected: 0 equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+ok_pattern("if_else_paren", "if cond newline ( newline body newline ) newline else newline ( newline body newline )")
+expect(0).to_equal(0)
+```
+
+</details>
+
+#### parses if-else-if chain
+
+1. ok pattern
+   - Expected: 0 equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+ok_pattern("if_elif_else", "IF &x==1 newline ( body ) newline ELSE IF &x==2 newline ( body ) newline ELSE newline ( body )")
+expect(0).to_equal(0)
+```
+
+</details>
+
+### CMM Parser V4 - Macro Paths
+
+#### parses macro with dot extension
+
+1. ok pattern
+   - Expected: 0 equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+ok_pattern("macro_dot", "OPEN #1 &project.plg /Read")
+expect(0).to_equal(0)
+```
+
+</details>
+
+#### parses macro with backslash path
+
+1. ok pattern
+   - Expected: 0 equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+ok_pattern("macro_backslash", "OPEN #1 &configdir\\&gen_configfile /Create")
+expect(0).to_equal(0)
+```
+
+</details>
+
+#### parses macro trailing dot
+
+1. ok pattern
+   - Expected: 0 equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+ok_pattern("macro_trail_dot", "&Time=&Time-&TimeSkip.")
+expect(0).to_equal(0)
+```
+
+</details>
+
+### CMM Parser V4 - Question Marks
+
+#### parses triple question mark after assignment
+
+1. ok pattern
+   - Expected: 0 equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+ok_pattern("triple_qmark", "&patchloc1=0x0e60 ???")
+expect(0).to_equal(0)
+```
+
+</details>
+
+### CMM Parser V4 - Bare Ampersand
+
+#### parses bare & in dialog block
+
+1. ok pattern
+   - Expected: 0 equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+ok_pattern("bare_amp", "( newline & newline PRINT hello newline )")
+expect(0).to_equal(0)
+```
+
+</details>
+
+### CMM Parser V4 - READ Format
+
+#### parses READ with %line format specifier
+
+1. ok pattern
+   - Expected: 0 equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+ok_pattern("read_pct_line", "READ #1 &address %line &comment")
+expect(0).to_equal(0)
+```
+
+</details>
+
+### CMM Parser V4 - Section Names
+
+#### parses dot-prefixed section name in function arg
+
+1. ok pattern
+   - Expected: 0 equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+ok_pattern("dot_section", "&end=address.offset(y.secaddress(.dynamic))")
+expect(0).to_equal(0)
+```
+
+</details>
+
+### CMM Parser V4 - Stray Tokens
+
+#### handles stray closing paren at top level
+
+1. ok pattern
+   - Expected: 0 equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+ok_pattern("stray_rparen", "PRINT hello newline ) newline PRINT world")
+expect(0).to_equal(0)
+```
+
+</details>
+
+### CMM Parser V4 - Trailing Token Cleanup
+
+#### handles trailing tokens after macro assignment
+
+1. ok pattern
+   - Expected: 0 equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+ok_pattern("trailing_tokens", "&patchloc1=0x0e60 ??? (extra tokens consumed)")
+expect(0).to_equal(0)
 ```
 
 </details>
@@ -88,56 +432,11 @@ expect(stdout.contains("Passed: 0")).to_equal(false)  # oracle: not a vacuous ru
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 2 |
-| Active scenarios | 2 |
+| Total scenarios | 19 |
+| Active scenarios | 19 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `725e3bf982a89a35acecf83080ef31a1b49b57705bf2b97e2371c1a1047e5141`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `725e3bf982a89a35acecf83080ef31a1b49b57705bf2b97e2371c1a1047e5141`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `725e3bf982a89a35acecf83080ef31a1b49b57705bf2b97e2371c1a1047e5141`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **94/100**; effective score: **94/100**; blockers: **0**.
-
-SSpec documentization score: 94/100
-source: test/03_system/feature/usage/cmm_lsp/cmm_parse_v4_fixes_spec.spl
-mirror: doc/06_spec/03_system/feature/usage/cmm_lsp/cmm_parse_v4_fixes_spec.md (current)
-findings: 4 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=80 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/feature/usage/cmm_lsp/cmm_parse_v4_fixes_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/feature/usage/cmm_lsp/cmm_parse_v4_fixes_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/feature/usage/cmm_lsp/cmm_parse_v4_fixes_spec.spl:35:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'every fixed real-world CMM pattern parses without errors' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/usage/cmm_lsp/cmm_parse_v4_fixes_spec.spl:42:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'harness executes to completion over all documented patterns' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

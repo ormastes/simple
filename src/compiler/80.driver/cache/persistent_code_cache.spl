@@ -25,18 +25,25 @@
 # a private temp file and are renamed into place, so a reader never observes
 # a half-written entry.
 
-use std.crypto.sha256.{sha256_text}
+use std.crypto.sha256.{sha256_text, sha256_bytes}
 use compiler.driver.cache.action_key.{canon_str, canon_field, canon_seq, action_key_sort_texts}
 use std.io_runtime.{dir_create_all}
-use std.nogc_sync_mut.io_runtime.{file_write_exact, file_exists, file_delete, file_read_nullable}
+
+extern fn rt_file_read_bytes(path: text) -> [i64]?
+extern fn rt_file_write_bytes(path: text, data: [i64]) -> bool
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
 
 # On-disk format stamp. Bump on ANY layout change: an old entry then keys to
 # a different digest and can never be misread as a new one.
+# v2: binary payload (fixed-width little-endian words) replacing the v1
+# comma-separated decimal text stream, whose decode dominated warm load.
 fn pcc_format_version() -> text:
-    "simple/persistent-code-cache/v1"
+    "simple/persistent-code-cache/v2"
 
-fn pcc_magic() -> text:
-    "SPCC1"
+# Magic bytes "SPCC2" — first five bytes of every entry file.
+fn pcc_magic_bytes() -> [i64]:
+    [83, 80, 67, 67, 50]
 
 # ============================================================================
 # Key
@@ -89,42 +96,99 @@ fn pcc_entry_path(root: text, digest: text) -> text:
 # Payload encoding
 # ============================================================================
 
-fn pcc_words_encode(words: [i64]) -> text:
-    var body = ""
-    var first = true
+# Binary layout (v2), byte offsets:
+#   [0, 5)     magic "SPCC2"
+#   [5, 69)    key echo — the 64 lowercase-hex chars of the key digest, ASCII
+#   [69, 77)   declared word count, u64 little-endian
+#   [77, 109)  SHA-256 of the body bytes (raw 32 bytes)
+#   [109, ...) body: count * 8 bytes, each word i64 two's-complement LE
+# Total length must be EXACTLY 109 + count*8 — trailing bytes are corruption.
+
+fn pcc_header_len() -> i64:
+    109
+
+# Append the 8 little-endian bytes of a two's-complement i64. `(w >> k) & 255`
+# is byte-exact for negative words too (arithmetic shift + mask).
+fn pcc_word_encode_into(out: [i64], w: i64):
+    out.push(w & 255)
+    out.push((w >> 8) & 255)
+    out.push((w >> 16) & 255)
+    out.push((w >> 24) & 255)
+    out.push((w >> 32) & 255)
+    out.push((w >> 40) & 255)
+    out.push((w >> 48) & 255)
+    out.push((w >> 56) & 255)
+
+fn pcc_words_encode(words: [i64]) -> [i64]:
+    var body: [i64] = []
     for w in words:
-        if first:
-            body = "{w}"
-            first = false
-        else:
-            body = body + "," + "{w}"
+        pcc_word_encode_into(body, w)
     body
 
-# Returns nil when ANY token is not a well-formed integer — a corrupt body is
-# never partially decoded.
-fn pcc_words_decode(body: text, expected_len: i64) -> [i64]?:
-    var out: [i64] = []
-    if body.len() > 0:
-        for tok in body.split(","):
-            val t = tok.trim()
-            if t.len() == 0:
-                return nil
-            var i = 0
-            if t.substring(0, 1) == "-":
-                i = 1
-            if i >= t.len():
-                return nil
-            while i < t.len():
-                val c = t.substring(i, i + 1)
-                if c < "0" or c > "9":
-                    return nil
-                i = i + 1
-            val v = t.to_i64()
-            if v == nil:
-                return nil
-            out.push(v!)
-    if out.len() != expected_len:
+# Decode `expected_len` LE words from `data` starting at `off`. Returns nil on
+# any out-of-range byte — a corrupt body is never partially decoded.
+fn pcc_words_decode(data: [i64], off: i64, expected_len: i64) -> [i64]?:
+    if data.len() != off + expected_len * 8:
         return nil
+    var out: [i64] = []
+    var i = off
+    var n = 0
+    while n < expected_len:
+        var lo = 0
+        var shift = 0
+        var j = 0
+        while j < 7:
+            val b = data[i + j]
+            if b < 0 or b > 255:
+                return nil
+            lo = lo + b * (1 << shift)
+            shift = shift + 8
+            j = j + 1
+        val top = data[i + 7]
+        if top < 0 or top > 255:
+            return nil
+        # Sign byte handled without 64-bit overflow: fold to [-128, 127] first.
+        var hi = top
+        if hi >= 128:
+            hi = hi - 256
+        out.push(hi * 72057594037927936 + lo)
+        i = i + 8
+        n = n + 1
+    out
+
+# ASCII code of one lowercase-hex character; -1 when not hex.
+fn pcc_hex_code(c: text) -> i64:
+    if c >= "0" and c <= "9":
+        val v = c.to_i64()
+        if v == nil:
+            return -1
+        return 48 + v!
+    if c == "a":
+        return 97
+    if c == "b":
+        return 98
+    if c == "c":
+        return 99
+    if c == "d":
+        return 100
+    if c == "e":
+        return 101
+    if c == "f":
+        return 102
+    -1
+
+# 64 ASCII bytes of the digest, or nil when the digest is not 64 hex chars.
+fn pcc_digest_bytes(digest: text) -> [i64]?:
+    if digest.len() != 64:
+        return nil
+    var out: [i64] = []
+    var i = 0
+    while i < 64:
+        val code = pcc_hex_code(digest.substring(i, i + 1))
+        if code < 0:
+            return nil
+        out.push(code)
+        i = i + 1
     out
 
 # ============================================================================
@@ -147,31 +211,30 @@ fn pcc_store(root: text, key: PccKey, words: [i64]) -> bool:
     val dir = root + "/entries/" + digest.substring(0, 2)
     if not dir_create_all(dir):
         return false
-    val body = pcc_words_encode(words)
-    var content = pcc_magic() + "\n"
-    content = content + "key=" + digest + "\n"
-    content = content + "words=" + "{words.len()}" + "\n"
-    content = content + "checksum=" + sha256_text(body) + "\n"
-    content = content + "body=" + body + "\n"
-    val tmp = path + ".tmp"
-    if not file_write_exact(tmp, content):
+    val key_bytes_opt = pcc_digest_bytes(digest)
+    if key_bytes_opt == nil:
         return false
-    if not file_write_exact(path, content):
-        file_delete(tmp)
+    val body = pcc_words_encode(words)
+    val checksum = sha256_bytes(body)
+    var content: [i64] = []
+    for b in pcc_magic_bytes():
+        content.push(b)
+    for b in key_bytes_opt!:
+        content.push(b)
+    val count = words.len()
+    pcc_word_encode_into(content, count)
+    for b in checksum:
+        content.push(b)
+    for b in body:
+        content.push(b)
+    val tmp = path + ".tmp"
+    if not rt_file_write_bytes(tmp, content):
+        return false
+    if not rt_file_write_bytes(path, content):
+        rt_file_delete(tmp)
         return false
     file_delete(tmp)
     true
-
-fn pcc_field(lines: [text], idx: i64, name: text) -> text?:
-    if idx >= lines.len():
-        return nil
-    val pfx = name + "="
-    val l = lines[idx]
-    if l.len() < pfx.len():
-        return nil
-    if l.substring(0, pfx.len()) != pfx:
-        return nil
-    l.substring(pfx.len(), l.len())
 
 # Load and FULLY validate. Every failure path returns a miss with a reason;
 # none of them returns partial words.
@@ -180,39 +243,64 @@ fn pcc_load(root: text, key: PccKey) -> PccLoad:
     val path = pcc_entry_path(root, digest)
     if not file_exists(path):
         return pcc_miss("absent")
-    val raw = file_read_nullable(path) ?? ""
+    val raw_opt = rt_file_read_bytes(path)
+    if raw_opt == nil:
+        return pcc_miss("unreadable")
+    val raw = raw_opt!
     if raw.len() == 0:
         return pcc_miss("empty")
-    val lines = raw.split("\n")
-    if lines.len() < 5:
+    if raw.len() < pcc_header_len():
         return pcc_miss("truncated")
-    if lines[0] != pcc_magic():
-        return pcc_miss("bad-magic")
-    val got_key = pcc_field(lines, 1, "key")
-    if got_key == nil:
-        return pcc_miss("bad-key-field")
+    val magic = pcc_magic_bytes()
+    var i = 0
+    while i < magic.len():
+        if raw[i] != magic[i]:
+            return pcc_miss("bad-magic")
+        i = i + 1
     # Defence in depth: the path already encodes the digest, but a file moved
     # or written by another producer must not be served under this key.
-    if got_key! != digest:
-        return pcc_miss("key-mismatch")
-    val got_count = pcc_field(lines, 2, "words")
-    if got_count == nil:
-        return pcc_miss("bad-count-field")
-    val declared_opt = got_count!.to_i64()
-    if declared_opt == nil:
+    val key_bytes_opt = pcc_digest_bytes(digest)
+    if key_bytes_opt == nil:
+        return pcc_miss("bad-key-field")
+    val key_bytes = key_bytes_opt!
+    var k = 0
+    while k < 64:
+        if raw[5 + k] != key_bytes[k]:
+            return pcc_miss("key-mismatch")
+        k = k + 1
+    # Declared count: u64 LE at [69, 77). A sign byte >= 128 would decode
+    # negative, which is rejected as a bad count.
+    var declared = 0
+    var shift = 0
+    var c = 0
+    while c < 7:
+        val b = raw[69 + c]
+        if b < 0 or b > 255:
+            return pcc_miss("bad-count")
+        declared = declared + b * (1 << shift)
+        shift = shift + 8
+        c = c + 1
+    val count_top = raw[76]
+    if count_top != 0:
         return pcc_miss("bad-count")
-    val declared = declared_opt!
-    if declared < 0:
-        return pcc_miss("bad-count")
-    val got_sum = pcc_field(lines, 3, "checksum")
-    if got_sum == nil:
-        return pcc_miss("bad-checksum-field")
-    val got_body = pcc_field(lines, 4, "body")
-    if got_body == nil:
-        return pcc_miss("bad-body-field")
-    if sha256_text(got_body!) != got_sum!:
-        return pcc_miss("checksum-mismatch")
-    val decoded = pcc_words_decode(got_body!, declared)
+    if raw.len() != pcc_header_len() + declared * 8:
+        return pcc_miss("length-mismatch")
+    # Body checksum: SHA-256 over the body bytes actually on disk.
+    var body: [i64] = []
+    var bi = pcc_header_len()
+    while bi < raw.len():
+        val b = raw[bi]
+        if b < 0 or b > 255:
+            return pcc_miss("bad-body-byte")
+        body.push(b)
+        bi = bi + 1
+    val checksum = sha256_bytes(body)
+    var s = 0
+    while s < 32:
+        if raw[77 + s] != checksum[s]:
+            return pcc_miss("checksum-mismatch")
+        s = s + 1
+    val decoded = pcc_words_decode(body, 0, declared)
     if decoded == nil:
         return pcc_miss("decode-failed")
     PccLoad(true, decoded!, "")

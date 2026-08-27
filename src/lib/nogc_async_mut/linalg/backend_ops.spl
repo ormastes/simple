@@ -1,8 +1,8 @@
 use std.ndarray.*
-use std.common.torch.dyn_sffi_ops.{dyn_torch_available, dyn_torch_tensor_dot_result, dyn_torch_tensor_free, dyn_torch_tensor_inverse_result, dyn_torch_tensor_linalg_solve_result, dyn_torch_tensor_matmul_result, dyn_torch_tensor_sum_result}
-use std.common.torch.dyn_sffi_tensor_ops.{dyn_torch_tensor_copy_values_result, dyn_torch_tensor_from_values_1d_result, dyn_torch_tensor_from_values_2d_result}
+use std.common.torch.dyn_sffi_ops.{dyn_torch_available, dyn_torch_tensor_dot, dyn_torch_tensor_free, dyn_torch_tensor_inverse, dyn_torch_tensor_linalg_solve, dyn_torch_tensor_matmul, dyn_torch_tensor_sum}
+use std.common.torch.dyn_sffi_tensor_ops.{dyn_torch_tensor_copy_values, dyn_torch_tensor_from_values_1d, dyn_torch_tensor_from_values_2d}
 use std.linalg.linalg_core.{BackendError, _scilib_call3, _scilib_call_n, dyn_cuda_available, dyn_openblas_available, float64_values_to_f64, float64_matrix_to_f64, column_matrix_from_vector, vector_from_column_matrix, vector_from}
-use std.nogc_sync_mut.ptr.raw.{rt_alloc, rt_free, rt_ptr_read_i64, rt_ptr_write_i64, spl_f64_to_bits, spl_bits_to_f64}
+use std.nogc_sync_mut.ptr.raw.{raw_alloc, raw_release, raw_read_i64, raw_write_i64, raw_f64_to_bits, raw_bits_to_f64}
 
 fn openblas_dot(left: NDArray, right: NDArray) -> Result<Float64, BackendError>:
     if left.dtype != DType.F64 or right.dtype != DType.F64 or left.len() != right.len():
@@ -24,22 +24,22 @@ fn openblas_dot_values(left: [Float64], right: [Float64]) -> Result<Float64, Bac
     if left.len() == 0:
         return Ok(Float64.new(0.0))
     val bytes = left.len() * 8
-    val left_buf = rt_alloc(bytes)
+    val left_buf = raw_alloc(bytes)
     if left_buf == 0:
         return Err(BackendError.BackendExecutionFailed("openblas dot failed to allocate host staging buffer"))
-    val right_buf = rt_alloc(bytes)
+    val right_buf = raw_alloc(bytes)
     if right_buf == 0:
-        rt_free(left_buf)
+        raw_release(left_buf)
         return Err(BackendError.BackendExecutionFailed("openblas dot failed to allocate host staging buffer"))
     var i = 0
     while i < left.len():
-        rt_ptr_write_i64(left_buf, i * 8, spl_f64_to_bits(left[i].value))
-        rt_ptr_write_i64(right_buf, i * 8, spl_f64_to_bits(right[i].value))
+        raw_write_i64(left_buf, i * 8, raw_f64_to_bits(left[i].value))
+        raw_write_i64(right_buf, i * 8, raw_f64_to_bits(right[i].value))
         i = i + 1
     val result_bits = _scilib_call3("rt_scilib_openblas_ddot_bits", left_buf, left.len(), right_buf)
-    rt_free(left_buf)
-    rt_free(right_buf)
-    Ok(Float64.new(spl_bits_to_f64(result_bits)))
+    raw_release(left_buf)
+    raw_release(right_buf)
+    Ok(Float64.new(raw_bits_to_f64(result_bits)))
 
 fn openblas_axpy(alpha: Float64, x: NDArray, y: NDArray) -> Result<NDArray, BackendError>:
     if x.dtype != DType.F64 or y.dtype != DType.F64 or x.shape != y.shape:
@@ -59,42 +59,42 @@ fn openblas_axpy_values(alpha: Float64, x: [Float64], y: [Float64]) -> Result<[F
     if not dyn_openblas_available():
         return Err(BackendError.BackendUnavailable("openblas"))
     val bytes = x.len() * 8
-    val params_buf = rt_alloc(16)
+    val params_buf = raw_alloc(16)
     if params_buf == 0:
         return Err(BackendError.BackendExecutionFailed("openblas axpy failed to allocate host staging buffer"))
-    val x_buf = rt_alloc(bytes)
+    val x_buf = raw_alloc(bytes)
     if x_buf == 0:
-        rt_free(params_buf)
+        raw_release(params_buf)
         return Err(BackendError.BackendExecutionFailed("openblas axpy failed to allocate host staging buffer"))
-    val y_buf = rt_alloc(bytes)
+    val y_buf = raw_alloc(bytes)
     if y_buf == 0:
-        rt_free(params_buf)
-        rt_free(x_buf)
+        raw_release(params_buf)
+        raw_release(x_buf)
         return Err(BackendError.BackendExecutionFailed("openblas axpy failed to allocate host staging buffer"))
-    val out_buf = rt_alloc(bytes)
+    val out_buf = raw_alloc(bytes)
     if out_buf == 0:
-        rt_free(params_buf)
-        rt_free(x_buf)
-        rt_free(y_buf)
+        raw_release(params_buf)
+        raw_release(x_buf)
+        raw_release(y_buf)
         return Err(BackendError.BackendExecutionFailed("openblas axpy failed to allocate host staging buffer"))
-    rt_ptr_write_i64(params_buf, 0, x.len())
-    rt_ptr_write_i64(params_buf, 8, spl_f64_to_bits(alpha.value))
+    raw_write_i64(params_buf, 0, x.len())
+    raw_write_i64(params_buf, 8, raw_f64_to_bits(alpha.value))
     var i = 0
     while i < x.len():
-        rt_ptr_write_i64(x_buf, i * 8, spl_f64_to_bits(x[i].value))
-        rt_ptr_write_i64(y_buf, i * 8, spl_f64_to_bits(y[i].value))
+        raw_write_i64(x_buf, i * 8, raw_f64_to_bits(x[i].value))
+        raw_write_i64(y_buf, i * 8, raw_f64_to_bits(y[i].value))
         i = i + 1
     val ok = _scilib_call_n("rt_scilib_openblas_daxpy_bits", [params_buf, x_buf, y_buf, out_buf])
     var out: [Float64] = []
     if ok != 0:
         i = 0
         while i < x.len():
-            out.push(Float64.new(spl_bits_to_f64(rt_ptr_read_i64(out_buf, i * 8))))
+            out.push(Float64.new(raw_bits_to_f64(raw_read_i64(out_buf, i * 8))))
             i = i + 1
-    rt_free(params_buf)
-    rt_free(x_buf)
-    rt_free(y_buf)
-    rt_free(out_buf)
+    raw_release(params_buf)
+    raw_release(x_buf)
+    raw_release(y_buf)
+    raw_release(out_buf)
     if ok == 0:
         return Err(BackendError.BackendExecutionFailed("openblas axpy backend execution failed"))
     Ok(out)
@@ -112,57 +112,57 @@ fn openblas_gemm(alpha: Float64, a: NDArray, b: NDArray, beta: Float64, c_in: ND
     val a_count = rows * inner
     val b_count = inner * cols
     val c_count = rows * cols
-    val a_buf = rt_alloc(a_count * 8)
+    val a_buf = raw_alloc(a_count * 8)
     if a_buf == 0:
         return Err(BackendError.BackendExecutionFailed("openblas gemm failed to allocate host staging buffer"))
-    val b_buf = rt_alloc(b_count * 8)
+    val b_buf = raw_alloc(b_count * 8)
     if b_buf == 0:
-        rt_free(a_buf)
+        raw_release(a_buf)
         return Err(BackendError.BackendExecutionFailed("openblas gemm failed to allocate host staging buffer"))
-    val c_buf = rt_alloc(c_count * 8)
+    val c_buf = raw_alloc(c_count * 8)
     if c_buf == 0:
-        rt_free(a_buf)
-        rt_free(b_buf)
+        raw_release(a_buf)
+        raw_release(b_buf)
         return Err(BackendError.BackendExecutionFailed("openblas gemm failed to allocate host staging buffer"))
-    val out_buf = rt_alloc(c_count * 8)
+    val out_buf = raw_alloc(c_count * 8)
     if out_buf == 0:
-        rt_free(a_buf)
-        rt_free(b_buf)
-        rt_free(c_buf)
+        raw_release(a_buf)
+        raw_release(b_buf)
+        raw_release(c_buf)
         return Err(BackendError.BackendExecutionFailed("openblas gemm failed to allocate host staging buffer"))
-    val params_buf = rt_alloc(40)
+    val params_buf = raw_alloc(40)
     if params_buf == 0:
-        rt_free(a_buf)
-        rt_free(b_buf)
-        rt_free(c_buf)
-        rt_free(out_buf)
+        raw_release(a_buf)
+        raw_release(b_buf)
+        raw_release(c_buf)
+        raw_release(out_buf)
         return Err(BackendError.BackendExecutionFailed("openblas gemm failed to allocate host staging buffer"))
     var row = 0
     while row < rows:
         var col = 0
         while col < inner:
-            rt_ptr_write_i64(a_buf, (row * inner + col) * 8, spl_f64_to_bits(a.get_f64_at([Index.new(row), Index.new(col)]).value))
+            raw_write_i64(a_buf, (row * inner + col) * 8, raw_f64_to_bits(a.get_f64_at([Index.new(row), Index.new(col)]).value))
             col = col + 1
         row = row + 1
     row = 0
     while row < inner:
         var col = 0
         while col < cols:
-            rt_ptr_write_i64(b_buf, (row * cols + col) * 8, spl_f64_to_bits(b.get_f64_at([Index.new(row), Index.new(col)]).value))
+            raw_write_i64(b_buf, (row * cols + col) * 8, raw_f64_to_bits(b.get_f64_at([Index.new(row), Index.new(col)]).value))
             col = col + 1
         row = row + 1
     row = 0
     while row < rows:
         var col = 0
         while col < cols:
-            rt_ptr_write_i64(c_buf, (row * cols + col) * 8, spl_f64_to_bits(c_in.get_f64_at([Index.new(row), Index.new(col)]).value))
+            raw_write_i64(c_buf, (row * cols + col) * 8, raw_f64_to_bits(c_in.get_f64_at([Index.new(row), Index.new(col)]).value))
             col = col + 1
         row = row + 1
-    rt_ptr_write_i64(params_buf, 0, rows)
-    rt_ptr_write_i64(params_buf, 8, cols)
-    rt_ptr_write_i64(params_buf, 16, inner)
-    rt_ptr_write_i64(params_buf, 24, spl_f64_to_bits(alpha.value))
-    rt_ptr_write_i64(params_buf, 32, spl_f64_to_bits(beta.value))
+    raw_write_i64(params_buf, 0, rows)
+    raw_write_i64(params_buf, 8, cols)
+    raw_write_i64(params_buf, 16, inner)
+    raw_write_i64(params_buf, 24, raw_f64_to_bits(alpha.value))
+    raw_write_i64(params_buf, 32, raw_f64_to_bits(beta.value))
     val ok = _scilib_call_n("rt_scilib_openblas_dgemm_bits", [
         params_buf,
         a_buf,
@@ -174,13 +174,13 @@ fn openblas_gemm(alpha: Float64, a: NDArray, b: NDArray, beta: Float64, c_in: ND
     if ok != 0:
         var i = 0
         while i < c_count:
-            out.push(Float64.new(spl_bits_to_f64(rt_ptr_read_i64(out_buf, i * 8))))
+            out.push(Float64.new(raw_bits_to_f64(raw_read_i64(out_buf, i * 8))))
             i = i + 1
-    rt_free(a_buf)
-    rt_free(b_buf)
-    rt_free(c_buf)
-    rt_free(out_buf)
-    rt_free(params_buf)
+    raw_release(a_buf)
+    raw_release(b_buf)
+    raw_release(c_buf)
+    raw_release(out_buf)
+    raw_release(params_buf)
     if ok == 0:
         return Err(BackendError.BackendExecutionFailed("openblas gemm backend execution failed"))
     Ok(make_f64_array(out, Shape.new([a.rows(), b.cols()])))
@@ -203,45 +203,45 @@ fn openblas_solve(a: NDArray, b: NDArray) -> Result<NDArray, BackendError>:
     val n = a.rows().value
     val a_count = n * n
     val b_count = n
-    val params_buf = rt_alloc(16)
+    val params_buf = raw_alloc(16)
     if params_buf == 0:
         return Err(BackendError.BackendExecutionFailed("openblas solve failed to allocate host staging buffer"))
-    val a_buf = rt_alloc(a_count * 8)
+    val a_buf = raw_alloc(a_count * 8)
     if a_buf == 0:
-        rt_free(params_buf)
+        raw_release(params_buf)
         return Err(BackendError.BackendExecutionFailed("openblas solve failed to allocate host staging buffer"))
-    val b_buf = rt_alloc(b_count * 8)
+    val b_buf = raw_alloc(b_count * 8)
     if b_buf == 0:
-        rt_free(params_buf)
-        rt_free(a_buf)
+        raw_release(params_buf)
+        raw_release(a_buf)
         return Err(BackendError.BackendExecutionFailed("openblas solve failed to allocate host staging buffer"))
-    val out_buf = rt_alloc(b_count * 8)
+    val out_buf = raw_alloc(b_count * 8)
     if out_buf == 0:
-        rt_free(params_buf)
-        rt_free(a_buf)
-        rt_free(b_buf)
+        raw_release(params_buf)
+        raw_release(a_buf)
+        raw_release(b_buf)
         return Err(BackendError.BackendExecutionFailed("openblas solve failed to allocate host staging buffer"))
-    rt_ptr_write_i64(params_buf, 0, n)
-    rt_ptr_write_i64(params_buf, 8, 1)
+    raw_write_i64(params_buf, 0, n)
+    raw_write_i64(params_buf, 8, 1)
     var row = 0
     while row < n:
         var col = 0
         while col < n:
-            rt_ptr_write_i64(a_buf, (row * n + col) * 8, spl_f64_to_bits(a.get_f64_at([Index.new(row), Index.new(col)]).value))
+            raw_write_i64(a_buf, (row * n + col) * 8, raw_f64_to_bits(a.get_f64_at([Index.new(row), Index.new(col)]).value))
             col = col + 1
-        rt_ptr_write_i64(b_buf, row * 8, spl_f64_to_bits(b.get_f64(Index.new(row)).value))
+        raw_write_i64(b_buf, row * 8, raw_f64_to_bits(b.get_f64(Index.new(row)).value))
         row = row + 1
     val info = _scilib_call_n("rt_scilib_openblas_dgesv_bits", [params_buf, a_buf, b_buf, out_buf])
     var out: [Float64] = []
     if info == 0:
         var i = 0
         while i < b_count:
-            out.push(Float64.new(spl_bits_to_f64(rt_ptr_read_i64(out_buf, i * 8))))
+            out.push(Float64.new(raw_bits_to_f64(raw_read_i64(out_buf, i * 8))))
             i = i + 1
-    rt_free(params_buf)
-    rt_free(a_buf)
-    rt_free(b_buf)
-    rt_free(out_buf)
+    raw_release(params_buf)
+    raw_release(a_buf)
+    raw_release(b_buf)
+    raw_release(out_buf)
     if info > 0:
         return Err(BackendError.BackendExecutionFailed("openblas solve detected a singular matrix"))
     if info != 0:
@@ -265,28 +265,23 @@ fn torch_dot_values(left: [Float64], right: [Float64]) -> Result<Float64, Backen
         return Err(BackendError.BackendExecutionFailed("pytorch dot requires same-length vectors"))
     if not dyn_torch_available():
         return Err(BackendError.BackendUnavailable("pytorch"))
-    val left_create = dyn_torch_tensor_from_values_1d_result(float64_values_to_f64(left))
-    if left_create.status != "ready" or left_create.handle <= 0:
-        return Err(BackendError.BackendExecutionFailed("pytorch left dot tensor construction failed: " + left_create.reason))
-    val left_handle = left_create.handle
-    val right_create = dyn_torch_tensor_from_values_1d_result(float64_values_to_f64(right))
-    if right_create.status != "ready" or right_create.handle <= 0:
+    val left_handle = dyn_torch_tensor_from_values_1d(float64_values_to_f64(left))
+    if left_handle <= 0:
+        return Err(BackendError.MissingRuntimeSymbol("rt_dyn_torch_tensor_from_bits_1d"))
+    val right_handle = dyn_torch_tensor_from_values_1d(float64_values_to_f64(right))
+    if right_handle <= 0:
         dyn_torch_tensor_free(left_handle)
-        return Err(BackendError.BackendExecutionFailed("pytorch right dot tensor construction failed: " + right_create.reason))
-    val right_handle = right_create.handle
-    val dot_handle = match dyn_torch_tensor_dot_result(left_handle, right_handle):
-        case Ok(handle): handle
-        case Err(reason):
-            dyn_torch_tensor_free(left_handle)
-            dyn_torch_tensor_free(right_handle)
-            return Err(BackendError.BackendExecutionFailed("pytorch dot failed: " + reason))
-    val result = dyn_torch_tensor_sum_result(dot_handle)
+        return Err(BackendError.MissingRuntimeSymbol("rt_dyn_torch_tensor_from_bits_1d"))
+    val dot_handle = dyn_torch_tensor_dot(left_handle, right_handle)
+    if dot_handle <= 0:
+        dyn_torch_tensor_free(left_handle)
+        dyn_torch_tensor_free(right_handle)
+        return Err(BackendError.MissingRuntimeSymbol("rt_torch_torchtensor_dot"))
+    val result = dyn_torch_tensor_sum(dot_handle)
     dyn_torch_tensor_free(dot_handle)
     dyn_torch_tensor_free(left_handle)
     dyn_torch_tensor_free(right_handle)
-    match result:
-        case Ok(value): Ok(Float64.new(value))
-        case Err(reason): Err(BackendError.BackendExecutionFailed("pytorch dot reduction failed: " + reason))
+    Ok(Float64.new(result))
 
 fn torch_gemm(alpha: Float64, a: NDArray, b: NDArray, beta: Float64, c_in: NDArray) -> Result<NDArray, BackendError>:
     if a.dtype != DType.F64 or b.dtype != DType.F64 or c_in.dtype != DType.F64:
@@ -298,28 +293,24 @@ fn torch_gemm(alpha: Float64, a: NDArray, b: NDArray, beta: Float64, c_in: NDArr
     val rows = a.rows().value
     val cols = b.cols().value
     val inner = a.cols().value
-    val a_create = dyn_torch_tensor_from_values_2d_result(float64_matrix_to_f64(a, rows, inner), rows, inner)
-    if a_create.status != "ready" or a_create.handle <= 0:
-        return Err(BackendError.BackendExecutionFailed("pytorch left matrix construction failed: " + a_create.reason))
-    val a_handle = a_create.handle
-    val b_create = dyn_torch_tensor_from_values_2d_result(float64_matrix_to_f64(b, inner, cols), inner, cols)
-    if b_create.status != "ready" or b_create.handle <= 0:
+    val a_handle = dyn_torch_tensor_from_values_2d(float64_matrix_to_f64(a, rows, inner), rows, inner)
+    if a_handle <= 0:
+        return Err(BackendError.MissingRuntimeSymbol("rt_dyn_torch_tensor_from_bits_2d"))
+    val b_handle = dyn_torch_tensor_from_values_2d(float64_matrix_to_f64(b, inner, cols), inner, cols)
+    if b_handle <= 0:
         dyn_torch_tensor_free(a_handle)
-        return Err(BackendError.BackendExecutionFailed("pytorch right matrix construction failed: " + b_create.reason))
-    val b_handle = b_create.handle
-    val product_handle = match dyn_torch_tensor_matmul_result(a_handle, b_handle):
-        case Ok(handle): handle
-        case Err(reason):
-            dyn_torch_tensor_free(a_handle)
-            dyn_torch_tensor_free(b_handle)
-            return Err(BackendError.BackendExecutionFailed("pytorch matmul failed: " + reason))
-    val copy_result = dyn_torch_tensor_copy_values_result(product_handle, rows * cols)
+        return Err(BackendError.MissingRuntimeSymbol("rt_dyn_torch_tensor_from_bits_2d"))
+    val product_handle = dyn_torch_tensor_matmul(a_handle, b_handle)
+    if product_handle <= 0:
+        dyn_torch_tensor_free(a_handle)
+        dyn_torch_tensor_free(b_handle)
+        return Err(BackendError.MissingRuntimeSymbol("rt_torch_torchtensor_matmul"))
+    val values = dyn_torch_tensor_copy_values(product_handle, rows * cols)
     dyn_torch_tensor_free(product_handle)
     dyn_torch_tensor_free(a_handle)
     dyn_torch_tensor_free(b_handle)
-    if copy_result.status != "ready" or copy_result.values.len() != rows * cols:
-        return Err(BackendError.BackendExecutionFailed("pytorch matrix result copy failed: " + copy_result.reason))
-    val values = copy_result.values
+    if values.len() != rows * cols:
+        return Err(BackendError.MissingRuntimeSymbol("rt_dyn_torch_tensor_copy_bits"))
     var out: [Float64] = []
     var row = 0
     while row < rows:
@@ -348,31 +339,27 @@ fn torch_solve(a: NDArray, b: NDArray) -> Result<NDArray, BackendError>:
     if not dyn_torch_available():
         return Err(BackendError.BackendUnavailable("pytorch"))
     val n = a.rows().value
-    val a_create = dyn_torch_tensor_from_values_2d_result(float64_matrix_to_f64(a, n, n), n, n)
-    if a_create.status != "ready" or a_create.handle <= 0:
-        return Err(BackendError.BackendExecutionFailed("pytorch solve matrix construction failed: " + a_create.reason))
-    val a_handle = a_create.handle
+    val a_handle = dyn_torch_tensor_from_values_2d(float64_matrix_to_f64(a, n, n), n, n)
+    if a_handle <= 0:
+        return Err(BackendError.MissingRuntimeSymbol("rt_dyn_torch_tensor_from_bits_2d"))
     var rhs_values: [Float64] = []
     var rhs_i = 0
     while rhs_i < b.len().value:
         rhs_values.push(b.get_f64(Index.new(rhs_i)))
         rhs_i = rhs_i + 1
-    val b_create = dyn_torch_tensor_from_values_1d_result(float64_values_to_f64(rhs_values))
-    if b_create.status != "ready" or b_create.handle <= 0:
+    val b_handle = dyn_torch_tensor_from_values_1d(float64_values_to_f64(rhs_values))
+    if b_handle <= 0:
         dyn_torch_tensor_free(a_handle)
-        return Err(BackendError.BackendExecutionFailed("pytorch solve right-hand construction failed: " + b_create.reason))
-    val b_handle = b_create.handle
-    val solve_result = dyn_torch_tensor_linalg_solve_result(a_handle, b_handle)
+        return Err(BackendError.MissingRuntimeSymbol("rt_dyn_torch_tensor_from_bits_1d"))
+    val out_handle = dyn_torch_tensor_linalg_solve(a_handle, b_handle)
     dyn_torch_tensor_free(a_handle)
     dyn_torch_tensor_free(b_handle)
-    if solve_result.status != "ready" or solve_result.handle <= 0:
-        return Err(BackendError.BackendExecutionFailed("pytorch solve backend execution failed: " + solve_result.reason))
-    val out_handle = solve_result.handle
-    val copy_result = dyn_torch_tensor_copy_values_result(out_handle, n)
+    if out_handle <= 0:
+        return Err(BackendError.BackendExecutionFailed("pytorch solve backend execution failed"))
+    val values = dyn_torch_tensor_copy_values(out_handle, n)
     dyn_torch_tensor_free(out_handle)
-    if copy_result.status != "ready" or copy_result.values.len() != n:
-        return Err(BackendError.BackendExecutionFailed("pytorch solve result copy failed: " + copy_result.reason))
-    val values = copy_result.values
+    if values.len() != n:
+        return Err(BackendError.MissingRuntimeSymbol("rt_dyn_torch_tensor_copy_bits"))
     var out: [Float64] = []
     var i = 0
     while i < values.len():
@@ -386,20 +373,17 @@ fn torch_inv(a: NDArray) -> Result<NDArray, BackendError>:
     if not dyn_torch_available():
         return Err(BackendError.BackendUnavailable("pytorch"))
     val n = a.rows().value
-    val a_create = dyn_torch_tensor_from_values_2d_result(float64_matrix_to_f64(a, n, n), n, n)
-    if a_create.status != "ready" or a_create.handle <= 0:
-        return Err(BackendError.BackendExecutionFailed("pytorch inverse matrix construction failed: " + a_create.reason))
-    val a_handle = a_create.handle
-    val inverse_result = dyn_torch_tensor_inverse_result(a_handle)
+    val a_handle = dyn_torch_tensor_from_values_2d(float64_matrix_to_f64(a, n, n), n, n)
+    if a_handle <= 0:
+        return Err(BackendError.MissingRuntimeSymbol("rt_dyn_torch_tensor_from_bits_2d"))
+    val out_handle = dyn_torch_tensor_inverse(a_handle)
     dyn_torch_tensor_free(a_handle)
-    val out_handle = match inverse_result:
-        case Ok(handle): handle
-        case Err(reason): return Err(BackendError.BackendExecutionFailed("pytorch inv failed: " + reason))
-    val copy_result = dyn_torch_tensor_copy_values_result(out_handle, n * n)
+    if out_handle <= 0:
+        return Err(BackendError.BackendExecutionFailed("pytorch inv backend execution failed"))
+    val values = dyn_torch_tensor_copy_values(out_handle, n * n)
     dyn_torch_tensor_free(out_handle)
-    if copy_result.status != "ready" or copy_result.values.len() != n * n:
-        return Err(BackendError.BackendExecutionFailed("pytorch inverse result copy failed: " + copy_result.reason))
-    val values = copy_result.values
+    if values.len() != n * n:
+        return Err(BackendError.MissingRuntimeSymbol("rt_dyn_torch_tensor_copy_bits"))
     var out: [Float64] = []
     var i = 0
     while i < values.len():
@@ -427,22 +411,22 @@ fn cuda_dot_values(left: [Float64], right: [Float64]) -> Result<Float64, Backend
     if left.len() == 0:
         return Ok(Float64.new(0.0))
     val bytes = left.len() * 8
-    val left_buf = rt_alloc(bytes)
+    val left_buf = raw_alloc(bytes)
     if left_buf == 0:
         return Err(BackendError.BackendExecutionFailed("cuda dot failed to allocate host staging buffer"))
-    val right_buf = rt_alloc(bytes)
+    val right_buf = raw_alloc(bytes)
     if right_buf == 0:
-        rt_free(left_buf)
+        raw_release(left_buf)
         return Err(BackendError.BackendExecutionFailed("cuda dot failed to allocate host staging buffer"))
     var i = 0
     while i < left.len():
-        rt_ptr_write_i64(left_buf, i * 8, spl_f64_to_bits(left[i].value))
-        rt_ptr_write_i64(right_buf, i * 8, spl_f64_to_bits(right[i].value))
+        raw_write_i64(left_buf, i * 8, raw_f64_to_bits(left[i].value))
+        raw_write_i64(right_buf, i * 8, raw_f64_to_bits(right[i].value))
         i = i + 1
     val result_bits = _scilib_call3("rt_scilib_cuda_ddot_bits", left_buf, left.len(), right_buf)
-    rt_free(left_buf)
-    rt_free(right_buf)
-    Ok(Float64.new(spl_bits_to_f64(result_bits)))
+    raw_release(left_buf)
+    raw_release(right_buf)
+    Ok(Float64.new(raw_bits_to_f64(result_bits)))
 
 fn cuda_gemm(alpha: Float64, a: NDArray, b: NDArray, beta: Float64, c_in: NDArray) -> Result<NDArray, BackendError>:
     if a.dtype != DType.F64 or b.dtype != DType.F64 or c_in.dtype != DType.F64:
@@ -457,57 +441,57 @@ fn cuda_gemm(alpha: Float64, a: NDArray, b: NDArray, beta: Float64, c_in: NDArra
     val a_count = rows * inner
     val b_count = inner * cols
     val c_count = rows * cols
-    val a_buf = rt_alloc(a_count * 8)
+    val a_buf = raw_alloc(a_count * 8)
     if a_buf == 0:
         return Err(BackendError.BackendExecutionFailed("cuda gemm failed to allocate host staging buffer"))
-    val b_buf = rt_alloc(b_count * 8)
+    val b_buf = raw_alloc(b_count * 8)
     if b_buf == 0:
-        rt_free(a_buf)
+        raw_release(a_buf)
         return Err(BackendError.BackendExecutionFailed("cuda gemm failed to allocate host staging buffer"))
-    val c_buf = rt_alloc(c_count * 8)
+    val c_buf = raw_alloc(c_count * 8)
     if c_buf == 0:
-        rt_free(a_buf)
-        rt_free(b_buf)
+        raw_release(a_buf)
+        raw_release(b_buf)
         return Err(BackendError.BackendExecutionFailed("cuda gemm failed to allocate host staging buffer"))
-    val out_buf = rt_alloc(c_count * 8)
+    val out_buf = raw_alloc(c_count * 8)
     if out_buf == 0:
-        rt_free(a_buf)
-        rt_free(b_buf)
-        rt_free(c_buf)
+        raw_release(a_buf)
+        raw_release(b_buf)
+        raw_release(c_buf)
         return Err(BackendError.BackendExecutionFailed("cuda gemm failed to allocate host staging buffer"))
-    val params_buf = rt_alloc(40)
+    val params_buf = raw_alloc(40)
     if params_buf == 0:
-        rt_free(a_buf)
-        rt_free(b_buf)
-        rt_free(c_buf)
-        rt_free(out_buf)
+        raw_release(a_buf)
+        raw_release(b_buf)
+        raw_release(c_buf)
+        raw_release(out_buf)
         return Err(BackendError.BackendExecutionFailed("cuda gemm failed to allocate host staging buffer"))
     var row = 0
     while row < rows:
         var col = 0
         while col < inner:
-            rt_ptr_write_i64(a_buf, (row * inner + col) * 8, spl_f64_to_bits(a.get_f64_at([Index.new(row), Index.new(col)]).value))
+            raw_write_i64(a_buf, (row * inner + col) * 8, raw_f64_to_bits(a.get_f64_at([Index.new(row), Index.new(col)]).value))
             col = col + 1
         row = row + 1
     row = 0
     while row < inner:
         var col = 0
         while col < cols:
-            rt_ptr_write_i64(b_buf, (row * cols + col) * 8, spl_f64_to_bits(b.get_f64_at([Index.new(row), Index.new(col)]).value))
+            raw_write_i64(b_buf, (row * cols + col) * 8, raw_f64_to_bits(b.get_f64_at([Index.new(row), Index.new(col)]).value))
             col = col + 1
         row = row + 1
     row = 0
     while row < rows:
         var col = 0
         while col < cols:
-            rt_ptr_write_i64(c_buf, (row * cols + col) * 8, spl_f64_to_bits(c_in.get_f64_at([Index.new(row), Index.new(col)]).value))
+            raw_write_i64(c_buf, (row * cols + col) * 8, raw_f64_to_bits(c_in.get_f64_at([Index.new(row), Index.new(col)]).value))
             col = col + 1
         row = row + 1
-    rt_ptr_write_i64(params_buf, 0, rows)
-    rt_ptr_write_i64(params_buf, 8, cols)
-    rt_ptr_write_i64(params_buf, 16, inner)
-    rt_ptr_write_i64(params_buf, 24, spl_f64_to_bits(alpha.value))
-    rt_ptr_write_i64(params_buf, 32, spl_f64_to_bits(beta.value))
+    raw_write_i64(params_buf, 0, rows)
+    raw_write_i64(params_buf, 8, cols)
+    raw_write_i64(params_buf, 16, inner)
+    raw_write_i64(params_buf, 24, raw_f64_to_bits(alpha.value))
+    raw_write_i64(params_buf, 32, raw_f64_to_bits(beta.value))
     val ok = _scilib_call_n("rt_scilib_cuda_dgemm_bits", [
         params_buf,
         a_buf,
@@ -519,13 +503,13 @@ fn cuda_gemm(alpha: Float64, a: NDArray, b: NDArray, beta: Float64, c_in: NDArra
     if ok != 0:
         var i = 0
         while i < c_count:
-            out.push(Float64.new(spl_bits_to_f64(rt_ptr_read_i64(out_buf, i * 8))))
+            out.push(Float64.new(raw_bits_to_f64(raw_read_i64(out_buf, i * 8))))
             i = i + 1
-    rt_free(a_buf)
-    rt_free(b_buf)
-    rt_free(c_buf)
-    rt_free(out_buf)
-    rt_free(params_buf)
+    raw_release(a_buf)
+    raw_release(b_buf)
+    raw_release(c_buf)
+    raw_release(out_buf)
+    raw_release(params_buf)
     if ok == 0:
         return Err(BackendError.BackendExecutionFailed("cuda gemm backend execution failed"))
     Ok(make_f64_array(out, Shape.new([a.rows(), b.cols()])))
@@ -542,50 +526,50 @@ fn cuda_gemv(alpha: Float64, matrix: NDArray, vector: NDArray, beta: Float64, y_
     val a_count = rows * cols
     val x_count = cols
     val y_count = rows
-    val a_buf = rt_alloc(a_count * 8)
+    val a_buf = raw_alloc(a_count * 8)
     if a_buf == 0:
         return Err(BackendError.BackendExecutionFailed("cuda gemv failed to allocate host staging buffer"))
-    val x_buf = rt_alloc(x_count * 8)
+    val x_buf = raw_alloc(x_count * 8)
     if x_buf == 0:
-        rt_free(a_buf)
+        raw_release(a_buf)
         return Err(BackendError.BackendExecutionFailed("cuda gemv failed to allocate host staging buffer"))
-    val y_buf = rt_alloc(y_count * 8)
+    val y_buf = raw_alloc(y_count * 8)
     if y_buf == 0:
-        rt_free(a_buf)
-        rt_free(x_buf)
+        raw_release(a_buf)
+        raw_release(x_buf)
         return Err(BackendError.BackendExecutionFailed("cuda gemv failed to allocate host staging buffer"))
-    val out_buf = rt_alloc(y_count * 8)
+    val out_buf = raw_alloc(y_count * 8)
     if out_buf == 0:
-        rt_free(a_buf)
-        rt_free(x_buf)
-        rt_free(y_buf)
+        raw_release(a_buf)
+        raw_release(x_buf)
+        raw_release(y_buf)
         return Err(BackendError.BackendExecutionFailed("cuda gemv failed to allocate host staging buffer"))
-    val params_buf = rt_alloc(32)
+    val params_buf = raw_alloc(32)
     if params_buf == 0:
-        rt_free(a_buf)
-        rt_free(x_buf)
-        rt_free(y_buf)
-        rt_free(out_buf)
+        raw_release(a_buf)
+        raw_release(x_buf)
+        raw_release(y_buf)
+        raw_release(out_buf)
         return Err(BackendError.BackendExecutionFailed("cuda gemv failed to allocate host staging buffer"))
     var row = 0
     while row < rows:
         var col = 0
         while col < cols:
-            rt_ptr_write_i64(a_buf, (row * cols + col) * 8, spl_f64_to_bits(matrix.get_f64_at([Index.new(row), Index.new(col)]).value))
+            raw_write_i64(a_buf, (row * cols + col) * 8, raw_f64_to_bits(matrix.get_f64_at([Index.new(row), Index.new(col)]).value))
             col = col + 1
         row = row + 1
     var i = 0
     while i < cols:
-        rt_ptr_write_i64(x_buf, i * 8, spl_f64_to_bits(vector.get_f64(Index.new(i)).value))
+        raw_write_i64(x_buf, i * 8, raw_f64_to_bits(vector.get_f64(Index.new(i)).value))
         i = i + 1
     i = 0
     while i < rows:
-        rt_ptr_write_i64(y_buf, i * 8, spl_f64_to_bits(y_in.get_f64(Index.new(i)).value))
+        raw_write_i64(y_buf, i * 8, raw_f64_to_bits(y_in.get_f64(Index.new(i)).value))
         i = i + 1
-    rt_ptr_write_i64(params_buf, 0, rows)
-    rt_ptr_write_i64(params_buf, 8, cols)
-    rt_ptr_write_i64(params_buf, 16, spl_f64_to_bits(alpha.value))
-    rt_ptr_write_i64(params_buf, 24, spl_f64_to_bits(beta.value))
+    raw_write_i64(params_buf, 0, rows)
+    raw_write_i64(params_buf, 8, cols)
+    raw_write_i64(params_buf, 16, raw_f64_to_bits(alpha.value))
+    raw_write_i64(params_buf, 24, raw_f64_to_bits(beta.value))
     val ok = _scilib_call_n("rt_scilib_cuda_dgemv_bits", [
         params_buf,
         a_buf,
@@ -597,13 +581,13 @@ fn cuda_gemv(alpha: Float64, matrix: NDArray, vector: NDArray, beta: Float64, y_
     if ok != 0:
         i = 0
         while i < rows:
-            out.push(Float64.new(spl_bits_to_f64(rt_ptr_read_i64(out_buf, i * 8))))
+            out.push(Float64.new(raw_bits_to_f64(raw_read_i64(out_buf, i * 8))))
             i = i + 1
-    rt_free(a_buf)
-    rt_free(x_buf)
-    rt_free(y_buf)
-    rt_free(out_buf)
-    rt_free(params_buf)
+    raw_release(a_buf)
+    raw_release(x_buf)
+    raw_release(y_buf)
+    raw_release(out_buf)
+    raw_release(params_buf)
     if ok == 0:
         return Err(BackendError.BackendExecutionFailed("cuda gemv backend execution failed"))
     Ok(make_f64_array(out, Shape.new([matrix.rows()])))
@@ -616,45 +600,45 @@ fn cuda_solve(a: NDArray, b: NDArray) -> Result<NDArray, BackendError>:
     val n = a.rows().value
     val a_count = n * n
     val b_count = n
-    val params_buf = rt_alloc(16)
+    val params_buf = raw_alloc(16)
     if params_buf == 0:
         return Err(BackendError.BackendExecutionFailed("cuda solve failed to allocate host staging buffer"))
-    val a_buf = rt_alloc(a_count * 8)
+    val a_buf = raw_alloc(a_count * 8)
     if a_buf == 0:
-        rt_free(params_buf)
+        raw_release(params_buf)
         return Err(BackendError.BackendExecutionFailed("cuda solve failed to allocate host staging buffer"))
-    val b_buf = rt_alloc(b_count * 8)
+    val b_buf = raw_alloc(b_count * 8)
     if b_buf == 0:
-        rt_free(params_buf)
-        rt_free(a_buf)
+        raw_release(params_buf)
+        raw_release(a_buf)
         return Err(BackendError.BackendExecutionFailed("cuda solve failed to allocate host staging buffer"))
-    val out_buf = rt_alloc(b_count * 8)
+    val out_buf = raw_alloc(b_count * 8)
     if out_buf == 0:
-        rt_free(params_buf)
-        rt_free(a_buf)
-        rt_free(b_buf)
+        raw_release(params_buf)
+        raw_release(a_buf)
+        raw_release(b_buf)
         return Err(BackendError.BackendExecutionFailed("cuda solve failed to allocate host staging buffer"))
-    rt_ptr_write_i64(params_buf, 0, n)
-    rt_ptr_write_i64(params_buf, 8, 1)
+    raw_write_i64(params_buf, 0, n)
+    raw_write_i64(params_buf, 8, 1)
     var row = 0
     while row < n:
         var col = 0
         while col < n:
-            rt_ptr_write_i64(a_buf, (row * n + col) * 8, spl_f64_to_bits(a.get_f64_at([Index.new(row), Index.new(col)]).value))
+            raw_write_i64(a_buf, (row * n + col) * 8, raw_f64_to_bits(a.get_f64_at([Index.new(row), Index.new(col)]).value))
             col = col + 1
-        rt_ptr_write_i64(b_buf, row * 8, spl_f64_to_bits(b.get_f64(Index.new(row)).value))
+        raw_write_i64(b_buf, row * 8, raw_f64_to_bits(b.get_f64(Index.new(row)).value))
         row = row + 1
     val info = _scilib_call_n("rt_scilib_cuda_dgesv_bits", [params_buf, a_buf, b_buf, out_buf])
     var out: [Float64] = []
     if info == 0:
         var i = 0
         while i < b_count:
-            out.push(Float64.new(spl_bits_to_f64(rt_ptr_read_i64(out_buf, i * 8))))
+            out.push(Float64.new(raw_bits_to_f64(raw_read_i64(out_buf, i * 8))))
             i = i + 1
-    rt_free(params_buf)
-    rt_free(a_buf)
-    rt_free(b_buf)
-    rt_free(out_buf)
+    raw_release(params_buf)
+    raw_release(a_buf)
+    raw_release(b_buf)
+    raw_release(out_buf)
     if info > 0:
         return Err(BackendError.BackendExecutionFailed("cuda solve detected a singular matrix"))
     if info != 0:
@@ -669,35 +653,35 @@ fn cuda_inv(a: NDArray) -> Result<NDArray, BackendError>:
     val n = a.rows().value
     val a_count = n * n
     val b_count = n * n
-    val params_buf = rt_alloc(16)
+    val params_buf = raw_alloc(16)
     if params_buf == 0:
         return Err(BackendError.BackendExecutionFailed("cuda inv failed to allocate host staging buffer"))
-    val a_buf = rt_alloc(a_count * 8)
+    val a_buf = raw_alloc(a_count * 8)
     if a_buf == 0:
-        rt_free(params_buf)
+        raw_release(params_buf)
         return Err(BackendError.BackendExecutionFailed("cuda inv failed to allocate host staging buffer"))
-    val b_buf = rt_alloc(b_count * 8)
+    val b_buf = raw_alloc(b_count * 8)
     if b_buf == 0:
-        rt_free(params_buf)
-        rt_free(a_buf)
+        raw_release(params_buf)
+        raw_release(a_buf)
         return Err(BackendError.BackendExecutionFailed("cuda inv failed to allocate host staging buffer"))
-    val out_buf = rt_alloc(b_count * 8)
+    val out_buf = raw_alloc(b_count * 8)
     if out_buf == 0:
-        rt_free(params_buf)
-        rt_free(a_buf)
-        rt_free(b_buf)
+        raw_release(params_buf)
+        raw_release(a_buf)
+        raw_release(b_buf)
         return Err(BackendError.BackendExecutionFailed("cuda inv failed to allocate host staging buffer"))
-    rt_ptr_write_i64(params_buf, 0, n)
-    rt_ptr_write_i64(params_buf, 8, n)
+    raw_write_i64(params_buf, 0, n)
+    raw_write_i64(params_buf, 8, n)
     var row = 0
     while row < n:
         var col = 0
         while col < n:
-            rt_ptr_write_i64(a_buf, (row * n + col) * 8, spl_f64_to_bits(a.get_f64_at([Index.new(row), Index.new(col)]).value))
+            raw_write_i64(a_buf, (row * n + col) * 8, raw_f64_to_bits(a.get_f64_at([Index.new(row), Index.new(col)]).value))
             if row == col:
-                rt_ptr_write_i64(b_buf, (row * n + col) * 8, spl_f64_to_bits(1.0))
+                raw_write_i64(b_buf, (row * n + col) * 8, raw_f64_to_bits(1.0))
             else:
-                rt_ptr_write_i64(b_buf, (row * n + col) * 8, spl_f64_to_bits(0.0))
+                raw_write_i64(b_buf, (row * n + col) * 8, raw_f64_to_bits(0.0))
             col = col + 1
         row = row + 1
     val info = _scilib_call_n("rt_scilib_cuda_dgesv_bits", [params_buf, a_buf, b_buf, out_buf])
@@ -705,12 +689,12 @@ fn cuda_inv(a: NDArray) -> Result<NDArray, BackendError>:
     if info == 0:
         var i = 0
         while i < b_count:
-            out.push(Float64.new(spl_bits_to_f64(rt_ptr_read_i64(out_buf, i * 8))))
+            out.push(Float64.new(raw_bits_to_f64(raw_read_i64(out_buf, i * 8))))
             i = i + 1
-    rt_free(params_buf)
-    rt_free(a_buf)
-    rt_free(b_buf)
-    rt_free(out_buf)
+    raw_release(params_buf)
+    raw_release(a_buf)
+    raw_release(b_buf)
+    raw_release(out_buf)
     if info > 0:
         return Err(BackendError.BackendExecutionFailed("cuda inv detected a singular matrix"))
     if info != 0:

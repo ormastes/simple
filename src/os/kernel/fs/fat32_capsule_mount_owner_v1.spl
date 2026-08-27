@@ -210,6 +210,10 @@ fn _fat32_candidate_from_capsule_v1(
         bpb.fat_size_32 == 0u32 or
         (bpb.sectors_per_cluster & (bpb.sectors_per_cluster - 1u8)) != 0u8):
         return Err(Fat32CapsuleMountErrorV1.InvalidGeometry)
+    val fat_mirroring_enabled = (bpb.ext_flags & 0x0080u16) == 0u16
+    val active_fat_index = (bpb.ext_flags & 0x000Fu16).to_u32()
+    if not fat_mirroring_enabled and active_fat_index >= bpb.num_fats.to_u32():
+        return Err(Fat32CapsuleMountErrorV1.InvalidGeometry)
     val fat_span = bpb.num_fats.to_u64() * bpb.fat_size_32.to_u64()
     val data_start_u64 = bpb.reserved_sectors.to_u64() + fat_span
     if (data_start_u64 > 0xffffffffu64 or
@@ -267,7 +271,10 @@ fn _fat32_candidate_from_capsule_v1(
         total_sectors: bpb.total_sectors_32,
         reserved_sectors: bpb.reserved_sectors.to_u32(),
         fat_size_sectors: bpb.fat_size_32,
-        fat_count: bpb.num_fats.to_u32(), mutation_active: false,
+        fat_count: bpb.num_fats.to_u32(),
+        fat_mirroring_enabled: fat_mirroring_enabled,
+        active_fat_index: active_fat_index,
+        mutation_active: false,
         root_dir_data: root)
     Ok(_Fat32CapsuleCandidateV1(fs: fs, caps: caps))
 
@@ -476,22 +483,19 @@ pub fn fat32_capsule_mount_release_v1(
     Ok(true)
 
 pub fn fat32_capsule_mount_snapshot_v1() -> Fat32CapsuleMountSnapshotV1:
-    mutex_with_lock(_fat32_capsule_mount_owner_v1, \state:
-        if (state.tag == _Fat32CapsuleMountStateTagV1.Active and
-            state.fs != nil and state.caps != nil):
-            val fs = state.fs.unwrap()
-            val caps = state.caps.unwrap()
-            Fat32CapsuleMountSnapshotV1(
-                mounted: true, generation: state.generation,
-                device_id: state.device_id, total_sectors: fs.total_sectors,
-                root_cluster: fs.root_cluster, root_bytes: fs.root_dir_data.len(),
-                recoverable_replace:
-                    caps.level == AtomicReplaceRecoveryLevel.RecoverableReplaceV1)
-        else:
-            Fat32CapsuleMountSnapshotV1(
-                mounted: false, generation: state.generation,
-                device_id: 0u64, total_sectors: 0u32, root_cluster: 0u32,
-                root_bytes: 0, recoverable_replace: false))
+    val state = mutex_with_lock(_fat32_capsule_mount_owner_v1, \value: value)
+    if state.tag == _Fat32CapsuleMountStateTagV1.Active and state.fs != nil and state.caps != nil:
+        val fs = state.fs.unwrap()
+        val caps = state.caps.unwrap()
+        return Fat32CapsuleMountSnapshotV1(
+            mounted: true, generation: state.generation,
+            device_id: state.device_id, total_sectors: fs.total_sectors,
+            root_cluster: fs.root_cluster, root_bytes: fs.root_dir_data.len(),
+            recoverable_replace: caps.level == AtomicReplaceRecoveryLevel.RecoverableReplaceV1)
+    Fat32CapsuleMountSnapshotV1(
+        mounted: false, generation: state.generation,
+        device_id: 0u64, total_sectors: 0u32, root_cluster: 0u32,
+        root_bytes: 0, recoverable_replace: false)
 
 pub fn fat32_capsule_mount_close_v1(
     mount: Fat32CapsuleMountSealV1

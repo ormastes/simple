@@ -159,16 +159,6 @@ items.map(\x:
 user?.name ?? "Anonymous"      # Optional chaining + nil coalescing
 ```
 
-`nil` is absence, like an empty `Option`, not a showable value. Use `if val x = maybe_value`, `.?`, `?.`, or `??` before field access, method calls, or user-facing output.
-
-Compiler backend code must treat `nil` metadata as invalid output. Do not emit
-or cache `nil` as a target type. For LLVM result positions, wrap local/type
-metadata with `valid_llvm_type(...)`; `simple lint` reports `LLVM001` for raw
-`ret_ty`/`phi_ty = self.get_local_type(...)` in LLVM emitters. For backend
-function signatures, guard `sig.return_type == nil` before mapping it; use the
-destination local type when a call has a destination and explicit `void`/backend
-void only for no-result calls.
-
 ### Operators
 
 ```simple
@@ -207,7 +197,6 @@ alias Optional = Option        # Class alias
 | `?` in names | Not allowed — `?` is operator only; use `.?` over `is_*` predicates |
 | `:=` walrus shorthand | Use `val name = expr` until real `:=` parser/runtime tests pass |
 | Native pipe-forward dispatch | Use direct calls or run native tests with `SIMPLE_NO_STUB_FALLBACK=1` |
-| `nil` display/field access | Unwrap or default first; `nil` is absence, not an object |
 
 ## Concurrency API Map
 
@@ -350,7 +339,6 @@ use lib.common.text            # Also works (std -> lib internally)
 
 ## Code Quality
 
-- **One App, One Host Interface:** When coding `src/app/` or `src/os/apps/`, write once for all OSes. Platform difference lives only behind HAL (SOSIX, CompositorBackend, DedicatedHost). Never add per-OS app files, platform conditionals in app logic, or adapter copies in app code. See `doc/04_architecture/os/one_app_host_interface_rule.md`.
 - NEVER over-engineer — only make requested changes
 - NEVER add unused code — delete completely
 - STUB001 = hard fail — no `pass_todo` in production code

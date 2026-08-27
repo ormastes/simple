@@ -5,9 +5,10 @@
 # from HirModule. This file holds what the generator must not invent:
 #   - HirCodecWriter: the line accumulator (parts array joined once, same as
 #     flat_pool_codec's encoders -- `out = out + piece` is quadratic).
-#   - the two opaque payloads the generator refuses to descend into, both
-#     FAIL CLOSED on encode: a parser `Expr` carried by `TypeKind.Array` and a
-#     `BlockValue` (whose payloads are `Any`). An unsupported value clears
+#   - the two payloads the generator refuses to descend into: the canonical
+#     integer parser `Expr` carried by `TypeKind.Array` is encoded with its
+#     span, while other expression shapes and non-text `BlockValue` payloads
+#     FAIL CLOSED on encode. An unsupported value clears
 #     `w.ok`, so the caller stores nothing for that module and the real build
 #     lowers it in process -- never a lossy entry.
 #   - hc_bad_tag: a decoder that meets an enum tag no arm names raises, since a
@@ -15,7 +16,8 @@
 #     a cache miss.
 
 use compiler.frontend.core.flat_pool_codec.{FlatPoolReader, flat_pool_escape, flat_pool_unescape, flat_pool_parse_i64}
-use compiler.frontend.parser_types_expr.{Expr}
+use compiler.frontend.parser_types_expr.{Expr, ExprKind}
+use compiler.common.diagnostics.span.{Span}
 use compiler.blocks.value.{BlockValue}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 use std.common.binary_io.{f64_to_bits, f64_from_bits}
@@ -78,14 +80,41 @@ fn hc_bad_tag(type_name: text, tag: i64):
     eprint("error: hir codec: no `{type_name}` arm for tag {tag}; regenerate src/compiler/20.hir/generated/hir_codec.spl\n")
     exit(1)
 
-# --- opaque: parser Expr (only reachable through TypeKind.Array's size) -----
+# --- canonical parser Expr (only reachable through TypeKind.Array's size) ---
+#
+# Valid HIR array sizes have already passed lowering's constant/nonnegative
+# gate, so IntLit is the sole encodable shape here.  Preserve its complete span
+# rather than dropping it or serializing a general expression graph into the
+# HIR cache.  Invalid/nonconstant shapes continue to fail closed.
 
 fn hc_enc_opaque_expr(w: HirCodecWriter, value: Expr):
-    w.reject("parser Expr inside a HIR type")
+    match value.kind:
+        case ExprKind.IntLit(v):
+            w.put_i64(0)
+            w.put_i64(v)
+            w.put_i64(value.span.start)
+            w.put_i64(value.span.end)
+            w.put_i64(value.span.line)
+            w.put_i64(value.span.col)
+            w.put_text(value.span.file)
+            w.put_i64(value.span.length)
+        case _:
+            w.reject("nonconstant parser Expr inside a HIR array type")
 
 fn hc_dec_opaque_expr(r: FlatPoolReader) -> Expr:
-    hc_bad_tag("Expr", -1)
-    hc_dec_opaque_expr(r)
+    val tag = r.next_i64()
+    if tag == 0:
+        val value = r.next_i64()
+        val span = Span(
+            start: r.next_i64(),
+            end: r.next_i64(),
+            line: r.next_i64(),
+            col: r.next_i64(),
+            file: flat_pool_unescape(r.next()),
+            length: r.next_i64())
+        return Expr(kind: ExprKind.IntLit(value), span: span)
+    hc_bad_tag("Expr", tag)
+    Expr(kind: ExprKind.IntLit(0), span: Span.empty())
 
 # --- opaque: BlockValue (HirExprKind.CustomBlock) ---------------------------
 #

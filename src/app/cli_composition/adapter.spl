@@ -31,6 +31,8 @@ class CliActivationRequestV1:
     provider_artifact_kind: text
     provider_artifact_digest: text
     requested_capability_bits: i64
+    extension_availability: i64
+    extension_missing_policy: i64
 
 class CliHelpProjectionV1:
     ok: bool
@@ -58,7 +60,9 @@ fn _empty_activation(code: text, subject: text, requested: text) -> CliActivatio
         provider_artifact_path: "",
         provider_artifact_kind: "",
         provider_artifact_digest: "",
-        requested_capability_bits: 0
+        requested_capability_bits: 0,
+        extension_availability: 0,
+        extension_missing_policy: 0
     )
 
 fn _command_matches(command: SimpleCliCommandRecordV1, token: text) -> bool:
@@ -180,8 +184,36 @@ fn resolve_cli_activation_v1(
         provider_artifact_path: provider.artifact_path,
         provider_artifact_kind: provider.artifact_kind,
         provider_artifact_digest: provider.artifact_digest,
-        requested_capability_bits: provider.required_capability_bits
+        requested_capability_bits: provider.required_capability_bits,
+        extension_availability: 0,
+        extension_missing_policy: 0
     )
+
+# Route section 10 already selected the exact provider/binding authority. Do
+# not fall back to provider-wide binding selection here.
+fn resolve_cli_extension_activation_bound_v1(image: SimpleCompositionImageV1, namespace: text,
+        args: [text], provider_id: text, binding_service_id: text,
+        availability: i64, missing_policy: i64) -> CliActivationRequestV1:
+    val provider_index = _find_provider(image, provider_id)
+    if provider_index == -2:
+        return _empty_activation("CLI_PROVIDER_AMBIGUOUS", provider_id, namespace)
+    if provider_index < 0:
+        return _empty_activation("CLI_PROVIDER_MISSING", provider_id, namespace)
+    val provider = image.providers[provider_index]
+    val binding_index = _find_binding(image, binding_service_id)
+    if binding_index == -2: return _empty_activation("CLI_BINDING_AMBIGUOUS", binding_service_id, namespace)
+    if binding_index < 0: return _empty_activation("CLI_BINDING_MISSING", binding_service_id, namespace)
+    val binding = image.bindings[binding_index]
+    if binding.provider_id != provider_id: return _empty_activation("CLI_BINDING_PROVIDER_MISMATCH", binding_service_id, namespace)
+    if not _provider_implements(provider, binding.interface_group_id): return _empty_activation("CLI_PROVIDER_GROUP_MISSING", provider_id, namespace)
+    val group_index = _find_group(image, binding.interface_group_id)
+    if group_index == -2: return _empty_activation("CLI_INTERFACE_GROUP_AMBIGUOUS", binding.interface_group_id, namespace)
+    if group_index < 0: return _empty_activation("CLI_INTERFACE_GROUP_MISSING", binding.interface_group_id, namespace)
+    val group = image.interface_groups[group_index]
+    CliActivationRequestV1(true, "", "", namespace, namespace, "", args,
+        binding.service_id, group.group_id, group.major, group.minor, group.abi_digest,
+        provider.provider_id, provider.artifact_path, provider.artifact_kind,
+        provider.artifact_digest, provider.required_capability_bits, availability, missing_policy)
 
 fn project_cli_help_v1(image: SimpleCompositionImageV1, command_token: text) -> CliHelpProjectionV1:
     val command_index = _find_command(image, command_token)
@@ -191,3 +223,5 @@ fn project_cli_help_v1(image: SimpleCompositionImageV1, command_token: text) -> 
         return CliHelpProjectionV1(false, "CLI_COMMAND_UNKNOWN", command_token, "", [], "")
     val command = image.commands[command_index]
     CliHelpProjectionV1(true, "", command_token, command.command_name, command.aliases, command.summary)
+
+export resolve_cli_extension_activation_v1

@@ -47,7 +47,7 @@ fn _count_groups(pattern: text) -> i64:
 
 # Simulate NFA from a given start position in the input
 # Returns (matched: bool, match_end: i64, groups: [i64])
-fn _simulate(ops: [_NfaOp], input: text, start_pos: i64, num_groups: i64) -> (bool, i64, [i64]):
+fn _simulate(ops: [_NfaOp], input: text, start_pos: i64, num_groups: i64) -> (matched: bool, match_end: i64, groups: [i64]):
     var current: [_Thread] = []
     var next_threads: [_Thread] = []
     val init_thread = _new_thread(pc: 0, num_groups: num_groups)
@@ -119,18 +119,18 @@ fn _simulate(ops: [_NfaOp], input: text, start_pos: i64, num_groups: i64) -> (bo
         # Check for Match states
         var ni = 0
         while ni < next_threads.len():
-            val mt = next_threads[ni]
-            if mt.pc < ops.len() and ops[mt.pc].kind == 5:
+            val nt = next_threads[ni]
+            if nt.pc < ops.len() and ops[nt.pc].kind == 5:
                 # Greedy: prefer longest match
                 if not best_matched or sp > best_end:
                     best_matched = true
                     best_end = sp
-                    best_groups = mt.groups
+                    best_groups = nt.groups
             ni = ni + 1
 
         current = next_threads
 
-    return (best_matched, best_end, best_groups)
+    return (matched: best_matched, match_end: best_end, groups: best_groups)
 
 # Expand epsilon transitions (Split, Jump, GroupStart, GroupEnd, Anchors)
 fn _add_epsilon_states(threads: [_Thread], ops: [_NfaOp], input: text, sp: i64, input_len: i64) -> [_Thread]:
@@ -237,7 +237,7 @@ fn regex_is_match(pattern: text, input_text: text) -> bool:
     var pos = 0
     while pos <= input_text.len():
         val result = _simulate(ops: ops, input: input_text, start_pos: pos, num_groups: num_groups)
-        if result.0:
+        if result.matched:
             return true
         pos = pos + 1
     return false
@@ -248,9 +248,9 @@ fn regex_find(pattern: text, input_text: text) -> Option<RegexMatch>:
     var pos = 0
     while pos <= input_text.len():
         val result = _simulate(ops: ops, input: input_text, start_pos: pos, num_groups: num_groups)
-        if result.0:
-            val matched_text = input_text[pos:result.1]
-            return Some(RegexMatch(text: matched_text, start: pos, end: result.1))
+        if result.matched:
+            val matched_text = input_text[pos:result.match_end]
+            return Some(RegexMatch(text: matched_text, start: pos, end: result.match_end))
         pos = pos + 1
     return nil
 
@@ -261,12 +261,12 @@ fn regex_find_all(pattern: text, input_text: text) -> [RegexMatch]:
     var pos = 0
     while pos <= input_text.len():
         val result = _simulate(ops: ops, input: input_text, start_pos: pos, num_groups: num_groups)
-        if result.0:
-            val matched_text = input_text[pos:result.1]
-            matches.push(RegexMatch(text: matched_text, start: pos, end: result.1))
+        if result.matched:
+            val matched_text = input_text[pos:result.match_end]
+            matches.push(RegexMatch(text: matched_text, start: pos, end: result.match_end))
             # Advance past match (non-overlapping); at least 1 to avoid infinite loop
-            if result.1 > pos:
-                pos = result.1
+            if result.match_end > pos:
+                pos = result.match_end
             else:
                 pos = pos + 1
         else:
@@ -279,13 +279,13 @@ fn regex_captures(pattern: text, input_text: text) -> Option<Captures>:
     var pos = 0
     while pos <= input_text.len():
         val result = _simulate(ops: ops, input: input_text, start_pos: pos, num_groups: num_groups)
-        if result.0:
-            val full = input_text[pos:result.1]
+        if result.matched:
+            val full = input_text[pos:result.match_end]
             var groups: [Option<text>] = []
             var gi = 0
             while gi < num_groups:
-                val gs = result.2[gi * 2]
-                val ge = result.2[gi * 2 + 1]
+                val gs = result.groups[gi * 2]
+                val ge = result.groups[gi * 2 + 1]
                 if gs >= 0 and ge >= 0:
                     groups.push(Some(input_text[gs:ge]))
                 else:
@@ -301,9 +301,9 @@ fn regex_replace(pattern: text, input_text: text, replacement: text) -> text:
     var pos = 0
     while pos <= input_text.len():
         val result = _simulate(ops: ops, input: input_text, start_pos: pos, num_groups: num_groups)
-        if result.0:
+        if result.matched:
             val before = input_text[0:pos]
-            val after = if result.1 < input_text.len(): input_text[result.1:input_text.len()] else: ""
+            val after = if result.match_end < input_text.len(): input_text[result.match_end:input_text.len()] else: ""
             return before + replacement + after
         pos = pos + 1
     return input_text
@@ -316,14 +316,14 @@ fn regex_replace_all(pattern: text, input_text: text, replacement: text) -> text
     var pos = 0
     while pos <= input_text.len():
         val result = _simulate(ops: ops, input: input_text, start_pos: pos, num_groups: num_groups)
-        if result.0:
+        if result.matched:
             # Push text between previous match end and this match start
             if pos > last_end:
                 parts.push(input_text[last_end:pos])
             parts.push(replacement)
-            if result.1 > pos:
-                last_end = result.1
-                pos = result.1
+            if result.match_end > pos:
+                last_end = result.match_end
+                pos = result.match_end
             else:
                 last_end = pos + 1
                 pos = pos + 1
@@ -342,11 +342,11 @@ fn regex_split(pattern: text, input_text: text) -> [text]:
     var pos = 0
     while pos <= input_text.len():
         val sim = _simulate(ops: ops, input: input_text, start_pos: pos, num_groups: num_groups)
-        if sim.0 and sim.1 > pos:
+        if sim.matched and sim.match_end > pos:
             val segment = input_text[last_end:pos]
             result.push(segment)
-            last_end = sim.1
-            pos = sim.1
+            last_end = sim.match_end
+            pos = sim.match_end
         else:
             pos = pos + 1
     # Add remaining

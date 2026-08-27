@@ -1,25 +1,22 @@
 #include "cosmos_nvme_admin.h"
+#include "cosmos_nvme_admin_policy.h"
 
-static struct cosmos_nvme_status status_make(unsigned int sct, unsigned int sc,
-                                              unsigned int dnr) {
+/* ABI conversion only; all status selection is owned by pure Simple. */
+static struct cosmos_nvme_status status_from_policy(unsigned int encoded) {
     struct cosmos_nvme_status status;
 
-    status.sct = sct;
-    status.sc = sc;
-    status.dnr = dnr;
+    status.sct = (encoded >> 8U) & 0xFFU;
+    status.sc = encoded & 0xFFU;
+    status.dnr = (encoded >> 16U) & 1U;
     return status;
 }
 
 static struct cosmos_nvme_status status_success(void) {
-    return status_make(COSMOS_NVME_SCT_GENERIC, COSMOS_NVME_SC_SUCCESS, 0U);
+    return status_from_policy(cosmos_nvme_admin_policy_status_success());
 }
 
 static struct cosmos_nvme_status status_generic(unsigned int sc) {
-    return status_make(COSMOS_NVME_SCT_GENERIC, sc, 1U);
-}
-
-static struct cosmos_nvme_status status_specific(unsigned int sc) {
-    return status_make(COSMOS_NVME_SCT_COMMAND_SPECIFIC, sc, 1U);
+    return status_from_policy(cosmos_nvme_admin_policy_status_generic(sc));
 }
 
 static void zero_bytes(unsigned char *bytes, unsigned int count) {
@@ -42,104 +39,12 @@ static void put_le64(unsigned char *bytes, unsigned int low, unsigned int high) 
     put_le32(bytes + 4U, high);
 }
 
-static unsigned int min_unsigned(unsigned int left, unsigned int right) {
-    return left < right ? left : right;
-}
-
-static int power_of_two(unsigned int value) {
-    return value != 0U && (value & (value - 1U)) == 0U;
-}
-
-static unsigned int log2_unsigned(unsigned int value) {
-    unsigned int result = 0U;
-
-    while (value > 1U) {
-        value >>= 1U;
-        result++;
-    }
-    return result;
-}
-
-static int command_has_no_payload(const struct cosmos_nvme_admin_command *command) {
-    return command->payload_address_low == 0U &&
-        command->payload_address_high == 0U &&
-        command->payload_address2_low == 0U &&
-        command->payload_address2_high == 0U &&
-        command->payload_bytes == 0U;
-}
-
-static int queue_base_valid(
-    const struct cosmos_nvme_admin_command *command) {
-    return command->payload_bytes == 0U &&
-        command->payload_address2_low == 0U &&
-        command->payload_address2_high == 0U &&
-        (command->payload_address_low != 0U ||
-         command->payload_address_high != 0U) &&
-        (command->payload_address_low & 0xFFFU) == 0U &&
-        command->payload_address_high <= 0xFU;
-}
-
-static int opcode_is_supported(unsigned int opcode) {
-    switch (opcode) {
-    case COSMOS_NVME_ADMIN_DELETE_IO_SQ:
-    case COSMOS_NVME_ADMIN_CREATE_IO_SQ:
-    case COSMOS_NVME_ADMIN_GET_LOG_PAGE:
-    case COSMOS_NVME_ADMIN_DELETE_IO_CQ:
-    case COSMOS_NVME_ADMIN_CREATE_IO_CQ:
-    case COSMOS_NVME_ADMIN_IDENTIFY:
-    case COSMOS_NVME_ADMIN_ABORT:
-    case COSMOS_NVME_ADMIN_SET_FEATURES:
-    case COSMOS_NVME_ADMIN_GET_FEATURES:
-    case COSMOS_NVME_ADMIN_ASYNC_EVENT_REQUEST:
-        return 1;
-    default:
-        return 0;
-    }
-}
-
 static int payload_valid(const struct cosmos_nvme_admin_command *command,
                          unsigned int bytes) {
-    unsigned int first_room;
-    unsigned int has_second;
-
-    if (command->payload_bytes != bytes ||
-        (command->payload_address_low == 0U &&
-         command->payload_address_high == 0U) ||
-        (command->payload_address_low & (COSMOS_NVME_DMA_ALIGNMENT - 1U)) !=
-            0U) {
-        return 0;
-    }
-    first_room = 4096U - (command->payload_address_low & 0xFFFU);
-    has_second = command->payload_address2_low != 0U ||
-        command->payload_address2_high != 0U;
-    if (bytes <= first_room) {
-        return has_second == 0U;
-    }
-    return has_second != 0U &&
-        (command->payload_address2_low & 0xFFFU) == 0U;
-}
-
-static int queue_index(unsigned int queue_id, unsigned int *index) {
-    if (queue_id == 0U || queue_id > COSMOS_NVME_ADMIN_MAX_IO_QUEUES) {
-        return 0;
-    }
-    *index = queue_id - 1U;
-    return 1;
-}
-
-static int queue_id_allowed(const struct cosmos_nvme_admin_service *service,
-                            unsigned int queue_id, unsigned int *index) {
-    return queue_id != 0U && queue_id <= service->negotiated_queue_count &&
-        queue_index(queue_id, index);
-}
-
-static int controller_feature_namespace_valid(unsigned int namespace_id) {
-    return namespace_id == 0U || namespace_id == COSMOS_NVME_NAMESPACE_ID;
-}
-
-static int smart_namespace_valid(unsigned int namespace_id) {
-    return namespace_id == COSMOS_NVME_NAMESPACE_ID ||
-        namespace_id == COSMOS_NVME_ADMIN_NAMESPACE_ALL;
+    return cosmos_nvme_admin_policy_payload_valid(
+        command->payload_address_low, command->payload_address_high,
+        command->payload_address2_low, command->payload_address2_high,
+        command->payload_bytes, bytes);
 }
 
 static void completion_from_command(
@@ -158,20 +63,19 @@ static void completion_from_command(
 static int publish_pending(struct cosmos_nvme_admin_service *service) {
     enum cosmos_nvme_post_result result = service->adapter.post_completion(
         service->adapter.context, &service->pending_completion);
+    int policy_result = cosmos_nvme_admin_policy_publish_result(
+        (unsigned int)result);
 
-    if (result == COSMOS_NVME_POST_COMMITTED) {
-        service->completion_state = COSMOS_NVME_COMPLETION_NONE;
+    service->completion_state = (enum cosmos_nvme_completion_state)
+        cosmos_nvme_admin_policy_publish_state((unsigned int)result);
+    if (policy_result == COSMOS_OK) {
         service->completion_terminal_status = COSMOS_OK;
         return COSMOS_OK;
     }
-    if (result == COSMOS_NVME_POST_NOT_COMMITTED_RETRY) {
-        service->completion_state = COSMOS_NVME_COMPLETION_RETRY;
+    if (policy_result == COSMOS_RETRY) {
         return COSMOS_RETRY;
     }
-    service->completion_state = COSMOS_NVME_COMPLETION_BLOCKED;
-    service->completion_terminal_status =
-        result == COSMOS_NVME_POST_AMBIGUOUS ? COSMOS_COMPLETION_UNCERTAIN :
-        COSMOS_HW_ERROR;
+    service->completion_terminal_status = policy_result;
     return service->completion_terminal_status;
 }
 
@@ -181,42 +85,34 @@ static struct cosmos_nvme_status write_payload(
     enum cosmos_nvme_admin_payload_result result;
 
     if (!payload_valid(command, bytes)) {
-        return status_generic(COSMOS_NVME_SC_DATA_TRANSFER_ERROR);
+        return status_from_policy(cosmos_nvme_admin_policy_payload_status(
+            0U, COSMOS_NVME_ADMIN_PAYLOAD_NOT_COMMITTED));
     }
     result = service->adapter.write_payload(
         service->adapter.context, command, service->payload, bytes);
-    if (result != COSMOS_NVME_ADMIN_PAYLOAD_COMMITTED) {
-        return status_generic(COSMOS_NVME_SC_DATA_TRANSFER_ERROR);
-    }
-    return status_success();
+    return status_from_policy(cosmos_nvme_admin_policy_payload_status(
+        1U, (unsigned int)result));
 }
 
 static struct cosmos_nvme_status identify(
     struct cosmos_nvme_admin_service *service,
     const struct cosmos_nvme_admin_command *command) {
     unsigned int cns = command->cdw10 & 0xFFU;
+    unsigned int policy_status = cosmos_nvme_admin_policy_identify_status(
+        command->namespace_id, command->cdw10, command->cdw11,
+        command->cdw12, command->cdw13);
 
-    if ((command->cdw10 & ~0xFFU) != 0U || command->cdw11 != 0U ||
-        command->cdw12 != 0U || command->cdw13 != 0U) {
-        return status_generic(COSMOS_NVME_SC_INVALID_FIELD);
+    if (policy_status != cosmos_nvme_admin_policy_status_success()) {
+        return status_from_policy(policy_status);
     }
     zero_bytes(service->payload, COSMOS_NVME_ADMIN_IDENTIFY_BYTES);
     if (cns == COSMOS_NVME_ADMIN_IDENTIFY_CONTROLLER) {
-        if (command->namespace_id != 0U) {
-            return status_generic(COSMOS_NVME_SC_INVALID_NAMESPACE_FORMAT);
-        }
         service->payload[512U] = 0x66U; /* SQES: min/max 64-byte entries. */
         service->payload[513U] = 0x44U; /* CQES: min/max 16-byte entries. */
         service->payload[77U] = 8U; /* 4 KiB * 2^8 = 1 MiB AUTO DMA. */
         put_le32(service->payload + 516U, COSMOS_NVME_NAMESPACE_ID);
         service->payload[520U] = 0x0CU; /* ONCS: DSM and Write Zeroes. */
         return write_payload(service, command, COSMOS_NVME_ADMIN_IDENTIFY_BYTES);
-    }
-    if (cns != COSMOS_NVME_ADMIN_IDENTIFY_NAMESPACE) {
-        return status_generic(COSMOS_NVME_SC_INVALID_FIELD);
-    }
-    if (command->namespace_id != COSMOS_NVME_NAMESPACE_ID) {
-        return status_generic(COSMOS_NVME_SC_INVALID_NAMESPACE_FORMAT);
     }
     put_le64(service->payload, service->namespace_blocks_low,
              service->namespace_blocks_high);
@@ -225,25 +121,20 @@ static struct cosmos_nvme_status identify(
     put_le64(service->payload + 16U, service->namespace_blocks_low,
              service->namespace_blocks_high);
     service->payload[25U] = 0U; /* One LBA format, indexed by FLBAS=0. */
-    service->payload[130U] = (unsigned char)log2_unsigned(service->block_bytes);
+    service->payload[130U] = (unsigned char)cosmos_nvme_admin_policy_log2(
+        service->block_bytes);
     return write_payload(service, command, COSMOS_NVME_ADMIN_IDENTIFY_BYTES);
 }
 
 static struct cosmos_nvme_status get_log_page(
     struct cosmos_nvme_admin_service *service,
     const struct cosmos_nvme_admin_command *command) {
-    unsigned int lid = command->cdw10 & 0xFFU;
-    unsigned int numd = (command->cdw10 >> 16U) & 0xFFFFU;
+    unsigned int policy_status = cosmos_nvme_admin_policy_get_log_status(
+        command->namespace_id, command->cdw10, command->cdw11,
+        command->cdw12, command->cdw13);
 
-    if (!smart_namespace_valid(command->namespace_id)) {
-        return status_generic(COSMOS_NVME_SC_INVALID_NAMESPACE_FORMAT);
-    }
-    if (lid != COSMOS_NVME_ADMIN_LOG_SMART_HEALTH) {
-        return status_specific(COSMOS_NVME_ADMIN_SC_INVALID_LOG_PAGE);
-    }
-    if ((command->cdw10 & 0x00007F00U) != 0U || numd != 127U ||
-        command->cdw11 != 0U || command->cdw12 != 0U || command->cdw13 != 0U) {
-        return status_generic(COSMOS_NVME_SC_INVALID_FIELD);
+    if (policy_status != cosmos_nvme_admin_policy_status_success()) {
+        return status_from_policy(policy_status);
     }
     zero_bytes(service->payload, COSMOS_NVME_ADMIN_SMART_BYTES);
     return write_payload(service, command, COSMOS_NVME_ADMIN_SMART_BYTES);
@@ -252,50 +143,32 @@ static struct cosmos_nvme_status get_log_page(
 static struct cosmos_nvme_status set_features(
     struct cosmos_nvme_admin_service *service,
     const struct cosmos_nvme_admin_command *command, unsigned int *result) {
-    unsigned int requested_cq;
-    unsigned int requested_sq;
+    unsigned int policy_status = cosmos_nvme_admin_policy_set_features_status(
+        command->namespace_id, command->cdw10, command->cdw11,
+        command->cdw12, command->cdw13);
 
-    if (!controller_feature_namespace_valid(command->namespace_id)) {
-        return status_generic(COSMOS_NVME_SC_INVALID_NAMESPACE_FORMAT);
+    if (policy_status != cosmos_nvme_admin_policy_status_success()) {
+        return status_from_policy(policy_status);
     }
-    if ((command->cdw10 & 0x7FFFFF00U) != 0U || command->cdw12 != 0U ||
-        command->cdw13 != 0U) {
-        return status_generic(COSMOS_NVME_SC_INVALID_FIELD);
-    }
-    if ((command->cdw10 & 0xFFU) != COSMOS_NVME_ADMIN_FEATURE_NUMBER_OF_QUEUES) {
-        return status_generic(COSMOS_NVME_SC_INVALID_FIELD);
-    }
-    if ((command->cdw10 & 0x80000000U) != 0U) {
-        return status_specific(COSMOS_NVME_ADMIN_SC_FEATURE_NOT_SAVEABLE);
-    }
-    if ((command->cdw11 & 0xFFFFU) == 0xFFFFU ||
-        (command->cdw11 >> 16U) == 0xFFFFU) {
-        return status_generic(COSMOS_NVME_SC_INVALID_FIELD);
-    }
-    requested_sq = (command->cdw11 & 0xFFFFU) + 1U;
-    requested_cq = (command->cdw11 >> 16U) + 1U;
-    service->negotiated_queue_count = min_unsigned(
-        COSMOS_NVME_ADMIN_MAX_IO_QUEUES,
-        min_unsigned(requested_sq, requested_cq));
-    *result = (service->negotiated_queue_count - 1U) |
-        ((service->negotiated_queue_count - 1U) << 16U);
+    service->negotiated_queue_count =
+        cosmos_nvme_admin_policy_queue_count(command->cdw11);
+    *result = cosmos_nvme_admin_policy_queue_result(
+        service->negotiated_queue_count);
     return status_success();
 }
 
 static struct cosmos_nvme_status get_features(
     const struct cosmos_nvme_admin_service *service,
     const struct cosmos_nvme_admin_command *command, unsigned int *result) {
-    if (!controller_feature_namespace_valid(command->namespace_id)) {
-        return status_generic(COSMOS_NVME_SC_INVALID_NAMESPACE_FORMAT);
+    unsigned int policy_status = cosmos_nvme_admin_policy_get_features_status(
+        command->namespace_id, command->cdw10, command->cdw11,
+        command->cdw12, command->cdw13);
+
+    if (policy_status != cosmos_nvme_admin_policy_status_success()) {
+        return status_from_policy(policy_status);
     }
-    if ((command->cdw10 & ~0x000007FFU) != 0U ||
-        (command->cdw10 & 0xFFU) != COSMOS_NVME_ADMIN_FEATURE_NUMBER_OF_QUEUES ||
-        ((command->cdw10 >> 8U) & 0x7U) != 0U || command->cdw11 != 0U ||
-        command->cdw12 != 0U || command->cdw13 != 0U) {
-        return status_generic(COSMOS_NVME_SC_INVALID_FIELD);
-    }
-    *result = (service->negotiated_queue_count - 1U) |
-        ((service->negotiated_queue_count - 1U) << 16U);
+    *result = cosmos_nvme_admin_policy_queue_result(
+        service->negotiated_queue_count);
     return status_success();
 }
 
@@ -304,28 +177,18 @@ static struct cosmos_nvme_status create_cq(
     const struct cosmos_nvme_admin_command *command) {
     unsigned int queue_id = command->cdw10 & 0xFFFFU;
     unsigned int entries = (command->cdw10 >> 16U) + 1U;
-    unsigned int index;
+    unsigned int index = queue_id > 0U &&
+        queue_id <= COSMOS_NVME_ADMIN_MAX_IO_QUEUES ? queue_id - 1U : 0U;
+    unsigned int policy_status = cosmos_nvme_admin_policy_create_cq_status(
+        service->negotiated_queue_count,
+        service->completion_queues[index].valid, command->namespace_id,
+        command->cdw10, command->cdw11, command->cdw12, command->cdw13,
+        command->payload_address_low, command->payload_address_high,
+        command->payload_address2_low, command->payload_address2_high,
+        command->payload_bytes);
 
-    if (command->namespace_id != 0U || command->cdw12 != 0U ||
-        command->cdw13 != 0U || !queue_base_valid(command)) {
-        return status_generic(COSMOS_NVME_SC_INVALID_FIELD);
-    }
-    if (!queue_id_allowed(service, queue_id, &index)) {
-        return status_specific(COSMOS_NVME_ADMIN_SC_INVALID_QUEUE_IDENTIFIER);
-    }
-    if (entries == 0U || entries > COSMOS_NVME_ADMIN_MAX_QUEUE_ENTRIES) {
-        return status_specific(COSMOS_NVME_ADMIN_SC_INVALID_QUEUE_SIZE);
-    }
-    if ((command->cdw11 & 1U) == 0U ||
-        (command->cdw11 & 0x0000FFFCU) != 0U ||
-        ((command->cdw11 & 2U) == 0U && (command->cdw11 >> 16U) != 0U)) {
-        return status_generic(COSMOS_NVME_SC_INVALID_FIELD);
-    }
-    if ((command->cdw11 & 2U) != 0U && (command->cdw11 >> 16U) != 0U) {
-        return status_specific(COSMOS_NVME_ADMIN_SC_INVALID_INTERRUPT_VECTOR);
-    }
-    if (service->completion_queues[index].valid != 0U) {
-        return status_specific(COSMOS_NVME_ADMIN_SC_INVALID_QUEUE_IDENTIFIER);
+    if (policy_status != cosmos_nvme_admin_policy_status_success()) {
+        return status_from_policy(policy_status);
     }
     if (service->adapter.configure_io_cq != 0 &&
         service->adapter.configure_io_cq(
@@ -333,7 +196,8 @@ static struct cosmos_nvme_status create_cq(
             (command->cdw11 >> 1U) & 1U, command->cdw11 >> 16U,
             entries, command->payload_address_low,
             command->payload_address_high) != COSMOS_OK) {
-        return status_generic(COSMOS_NVME_SC_INTERNAL_DEVICE_ERROR);
+        return status_from_policy(
+            cosmos_nvme_admin_policy_adapter_failure_status(COSMOS_HW_ERROR));
     }
     service->completion_queues[index].entries = entries;
     service->completion_queues[index].completion_queue_id = 0U;
@@ -347,34 +211,30 @@ static struct cosmos_nvme_status create_sq(
     unsigned int queue_id = command->cdw10 & 0xFFFFU;
     unsigned int entries = (command->cdw10 >> 16U) + 1U;
     unsigned int completion_queue_id = command->cdw11 >> 16U;
-    unsigned int index;
-    unsigned int completion_index;
+    unsigned int index = queue_id > 0U &&
+        queue_id <= COSMOS_NVME_ADMIN_MAX_IO_QUEUES ? queue_id - 1U : 0U;
+    unsigned int completion_index = completion_queue_id > 0U &&
+        completion_queue_id <= COSMOS_NVME_ADMIN_MAX_IO_QUEUES ?
+        completion_queue_id - 1U : 0U;
+    unsigned int policy_status = cosmos_nvme_admin_policy_create_sq_status(
+        service->negotiated_queue_count,
+        service->completion_queues[completion_index].valid,
+        service->submission_queues[index].valid, command->namespace_id,
+        command->cdw10, command->cdw11, command->cdw12, command->cdw13,
+        command->payload_address_low, command->payload_address_high,
+        command->payload_address2_low, command->payload_address2_high,
+        command->payload_bytes);
 
-    if (command->namespace_id != 0U || command->cdw12 != 0U ||
-        command->cdw13 != 0U || (command->cdw11 & 1U) == 0U ||
-        (command->cdw11 & 0x0000FFF8U) != 0U ||
-        !queue_base_valid(command)) {
-        return status_generic(COSMOS_NVME_SC_INVALID_FIELD);
-    }
-    if (!queue_id_allowed(service, queue_id, &index) ||
-        !queue_id_allowed(service, completion_queue_id, &completion_index)) {
-        return status_specific(COSMOS_NVME_ADMIN_SC_INVALID_QUEUE_IDENTIFIER);
-    }
-    if (entries == 0U || entries > COSMOS_NVME_ADMIN_MAX_QUEUE_ENTRIES) {
-        return status_specific(COSMOS_NVME_ADMIN_SC_INVALID_QUEUE_SIZE);
-    }
-    if (service->completion_queues[completion_index].valid == 0U) {
-        return status_specific(COSMOS_NVME_ADMIN_SC_COMPLETION_QUEUE_INVALID);
-    }
-    if (service->submission_queues[index].valid != 0U) {
-        return status_specific(COSMOS_NVME_ADMIN_SC_INVALID_QUEUE_IDENTIFIER);
+    if (policy_status != cosmos_nvme_admin_policy_status_success()) {
+        return status_from_policy(policy_status);
     }
     if (service->adapter.configure_io_sq != 0 &&
         service->adapter.configure_io_sq(
             service->adapter.context, queue_id, 1U,
             completion_queue_id, entries, command->payload_address_low,
             command->payload_address_high) != COSMOS_OK) {
-        return status_generic(COSMOS_NVME_SC_INTERNAL_DEVICE_ERROR);
+        return status_from_policy(
+            cosmos_nvme_admin_policy_adapter_failure_status(COSMOS_HW_ERROR));
     }
     service->submission_queues[index].entries = entries;
     service->submission_queues[index].completion_queue_id = completion_queue_id;
@@ -385,20 +245,26 @@ static struct cosmos_nvme_status create_sq(
 static struct cosmos_nvme_status delete_sq(
     struct cosmos_nvme_admin_service *service,
     const struct cosmos_nvme_admin_command *command) {
-    unsigned int index;
+    unsigned int queue_id = command->cdw10 & 0xFFFFU;
+    unsigned int index = queue_id > 0U &&
+        queue_id <= COSMOS_NVME_ADMIN_MAX_IO_QUEUES ? queue_id - 1U : 0U;
+    unsigned int policy_status = cosmos_nvme_admin_policy_delete_sq_status(
+        service->negotiated_queue_count,
+        service->submission_queues[index].valid, command->namespace_id,
+        command->cdw10, command->cdw11, command->cdw12, command->cdw13,
+        command->payload_address_low, command->payload_address_high,
+        command->payload_address2_low, command->payload_address2_high,
+        command->payload_bytes);
 
-    if (command->namespace_id != 0U || (command->cdw10 >> 16U) != 0U ||
-        command->cdw11 != 0U || command->cdw12 != 0U || command->cdw13 != 0U ||
-        !command_has_no_payload(command) ||
-        !queue_id_allowed(service, command->cdw10 & 0xFFFFU, &index) ||
-        service->submission_queues[index].valid == 0U) {
-        return status_specific(COSMOS_NVME_ADMIN_SC_INVALID_QUEUE_IDENTIFIER);
+    if (policy_status != cosmos_nvme_admin_policy_status_success()) {
+        return status_from_policy(policy_status);
     }
     if (service->adapter.configure_io_sq != 0 &&
         service->adapter.configure_io_sq(
             service->adapter.context, index + 1U, 0U, 0U, 0U, 0U, 0U) !=
             COSMOS_OK) {
-        return status_generic(COSMOS_NVME_SC_INTERNAL_DEVICE_ERROR);
+        return status_from_policy(
+            cosmos_nvme_admin_policy_adapter_failure_status(COSMOS_HW_ERROR));
     }
     service->submission_queues[index].valid = 0U;
     return status_success();
@@ -407,28 +273,36 @@ static struct cosmos_nvme_status delete_sq(
 static struct cosmos_nvme_status delete_cq(
     struct cosmos_nvme_admin_service *service,
     const struct cosmos_nvme_admin_command *command) {
-    unsigned int index;
+    unsigned int queue_id = command->cdw10 & 0xFFFFU;
+    unsigned int index = queue_id > 0U &&
+        queue_id <= COSMOS_NVME_ADMIN_MAX_IO_QUEUES ? queue_id - 1U : 0U;
     unsigned int scan;
+    unsigned int has_dependent_sq = 0U;
+    unsigned int policy_status;
 
-    if (command->namespace_id != 0U || (command->cdw10 >> 16U) != 0U ||
-        command->cdw11 != 0U || command->cdw12 != 0U || command->cdw13 != 0U ||
-        !command_has_no_payload(command) ||
-        !queue_id_allowed(service, command->cdw10 & 0xFFFFU, &index) ||
-        service->completion_queues[index].valid == 0U) {
-        return status_specific(COSMOS_NVME_ADMIN_SC_INVALID_QUEUE_IDENTIFIER);
-    }
     for (scan = 0U; scan < COSMOS_NVME_ADMIN_MAX_IO_QUEUES; scan++) {
         if (service->submission_queues[scan].valid != 0U &&
             service->submission_queues[scan].completion_queue_id ==
                 (index + 1U)) {
-            return status_specific(COSMOS_NVME_ADMIN_SC_INVALID_QUEUE_DELETION);
+            has_dependent_sq = 1U;
         }
+    }
+    policy_status = cosmos_nvme_admin_policy_delete_cq_status(
+        service->negotiated_queue_count,
+        service->completion_queues[index].valid, has_dependent_sq,
+        command->namespace_id, command->cdw10, command->cdw11,
+        command->cdw12, command->cdw13, command->payload_address_low,
+        command->payload_address_high, command->payload_address2_low,
+        command->payload_address2_high, command->payload_bytes);
+    if (policy_status != cosmos_nvme_admin_policy_status_success()) {
+        return status_from_policy(policy_status);
     }
     if (service->adapter.configure_io_cq != 0 &&
         service->adapter.configure_io_cq(
             service->adapter.context, index + 1U, 0U, 0U, 0U, 0U, 0U, 0U) !=
             COSMOS_OK) {
-        return status_generic(COSMOS_NVME_SC_INTERNAL_DEVICE_ERROR);
+        return status_from_policy(
+            cosmos_nvme_admin_policy_adapter_failure_status(COSMOS_HW_ERROR));
     }
     service->completion_queues[index].valid = 0U;
     return status_success();
@@ -439,22 +313,22 @@ static struct cosmos_nvme_status abort_command(
     const struct cosmos_nvme_admin_command *command, unsigned int *result) {
     unsigned int target_cid = command->cdw10 & 0xFFFFU;
     unsigned int target_queue_id = command->cdw10 >> 16U;
-    unsigned int index;
+    unsigned int index = target_queue_id > 0U &&
+        target_queue_id <= COSMOS_NVME_ADMIN_MAX_IO_QUEUES ?
+        target_queue_id - 1U : 0U;
+    unsigned int policy_status = cosmos_nvme_admin_policy_abort_status(
+        service->negotiated_queue_count,
+        service->submission_queues[index].valid, command->namespace_id,
+        command->cdw10, command->cdw11, command->cdw12, command->cdw13);
 
-    if (command->namespace_id != 0U || command->cdw11 != 0U ||
-        command->cdw12 != 0U || command->cdw13 != 0U) {
-        return status_generic(COSMOS_NVME_SC_INVALID_FIELD);
+    if (policy_status != cosmos_nvme_admin_policy_status_success()) {
+        return status_from_policy(policy_status);
     }
-    if (target_queue_id != 0U &&
-        (!queue_id_allowed(service, target_queue_id, &index) ||
-         service->submission_queues[index].valid == 0U)) {
-        return status_specific(COSMOS_NVME_ADMIN_SC_INVALID_QUEUE_IDENTIFIER);
-    }
-    *result = 1U;
-    if (target_queue_id == 0U && service->async_event_pending != 0U &&
-        service->pending_async_event.cid == target_cid) {
+    *result = cosmos_nvme_admin_policy_abort_result(
+        target_queue_id, target_cid, service->async_event_pending,
+        service->pending_async_event.cid);
+    if (*result == 0U) {
         service->async_event_pending = 0U;
-        *result = 0U;
     }
     return status_success();
 }
@@ -463,19 +337,16 @@ static int execute_command(struct cosmos_nvme_admin_service *service,
                            const struct cosmos_nvme_admin_command *command,
                            struct cosmos_nvme_status *status,
                            unsigned int *result_low) {
+    unsigned int policy_status;
+
     *result_low = 0U;
-    if (command->invalid_field != 0U || command->queue_id != 0U ||
-        command->cid > COSMOS_NVME_MAX_CID) {
-        *status = status_generic(COSMOS_NVME_SC_INVALID_FIELD);
-        return 0;
-    }
-    if (!command_has_no_payload(command) &&
-        opcode_is_supported(command->opcode) &&
-        command->opcode != COSMOS_NVME_ADMIN_IDENTIFY &&
-        command->opcode != COSMOS_NVME_ADMIN_GET_LOG_PAGE &&
-        command->opcode != COSMOS_NVME_ADMIN_CREATE_IO_SQ &&
-        command->opcode != COSMOS_NVME_ADMIN_CREATE_IO_CQ) {
-        *status = status_generic(COSMOS_NVME_SC_INVALID_FIELD);
+    policy_status = cosmos_nvme_admin_policy_envelope_status(
+        command->invalid_field, command->queue_id, command->cid,
+        command->opcode, command->payload_address_low,
+        command->payload_address_high, command->payload_address2_low,
+        command->payload_address2_high, command->payload_bytes);
+    if (policy_status != COSMOS_NVME_ADMIN_POLICY_CONTINUE) {
+        *status = status_from_policy(policy_status);
         return 0;
     }
     switch (command->opcode) {
@@ -507,19 +378,16 @@ static int execute_command(struct cosmos_nvme_admin_service *service,
         *status = abort_command(service, command, result_low);
         return 0;
     case COSMOS_NVME_ADMIN_ASYNC_EVENT_REQUEST:
-        if (service->adapter.poll_async_event == 0) {
-            *status = status_generic(COSMOS_NVME_SC_INVALID_OPCODE);
-        } else if (command->namespace_id != 0U || command->cdw10 != 0U ||
-                   command->cdw11 != 0U || command->cdw12 != 0U ||
-                   command->cdw13 != 0U) {
-            *status = status_generic(COSMOS_NVME_SC_INVALID_FIELD);
-        } else if (service->async_event_pending != 0U) {
-            *status = status_specific(COSMOS_NVME_ADMIN_SC_AER_LIMIT_EXCEEDED);
-        } else {
+        policy_status = cosmos_nvme_admin_policy_async_event_status(
+            service->adapter.poll_async_event != 0 ? 1U : 0U,
+            service->async_event_pending, command->namespace_id,
+            command->cdw10, command->cdw11, command->cdw12, command->cdw13);
+        if (policy_status == COSMOS_NVME_ADMIN_POLICY_CONTINUE) {
             service->pending_async_event = *command;
             service->async_event_pending = 1U;
             return 1;
         }
+        *status = status_from_policy(policy_status);
         return 0;
     default:
         *status = status_generic(COSMOS_NVME_SC_INVALID_OPCODE);
@@ -559,8 +427,8 @@ int cosmos_nvme_admin_init(struct cosmos_nvme_admin_service *service,
 
     if (service == 0 || adapter == 0 || adapter->post_completion == 0 ||
         adapter->write_payload == 0 ||
-        (namespace_blocks_low == 0U && namespace_blocks_high == 0U) ||
-        !power_of_two(block_bytes)) {
+        !cosmos_nvme_admin_policy_init_values_valid(
+            namespace_blocks_low, namespace_blocks_high, block_bytes)) {
         return COSMOS_INVALID;
     }
     service->adapter = *adapter;

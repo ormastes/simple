@@ -12,8 +12,8 @@
 
 use compiler.backend.backend.io_compat.{backend_shell_tuple}
 use compiler.backend.backend.riscv_target.{riscv_linux_target_contract}
-use std.platform.{get_host_os, host_arch}
-use std.io_runtime.{file_exists}
+use std.platform.{get_host_os}
+use std.io_runtime.{file_exists, host_arch}
 use compiler.backend.backend.backend_types.{CodegenTarget}
 
 # ============================================================================
@@ -55,9 +55,7 @@ impl TargetToolchain:
         var issues: [text] = []
 
         # Check linker
-        if self.linker == "":
-            issues.push("No linker configured")
-        else:
+        if self.linker != "":
             val (out, err, code) = backend_shell_tuple("command -v {self.linker} 2>/dev/null || where {self.linker} 2>NUL")
             if code != 0:
                 issues.push("Linker '{self.linker}' not found")
@@ -79,19 +77,6 @@ impl TargetToolchain:
         msg = msg + "\n  Install: {self.install_hint}\n"
         msg
 
-fn unsupported_target_toolchain(target: CodegenTarget, triple: text, hint: text) -> TargetToolchain:
-    TargetToolchain(
-        target: target,
-        triple: triple,
-        linker: "",
-        linker_flavor: "unsupported",
-        sysroot: "",
-        crt_dir: "",
-        default_flags: [],
-        requires_external: true,
-        install_hint: hint
-    )
-
 # ============================================================================
 # Built-in Toolchain Descriptors
 # ============================================================================
@@ -105,11 +90,6 @@ fn toolchain_for_target(target: CodegenTarget) -> TargetToolchain:
         val tc = toolchain_for_target(CodegenTarget.X86_64)
         expect(tc.triple).to_contain("x86_64")
     """
-    # RV32 hosted linking is intentionally unsupported; fail closed without
-    # probing a host toolchain that cannot make the missing ILP32D sysroot real.
-    if target == CodegenTarget.Riscv32:
-        return toolchain_riscv32()
-
     val os = get_host_os()
     val arch = host_arch()
 
@@ -125,7 +105,7 @@ fn toolchain_for_target(target: CodegenTarget) -> TargetToolchain:
         case Riscv64:
             toolchain_riscv64(os, arch)
         case Riscv32:
-            toolchain_riscv32()
+            toolchain_riscv32(os, arch)
         case Wasm32:
             toolchain_wasm32()
         case Wasm64:
@@ -160,20 +140,8 @@ fn toolchain_x86_64_native(os: text) -> TargetToolchain:
             requires_external: false,
             install_hint: "Visual Studio Build Tools or MSVC"
         )
-    elif os == "freebsd":
-        TargetToolchain(
-            target: CodegenTarget.X86_64,
-            triple: "x86_64-unknown-freebsd",
-            linker: "ld",
-            linker_flavor: "gnu",
-            sysroot: "",
-            crt_dir: "/usr/lib",
-            default_flags: ["-pie", "--eh-frame-hdr"],
-            requires_external: false,
-            install_hint: "FreeBSD base system toolchain"
-        )
     else:
-        # Linux
+        # Linux / FreeBSD
         TargetToolchain(
             target: CodegenTarget.X86_64,
             triple: "x86_64-unknown-linux-gnu",
@@ -225,43 +193,21 @@ fn toolchain_aarch64(os: text, host: text) -> TargetToolchain:
             requires_external: false,
             install_hint: "Xcode Command Line Tools: xcode-select --install"
         )
-    elif os == "windows":
-        unsupported_target_toolchain(
-            CodegenTarget.AArch64,
-            "aarch64-pc-windows-msvc",
-            "Windows ARM64 linking is unsupported: MSVC linker and CRT discovery are x64-only"
-        )
-    elif os == "freebsd":
-        if host != "aarch64" and host != "arm64":
-            return unsupported_target_toolchain(
-                CodegenTarget.AArch64,
-                "aarch64-unknown-freebsd",
-                "FreeBSD AArch64 cross-linking is unsupported; use a native AArch64 host"
-            )
+    elif host == "aarch64":
+        # Native aarch64 Linux
         TargetToolchain(
             target: CodegenTarget.AArch64,
-            triple: "aarch64-unknown-freebsd",
-            linker: "ld",
+            triple: "aarch64-unknown-linux-gnu",
+            linker: "mold",
             linker_flavor: "gnu",
             sysroot: "",
-            crt_dir: "/usr/lib",
+            crt_dir: "/usr/lib/aarch64-linux-gnu",
             default_flags: ["-pie", "--eh-frame-hdr"],
             requires_external: false,
-            install_hint: "FreeBSD base system toolchain"
+            install_hint: "apt install mold (native build)"
         )
-    elif os == "linux":
-        if host == "aarch64" or host == "arm64":
-            return TargetToolchain(
-                target: CodegenTarget.AArch64,
-                triple: "aarch64-unknown-linux-gnu",
-                linker: "mold",
-                linker_flavor: "gnu",
-                sysroot: "",
-                crt_dir: "/usr/lib/aarch64-linux-gnu",
-                default_flags: ["-pie", "--eh-frame-hdr"],
-                requires_external: false,
-                install_hint: "apt install mold (native build)"
-            )
+    else:
+        # Cross-compile to aarch64
         TargetToolchain(
             target: CodegenTarget.AArch64,
             triple: "aarch64-unknown-linux-gnu",
@@ -273,40 +219,38 @@ fn toolchain_aarch64(os: text, host: text) -> TargetToolchain:
             requires_external: true,
             install_hint: "apt install gcc-aarch64-linux-gnu libc6-dev-arm64-cross"
         )
-    else:
-        unsupported_target_toolchain(
-            CodegenTarget.AArch64,
-            "aarch64-unknown-{os}",
-            "AArch64 linking is unsupported on host OS '{os}'"
-        )
 
-fn toolchain_armv7(os: text, _host: text) -> TargetToolchain:
-    val triple = match os:
-        case "macos": "armv7-apple-darwin"
-        case "windows": "armv7-pc-windows-msvc"
-        case "freebsd": "armv7-unknown-freebsd"
-        case "linux": "armv7-unknown-linux-gnueabihf"
-        case _: "armv7-unknown-{os}"
-    unsupported_target_toolchain(
-        CodegenTarget.Arm,
-        triple,
-        "Hosted ARMv7 is unsupported on '{os}': hard-float ABI and sysroot are not portable"
-    )
+fn toolchain_armv7(os: text, host: text) -> TargetToolchain:
+    if host == "armv7l" or host == "armv7" or host == "arm":
+        # Native ARM build
+        TargetToolchain(
+            target: CodegenTarget.Arm,
+            triple: "armv7-unknown-linux-gnueabihf",
+            linker: "ld",
+            linker_flavor: "gnu",
+            sysroot: "",
+            crt_dir: "/usr/lib/arm-linux-gnueabihf",
+            default_flags: ["-pie"],
+            requires_external: false,
+            install_hint: "Native ARM build"
+        )
+    else:
+        # Cross-compile to ARM
+        TargetToolchain(
+            target: CodegenTarget.Arm,
+            triple: "armv7-unknown-linux-gnueabihf",
+            linker: "arm-linux-gnueabihf-ld",
+            linker_flavor: "gnu",
+            sysroot: "/usr/arm-linux-gnueabihf",
+            crt_dir: "/usr/lib/arm-linux-gnueabihf",
+            default_flags: ["--sysroot=/usr/arm-linux-gnueabihf", "-pie"],
+            requires_external: true,
+            install_hint: "apt install gcc-arm-linux-gnueabihf libc6-dev-armhf-cross"
+        )
 
 fn toolchain_riscv64(os: text, host: text) -> TargetToolchain:
     val contract = riscv_linux_target_contract(CodegenTarget.Riscv64)
-    if os != "linux":
-        val triple = match os:
-            case "macos": "riscv64-apple-darwin"
-            case "windows": "riscv64-pc-windows-msvc"
-            case "freebsd": "riscv64-unknown-freebsd"
-            case _: "riscv64-unknown-{os}"
-        return unsupported_target_toolchain(
-            CodegenTarget.Riscv64,
-            triple,
-            "Hosted RISC-V 64 targets are Linux-only; host OS '{os}' is unsupported"
-        )
-    if host == "riscv64" or host == "rv64":
+    if host == "riscv64":
         TargetToolchain(
             target: CodegenTarget.Riscv64,
             triple: contract.triple(),
@@ -331,7 +275,7 @@ fn toolchain_riscv64(os: text, host: text) -> TargetToolchain:
             install_hint: "apt install gcc-riscv64-linux-gnu libc6-dev-riscv64-cross"
         )
 
-fn toolchain_riscv32() -> TargetToolchain:
+fn toolchain_riscv32(os: text, host: text) -> TargetToolchain:
     val contract = riscv_linux_target_contract(CodegenTarget.Riscv32)
     TargetToolchain(
         target: CodegenTarget.Riscv32,
@@ -340,9 +284,9 @@ fn toolchain_riscv32() -> TargetToolchain:
         linker_flavor: "gnu",
         sysroot: contract.sysroot,
         crt_dir: contract.crt_dir,
-        default_flags: [],
+        default_flags: ["--sysroot={contract.sysroot}", "-melf32lriscv", "--no-relax", contract.abi_flag(), contract.march_flag()],
         requires_external: true,
-        install_hint: "Hosted RISC-V32 is unsupported; use riscv32-unknown-none-elf"
+        install_hint: "apt install gcc-riscv64-linux-gnu (also handles rv32 ELF linking)"
     )
 
 fn toolchain_wasm32() -> TargetToolchain:
@@ -374,18 +318,14 @@ fn toolchain_wasm64() -> TargetToolchain:
 fn toolchain_simpleos_x86_64() -> TargetToolchain:
     TargetToolchain(
         target: CodegenTarget.SimpleOS_X86_64,
-        triple: "x86_64-unknown-simpleos",
+        triple: "x86_64-unknown-none-elf",
         linker: "ld.lld",
         linker_flavor: "gnu",
-        sysroot: "build/os/sysroot",
-        crt_dir: "build/os/sysroot/lib",
-        default_flags: [
-            "-nostdlib", "-static",
-            "-T", "build/os/sysroot/share/simpleos/simpleos.ld",
-            "-L", "build/os/sysroot/lib"
-        ],
-        requires_external: true,
-        install_hint: "sh src/os/port/llvm/sysroot.shs (and install lld)"
+        sysroot: "",
+        crt_dir: "",
+        default_flags: ["--no-relax", "-nostdlib"],
+        requires_external: false,
+        install_hint: "apt install lld (provides ld.lld)"
     )
 
 # ============================================================================
@@ -413,21 +353,12 @@ fn resolve_toolchain(target: CodegenTarget, overrides: ToolchainOverrides) -> Ta
     var tc = toolchain_for_target(target)
 
     # Apply explicit overrides
-    match overrides.linker:
-        Some(linker):
-            tc.linker = linker
-        nil:
-            ()
-    match overrides.sysroot:
-        Some(sysroot):
-            tc.sysroot = sysroot
-        nil:
-            ()
-    match overrides.crt_dir:
-        Some(crt_dir):
-            tc.crt_dir = crt_dir
-        nil:
-            ()
+    if overrides.linker.?:
+        tc.linker = overrides.linker.unwrap()
+    if overrides.sysroot.?:
+        tc.sysroot = overrides.sysroot.unwrap()
+    if overrides.crt_dir.?:
+        tc.crt_dir = overrides.crt_dir.unwrap()
 
     # Check environment variables
     val (env_linker, e1, c1) = backend_shell_tuple("echo $SIMPLE_LINKER 2>/dev/null")

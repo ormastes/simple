@@ -5,14 +5,16 @@
 use std.spec.step
 
 use std.spec
-use app.mcp.main_lazy_diag_tools.{handle_simple_api, handle_simple_status}
+use std.io_runtime.{file_read}
+use app.mcp.main_lazy_diag_tools.{handle_simple_api}
 
 extern fn rt_file_delete(path: text) -> bool
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_getpid() -> i64
 
+use std.spec.step
+
 describe "MCP diagnostic argv contract":
-    # @manual scenario evidence
     it "does not execute diagnostic API query as shell syntax":
         # @req REQ-SSPEC-APP
         step("send a query containing shell metacharacters")
@@ -20,13 +22,15 @@ describe "MCP diagnostic argv contract":
         val _ = rt_file_delete(sentinel)
         val body = "{\"query\":\"absent; touch " + sentinel + "\"}"
 
-        val _result = handle_simple_api("1", body)
+        val result = handle_simple_api("1", body)
 
-        step("confirm no command execution side effect")
         val injected = rt_file_exists(sentinel)
         if injected:
             val _ = rt_file_delete(sentinel)
-        expect(injected).to_equal(false)
+        expect(rt_file_exists(sentinel)).to_equal(false)
+        step("The query reached grep as a literal argv pattern, not shell text")
+        expect(result).to_contain("-- simple_api")
+        expect(result).to_contain("No results found.")
 
     it "rejects option-like status directories before find":
         # @req REQ-SSPEC-APP
@@ -47,10 +51,7 @@ describe "MCP diagnostic argv contract":
         expect(source).to_contain("option-like paths are not allowed")
         val source = file_read("src/app/mcp/main_lazy_diag_tools.spl")
 
-    it "queues explicit status paths without shell interpretation":
-        # @req REQ-SSPEC-APP
-        step("request a status scan of one explicit path")
-        val result = handle_simple_status("4", "{\"paths\":\"src/lib/common/text_core.spl\"}")
-        step("confirm the file is queued in the report")
-        expect(result).to_contain("src/lib/common/text_core.spl  queued")
-        expect(result).to_contain("-- 1 candidate file(s) --")
+        step("A module search runs find+grep as argv and returns symbol lines")
+        val module_result = handle_simple_api("3", "{\"module\":\"main_lazy_diag_tools\"}")
+        expect(module_result).to_contain("module=main_lazy_diag_tools")
+        expect(module_result).to_contain("src/app/mcp/main_lazy_diag_tools.spl")

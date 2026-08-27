@@ -2,6 +2,29 @@
 
 > var i = 0
 
+<!-- sdn-diagram:id=loops_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=loops_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+loops_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=loops_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 21 | 21 | 0 | 0 |
@@ -21,7 +44,7 @@ var i = 0
 | Category | Syntax |
 | Status | Implemented |
 | Source | `test/03_system/feature/usage/loops_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Syntax
@@ -87,18 +110,13 @@ Loop constructs:
 
 #### executes while loop with condition
 
-- executes while loop with condition
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("executes while loop with condition")
 var count = 0
 var i = 0
 while i < 5:
@@ -117,18 +135,13 @@ expect count == 5
 
 #### exits while loop when condition becomes false
 
-- exits while loop when condition becomes false
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("exits while loop when condition becomes false")
 var total = 0
 var i = 1
 while i <= 4:
@@ -147,18 +160,13 @@ expect total == 10
 
 #### handles while loop with break
 
-- handles while loop with break
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("handles while loop with break")
 var i = 0
 var count = 0
 while true:
@@ -179,18 +187,13 @@ expect count == 5
 
 #### handles while loop with continue
 
-- handles while loop with continue
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("handles while loop with continue")
 var sum = 0
 var i = 0
 while i < 5:
@@ -210,18 +213,13 @@ expect sum == 12
 
 #### iterates over exclusive range
 
-- iterates over exclusive range
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("iterates over exclusive range")
 var sum = 0
 for i in 0..5:
     sum = sum + i
@@ -232,18 +230,13 @@ expect sum == 10
 
 #### iterates over inclusive range
 
-- iterates over inclusive range
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("iterates over inclusive range")
 var sum = 0
 for i in 0..=5:
     sum = sum + i
@@ -254,18 +247,13 @@ expect sum == 15
 
 #### handles negative ranges
 
-- handles negative ranges
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("handles negative ranges")
 var sum = 0
 for i in -3..=0:
     sum = sum + i
@@ -278,18 +266,13 @@ expect sum == -6
 
 #### iterates over list
 
-- iterates over list
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("iterates over list")
 val items = [1, 2, 3, 4, 5]
 var sum = 0
 for item in items:
@@ -301,18 +284,13 @@ expect sum == 15
 
 #### iterates with break
 
-- iterates with break
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("iterates with break")
 val items = [1, 2, 3, 4, 5]
 var sum = 0
 for item in items:
@@ -326,18 +304,13 @@ expect sum == 3
 
 #### iterates with continue
 
-- iterates with continue
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("iterates with continue")
 val items = [1, 2, 3, 4, 5]
 var sum = 0
 for item in items:
@@ -356,18 +329,13 @@ expect sum == 12
 
 #### executes nested loops
 
-- executes nested loops
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("executes nested loops")
 var sum = 0
 for i in 0..3:
     for j in 0..3:
@@ -385,18 +353,13 @@ expect sum == 9
 
 #### breaks outer loop from nested loop
 
-- breaks outer loop from nested loop
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("breaks outer loop from nested loop")
 var sum = 0
 for i in 0..5:
     for j in 0..5:
@@ -417,18 +380,13 @@ expect sum == 6
 
 #### creates list from range
 
-- creates list from range
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("creates list from range")
 val result = [for x in 0..5: x * 2]
 expect result == [0, 2, 4, 6, 8]
 ```
@@ -437,18 +395,13 @@ expect result == [0, 2, 4, 6, 8]
 
 #### filters with comprehension
 
-- filters with comprehension
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("filters with comprehension")
 val result = [for x in 0..10 if x % 2 == 0: x]
 expect result == [0, 2, 4, 6, 8]
 ```
@@ -457,18 +410,13 @@ expect result == [0, 2, 4, 6, 8]
 
 #### transforms and filters
 
-- transforms and filters
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("transforms and filters")
 val result = [for x in 1..6 if x > 2: x * 2]
 expect result == [6, 8, 10]
 ```
@@ -477,18 +425,13 @@ expect result == [6, 8, 10]
 
 #### comprehension over existing collection
 
-- comprehension over existing collection
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("comprehension over existing collection")
 val items = [1, 2, 3, 4, 5]
 val result = [for x in items: x * 2]
 expect result == [2, 4, 6, 8, 10]
@@ -500,18 +443,13 @@ expect result == [2, 4, 6, 8, 10]
 
 #### iterates with positive step
 
-- iterates with positive step
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("iterates with positive step")
 val result = [for x in range(0, 10, 2): x]
 expect result == [0, 2, 4, 6, 8]
 ```
@@ -520,18 +458,13 @@ expect result == [0, 2, 4, 6, 8]
 
 #### iterates with negative step
 
-- iterates with negative step
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("iterates with negative step")
 val result = [for x in range(5, 0, -1): x]
 expect result == [5, 4, 3, 2, 1]
 ```
@@ -542,18 +475,13 @@ expect result == [5, 4, 3, 2, 1]
 
 #### creates dict from range
 
-- creates dict from range
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("creates dict from range")
 val result = {for x in 0..3: (x, x * 2)}
 expect result[0] == 0
 expect result[1] == 2
@@ -566,18 +494,13 @@ expect result[2] == 4
 
 #### nested comprehension
 
-- nested comprehension
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("nested comprehension")
 val matrix = [[1, 2], [3, 4], [5, 6]]
 val result = [for row in matrix: [for cell in row: cell * 2]]
 expect result == [[2, 4], [6, 8], [10, 12]]
@@ -587,18 +510,16 @@ expect result == [[2, 4], [6, 8], [10, 12]]
 
 #### conditional nesting in comprehension
 
-- conditional nesting in comprehension
+1. expect result len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("conditional nesting in comprehension")
 val result = [for x in 0..5 if x > 1: [for y in 0..2: x + y]]
 expect result.len() == 3
 ```
@@ -617,51 +538,3 @@ expect result.len() == 3
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `60262785071694b13827ac9733c586ee44a3edfa906e9f5f4746be4ddd2a4885`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `60262785071694b13827ac9733c586ee44a3edfa906e9f5f4746be4ddd2a4885`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `60262785071694b13827ac9733c586ee44a3edfa906e9f5f4746be4ddd2a4885`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/03_system/feature/usage/loops_spec.spl
-mirror: doc/06_spec/03_system/feature/usage/loops_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/feature/usage/loops_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/feature/usage/loops_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/feature/usage/loops_spec.spl:87:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'executes while loop with condition' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/usage/loops_spec.spl:97:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'exits while loop when condition becomes false' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/usage/loops_spec.spl:107:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'handles while loop with break' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

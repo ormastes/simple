@@ -1,0 +1,26 @@
+# @cover src/app/bug_add/main.spl 0%
+# codex-system-test
+# @req REQ-DEBUG-EVIDENCE-TOKEN-001
+"""A user-created bug binds its database identity to a truthful creation date."""
+
+use std.spec.{describe, it, expect, step}
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+val SYSTEM_ROOT = "/tmp/simple_bug_add_truthful_timestamp_system"
+
+describe "bug-add records truthful creation evidence":
+    it "accepts a validated date and exposes the same date in the persisted active bug":
+        val repo = rt_process_run("/bin/pwd", []).0.trim()
+        step("Create an isolated, empty production-shaped bug database")
+        val schema = "bugs_active |id, severity, status, title, file, line, reproducible_by, created_at, updated_at, valid|\\n\\nbugs |id, severity, status, title, file, line, reproducible_by, created_at, updated_at, valid|\\n\\nbug_descriptions |bug_id, line_num, content|\\n\\nbug_fix_strategies |bug_id, line_num, content|\\n\\nbug_investigation_logs |bug_id, line_num, content|\\n\\nbug_token_usage |bug_id, category, provider, input_tokens, output_tokens, cache_read_tokens, cache_create_tokens, total_tokens, source, knowledge, recorded_at|\\n"
+        val setup = rt_process_run("/bin/sh", ["-c", "rm -rf " + SYSTEM_ROOT + " && mkdir -p " + SYSTEM_ROOT + "/doc/08_tracking/bug && printf '" + schema + "' > " + SYSTEM_ROOT + "/doc/08_tracking/bug/bug_db.sdn"])
+        expect(setup.2).to_equal(0)
+        step("Add a bug through the real CLI with an exact evidence date")
+        val added = rt_process_run("/bin/sh", ["-c", "cd " + SYSTEM_ROOT + " && SIMPLE_LIB=" + repo + "/src " + repo + "/bin/simple run " + repo + "/src/app/bug_add/main.spl --id=truthful_date_system --severity=p1 --title=system-date --file=src/app/bug_add/main.spl --date=2026-08-14"])
+        expect(added.2).to_equal(0)
+        expect(added.0).to_contain("Added bug truthful_date_system")
+        step("Inspect the durable database rather than trusting CLI success text")
+        val persisted = rt_process_run("/bin/cat", [SYSTEM_ROOT + "/doc/08_tracking/bug/bug_db.sdn"])
+        expect(persisted.2).to_equal(0)
+        expect(persisted.0).to_contain("truthful_date_system, P1, open, system-date, src/app/bug_add/main.spl, 0, N/A, 2026-08-14, 2026-08-14, true")

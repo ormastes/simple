@@ -43,23 +43,9 @@ Selected option: Option A, Context Pack First.
 - REQ-015: App MCP and lower MCP `simple_context` shall expose the SQL
   source/provenance filter and forward it to the shared `context` CLI
   subprocess.
-- REQ-016: A focused full-replacement evidence gate shall prove the checked-in
-  operator, CLI, app MCP, lower MCP, dashboard-adjacent, embedded-SQL, and
-  Ponytail surfaces converge on the Simple-owned `simple_pipe` front door plus
-  compatibility `simple_context` and `simple_ponytail` contracts.
-- REQ-017: App MCP and lower MCP `simple_pipe` shall provide one SPipe-linked
-  front door for codebase search, bounded context, embedded-SQL context query,
-  and Ponytail audit/simplification operations while preserving the existing
-  split tool names for compatibility.
-- REQ-018: `simple_pipe` codebase queries shall use the existing embedded-SQL
-  context DB when `sql`/`db` is supplied, fall back to bounded text codebase
-  search, combine those map-style results with Simple LSP workspace-symbol
-  results, and prefer focused LSP output with an explicit raw-search hint when
-  codebase results return a broad sample.
 
 ## Deferred
 
-- Internet fetch, external vector store, or third-party plugin parity beyond
-  repo-local Simple-owned context/Ponytail surfaces.
+- Full context-mode fetch/index replacement beyond local file packs.
 - Full SQLite SQL dialect support beyond the facade subset exercised by
   context indexing/querying.

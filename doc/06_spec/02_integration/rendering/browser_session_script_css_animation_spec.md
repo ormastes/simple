@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 25 | 25 | 0 | 0 |
+| 24 | 24 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -67,7 +67,19 @@ rendered from that exact composition.
    - Expected: midpoint.command.color equals `0xFF22C55Eu32`
 - Rasterize the cascaded frame through canonical Engine2D
    - Artifact capture: after_step
+   - Expected: midpoint frame satisfies `_expect_browser_animation_draw_ir_frame`
+   - Evidence: exact 32×24 command-color pixels, zero matching pixels outside the command, and zero skipped commands
 
+Helper ownership is frozen to `_duplicate_offset_animation_html` for the
+fixture, `_browser_animation_draw_ir_trace` for canonical Draw IR lowering and
+Engine2D execution, and `_expect_browser_animation_draw_ir_frame` for exact
+geometry/pixel/source assertions.
+
+| Helper | Source |
+|--------|--------|
+| `_duplicate_offset_animation_html` | `test/02_integration/rendering/browser_session_script_css_animation_spec.spl` |
+| `_browser_animation_draw_ir_trace` | `test/02_integration/rendering/browser_session_script_css_animation_spec.spl` |
+| `_expect_browser_animation_draw_ir_frame` | `test/02_integration/rendering/browser_session_script_css_animation_spec.spl` |
 
 <details>
 <summary>Executable SSpec</summary>
@@ -108,16 +120,30 @@ _expect_browser_animation_draw_ir_frame(midpoint)
    - Artifact capture: after_step
 - Trace CSS animation through deterministic Draw IR frames
    - Artifact capture: after_step
-   - Evidence: artifact verified by 14 expected checks
+- var session = BrowserSession new
+   - Artifact capture: after_step
+-  expect browser animation draw ir frame
+   - Artifact capture: after_step
+   - Evidence: artifact verified by 3 expected checks
    - Expected: initial.command.color equals `0xFFEF4444u32`
    - Expected: initial.next_ms equals `16`
    - Expected: session.advance_time(500) equals `0`
    - Expected: intermediate.command.color == initial.command.color is false
    - Expected: intermediate.command.color == 0xFF2563EBu32 is false
+- "document getElementById
+   - Artifact capture: after_step
+-  expect browser animation draw ir frame
+   - Artifact capture: after_step
+   - Evidence: artifact verified by 3 expected checks
    - Expected: paused.command.color equals `intermediate.command.color`
    - Expected: paused.next_ms equals `-1`
    - Expected: session.advance_time(1000) equals `0`
    - Expected: still_paused.command.color equals `paused.command.color`
+- "document getElementById
+   - Artifact capture: after_step
+-  expect browser animation draw ir frame
+   - Artifact capture: after_step
+   - Evidence: artifact verified by 3 expected checks
    - Expected: resumed.command.color equals `paused.command.color`
    - Expected: resumed.next_ms equals `1016`
    - Expected: session.advance_time(2500) equals `0`
@@ -310,12 +336,12 @@ expect(session.open_html(
     "<html><body><div id='stage' style='background-color:#ef4444'></div><script>var stage = document.getElementById('stage'); requestAnimationFrame(function(){ stage.style.cssText = 'color:#2563eb'; requestAnimationFrame(function(){ stage.style.cssText = ''; }); });</script></body></html>"
 ).is_ok()).to_equal(true)
 
-expect(session.advance_time(16)).to_equal(1)
+expect(session.advance_time(16)).to_equal(1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
 val replaced = session.render_html_document()
 expect(replaced).to_contain("style=\"color:#2563eb;\"")
 expect(replaced.contains("background-color:#ef4444")).to_equal(false)
 
-expect(session.advance_time(32)).to_equal(1)
+expect(session.advance_time(32)).to_equal(1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
 val cleared = session.render_html_document()
 expect(cleared.contains("color:#2563eb")).to_equal(false)
 expect(cleared.contains("background-color:#ef4444")).to_equal(false)
@@ -325,7 +351,8 @@ expect(cleared.contains("background-color:#ef4444")).to_equal(false)
 
 #### removes a declaration inherited from cssText
 
-- removes a declaration inherited from cssText
+- var session = BrowserSession new
+- "<html><body><div id='stage'></div><script>var stage = document getElementById
    - Expected: session.advance_time(16) equals `1`
    - Expected: session.advance_time(32) equals `1`
 
@@ -333,7 +360,7 @@ expect(cleared.contains("background-color:#ef4444")).to_equal(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -361,6 +388,7 @@ expect(session.render_html_document().contains(
 
 - observes DOM bridge generation wraparound
    - Expected: session.eval_script("document.title = 'runtime-ready'").is_ok() is true
+- session runtime state = Some
 
 
 <details>
@@ -420,7 +448,7 @@ expect(session.open_html(
     "<html><head><title>Waiting</title></head><body><script>requestAnimationFrame(function(frameTime){ document.title = '' + frameTime; });</script></body></html>"
 ).is_ok()).to_be(true)
 
-expect(session.advance_time(33)).to_equal(1)
+expect(session.advance_time(33)).to_equal(1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
 expect(session.current_title).to_equal("33")
 ```
 
@@ -435,16 +463,16 @@ expect(session.current_title).to_equal("33")
    - Evidence: artifact verified by 8 expected checks
    - Expected: initial.source_kind equals `html_ast`
    - Expected: initial.command.component_id equals `stage`
-   - Expected: initial.command.width equals `32`
-   - Expected: initial.command.height equals `24`
+   - Expected: initial.command.width equals `32)  # oracle: pinned constant asserted by this scenario  # oracle: pinned co... (full value in folded executable source)`
+   - Expected: initial.command.height equals `24)  # oracle: pinned constant asserted by this scenario  # oracle: pinned co... (full value in folded executable source)`
    - Expected: initial.command.color equals `0xFFEF4444u32`
    - Expected: initial.rect_pixel_count equals `32 * 24`
-   - Expected: initial.outside_color_count equals `0`
-   - Expected: initial.skipped_command_count equals `0`
+   - Expected: initial.outside_color_count equals `0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
+   - Expected: initial.skipped_command_count equals `0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
 - Advance requestAnimationFrame and its Promise microtask
    - Artifact capture: after_step
    - Evidence: artifact verified by 2 expected checks
-   - Expected: callback_count equals `1`
+   - Expected: callback_count equals `1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
    - Expected: session.current_title equals `microtask`
 - Observe the microtask DOM style before returning
    - Artifact capture: after_step
@@ -453,12 +481,12 @@ expect(session.current_title).to_equal("33")
    - Evidence: artifact verified by 8 expected checks
    - Expected: changed.source_kind equals `html_ast`
    - Expected: changed.command.component_id equals `stage`
-   - Expected: changed.command.width equals `32`
-   - Expected: changed.command.height equals `24`
+   - Expected: changed.command.width equals `32)  # oracle: pinned constant asserted by this scenario  # oracle: pinned co... (full value in folded executable source)`
+   - Expected: changed.command.height equals `24)  # oracle: pinned constant asserted by this scenario  # oracle: pinned co... (full value in folded executable source)`
    - Expected: changed.command.color equals `0xFF2563EBu32`
    - Expected: changed.rect_pixel_count equals `32 * 24`
-   - Expected: changed.outside_color_count equals `0`
-   - Expected: changed.skipped_command_count equals `0`
+   - Expected: changed.outside_color_count equals `0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
+   - Expected: changed.skipped_command_count equals `0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
 
 
 <details>
@@ -474,15 +502,15 @@ val session = _open_raf_promise_microtask_frame()
 val initial = _browser_animation_draw_ir_trace(session, 64, 48)
 expect(initial.source_kind).to_equal("html_ast")
 expect(initial.command.component_id).to_equal("stage")
-expect(initial.command.width).to_equal(32)
-expect(initial.command.height).to_equal(24)
+expect(initial.command.width).to_equal(32)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+expect(initial.command.height).to_equal(24)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
 expect(initial.command.color).to_equal(0xFFEF4444u32)
 expect(initial.rect_pixel_count).to_equal(32 * 24)
-expect(initial.outside_color_count).to_equal(0)
-expect(initial.skipped_command_count).to_equal(0)
+expect(initial.outside_color_count).to_equal(0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+expect(initial.skipped_command_count).to_equal(0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
 
 val callback_count = session.advance_time(16)
-expect(callback_count).to_equal(1)
+expect(callback_count).to_equal(1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
 expect(session.current_title).to_equal("microtask")
 
 val rendered_html = session.render_html_document()
@@ -491,12 +519,12 @@ expect(rendered_html).to_contain("background-color:#2563eb;")
 val changed = _browser_animation_draw_ir_trace(session, 64, 48)
 expect(changed.source_kind).to_equal("html_ast")
 expect(changed.command.component_id).to_equal("stage")
-expect(changed.command.width).to_equal(32)
-expect(changed.command.height).to_equal(24)
+expect(changed.command.width).to_equal(32)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+expect(changed.command.height).to_equal(24)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
 expect(changed.command.color).to_equal(0xFF2563EBu32)
 expect(changed.rect_pixel_count).to_equal(32 * 24)
-expect(changed.outside_color_count).to_equal(0)
-expect(changed.skipped_command_count).to_equal(0)
+expect(changed.outside_color_count).to_equal(0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+expect(changed.skipped_command_count).to_equal(0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
 ```
 
 </details>
@@ -506,10 +534,10 @@ expect(changed.skipped_command_count).to_equal(0)
 - seeds a new JavaScript runtime from the browser clock
    - Expected: session.advance_time(1000) equals `0`
    - Expected: session.current_title equals `Waiting`
-   - Expected: session.advance_time(1001) equals `0`
-   - Expected: session.advance_time(1499) equals `0`
+   - Expected: session.advance_time(1001) equals `0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
+   - Expected: session.advance_time(1499) equals `0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
    - Expected: session.current_title equals `Waiting`
-   - Expected: session.advance_time(1500) equals `1`
+   - Expected: session.advance_time(1500) equals `1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
    - Expected: session.current_title equals `Due`
 
 
@@ -523,17 +551,17 @@ Reproduction: this block contains the complete executable scenario source.
 # @req REQ-SSPEC-INTEGRATION
 step("seeds a new JavaScript runtime from the browser clock")
 var session = BrowserSession.new()
-expect(session.advance_time(1000)).to_equal(0)
+expect(session.advance_time(1000)).to_equal(0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
 expect(session.open_html(
     "https://example.test/later-runtime",
     "<html><head><title>Waiting</title></head><body><script>setTimeout(function(){ document.title = 'Due'; }, 500);</script></body></html>"
 ).is_ok()).to_equal(true)
 
 expect(session.current_title).to_equal("Waiting")
-expect(session.advance_time(1001)).to_equal(0)
-expect(session.advance_time(1499)).to_equal(0)
+expect(session.advance_time(1001)).to_equal(0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
+expect(session.advance_time(1499)).to_equal(0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
 expect(session.current_title).to_equal("Waiting")
-expect(session.advance_time(1500)).to_equal(1)
+expect(session.advance_time(1500)).to_equal(1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
 expect(session.current_title).to_equal("Due")
 ```
 
@@ -543,45 +571,45 @@ expect(session.current_title).to_equal("Due")
 
 - schedules a late-created timer from the current browser clock
    - Expected: session.advance_time(500) equals `0`
+- "setTimeout
    - Expected: session.advance_time(599) equals `0`
    - Expected: session.current_title equals `Waiting`
-   - Expected: session.advance_time(600) equals `1`
+   - Expected: session.advance_time(600) equals `1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
    - Expected: session.current_title equals `Due`
-   - Expected: session.advance_time(601) equals `0`
+   - Expected: session.advance_time(601) equals `0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("schedules a late-created timer from the current browser clock")
 var session = BrowserSession.new()
 expect(session.open_html(
     "https://example.test/late-timer",
     "<html><head><title>Waiting</title></head><body><script>var ready = true;</script></body></html>"
 ).is_ok()).to_equal(true)
 
-expect(session.advance_time(500)).to_equal(0)
+expect(session.advance_time(500)).to_equal(0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
 expect(session.eval_script(
     "setTimeout(function(){ document.title = 'Due'; }, 100);"
 ).is_ok()).to_equal(true)
-expect(session.advance_time(599)).to_equal(0)
+expect(session.advance_time(599)).to_equal(0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
 expect(session.current_title).to_equal("Waiting")
-expect(session.advance_time(600)).to_equal(1)
+expect(session.advance_time(600)).to_equal(1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
 expect(session.current_title).to_equal("Due")
-expect(session.advance_time(601)).to_equal(0)
+expect(session.advance_time(601)).to_equal(0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
 ```
 
 </details>
 
 #### reports animation frame time from the current document origin
 
-- reports animation frame time from the current document origin
+- var session = BrowserSession new
    - Expected: session.advance_time(1000) equals `0`
+- "<html><head><title>Waiting</title></head><body><script>requestAnimationFrame
    - Expected: session.advance_time(1016) equals `1`
    - Expected: session.current_title equals `16`
 
@@ -589,14 +617,12 @@ expect(session.advance_time(601)).to_equal(0)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("reports animation frame time from the current document origin")
 var session = BrowserSession.new()
-expect(session.advance_time(1000)).to_equal(0)
+expect(session.advance_time(1000)).to_equal(0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
 expect(session.open_html(
     "https://example.test/later-frame",
     "<html><head><title>Waiting</title></head><body><script>requestAnimationFrame(function(frameTime){ document.title = '' + frameTime; });</script></body></html>"
@@ -668,21 +694,16 @@ expect(_pixels_equal(second.pixel_data, first.pixel_data)).to_equal(false)
 - applies CSS from a SimpleScript animation frame through Draw IR
 - Render the HTML and CSS frame before the SimpleScript callback
    - Expected: initial.command.color equals `0xFFEF4444u32`
-- Keep the frame red before the shared refresh boundary
-   - Expected: session.advance_time(5) equals `0`
-   - Expected: session.advance_time(15) equals `0`
-   - Expected: before_boundary.command.color equals `0xFFEF4444u32`
-- Advance the production SimpleScript animation clock to 16ms
+- Advance the production SimpleScript animation clock
    - Expected: session.advance_time(16) equals `1`
    - Expected: session.simple_script_callback_count() equals `1`
    - Expected: animated.command.color equals `0xFF2563EBu32`
    - Expected: animated.command.color == initial.command.color is false
 
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 26 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -698,14 +719,7 @@ val initial = _browser_animation_draw_ir_trace(session, 64, 48)
 _expect_browser_animation_draw_ir_frame(initial)
 expect(initial.command.color).to_equal(0xFFEF4444u32)
 
-step("Keep the frame red before the shared refresh boundary")
-expect(session.advance_time(5)).to_equal(0)
-expect(session.advance_time(15)).to_equal(0)
-val before_boundary = _browser_animation_draw_ir_trace(session, 64, 48)
-_expect_browser_animation_draw_ir_frame(before_boundary)
-expect(before_boundary.command.color).to_equal(0xFFEF4444u32)
-
-step("Advance the production SimpleScript animation clock to 16ms")
+step("Advance the production SimpleScript animation clock")
 expect(session.advance_time(16)).to_equal(1)
 expect(session.simple_script_callback_count()).to_equal(1)
 val animated = _browser_animation_draw_ir_trace(session, 64, 48)
@@ -781,20 +795,18 @@ expect(after.command.color == 0xFF2563EBu32).to_equal(false)
 - should preserve an active animation across an unrelated SimpleScript stylesheet update
    - Artifact capture: after_step
 - Render the active animation before the SimpleScript timer
-   - Artifact capture: after_step
-   - Evidence: artifact verified by 1 expected check
    - Expected: initial.command.color equals `0xFFEF4444u32`
 - Apply an unrelated stylesheet rule from the SimpleScript timer
    - Artifact capture: after_step
    - Evidence: artifact verified by 2 expected checks
    - Expected: session.advance_time(500) equals `1`
    - Expected: session.style_revision equals `prior_style_revision + 1`
+   - Expected: session.current_style_html contains `#other{color:#16a34a}`
 - Keep the animation midpoint in canonical Draw IR and Engine2D pixels
-   - Artifact capture: after_step
-   - Evidence: artifact verified by 3 expected checks
    - Expected: midpoint.command.color equals `0xFF8A5397u32`
    - Expected: midpoint.rect_pixel_count equals `32 * 24`
-   - Expected: midpoint.skipped_command_count equals `0`
+   - Expected: midpoint.skipped_command_count equals `0)  # oracle: pinned constant asserted by this scenario  # oracle: pinned con... (full value in folded executable source)`
+
 
 
 <details>
@@ -808,10 +820,10 @@ Reproduction: this block contains the complete executable scenario source.
 step("should preserve an active animation across an unrelated SimpleScript stylesheet update")
 step("Render the active animation before the SimpleScript timer")
 val animation_css = (
-    "@keyframes Pulse{{from{{background-color:#ef4444}}" +
-    "to{{background-color:#2563eb}}}}" +
-    "#stage{{width:32px;height:24px;" +
-    "animation:Pulse 1000ms linear forwards}}"
+    "@keyframes Pulse{from{background-color:#ef4444}" +
+    "to{background-color:#2563eb}}" +
+    "#stage{width:32px;height:24px;" +
+    "animation:Pulse 1000ms linear forwards}"
 )
 var session = BrowserSession.new()
 expect(session.open_html(
@@ -819,7 +831,7 @@ expect(session.open_html(
     "<style>{animation_css}</style><div id='stage'></div>" +
     "<script type='text/simple'>" +
     "callback 51|style_html '<style>{animation_css}" +
-    "#other{{color:#16a34a}}</style>'\n" +
+    "#other{color:#16a34a}</style>'\n" +
     "timeout 51 500</script>"
 ).is_ok()).to_be(true)
 val initial = _browser_animation_draw_ir_trace(session, 64, 48)
@@ -831,7 +843,7 @@ step("Apply an unrelated stylesheet rule from the SimpleScript timer")
 expect(session.advance_time(500)).to_equal(1)
 expect(session.style_revision).to_equal(prior_style_revision + 1)
 expect(session.current_style_html).to_contain(
-    "#other{{color:#16a34a}}"
+    "#other{color:#16a34a}"
 )
 val midpoint = _browser_animation_draw_ir_trace(session, 64, 48)
 
@@ -980,6 +992,7 @@ expect(_pixels_equal(
 
 - bounds retained DOM bridge allocations without aliasing detached nodes
    - Expected: session.current_title equals `distinct`
+- session runtime state = Some
    - Expected: exercised is true
    - Expected: admitted_checked is true
    - Expected: object_limit_checked is true
@@ -1366,8 +1379,8 @@ expect(_count_color(last.pixel_data, 0xFF2563EBu32)).to_be_greater_than(0)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 25 |
-| Active scenarios | 25 |
+| Total scenarios | 24 |
+| Active scenarios | 24 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

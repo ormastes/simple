@@ -19,18 +19,19 @@ use compiler.common.attributes.{parse_layout_attrs, parse_function_attrs, parse_
 use compiler.types.type_layout.{LayoutAttr, TypeLayoutKind, PlatformParseResult, PlatformDiagnosticLevel, PlatformLayoutDiagnostic}
 use compiler.common.dependency.visibility.{Visibility}
 use compiler.common.module_path_naming.{module_logical_name_from_path}
-use compiler.core.{decl_get_body, decl_get_name, decl_get_param_names, decl_get_param_types, decl_get_ret_type}
-use compiler.core.{STMT_EXPR, STMT_VAL_DECL, STMT_VAR_DECL, STMT_RETURN, stmt_get_tag, stmt_get_expr, stmt_get_name, stmt_get_type}
+use compiler.core.ast.{decl_get_body, decl_get_name, decl_get_param_names, decl_get_param_types, decl_get_ret_type, STMT_EXPR, STMT_VAL_DECL, STMT_VAR_DECL, STMT_RETURN}
+use compiler.core.ast_stmt.{stmt_get_tag, stmt_get_expr, stmt_get_name, stmt_get_type}
 
 extern fn rt_enum_discriminant(value: Any) -> i64
 extern fn rt_enum_payload(value: StmtKind) -> Expr
-use compiler.core.{EXPR_INT_LIT, EXPR_STRING_LIT, EXPR_INTERPOLATED_STRING, EXPR_BOOL_LIT, EXPR_NIL_LIT, EXPR_IDENT, EXPR_BINARY, EXPR_CALL, EXPR_FIELD_ACCESS, EXPR_METHOD_CALL, EXPR_BLOCK, EXPR_RETURN, expr_get_tag, expr_get_int, expr_get_str, expr_get_left, expr_get_right, expr_get_args, expr_get_arg_names, expr_get_stmts}
+use compiler.core.ast.{EXPR_INT_LIT, EXPR_STRING_LIT, EXPR_INTERPOLATED_STRING, EXPR_BOOL_LIT, EXPR_NIL_LIT, EXPR_IDENT, EXPR_BINARY, EXPR_CALL, EXPR_FIELD_ACCESS, EXPR_METHOD_CALL, EXPR_BLOCK, EXPR_RETURN}
+use compiler.core.ast_expr.{expr_get_tag, expr_get_int, expr_get_str, expr_get_left, expr_get_right, expr_get_args, expr_get_arg_names, expr_get_stmts}
 use compiler.frontend.core._AstExpr.accessors.{expr_get_arg_names}
-use compiler.core.{TOK_MINUS, TOK_STAR, TOK_SLASH, TOK_PERCENT, TOK_EQ, TOK_NOT_EQ, TOK_LT, TOK_LT_EQ, TOK_GT, TOK_GT_EQ}
+use compiler.core.tokens.{TOK_MINUS, TOK_STAR, TOK_SLASH, TOK_PERCENT, TOK_EQ, TOK_NOT_EQ, TOK_LT, TOK_LT_EQ, TOK_GT, TOK_GT_EQ}
 use compiler.frontend.core.types.{TYPE_VOID, TYPE_BOOL, TYPE_I64, TYPE_TEXT, TYPE_DICT, custom_primitive_bind_symbol, custom_primitive_is_name}
 use compiler.frontend.core.types.{is_dict_tag, dict_tag_to_id, dict_type_get_key, dict_type_get_value}
 use compiler.frontend.core.types.{primitive_integer_bit_width_from_name, custom_primitive_integer_bit_width_by_name}
-use compiler.core.{int_to_str}
+use compiler.core.types.{int_to_str}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 
 impl HirLowering:
@@ -72,7 +73,7 @@ impl HirLowering:
         if not scan.found_value_return:
             return HirType(kind: HirTypeKind.Unit, span: fn_decl.span)
         if scan.ambiguous or not scan.resolved_name.?:
-            if self.ambient_bootstrap_enabled():
+            if (hir_module_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
                 # The bootstrap route has no whole-program inference pass.
                 # Preserve the value dynamically; Unit would discard it.
                 return HirType(kind: HirTypeKind.Any, span: fn_decl.span)
@@ -115,15 +116,6 @@ impl HirLowering:
                 ()
         while first_raw_param < raw_params.len():
             val raw_param: Param = raw_params[first_raw_param]
-            # `Param.type_` is a DESUGARED optional paired with `has_type_`: an
-            # untyped parameter leaves it nil, and `lower_type(nil)` traps in
-            # types.spl (`val lt_kind: TypeKind = lt.kind` -> "undefined field
-            # 'kind' ... type 'nil'", with no span). An untyped param means we
-            # cannot form a complete DECLARED signature, so bail to nil exactly
-            # like the generic/import cases above and the sibling
-            # `declared_surface_callable_type` below.
-            if not raw_param.has_type_:
-                return nil
             val raw_param_type: Type = raw_param.type_
             param_types.push(self.lower_type(raw_param_type))
             first_raw_param = first_raw_param + 1
@@ -246,31 +238,14 @@ impl HirLowering:
                 imported_module_name, type_name)
             if raw_symbol_id >= 0:
                 return HirType(kind: HirTypeKind.Named(SymbolId(id: raw_symbol_id), []), span: type_.span)
-            # `has_X` is the optional sugar for `X?`; the surface records it
-            # verbatim. Project the BASE through the owner's qualified scope
-            # before falling back, otherwise lower_named_kind strips the
-            # prefix and looks `X` up unqualified in the consumer, where the
-            # materialized dependency is not bound (stage-1 run9:
-            # `unresolved type: GpuIntrinsicKind` blamed on zero-import
-            # package siblings of gpu_intrinsics.spl).
-            if type_name.starts_with("has_") and type_name.len() > 4:
-                val has_symbol_id = self.symbols.lookup_qualified_type_raw(
-                    imported_module_name, type_name[4:])
-                if has_symbol_id >= 0:
-                    return HirType(kind: HirTypeKind.Optional(HirType(kind: HirTypeKind.Named(SymbolId(id: has_symbol_id), []), span: type_.span)), span: type_.span)
             return HirType(kind: self.lower_named_kind(type_name, [], type_.span), span: type_.span)
         if array_element_name != "":
             val raw_element_id = self.symbols.lookup_qualified_type_raw(
                 imported_module_name, array_element_name)
-            var element: HirType = HirType(kind: HirTypeKind.Error, span: type_.span)
-            if raw_element_id >= 0:
-                element = HirType(
-                    kind: HirTypeKind.Named(SymbolId(id: raw_element_id), []),
-                    span: type_.span)
+            val element = if raw_element_id >= 0:
+                HirType(kind: HirTypeKind.Named(SymbolId(id: raw_element_id), []), span: type_.span)
             else:
-                element = HirType(
-                    kind: self.lower_named_kind(array_element_name, [], type_.span),
-                    span: type_.span)
+                HirType(kind: self.lower_named_kind(array_element_name, [], type_.span), span: type_.span)
             return HirType(kind: HirTypeKind.Array(element, nil), span: type_.span)
         self.imported_surface_type(type_, imported_module_name)
 
@@ -303,25 +278,6 @@ impl HirLowering:
                     imported_module_name),
                 []),
             span: callable.span)
-
-    me imported_surface_projected_name_type(shape: text, type_name: text, imported_module_name: text, span: Span) -> HirType?:
-        if shape != "named" and shape != "named_array":
-            return nil
-        val raw_symbol_id = self.symbols.lookup_qualified_type_raw(
-            imported_module_name, type_name)
-        var element: HirType = HirType(kind: HirTypeKind.Error, span: span)
-        if raw_symbol_id >= 0:
-            element = HirType(
-                kind: HirTypeKind.Named(SymbolId(id: raw_symbol_id), []),
-                span: span)
-        else:
-            element = HirType(
-                kind: self.lower_named_kind(type_name, [], span), span: span)
-        var projected: HirType = element
-        if shape == "named_array":
-            projected = HirType(
-                kind: HirTypeKind.Array(element, nil), span: span)
-        Some(projected)
 
     me infer_simple_type_name_ast(e: Expr, params: [Param]) -> text?:
         match e.kind:
@@ -486,7 +442,7 @@ impl HirLowering:
                 self.scan_ast_block_for_returns(body, params)
             case ExprKind.NogradBlock(body):
                 self.scan_ast_block_for_returns(body, params)
-            case ExprKind.UnsafeBlock(body, _):
+            case ExprKind.UnsafeBlock(body):
                 self.scan_ast_block_for_returns(body, params)
             case ExprKind.Lambda(_, _):
                 return_scan_empty()

@@ -1,29 +1,6 @@
 # MCP core tool set serves 3 tools while its specs require 20
 
-**Date:** 2026-08-25 · **Severity:** MEDIUM (core/auto MCP mode advertises far fewer tools than specified) · **Status:** FIXED 2026-08-26 · **Pre-existing at origin**
-
-## Resolution (2026-08-26)
-The product side was authoritative-wrong, not the specs. `git log -S` shows
-`_mcp_core_tool_names` was BORN with 3 names at `cfe0506e336` (2026-08-05) and
-was never 20 — the only 3↔0 flips in its history are the known
-`6f86ff32a7d` tree wipe and its `ae55a746719` restore, so this is not a
-stale-snapshot clobber. The binding contract in
-`doc/03_plan/app/mcp/mcp_core_default_dynload_plan_2026-06-13.md` states
-"core (20 tools)", and task B4 of the startup-perf plan says "core ~15-25
-tools", so the implementation never met its spec. `_mcp_core_tool_names` in
-`src/app/mcp/main_static_tools.spl` now returns the 20 everyday dev tools
-(read/navigate, write, build/verify, vcs), keeping the original three and
-adding the names the specs pin by hand (`simple_read`, `simple_check`,
-`simple_edit`, `simple_run`, `simple_test`, `simple_commit`). No `debug_*`,
-`play_*` or `assistant_*` tool is in the core set; dispatch stays unfiltered.
-
-The stale FULL-list pins in `mcp_static_tools_perf_spec.spl` were also
-re-measured (151 -> 163 tools, 38114 -> 45397 chars). **The second half of the
-unblock condition is NOT met:** that pin is still hand-maintained, not
-regenerated from the table. The only guard against it drifting again is that
-`mcp_tool_set_spec.spl` pins the same 163 independently, so a single-sided
-edit turns one of the two red. Regenerating the pin from
-`_mcp_static_tool_table()` remains open.
+**Date:** 2026-08-25 · **Severity:** MEDIUM (core/auto MCP mode advertises far fewer tools than specified) · **Status:** OPEN · **Pre-existing at origin**
 
 ## Symptom
 `test/01_unit/app/mcp/mcp_tool_set_spec.spl` and `mcp_dynload_upgrade_spec.spl`

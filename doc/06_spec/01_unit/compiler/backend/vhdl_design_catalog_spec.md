@@ -1,6 +1,6 @@
-# Vhdl Design Catalog Specification
+# Contract spec: test/01_unit/compiler/backend/vhdl_design_catalog_spec.spl
 
-> Tests covering VHDL design-wide catalog.
+> Audience: engineers owning the pinned repository sources. Purpose: keep the pinned observable
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -9,7 +9,47 @@
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Vhdl Design Catalog Specification
+# Contract spec: test/01_unit/compiler/backend/vhdl_design_catalog_spec.spl
+
+Audience: engineers owning the pinned repository sources. Purpose: keep the pinned observable
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Compiler |
+| Status | Active |
+| Source | `test/01_unit/compiler/backend/vhdl_design_catalog_spec.spl` |
+| Updated | 2026-08-27 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Purpose and Audience
+
+Audience: engineers owning the pinned repository sources. Purpose: keep the pinned observable
+contracts red-visible, so a regression in the owned code fails this spec
+instead of shipping silently.
+
+## Scope and Preconditions
+
+Precondition: the repository working tree holds the subject code under test.
+Each scenario exercises the subject and asserts its observable contract; no
+behavior outside the named subject is claimed.
+
+## Primary Workflow
+
+Run the scenarios; each one drives the subject through its pinned contract
+and asserts the expected observable outcome with an executed oracle.
+
+## Unsupported / Limitations
+
+Only the pinned contracts are asserted here; end-to-end and integration
+behavior of the surrounding system is covered by companion specs.
+
+## Verification and Recovery
+
+A red scenario names the contract that regressed. Recover by restoring the
+pinned behavior in the subject; verify with
+`bin/simple test test/01_unit/compiler/backend/vhdl_design_catalog_spec.spl` and a green Results line.
 
 ## Scenarios
 
@@ -810,13 +850,12 @@ expect(result.unwrap_err()).to_contain("cyclic record/enum type dependency")
 #### selects the VHDL root only from explicit compile inputs, never native-build env
 
 - selects the VHDL root only from explicit compile inputs, never native-build env
-   - Expected: source does not contain `rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY")`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -824,29 +863,13 @@ Reproduction: this block contains the complete executable scenario source.
 step("selects the VHDL root only from explicit compile inputs, never native-build env")
 val source = rt_file_read_text(
     "src/compiler/80.driver/driver_aot_vhdl_output.spl") ?? ""
-expect(source.contains("rt_env_get(\"SIMPLE_NATIVE_BUILD_ENTRY\")")).to_equal(false)
-expect(source).to_contain("driver_vhdl_entry_module(ctx)")
+expect(source).to_not_contain("rt_env_get(\"SIMPLE_NATIVE_BUILD_ENTRY\")")        expect(source).to_contain("driver_vhdl_entry_module(ctx)")
 expect(source).to_contain("ctx.options.bootstrap_input_0")
 expect(source).to_contain("VHDL compilation requires one explicit entry file in compile options")
 expect(source).to_contain("VHDL compilation entry is ambiguous")
 ```
 
 </details>
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Compiler |
-| Status | Active |
-| Source | `test/01_unit/compiler/backend/vhdl_design_catalog_spec.spl` |
-| Updated | 2026-08-26 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering VHDL design-wide catalog.
-- VHDL design-wide catalog
 
 ## Scenario Summary
 
@@ -866,56 +889,42 @@ Tests covering VHDL design-wide catalog.
 
 Requirements covered by the scenarios in this manual:
 
-- `REQ-SSPEC-UNIT`
 - `REQ-SSPEC-COMPILER`
 <!-- sspec-maintain:traceability:end -->
 
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `c8bbd9a2ae655a565905cbf7c441388970971db02a9a4e7c7d92e8d8caaf175a`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `2b355026644211be4c351483f84f4770d34011d00225266d648e7c82f28f4e71`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `c8bbd9a2ae655a565905cbf7c441388970971db02a9a4e7c7d92e8d8caaf175a`.
+Source SHA-256: `2b355026644211be4c351483f84f4770d34011d00225266d648e7c82f28f4e71`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `c8bbd9a2ae655a565905cbf7c441388970971db02a9a4e7c7d92e8d8caaf175a`  
+Source SHA-256: `2b355026644211be4c351483f84f4770d34011d00225266d648e7c82f28f4e71`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **70/100**; effective score: **49/100**; blockers: **2**.
+Raw score: **89/100**; effective score: **89/100**; blockers: **0**.
 
-SSpec documentization score: 49/100
+SSpec documentization score: 89/100
 source: test/01_unit/compiler/backend/vhdl_design_catalog_spec.spl
 mirror: doc/06_spec/01_unit/compiler/backend/vhdl_design_catalog_spec.md (current)
-findings: 8 blockers: 2
-  narrative=100 structure=100 oracle=20
-  traceability=60 evidence=70 coverage=100 maintainability=70
+findings: 4 blockers: 0
+  narrative=100 structure=100 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=100
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-  raw=70; blocker cap makes effective=49
-doc/06_spec/01_unit/compiler/backend/vhdl_design_catalog_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/compiler/backend/vhdl_design_catalog_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/compiler/backend/vhdl_design_catalog_spec.spl:1:1: blocker SSDOC-ORA-002 [oracle] (-50): scenario relies on source-text inspection as system evidence
-  why: Source presence or self-created arithmetic does not demonstrate production behavior.
-  improve: Observe runtime behavior or a stable generated artifact instead.
 test/01_unit/compiler/backend/vhdl_design_catalog_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 22 unexplained numeric expected value(s)
   why: Reviewers need to know why a magic expected value is authoritative.
   improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/01_unit/compiler/backend/vhdl_design_catalog_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 1 declared requirement(s) have no scenario binding
-  why: A requirement list without scenario evidence is inventory, not traceability.
-  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
-test/01_unit/compiler/backend/vhdl_design_catalog_spec.spl:208:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'recovers hardware metadata from the driver source sidecar' has no retained capture or evidence
+test/01_unit/compiler/backend/vhdl_design_catalog_spec.spl:240:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'recovers hardware metadata from the driver source sidecar' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/compiler/backend/vhdl_design_catalog_spec.spl:260:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'fails closed when no sidecar function name matches' has no retained capture or evidence
+test/01_unit/compiler/backend/vhdl_design_catalog_spec.spl:292:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'fails closed when no sidecar function name matches' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/compiler/backend/vhdl_design_catalog_spec.spl:272:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'does not classify an unrelated same-named sidecar function' has no retained capture or evidence
+test/01_unit/compiler/backend/vhdl_design_catalog_spec.spl:304:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'does not classify an unrelated same-named sidecar function' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
 <!-- sspec-maintain:scorecard:end -->

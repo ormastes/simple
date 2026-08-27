@@ -71,12 +71,8 @@ var session = setup_cancel_domain_fixture()
 check_cancel_domain_registration(session)
 check_node_cancel_domain_handle_metadata()
 
-step("Advance the monotonic browser clock")
-expect(session.advance_time(15)).to_equal(0)
-expect(_read_js_text(
-    session,
-    "callbackLog+':'+clickCount+':'+frameStamp"
-)).to_equal(":0:-1")
+    step("Observe updated canonical Draw IR pixels and released resources")
+    check_cancel_domain_pixels_and_resources(session)
 
 step("Dispatch events and animation frames")
 val _ = session.dispatch_dom_event(
@@ -91,8 +87,27 @@ expect(_read_js_text(
     "callbackLog+':'+clickCount+':'+frameStamp"
 )).to_equal("FT:1:16")
 
-step("Observe updated canonical Draw IR pixels and released resources")
-check_cancel_domain_pixels_and_resources(session)
+    step("Advance to the shared frame boundary")
+    expect(session.advance_time(16)).to_equal(2)
+
+    step("Schedule a callback during dispatch")
+    check_nested_callback_deferred(session)
+
+    step("Render two aligned animation frames")
+    check_aligned_draw_ir_frames(session)
+
+it "should preserve aligned deadlines across clock edge cases":
+    step("Align a skipped refresh from a nonzero document origin")
+    check_nonzero_origin_skipped_boundary()
+
+    step("Keep an overflowed nested frame out of the current drain")
+    check_overflow_safe_nested_frame()
+
+    step("Refresh Node-compatible animation handles exactly")
+    check_node_compatible_raf_refresh_metadata()
+
+    step("Saturate worker wakeup after the drain cap")
+    check_worker_wakeup_saturates_after_drain_cap()
 ```
 
 </details>

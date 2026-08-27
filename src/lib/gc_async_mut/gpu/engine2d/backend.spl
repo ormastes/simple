@@ -4,7 +4,6 @@ class Engine2DReadback:
     pixels: [u32]
     source: text
     backend_handle: i64
-    device_identity: i64
     pixel_count: i64
     checksum: i64
 
@@ -12,31 +11,24 @@ fn engine2d_readback(pixels: [u32], source: text) -> Engine2DReadback:
     engine2d_readback_with_handle(pixels, source, 0)
 
 fn engine2d_readback_with_handle(pixels: [u32], source: text, backend_handle: i64) -> Engine2DReadback:
-    engine2d_readback_with_identity(pixels, source, backend_handle, 0)
-
-pub fn engine2d_readback_with_identity(pixels: [u32], source: text, backend_handle: i64, device_identity: i64) -> Engine2DReadback:
     var checksum: i64 = 0
     var i = 0
     while i < pixels.len():
         checksum = (checksum + pixels[i].to_i64()) % 2147483647
         i = i + 1
-    Engine2DReadback(pixels: pixels, source: source, backend_handle: backend_handle, device_identity: device_identity, pixel_count: pixels.len().to_i64(), checksum: checksum)
+    Engine2DReadback(pixels: pixels, source: source, backend_handle: backend_handle, pixel_count: pixels.len().to_i64(), checksum: checksum)
 
-# ============================================================================
-# ReadbackSource — typed classification of where readback pixels came from.
-#
-# Engine2DReadback.source remains free-text for now (a hard field-type change
-# ripples across ~15 files / 6+ distinct labels, several outside these three
-# variants) — this enum plus the bidirectional text mapping gives callers a
-# typed view without that churn. `readback_source_label` is the canonical
-# string producer used at the readback construction sites.
-# ============================================================================
+class Engine2DPackedRegions:
+    """A bounded row-major payload for one exact rectangle list.
 
-enum ReadbackSource:
-    """Where a readback's pixels physically came from."""
-    DeviceReadback  # copied back from a real GPU device framebuffer
-    CpuMirror       # a CPU-side mirror / cached copy of a presented frame
-    Software        # produced entirely by the software rasterizer
+    This is deliberately an opt-in sparse-readback result. `valid=false`
+    means the backend did not prove a direct region path, so callers must use
+    their established full-read fallback instead of labelling a full copy as
+    sparse.
+    """
+    valid: bool
+    rects: [i64]
+    pixels: [u32]
 
 impl ReadbackSource:
     fn to_text() -> text:
@@ -73,18 +65,11 @@ trait RenderBackend:
     me draw_gradient_rect(x: i32, y: i32, w: i32, h: i32, top_color: u32, bottom_color: u32)
     me draw_text(x: i32, y: i32, text_val: text, color: u32, font_size: i32)
     me draw_image(x: i32, y: i32, w: i32, h: i32, pixels: [u32])
-    me draw_image_blend(x: i32, y: i32, w: i32, h: i32, pixels: [u32])
     me set_clip(x: i32, y: i32, w: i32, h: i32)
     me clear_clip()
     me set_mask(mask_pixels: [u8], w: i32, h: i32)
     me clear_mask()
     me present()
-    # Flush any backend-buffered draw calls for the current frame into one
-    # submission (one fence wait) instead of one submission per primitive.
-    # Backends that dispatch immediately per draw call (the default for
-    # every non-Vulkan backend today) have nothing pending and just return
-    # true. Called once per composition render, before present/readback.
-    me submit_batch() -> bool
     fn read_pixels() -> [u32]
     me read_pixels_damaged(max_rects: i32) -> [u32]:
         """Borrowed retained mirror when a backend supports one.

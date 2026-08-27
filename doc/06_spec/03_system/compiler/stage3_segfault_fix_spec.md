@@ -1,6 +1,31 @@
 # Stage 3 SEGFAULT Fix (LIM-010) Specification
 
-> Verifies the fix for bootstrap Stage 3 SEGFAULT (exit 139) caused by duplicate LLVM CLI option registration. The fix changes strip_llvm_constructors() to return Result, replaces silent unwrap_or fallbacks with explicit warn!(), adds verify_stripped_archive() post-condition, and adds exit-139 detection in compile_stage().
+> Historical LIM-010 scenarios verify duplicate-LLVM-constructor hardening.
+> They do not prove that the current Stage 3 completes or is functional; live
+> Stage 3 admission is reopened pending canonical provenance and sanity evidence.
+
+<!-- sdn-diagram:id=stage3_segfault_fix_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=stage3_segfault_fix_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+stage3_segfault_fix_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=stage3_segfault_fix_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -11,7 +36,9 @@
 
 # Stage 3 SEGFAULT Fix (LIM-010) Specification
 
-Verifies the fix for bootstrap Stage 3 SEGFAULT (exit 139) caused by duplicate LLVM CLI option registration. The fix changes strip_llvm_constructors() to return Result, replaces silent unwrap_or fallbacks with explicit warn!(), adds verify_stripped_archive() post-condition, and adds exit-139 detection in compile_stage().
+Historically verifies source structure for the LIM-010 duplicate LLVM CLI
+option repair. It does not execute or qualify the current Stage 3, whose native
+bootstrap acceptance remains reopened.
 
 ## At a Glance
 
@@ -20,22 +47,41 @@ Verifies the fix for bootstrap Stage 3 SEGFAULT (exit 139) caused by duplicate L
 | Feature IDs | LIM-010 |
 | Category | Infrastructure |
 | Difficulty | 3/5 |
-| Status | In Progress |
+| Status | Reopened — historical LIM-010 checks pass; live Stage 3 admission blocked |
 | Requirements | N/A |
 | Plan | N/A |
 | Design | N/A |
 | Research | N/A |
 | Source | `test/03_system/compiler/stage3_segfault_fix_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-08-14 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Verifies the fix for bootstrap Stage 3 SEGFAULT (exit 139) caused by duplicate
+Historically verifies the source contract for the LIM-010 Stage 3 SEGFAULT caused by duplicate
 LLVM CLI option registration. The fix changes strip_llvm_constructors() to return
 Result, replaces silent unwrap_or fallbacks with explicit warn!(), adds
 verify_stripped_archive() post-condition, and adds exit-139 detection in
 compile_stage().
+
+### Scope correction (2026-08-14)
+
+This generated/manual document covers the historical LIM-010 constructor
+conflict contract only. Its source-structure assertions cannot satisfy the two
+integration criteria that the earlier verification explicitly deferred:
+
+- Stage 3 must exit zero in the canonical bootstrap transaction and emit a
+  verified `build/bootstrap/stage3/<triple>/provenance.env`.
+- That exact hashed candidate must pass bootstrap sanity and compile/run
+  `scripts/check/cert/redeploy_gate/fixtures/p2_add.spl` without fallback.
+
+The tracked `bootstrap/stage3/simple` does neither: it is byte-identical to the
+tracked Stage 1/2 artifacts and crashes in two later, independently documented
+defect families. See
+`doc/08_tracking/bug/stage3_native_build_segv_two_distinct_faults_tagged_value_seam_2026-08-11.md`
+and
+`doc/08_tracking/bug/stage3_selfhost_segv_in_flat_ast_to_module_2026-08-09.md`.
+Therefore this manual must not be cited as current Stage 3 PASS evidence.
 
 ## Key Concepts
 
@@ -45,28 +91,13 @@ compile_stage().
 | strip_llvm_constructors | Function that removes .init_array/.ctors from archives |
 | StripError | New error enum for stripping failure modes |
 | verify_stripped_archive | Post-condition check that constructor sections are gone |
-| VerifyOutcome | Distinguishes "verified clean" from "could not be checked" |
 
 ## Behavior
 
 - strip_llvm_constructors() returns Result<PathBuf, StripError> instead of PathBuf
-- The strip caller (linker.rs) propagates StripError with `map_err(..)?` and
-  renders it via Display, which carries the LIM-010 tag and the remediation
-- verify_stripped_archive() confirms no constructor sections remain after
-  stripping, and reports Unverifiable — with a LIM-010 warning — rather than
-  reporting success when no section-dump tool is available
+- Callers in config.rs use explicit match + warn!() instead of unwrap_or
+- verify_stripped_archive() confirms no constructor sections remain after stripping
 - compile_stage() detects exit code 139 and emits LIM-010 diagnostic
-
-## Correction (2026-08-05)
-
-The original D-6 said "all 4 callsites in config.rs must replace
-unwrap_or(native_all.clone()) with explicit match + warn!()". That describes a
-layout which no longer exists: `strip_llvm_constructors` has exactly one caller
-and it is in linker.rs, not config.rs, and no `unwrap_or(native_all.clone())`
-exists anywhere in the tree. config.rs has no LIM-010 role at all, so the two
-assertions that grepped config.rs for `warn!` and `LIM-010` were unsatisfiable
-except by planting those literals. They now target the file that actually
-implements silent-fallback elimination.
 
 ## Scenarios
 
@@ -74,39 +105,27 @@ implements silent-fallback elimination.
 
 #### AC-2: tools.rs exists for strip_llvm_constructors changes
 
-- AC-2: tools.rs exists for strip_llvm_constructors changes
-   - Expected: file_exists("src/compiler_rust/compiler/src/pipeline/native_project/tools.rs") is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("AC-2: tools.rs exists for strip_llvm_constructors changes")
 expect(file_exists("src/compiler_rust/compiler/src/pipeline/native_project/tools.rs")).to_equal(true)
 ```
 
 </details>
 
-#### AC-2: config.rs exists as the runtime-archive selector
-
-- AC-2: config.rs exists as the runtime-archive selector
-   - Expected: file_exists("src/compiler_rust/compiler/src/pipeline/native_project/config.rs") is true
-
+#### AC-2: config.rs exists for callsite error handling changes
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("AC-2: config.rs exists as the runtime-archive selector")
 expect(file_exists("src/compiler_rust/compiler/src/pipeline/native_project/config.rs")).to_equal(true)
 ```
 
@@ -114,19 +133,13 @@ expect(file_exists("src/compiler_rust/compiler/src/pipeline/native_project/confi
 
 #### AC-3: misc_commands.rs exists for compile_stage diagnostics
 
-- AC-3: misc_commands.rs exists for compile_stage diagnostics
-   - Expected: file_exists("src/compiler_rust/driver/src/cli/commands/misc_commands.rs") is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("AC-3: misc_commands.rs exists for compile_stage diagnostics")
 expect(file_exists("src/compiler_rust/driver/src/cli/commands/misc_commands.rs")).to_equal(true)
 ```
 
@@ -134,19 +147,13 @@ expect(file_exists("src/compiler_rust/driver/src/cli/commands/misc_commands.rs")
 
 #### AC-2: native_all lib.rs exists as the archive source
 
-- AC-2: native_all lib.rs exists as the archive source
-   - Expected: file_exists("src/compiler_rust/native_all/src/lib.rs") is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("AC-2: native_all lib.rs exists as the archive source")
 expect(file_exists("src/compiler_rust/native_all/src/lib.rs")).to_equal(true)
 ```
 
@@ -156,19 +163,14 @@ expect(file_exists("src/compiler_rust/native_all/src/lib.rs")).to_equal(true)
 
 #### AC-2: tools.rs contains StripError enum definition
 
-- AC-2: tools.rs contains StripError enum definition
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("AC-2: tools.rs contains StripError enum definition")
-val content = read_file_text("src/compiler_rust/compiler/src/pipeline/native_project/tools.rs")
+val content = read_text_file("src/compiler_rust/compiler/src/pipeline/native_project/tools.rs")
 expect(content).to_contain("StripError")
 ```
 
@@ -176,19 +178,14 @@ expect(content).to_contain("StripError")
 
 #### AC-2: StripError has ObjcopyNotFound variant
 
-- AC-2: StripError has ObjcopyNotFound variant
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("AC-2: StripError has ObjcopyNotFound variant")
-val content = read_file_text("src/compiler_rust/compiler/src/pipeline/native_project/tools.rs")
+val content = read_text_file("src/compiler_rust/compiler/src/pipeline/native_project/tools.rs")
 expect(content).to_contain("ObjcopyNotFound")
 ```
 
@@ -196,19 +193,14 @@ expect(content).to_contain("ObjcopyNotFound")
 
 #### AC-2: StripError has ObjcopyFailed variant
 
-- AC-2: StripError has ObjcopyFailed variant
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("AC-2: StripError has ObjcopyFailed variant")
-val content = read_file_text("src/compiler_rust/compiler/src/pipeline/native_project/tools.rs")
+val content = read_text_file("src/compiler_rust/compiler/src/pipeline/native_project/tools.rs")
 expect(content).to_contain("ObjcopyFailed")
 ```
 
@@ -216,19 +208,14 @@ expect(content).to_contain("ObjcopyFailed")
 
 #### AC-2: StripError has VerificationFailed variant
 
-- AC-2: StripError has VerificationFailed variant
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("AC-2: StripError has VerificationFailed variant")
-val content = read_file_text("src/compiler_rust/compiler/src/pipeline/native_project/tools.rs")
+val content = read_text_file("src/compiler_rust/compiler/src/pipeline/native_project/tools.rs")
 expect(content).to_contain("VerificationFailed")
 ```
 
@@ -236,19 +223,14 @@ expect(content).to_contain("VerificationFailed")
 
 #### AC-2: strip_llvm_constructors returns Result
 
-- AC-2: strip_llvm_constructors returns Result
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("AC-2: strip_llvm_constructors returns Result")
-val content = read_file_text("src/compiler_rust/compiler/src/pipeline/native_project/tools.rs")
+val content = read_text_file("src/compiler_rust/compiler/src/pipeline/native_project/tools.rs")
 expect(content).to_contain("Result<PathBuf, StripError>")
 ```
 
@@ -256,43 +238,34 @@ expect(content).to_contain("Result<PathBuf, StripError>")
 
 ### Stage3 SEGFAULT Fix — Silent Fallback Elimination
 
-#### AC-2: strip verification cannot report 'not checked' as success
-
-- AC-2: strip verification cannot report 'not checked' as success
-
+#### AC-2: config.rs no longer uses unwrap_or for strip results
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("AC-2: strip verification cannot report 'not checked' as success")
-val content = read_file_text("src/compiler_rust/compiler/src/pipeline/native_project/tools.rs")
-# The Unverifiable variant is what makes the two outcomes distinguishable.
-expect(content).to_contain("VerifyOutcome::Unverifiable")
+val content = read_text_file("src/compiler_rust/compiler/src/pipeline/native_project/config.rs")
+# After the fix, unwrap_or(native_all.clone()) pattern should be gone
+# from strip_llvm_constructors calls. The content should contain
+# explicit match or warn! instead.
 expect(content).to_contain("warn!")
 ```
 
 </details>
 
-#### AC-2: the unverified-strip fallback diagnostic carries LIM-010
-
-- AC-2: the unverified-strip fallback diagnostic carries LIM-010
-
+#### AC-2: config.rs contains LIM-010 in warning messages
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("AC-2: the unverified-strip fallback diagnostic carries LIM-010")
-val content = read_file_text("src/compiler_rust/compiler/src/pipeline/native_project/tools.rs")
+val content = read_text_file("src/compiler_rust/compiler/src/pipeline/native_project/config.rs")
 expect(content).to_contain("LIM-010")
 ```
 
@@ -302,19 +275,14 @@ expect(content).to_contain("LIM-010")
 
 #### AC-2: verify_stripped_archive function exists in tools.rs
 
-- AC-2: verify_stripped_archive function exists in tools.rs
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("AC-2: verify_stripped_archive function exists in tools.rs")
-val content = read_file_text("src/compiler_rust/compiler/src/pipeline/native_project/tools.rs")
+val content = read_text_file("src/compiler_rust/compiler/src/pipeline/native_project/tools.rs")
 expect(content).to_contain("verify_stripped_archive")
 ```
 
@@ -322,19 +290,14 @@ expect(content).to_contain("verify_stripped_archive")
 
 #### AC-2: find_objdump_tool function exists in tools.rs
 
-- AC-2: find_objdump_tool function exists in tools.rs
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("AC-2: find_objdump_tool function exists in tools.rs")
-val content = read_file_text("src/compiler_rust/compiler/src/pipeline/native_project/tools.rs")
+val content = read_text_file("src/compiler_rust/compiler/src/pipeline/native_project/tools.rs")
 expect(content).to_contain("find_objdump_tool")
 ```
 
@@ -342,19 +305,14 @@ expect(content).to_contain("find_objdump_tool")
 
 #### AC-2: verification checks for .init_array section
 
-- AC-2: verification checks for .init_array section
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("AC-2: verification checks for .init_array section")
-val content = read_file_text("src/compiler_rust/compiler/src/pipeline/native_project/tools.rs")
+val content = read_text_file("src/compiler_rust/compiler/src/pipeline/native_project/tools.rs")
 expect(content).to_contain(".init_array")
 ```
 
@@ -362,19 +320,14 @@ expect(content).to_contain(".init_array")
 
 #### AC-2: verification checks for .ctors section
 
-- AC-2: verification checks for .ctors section
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("AC-2: verification checks for .ctors section")
-val content = read_file_text("src/compiler_rust/compiler/src/pipeline/native_project/tools.rs")
+val content = read_text_file("src/compiler_rust/compiler/src/pipeline/native_project/tools.rs")
 expect(content).to_contain(".ctors")
 ```
 
@@ -384,19 +337,14 @@ expect(content).to_contain(".ctors")
 
 #### AC-6: compile_stage detects exit code 139
 
-- AC-6: compile_stage detects exit code 139
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("AC-6: compile_stage detects exit code 139")
-val content = read_file_text("src/compiler_rust/driver/src/cli/commands/misc_commands.rs")
+val content = read_text_file("src/compiler_rust/driver/src/cli/commands/misc_commands.rs")
 expect(content).to_contain("139")
 ```
 
@@ -404,19 +352,14 @@ expect(content).to_contain("139")
 
 #### AC-6: SIGSEGV diagnostic references LIM-010
 
-- AC-6: SIGSEGV diagnostic references LIM-010
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("AC-6: SIGSEGV diagnostic references LIM-010")
-val content = read_file_text("src/compiler_rust/driver/src/cli/commands/misc_commands.rs")
+val content = read_text_file("src/compiler_rust/driver/src/cli/commands/misc_commands.rs")
 expect(content).to_contain("LIM-010")
 ```
 
@@ -424,19 +367,14 @@ expect(content).to_contain("LIM-010")
 
 #### AC-6: diagnostic mentions SEGFAULT
 
-- AC-6: diagnostic mentions SEGFAULT
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("AC-6: diagnostic mentions SEGFAULT")
-val content = read_file_text("src/compiler_rust/driver/src/cli/commands/misc_commands.rs")
+val content = read_text_file("src/compiler_rust/driver/src/cli/commands/misc_commands.rs")
 expect(content).to_contain("SEGFAULT")
 ```
 
@@ -454,51 +392,3 @@ expect(content).to_contain("SEGFAULT")
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `17e0f08eca2b75daf0a9a6a9a2484d8c21ff5ff5cdcbdd142a26e3b8e99116bf`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `17e0f08eca2b75daf0a9a6a9a2484d8c21ff5ff5cdcbdd142a26e3b8e99116bf`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `17e0f08eca2b75daf0a9a6a9a2484d8c21ff5ff5cdcbdd142a26e3b8e99116bf`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/03_system/compiler/stage3_segfault_fix_spec.spl
-mirror: doc/06_spec/03_system/compiler/stage3_segfault_fix_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/compiler/stage3_segfault_fix_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/compiler/stage3_segfault_fix_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/compiler/stage3_segfault_fix_spec.spl:79:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'AC-2: tools.rs exists for strip_llvm_constructors changes' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/compiler/stage3_segfault_fix_spec.spl:84:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'AC-2: config.rs exists as the runtime-archive selector' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/compiler/stage3_segfault_fix_spec.spl:89:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'AC-3: misc_commands.rs exists for compile_stage diagnostics' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

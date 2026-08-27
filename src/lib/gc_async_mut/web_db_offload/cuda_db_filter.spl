@@ -1,0 +1,132 @@
+"""Execute one DB scan/filter batch on CUDA and admit only exact device evidence."""
+
+use std.common.processing.db_filter_u32_ir.{
+    ProcessingDbFilterU32Ir,
+    processing_db_filter_u32_cpu_row_ids,
+    processing_db_filter_u32_validate
+}
+use std.gc_async_mut.processing.cuda_db_filter_u32.{
+    ProcessingDbCudaExecutor,
+    ProcessingDbCudaResult,
+    processing_db_cuda_not_dispatched,
+    processing_db_filter_u32_execute_cuda_with_executor
+}
+use std.database.gpu_mode_plan.{DbGpuMode}
+use std.database.db_offload.{
+    DbGpuBatchKind,
+    DbGpuBatchDeviceOffloadExecution,
+    db_gpu_batch_offload_execute_device_for_generation
+}
+use std.web_db_offload.queue.{GpuWdbQueueState}
+use std.web_db_offload.contract.{GpuWdbBudget, GpuWdbWorkKind}
+use std.web_db_offload.device_backend.{
+    GpuWdbDeviceBackend,
+    gpu_wdb_device_receipt,
+    gpu_wdb_device_receipt_unavailable,
+    gpu_wdb_device_batch_preflight,
+    gpu_wdb_device_backend_unavailable
+}
+use std.nogc_sync_mut.io.time_ops.{time_now_nanos}
+
+struct ProcessingDbCudaAdmissionResult:
+    device: ProcessingDbCudaResult
+    admission: DbGpuBatchDeviceOffloadExecution
+    exact_row_ids: bool
+
+fn _processing_db_row_ids_equal(left: [i64], right: [i64]) -> bool:
+    if left.len() != right.len():
+        return false
+    var index: i64 = 0
+    while index < left.len().to_i64():
+        if left[index] != right[index]:
+            return false
+        index = index + 1
+    true
+
+fn processing_db_filter_cuda_execute_and_admit(
+        executor: ProcessingDbCudaExecutor,
+        ir: ProcessingDbFilterU32Ir,
+        mode: DbGpuMode,
+        state: GpuWdbQueueState,
+        backend: GpuWdbDeviceBackend,
+        wal_generation_current: bool,
+        expected_backend_generation: i64,
+    cpu_fallback_available: bool,
+    budget: GpuWdbBudget) -> ProcessingDbCudaAdmissionResult:
+    val cpu_row_ids = processing_db_filter_u32_cpu_row_ids(ir)
+    val validation = processing_db_filter_u32_validate(ir)
+    if not validation.valid:
+        val invalid_device = processing_db_cuda_not_dispatched(validation.reason)
+        val invalid_admission = db_gpu_batch_offload_execute_device_for_generation(
+            mode, DbGpuBatchKind.ScanFilterProject,
+            ir.values.len().to_i64(), 4, state,
+            gpu_wdb_device_backend_unavailable(),
+            wal_generation_current, expected_backend_generation,
+            cpu_fallback_available, budget, cpu_row_ids,
+            0, 0, 0, "cuda:processing-db-filter-u32",
+            gpu_wdb_device_receipt_unavailable())
+        return ProcessingDbCudaAdmissionResult(
+            device: invalid_device, admission: invalid_admission,
+            exact_row_ids: false)
+    val effective_generation = if wal_generation_current:
+        expected_backend_generation
+    else:
+        -1
+    val preflight = gpu_wdb_device_batch_preflight(
+        state, backend, GpuWdbWorkKind.DbScanFilterProject,
+        ir.values.len().to_i64() * 4, ir.values.len().to_i64(),
+        effective_generation, cpu_fallback_available, budget)
+    if not preflight.accepted:
+        val skipped = processing_db_cuda_not_dispatched(
+            "cuda-db-not-dispatched:" + preflight.reason)
+        val rejected = db_gpu_batch_offload_execute_device_for_generation(
+            mode, DbGpuBatchKind.ScanFilterProject,
+            ir.values.len().to_i64(), 4, state, backend,
+            wal_generation_current, expected_backend_generation,
+            cpu_fallback_available, budget, cpu_row_ids,
+            0, 0, 0, "cuda:processing-db-filter-u32",
+            gpu_wdb_device_receipt_unavailable())
+        return ProcessingDbCudaAdmissionResult(
+            device: skipped, admission: rejected, exact_row_ids: false)
+    val started_nanos = time_now_nanos()
+    val device = processing_db_filter_u32_execute_cuda_with_executor(executor, ir)
+    val finished_nanos = time_now_nanos()
+    val exact_row_ids = (device.completed and
+        _processing_db_row_ids_equal(cpu_row_ids, device.row_ids))
+    val receipt = if exact_row_ids:
+        device.receipt
+    else:
+        # The CUDA executor already reports its mismatch count. This branch
+        # also prevents a malformed projected row list from being promoted.
+        gpu_wdb_device_receipt(
+            false, 0, 0, "unavailable",
+            device.receipt.expected_checksum,
+            device.receipt.actual_checksum,
+            if device.receipt.mismatch_count > 0: device.receipt.mismatch_count else: 1,
+            false)
+    val started_us = if started_nanos > 0: started_nanos / 1000 else: 0
+    val finished_us = if finished_nanos > started_nanos: finished_nanos / 1000 else: 0
+    val admission = db_gpu_batch_offload_execute_device_for_generation(
+        mode,
+        DbGpuBatchKind.ScanFilterProject,
+        ir.values.len().to_i64(),
+        4,
+        state,
+        backend,
+        wal_generation_current,
+        expected_backend_generation,
+        cpu_fallback_available,
+        budget,
+        cpu_row_ids,
+        started_us,
+        finished_us,
+        if exact_row_ids: device.device_time_us else: 0,
+        "cuda:processing-db-filter-u32",
+        receipt)
+    ProcessingDbCudaAdmissionResult(
+        device: device,
+        admission: admission,
+        exact_row_ids: exact_row_ids)
+
+export ProcessingDbCudaAdmissionResult
+export processing_db_filter_cuda_execute_and_admit

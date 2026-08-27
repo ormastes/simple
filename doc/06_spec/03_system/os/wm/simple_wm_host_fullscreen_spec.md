@@ -1,6 +1,29 @@
-# Simple WM Host Fullscreen
+# Simple Wm Host Fullscreen Specification
 
-> Launches the cached production pure-Simple host WM, drives its real input
+> <details>
+
+<!-- sdn-diagram:id=simple_wm_host_fullscreen_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=simple_wm_host_fullscreen_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+simple_wm_host_fullscreen_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=simple_wm_host_fullscreen_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -9,29 +32,7 @@
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Simple WM Host Fullscreen
-
-Launches the cached production pure-Simple host WM, drives its real input
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Hardware & OS |
-| Status | Active |
-| Source | `test/03_system/os/wm/simple_wm_host_fullscreen_spec.spl` |
-| Updated | 2026-08-26 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-Launches the cached production pure-Simple host WM, drives its real input
-surface from windowed mode through F11 fullscreen and back, and correlates the
-physical transition with an unchanged internal `SharedWmScene` snapshot. The
-runtime evidence must include executable, backend, transition, scene, frame,
-and capture identities; unavailable or mismatched evidence fails closed.
-
-The performance scenarios define the required NFR-1, NFR-2, and NFR-5 sample
-methodology. They do not accept synthetic timings, source inspection, demo
-entrypoints, Rust-seed provenance, or unverified screenshots as measurements.
+# Simple Wm Host Fullscreen Specification
 
 ## Scenarios
 
@@ -39,8 +40,6 @@ entrypoints, Rust-seed provenance, or unverified screenshots as measurements.
 
 #### should restore windowed host geometry and preserve the exact internal scene after F11 fullscreen
 
-- should restore windowed host geometry and preserve the exact internal scene after F11 fullscreen
-   - Artifact capture: after_step
 - Launch the production WM in a host window
    - Artifact capture: after_step
 - Interact with internal windows and taskbar chrome
@@ -84,12 +83,10 @@ entrypoints, Rust-seed provenance, or unverified screenshots as measurements.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 27 lines folded for reproduction.
+Runnable source: 25 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("should restore windowed host geometry and preserve the exact internal scene after F11 fullscreen")
 step("Launch the production WM in a host window")
 val run_id = launch_production_cached_pure_simple_host_wm()
 step("Interact with internal windows and taskbar chrome")
@@ -124,8 +121,6 @@ expect(verify_correlated_host_capture(run_id, restored, "windowed")).to_equal("v
 
 #### should correlate every fullscreen request with its nonce phase and physical geometry
 
-- should correlate every fullscreen request with its nonce phase and physical geometry
-   - Protocol capture: after_step
 - Launch the production WM in a host window
    - Protocol capture: after_step
 - Request fullscreen and retain the request nonce and prior x y width height
@@ -142,12 +137,10 @@ expect(verify_correlated_host_capture(run_id, restored, "windowed")).to_equal("v
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("should correlate every fullscreen request with its nonce phase and physical geometry")
 step("Launch the production WM in a host window")
 val run_id = launch_production_cached_pure_simple_host_wm()
 step("Request fullscreen and retain the request nonce and prior x y width height")
@@ -169,8 +162,6 @@ expect(verify_correlated_host_capture(run_id, restored, "windowed")).to_equal("v
 
 #### should roll back and fail closed for denied timed-out stale or reordered transitions
 
-- should roll back and fail closed for denied timed-out stale or reordered transitions
-   - Protocol capture: after_step
 - Launch the production WM in a host window
    - Protocol capture: after_step
 - Exercise denied timeout stale nonce and reordered acknowledgement cases
@@ -182,12 +173,10 @@ expect(verify_correlated_host_capture(run_id, restored, "windowed")).to_equal("v
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("should roll back and fail closed for denied timed-out stale or reordered transitions")
 step("Launch the production WM in a host window")
 val run_id = launch_production_cached_pure_simple_host_wm()
 step("Exercise denied timeout stale nonce and reordered acknowledgement cases")
@@ -208,8 +197,6 @@ expect([denied, timed_out, stale, reordered]).to_equal(["rolled-back", "rolled-b
 
 #### should reject missing stale wrong-process or unverifiable captures
 
-- should reject missing stale wrong-process or unverifiable captures
-   - Artifact capture: after_step
 - Launch the production WM in a host window
    - Artifact capture: after_step
 - Submit missing stale wrong-process and revision-mismatched captures
@@ -224,12 +211,10 @@ expect([denied, timed_out, stale, reordered]).to_equal(["rolled-back", "rolled-b
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("should reject missing stale wrong-process or unverifiable captures")
 step("Launch the production WM in a host window")
 val run_id = launch_production_cached_pure_simple_host_wm()
 step("Submit missing stale wrong-process and revision-mismatched captures")
@@ -249,8 +234,6 @@ expect(submit_host_transition_failure_case(run_id, "capture-revision-mismatch"))
 
 #### should measure ten warm cached pure-Simple launches to first shared-scene frame
 
-- should measure ten warm cached pure-Simple launches to first shared-scene frame
-   - Exec capture: after_step
 - Launch once and discard the cold production host sample
    - Exec capture: after_step
 - Measure ten warm launches to the first presented shared-scene frame
@@ -264,12 +247,10 @@ expect(submit_host_transition_failure_case(run_id, "capture-revision-mismatch"))
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("should measure ten warm cached pure-Simple launches to first shared-scene frame")
 step("Launch once and discard the cold production host sample")
 val run_id = launch_production_cached_pure_simple_host_wm()
 step("Measure ten warm launches to the first presented shared-scene frame")
@@ -288,8 +269,6 @@ expect(verify_performance_row_provenance(report)).to_equal("verified")
 
 #### should measure thirty acknowledged fullscreen enter and exit pairs
 
-- should measure thirty acknowledged fullscreen enter and exit pairs
-   - Exec capture: after_step
 - Launch the production WM in a host window
    - Exec capture: after_step
 - Measure thirty nonce-correlated enter and exit pairs
@@ -303,12 +282,10 @@ expect(verify_performance_row_provenance(report)).to_equal("verified")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("should measure thirty acknowledged fullscreen enter and exit pairs")
 step("Launch the production WM in a host window")
 val run_id = launch_production_cached_pure_simple_host_wm()
 step("Measure thirty nonce-correlated enter and exit pairs")
@@ -327,8 +304,6 @@ expect(verify_performance_row_provenance(report)).to_equal("verified")
 
 #### should bound RSS growth and slope across one hundred transition pairs
 
-- should bound RSS growth and slope across one hundred transition pairs
-   - Exec capture: after_step
 - Launch the production WM and record its stable baseline RSS
    - Exec capture: after_step
 - Measure RSS after one hundred completed enter and exit pairs
@@ -342,12 +317,10 @@ expect(verify_performance_row_provenance(report)).to_equal("verified")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("should bound RSS growth and slope across one hundred transition pairs")
 step("Launch the production WM and record its stable baseline RSS")
 val run_id = launch_production_cached_pure_simple_host_wm()
 step("Measure RSS after one hundred completed enter and exit pairs")
@@ -361,6 +334,21 @@ expect(verify_performance_row_provenance(report)).to_equal("verified")
 
 </details>
 
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Hardware & OS |
+| Status | Active |
+| Source | `test/03_system/os/wm/simple_wm_host_fullscreen_spec.spl` |
+| Updated | 2026-07-11 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Tests covering:
+- Simple WM production host fullscreen
+
 ## Scenario Summary
 
 | Metric | Count |
@@ -373,78 +361,3 @@ expect(verify_performance_row_provenance(report)).to_equal("verified")
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-- `REQ-1`
-- `REQ-5`
-- `REQ-6`
-- `REQ-7`
-- `REQ-8`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `28d54948c0055d5ac80668003da4fe535066710a612dcc11a6c04f6cd67e1e6f`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `28d54948c0055d5ac80668003da4fe535066710a612dcc11a6c04f6cd67e1e6f`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `28d54948c0055d5ac80668003da4fe535066710a612dcc11a6c04f6cd67e1e6f`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **82/100**; effective score: **49/100**; blockers: **1**.
-
-SSpec documentization score: 49/100
-source: test/03_system/os/wm/simple_wm_host_fullscreen_spec.spl
-mirror: doc/06_spec/03_system/os/wm/simple_wm_host_fullscreen_spec.md (current)
-findings: 12 blockers: 1
-  narrative=100 structure=70 oracle=100
-  traceability=60 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-  raw=82; blocker cap makes effective=49
-doc/06_spec/03_system/os/wm/simple_wm_host_fullscreen_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/os/wm/simple_wm_host_fullscreen_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/os/wm/simple_wm_host_fullscreen_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 5 declared requirement(s) have no scenario binding
-  why: A requirement list without scenario evidence is inventory, not traceability.
-  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
-test/03_system/os/wm/simple_wm_host_fullscreen_spec.spl:63:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should restore windowed host geometry and preserve the exact internal scene after F11 fullscreen' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/03_system/os/wm/simple_wm_host_fullscreen_spec.spl:94:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should correlate every fullscreen request with its nonce phase and physical geometry' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/03_system/os/wm/simple_wm_host_fullscreen_spec.spl:94:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should correlate every fullscreen request with its nonce phase and physical geometry' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/os/wm/simple_wm_host_fullscreen_spec.spl:109:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should roll back and fail closed for denied timed-out stale or reordered transitions' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/03_system/os/wm/simple_wm_host_fullscreen_spec.spl:109:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should roll back and fail closed for denied timed-out stale or reordered transitions' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/os/wm/simple_wm_host_fullscreen_spec.spl:124:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should reject missing stale wrong-process or unverifiable captures' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/03_system/os/wm/simple_wm_host_fullscreen_spec.spl:124:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should reject missing stale wrong-process or unverifiable captures' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/os/wm/simple_wm_host_fullscreen_spec.spl:137:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should measure ten warm cached pure-Simple launches to first shared-scene frame' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/03_system/os/wm/simple_wm_host_fullscreen_spec.spl:149:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should measure thirty acknowledged fullscreen enter and exit pairs' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-<!-- sspec-maintain:scorecard:end -->

@@ -1,0 +1,484 @@
+# Canonical runtime owner for dynamically acquired facet references.
+#
+# The aspect-pack lifecycle module remains the sole loader/generation owner.
+# This module owns only the runtime binding plan, the compiler-facing four-slot
+# FacetRef handle, and validated method dispatch.  A resident lookup calls only
+# apk_try_facet; the lazy lookup is the only operation here that may call
+# apk_load_facet.
+
+use std.common.aspect_pack_lifecycle.{
+    ApkFacetLoadV1, apk_try_facet, apk_load_facet,
+    apk_facet_pin_v1, apk_facet_unpin_v1
+}
+use std.nogc_sync_mut.atomic.{AtomicI64, MemoryOrdering, atomic_i64_new}
+
+val FACET_LOAD_NOT_CONFIGURED: i64 = 1
+val FACET_LOAD_INVALID_RUNTIME: i64 = 2
+val FACET_LOAD_INVALID_ROUTE: i64 = 3
+val FACET_LOAD_PACK_FAILED: i64 = 4
+val FACET_LOAD_INVALID_HANDLE: i64 = 5
+val FACET_LOAD_STALE_GENERATION: i64 = 6
+val FACET_LOAD_ADVICE_MISMATCH: i64 = 7
+val FACET_LOAD_METHOD_MISMATCH: i64 = 8
+val FACET_LOAD_METHOD_MISSING: i64 = 9
+val FACET_LOAD_BINDING_UNAVAILABLE: i64 = 10
+
+# A nominal, ABI-transparent scalar.  The compiler can name this exact error
+# in Result<Option<FacetRef<F>>, FacetLoadError> while every runtime lane keeps
+# the error payload in one i64 value.
+newtype FacetLoadError = i64
+
+type FacetRuntimeDispatchFn = fn(i64, [i64]) -> i64
+
+struct FacetDispatchLeaseV1:
+    runtime: i64
+    facet_key: text
+    method_key: text
+    base: i64
+    witness: i64
+    generation: i64
+    advice: i64
+
+struct FacetRuntimeRouteSnapshotV1:
+    found: bool
+    index: i64
+    witness: i64
+    advice: i64
+    generation: i64
+
+struct FacetRefSlotsV1:
+    ok: bool
+    base: i64
+    witness: i64
+    generation: i64
+    advice: i64
+
+val _fr_gate: AtomicI64 = atomic_i64_new(0)
+var _fr_default: i64 = -1
+
+# Runtime instances retain a value copy of the catalog bytes.  Loader handles
+# are owned by aspect_pack_lifecycle and are never transferred through a
+# FacetRef.
+var _fr_loader: [i64] = []
+var _fr_catalog_off: [i64] = []
+var _fr_catalog_len: [i64] = []
+var _fr_catalog_pool: [u8] = []
+
+# One route row per (runtime, facet key).  The row is planned before lazy load;
+# generation zero means it has not yet been published by the lifecycle owner.
+var _fb_runtime: [i64] = []
+var _fb_key: [text] = []
+var _fb_witness: [i64] = []
+var _fb_advice: [i64] = []
+var _fb_generation: [i64] = []
+
+# Method handlers are immutable after registration.  Arguments are packaged in
+# a bounded caller-created array, so dispatch never stores an unknown dynamic
+# payload or a raw cross-domain pointer.
+var _fm_runtime: [i64] = []
+var _fm_method_key: [text] = []
+var _fm_handler: [FacetRuntimeDispatchFn] = []
+
+# Opaque four-slot FacetRef arena.  The compiler/runtime ABI adapter maps its
+# tuple representation to these same four values; the semantic owner itself is
+# pure Simple and does not require an interpreter- or host-runtime tuple shim.
+var _fh_base: [i64] = []
+var _fh_witness: [i64] = []
+var _fh_generation: [i64] = []
+var _fh_advice: [i64] = []
+
+fn _facet_runtime_lock_v1():
+    var acquired = _fr_gate.compare_exchange(0, 1, MemoryOrdering.AcqRel, MemoryOrdering.Acquire)
+    while not acquired:
+        acquired = _fr_gate.compare_exchange(0, 1, MemoryOrdering.AcqRel, MemoryOrdering.Acquire)
+
+fn _facet_runtime_unlock_v1():
+    _fr_gate.store(0, MemoryOrdering.Release)
+
+fn _facet_error_v1(code: i64) -> FacetLoadError:
+    FacetLoadError(value: code)
+
+fn facet_load_error_code(error: FacetLoadError) -> i64:
+    error.value
+
+fn facet_load_error_message(error: FacetLoadError) -> text:
+    match error.value:
+        case FACET_LOAD_NOT_CONFIGURED: "facet runtime is not configured"
+        case FACET_LOAD_INVALID_RUNTIME: "facet runtime handle is invalid"
+        case FACET_LOAD_INVALID_ROUTE: "facet binding route is invalid"
+        case FACET_LOAD_PACK_FAILED: "facet pack acquisition failed"
+        case FACET_LOAD_INVALID_HANDLE: "FacetRef handle must contain exactly four valid slots"
+        case FACET_LOAD_STALE_GENERATION: "FacetRef generation is stale"
+        case FACET_LOAD_ADVICE_MISMATCH: "FacetRef advice token does not match its generation"
+        case FACET_LOAD_METHOD_MISMATCH: "facet method does not belong to the retained facet"
+        case FACET_LOAD_METHOD_MISSING: "loaded facet method is not registered"
+        case FACET_LOAD_BINDING_UNAVAILABLE: "loaded facet has no published runtime binding"
+        case _: "unknown facet load error"
+
+fn _facet_runtime_valid_v1(runtime: i64) -> bool:
+    runtime >= 0 and runtime < _fr_loader.len()
+
+fn facet_runtime_new(loader: i64, catalog: [u8]) -> i64:
+    """Create a runtime binding owner over an existing lifecycle loader."""
+    _facet_runtime_lock_v1()
+    val runtime = _fr_loader.len()
+    _fr_loader = _fr_loader.push(loader)
+    _fr_catalog_off = _fr_catalog_off.push(_fr_catalog_pool.len())
+    _fr_catalog_len = _fr_catalog_len.push(catalog.len())
+    var i = 0
+    while i < catalog.len():
+        _fr_catalog_pool = _fr_catalog_pool.push(catalog[i])
+        i = i + 1
+    if _fr_default < 0:
+        _fr_default = runtime
+    _facet_runtime_unlock_v1()
+    runtime
+
+fn facet_runtime_set_default(runtime: i64) -> bool:
+    """Select the owner used by compiler-emitted acquisition/dispatch calls."""
+    _facet_runtime_lock_v1()
+    if not _facet_runtime_valid_v1(runtime):
+        _facet_runtime_unlock_v1()
+        return false
+    _fr_default = runtime
+    _facet_runtime_unlock_v1()
+    true
+
+fn facet_runtime_default() -> i64:
+    _facet_runtime_lock_v1()
+    val runtime = _fr_default
+    _facet_runtime_unlock_v1()
+    runtime
+
+fn _facet_runtime_catalog_v1(runtime: i64) -> [u8]:
+    var catalog: [u8] = []
+    _facet_runtime_lock_v1()
+    if not _facet_runtime_valid_v1(runtime):
+        _facet_runtime_unlock_v1()
+        return catalog
+    val off = _fr_catalog_off[runtime]
+    val len = _fr_catalog_len[runtime]
+    var i = 0
+    while i < len:
+        catalog = catalog.push(_fr_catalog_pool[off + i])
+        i = i + 1
+    _facet_runtime_unlock_v1()
+    catalog
+
+fn _facet_runtime_route_snapshot_v1(runtime: i64, facet_key: text) -> FacetRuntimeRouteSnapshotV1:
+    var found = false
+    var index: i64 = -1
+    var witness: i64 = -1
+    var advice: i64 = -1
+    var generation: i64 = 0
+    _facet_runtime_lock_v1()
+    var i = 0
+    while i < _fb_runtime.len():
+        if _fb_runtime[i] == runtime and _fb_key[i] == facet_key:
+            found = true
+            index = i
+            witness = _fb_witness[i]
+            advice = _fb_advice[i]
+            generation = _fb_generation[i]
+        i = i + 1
+    _facet_runtime_unlock_v1()
+    FacetRuntimeRouteSnapshotV1(found: found, index: index,
+        witness: witness, advice: advice, generation: generation)
+
+fn facet_runtime_register_route_v1(runtime: i64, facet_key: text,
+        witness: i64, advice: i64) -> Result<(), FacetLoadError>:
+    """Register the relocation/binding-plan tokens before first lazy use.
+
+    Witnesses are unique within a runtime, making a four-slot handle sufficient
+    to recover its facet key without adding hidden fields to the base object.
+    """
+    if facet_key == "" or witness < 0 or advice < 0:
+        return Err(_facet_error_v1(FACET_LOAD_INVALID_ROUTE))
+    _facet_runtime_lock_v1()
+    if not _facet_runtime_valid_v1(runtime):
+        _facet_runtime_unlock_v1()
+        return Err(_facet_error_v1(FACET_LOAD_INVALID_RUNTIME))
+    var i = 0
+    while i < _fb_runtime.len():
+        if _fb_runtime[i] == runtime and
+                (_fb_key[i] == facet_key or _fb_witness[i] == witness):
+            _facet_runtime_unlock_v1()
+            return Err(_facet_error_v1(FACET_LOAD_INVALID_ROUTE))
+        i = i + 1
+    _fb_runtime = _fb_runtime.push(runtime)
+    _fb_key = _fb_key.push(facet_key)
+    _fb_witness = _fb_witness.push(witness)
+    _fb_advice = _fb_advice.push(advice)
+    _fb_generation = _fb_generation.push(0)
+    _facet_runtime_unlock_v1()
+    Ok(())
+
+fn facet_runtime_register_method_v1(runtime: i64, facet_key: text,
+        method_name: text, handler: FacetRuntimeDispatchFn) -> Result<(), FacetLoadError>:
+    """Bind one exact method key to a validated loaded-facet handler."""
+    if method_name == "":
+        return Err(_facet_error_v1(FACET_LOAD_METHOD_MISSING))
+    val route = _facet_runtime_route_snapshot_v1(runtime, facet_key)
+    if not route.found:
+        return Err(_facet_error_v1(FACET_LOAD_INVALID_ROUTE))
+    val method_key = facet_key + "::" + method_name
+    _facet_runtime_lock_v1()
+    var i = 0
+    while i < _fm_runtime.len():
+        if _fm_runtime[i] == runtime and _fm_method_key[i] == method_key:
+            _facet_runtime_unlock_v1()
+            return Err(_facet_error_v1(FACET_LOAD_INVALID_ROUTE))
+        i = i + 1
+    _fm_runtime = _fm_runtime.push(runtime)
+    _fm_method_key = _fm_method_key.push(method_key)
+    _fm_handler = _fm_handler.push(handler)
+    _facet_runtime_unlock_v1()
+    Ok(())
+
+fn facet_ref_handle_v1(base: i64, witness: i64, generation: i64,
+        advice: i64) -> Result<i64, FacetLoadError>:
+    """Construct the ABI-pinned four-slot FacetRef handle."""
+    if witness < 0 or generation <= 0 or advice < 0:
+        return Err(_facet_error_v1(FACET_LOAD_INVALID_HANDLE))
+    _facet_runtime_lock_v1()
+    val handle = _fh_base.len()
+    _fh_base = _fh_base.push(base)
+    _fh_witness = _fh_witness.push(witness)
+    _fh_generation = _fh_generation.push(generation)
+    _fh_advice = _fh_advice.push(advice)
+    _facet_runtime_unlock_v1()
+    Ok(handle)
+
+fn facet_ref_slot_count_v1(handle: i64) -> i64:
+    _facet_runtime_lock_v1()
+    val valid = handle >= 0 and handle < _fh_base.len() and
+        handle < _fh_witness.len() and handle < _fh_generation.len() and
+        handle < _fh_advice.len()
+    _facet_runtime_unlock_v1()
+    if valid: 4 else: -1
+
+fn facet_ref_generation_v1(handle: i64) -> i64:
+    val slots = _facet_ref_slots_v1(handle)
+    if slots.ok: slots.generation else: 0
+
+fn _facet_ref_slots_v1(handle: i64) -> FacetRefSlotsV1:
+    _facet_runtime_lock_v1()
+    if handle < 0 or handle >= _fh_base.len() or
+            handle >= _fh_witness.len() or handle >= _fh_generation.len() or
+            handle >= _fh_advice.len():
+        _facet_runtime_unlock_v1()
+        return FacetRefSlotsV1(ok: false, base: 0, witness: -1,
+            generation: 0, advice: -1)
+    val slots = FacetRefSlotsV1(ok: true, base: _fh_base[handle],
+        witness: _fh_witness[handle], generation: _fh_generation[handle],
+        advice: _fh_advice[handle])
+    _facet_runtime_unlock_v1()
+    slots
+
+fn facet_ref_release_v1(runtime: i64, handle: i64) -> Result<(), FacetLoadError>:
+    """Release the lifecycle pin carried by one validated FacetRef handle."""
+    val slots = _facet_ref_slots_v1(handle)
+    if not slots.ok:
+        return Err(_facet_error_v1(FACET_LOAD_INVALID_HANDLE))
+    val witness = slots.witness
+    val generation = slots.generation
+    val advice = slots.advice
+    var facet_key = ""
+    var loader: i64 = -1
+    var current_generation: i64 = 0
+    var current_advice: i64 = -1
+    _facet_runtime_lock_v1()
+    if not _facet_runtime_valid_v1(runtime):
+        _facet_runtime_unlock_v1()
+        return Err(_facet_error_v1(FACET_LOAD_INVALID_RUNTIME))
+    loader = _fr_loader[runtime]
+    var i = 0
+    while i < _fb_runtime.len():
+        if _fb_runtime[i] == runtime and _fb_witness[i] == witness:
+            facet_key = _fb_key[i]
+            current_generation = _fb_generation[i]
+            current_advice = _fb_advice[i]
+        i = i + 1
+    _facet_runtime_unlock_v1()
+    if facet_key == "":
+        return Err(_facet_error_v1(FACET_LOAD_INVALID_HANDLE))
+    if generation != current_generation:
+        return Err(_facet_error_v1(FACET_LOAD_STALE_GENERATION))
+    if advice != current_advice:
+        return Err(_facet_error_v1(FACET_LOAD_ADVICE_MISMATCH))
+    if not apk_facet_unpin_v1(loader, facet_key):
+        return Err(_facet_error_v1(FACET_LOAD_STALE_GENERATION))
+    Ok(())
+
+fn _facet_runtime_publish_generation_v1(runtime: i64, facet_key: text,
+        generation: i64) -> bool:
+    if generation <= 0:
+        return false
+    _facet_runtime_lock_v1()
+    var i = 0
+    while i < _fb_runtime.len():
+        if _fb_runtime[i] == runtime and _fb_key[i] == facet_key:
+            _fb_generation[i] = generation
+            _facet_runtime_unlock_v1()
+            return true
+        i = i + 1
+    _facet_runtime_unlock_v1()
+    false
+
+fn _facet_runtime_handle_from_load_v1(runtime: i64, base: i64,
+        facet_key: text, witness_hint: i64, advice_hint: i64,
+        loaded: ApkFacetLoadV1) -> Option<i64>:
+    if not loaded.found or loaded.generation <= 0:
+        return None
+    val route = _facet_runtime_route_snapshot_v1(runtime, facet_key)
+    if not route.found:
+        return None
+    if witness_hint >= 0 and witness_hint != route.witness:
+        return None
+    if advice_hint > 0 and advice_hint != route.advice:
+        return None
+    if not _facet_runtime_publish_generation_v1(runtime, facet_key, loaded.generation):
+        return None
+    _facet_runtime_lock_v1()
+    if not _facet_runtime_valid_v1(runtime):
+        _facet_runtime_unlock_v1()
+        return None
+    val loader = _fr_loader[runtime]
+    _facet_runtime_unlock_v1()
+    if not apk_facet_pin_v1(loader, facet_key):
+        return None
+    val handle = facet_ref_handle_v1(base, route.witness, loaded.generation, route.advice)
+    match handle:
+        case Ok(value): Some(value)
+        case Err(_):
+            _ = apk_facet_unpin_v1(loader, facet_key)
+            None
+
+fn facet_lookup_loaded_for_v1(runtime: i64, base: i64, facet_key: text,
+        witness_hint: i64, advice_hint: i64) -> Option<i64>:
+    """Resident-only lookup.  This function never calls apk_load_facet."""
+    _facet_runtime_lock_v1()
+    if not _facet_runtime_valid_v1(runtime):
+        _facet_runtime_unlock_v1()
+        return None
+    val loader = _fr_loader[runtime]
+    _facet_runtime_unlock_v1()
+    val loaded = apk_try_facet(loader, facet_key)
+    _facet_runtime_handle_from_load_v1(
+        runtime, base, facet_key, witness_hint, advice_hint, loaded)
+
+fn facet_lookup_lazy_for_v1(runtime: i64, base: i64, facet_key: text,
+        witness_hint: i64, advice_hint: i64) -> Result<Option<i64>, FacetLoadError>:
+    """Policy-gated first-use lookup with a declared FacetLoadError axis."""
+    val resident = facet_lookup_loaded_for_v1(
+        runtime, base, facet_key, witness_hint, advice_hint)
+    if resident.?:
+        return Ok(resident)
+    val route = _facet_runtime_route_snapshot_v1(runtime, facet_key)
+    if not route.found:
+        return Err(_facet_error_v1(FACET_LOAD_BINDING_UNAVAILABLE))
+    _facet_runtime_lock_v1()
+    if not _facet_runtime_valid_v1(runtime):
+        _facet_runtime_unlock_v1()
+        return Err(_facet_error_v1(FACET_LOAD_INVALID_RUNTIME))
+    val loader = _fr_loader[runtime]
+    _facet_runtime_unlock_v1()
+    val catalog = _facet_runtime_catalog_v1(runtime)
+    val loaded = apk_load_facet(loader, catalog, facet_key)
+    if not loaded.ok:
+        return Err(_facet_error_v1(FACET_LOAD_PACK_FAILED))
+    if not loaded.found:
+        return Ok(None)
+    val handle = _facet_runtime_handle_from_load_v1(
+        runtime, base, facet_key, witness_hint, advice_hint, loaded)
+    if not handle.?:
+        return Err(_facet_error_v1(FACET_LOAD_BINDING_UNAVAILABLE))
+    Ok(handle)
+
+fn facet_lookup_loaded(base: i64, facet_key: text,
+        witness_hint: i64, advice_hint: i64) -> Option<i64>:
+    """Canonical compiler-facing resident semantic owner."""
+    val runtime = facet_runtime_default()
+    if runtime < 0:
+        return None
+    facet_lookup_loaded_for_v1(runtime, base, facet_key, witness_hint, advice_hint)
+
+fn facet_lookup_lazy(base: i64, facet_key: text,
+        witness_hint: i64, advice_hint: i64) -> Result<Option<i64>, FacetLoadError>:
+    """Canonical compiler-facing lazy semantic owner."""
+    val runtime = facet_runtime_default()
+    if runtime < 0:
+        return Err(_facet_error_v1(FACET_LOAD_NOT_CONFIGURED))
+    facet_lookup_lazy_for_v1(runtime, base, facet_key, witness_hint, advice_hint)
+
+fn facet_ref_validate_v1(runtime: i64, handle: i64,
+        method_key: text) -> Result<FacetDispatchLeaseV1, FacetLoadError>:
+    """Validate all four slots and reject stale generation/advice metadata."""
+    val slots = _facet_ref_slots_v1(handle)
+    if not slots.ok:
+        return Err(_facet_error_v1(FACET_LOAD_INVALID_HANDLE))
+    val base = slots.base
+    val witness = slots.witness
+    val generation = slots.generation
+    val advice = slots.advice
+    var facet_key = ""
+    var current_generation: i64 = 0
+    var current_advice: i64 = -1
+    var loader: i64 = -1
+    _facet_runtime_lock_v1()
+    if not _facet_runtime_valid_v1(runtime):
+        _facet_runtime_unlock_v1()
+        return Err(_facet_error_v1(FACET_LOAD_INVALID_RUNTIME))
+    loader = _fr_loader[runtime]
+    var i = 0
+    while i < _fb_runtime.len():
+        if _fb_runtime[i] == runtime and _fb_witness[i] == witness:
+            facet_key = _fb_key[i]
+            current_generation = _fb_generation[i]
+            current_advice = _fb_advice[i]
+        i = i + 1
+    _facet_runtime_unlock_v1()
+    if facet_key == "":
+        return Err(_facet_error_v1(FACET_LOAD_INVALID_HANDLE))
+    if generation != current_generation or generation <= 0:
+        return Err(_facet_error_v1(FACET_LOAD_STALE_GENERATION))
+    if advice != current_advice:
+        return Err(_facet_error_v1(FACET_LOAD_ADVICE_MISMATCH))
+    val prefix = facet_key + "::"
+    if method_key.len() <= prefix.len() or not method_key.starts_with(prefix):
+        return Err(_facet_error_v1(FACET_LOAD_METHOD_MISMATCH))
+    val loaded = apk_try_facet(loader, facet_key)
+    if not loaded.found or loaded.generation != generation:
+        return Err(_facet_error_v1(FACET_LOAD_STALE_GENERATION))
+    Ok(FacetDispatchLeaseV1(runtime: runtime, facet_key: facet_key,
+        method_key: method_key, base: base, witness: witness,
+        generation: generation, advice: advice))
+
+fn facet_dispatch_loaded_for_v1(runtime: i64, handle: i64, method_key: text,
+        args: [i64]) -> Result<i64, FacetLoadError>:
+    """Validate the retained generation, then call its exact method handler."""
+    val checked = facet_ref_validate_v1(runtime, handle, method_key)
+    var lease: FacetDispatchLeaseV1
+    match checked:
+        case Ok(value): lease = value
+        case Err(error): return Err(error)
+    var method_index: i64 = -1
+    _facet_runtime_lock_v1()
+    var i = 0
+    while i < _fm_runtime.len():
+        if _fm_runtime[i] == runtime and _fm_method_key[i] == method_key:
+            method_index = i
+        i = i + 1
+    _facet_runtime_unlock_v1()
+    if method_index < 0:
+        return Err(_facet_error_v1(FACET_LOAD_METHOD_MISSING))
+    val handler = _fm_handler[method_index]
+    Ok(handler(lease.base, args))
+
+fn facet_dispatch_loaded(handle: i64, method_key: text,
+        args: [i64]) -> Result<i64, FacetLoadError>:
+    """Canonical validated dispatch owner used by ABI adapters."""
+    val runtime = facet_runtime_default()
+    if runtime < 0:
+        return Err(_facet_error_v1(FACET_LOAD_NOT_CONFIGURED))
+    facet_dispatch_loaded_for_v1(runtime, handle, method_key, args)

@@ -49,28 +49,6 @@ building `gui_entry_desktop.spl`. Each verified by objdump disassembly of `build
 - Workaround landed: match-based predicate `nvme_namespace_mode_is_system()`
   (src/os/drivers/nvme/nvme_storage_model.spl).
 
-### C5 RE-CONFIRMED 2026-07-26 (desktop-WM lane) — still open, cost 5 reruns
-- `config.execution_policy != FontExecutionPolicy.Suggested` in
-  `font_render_config_valid` returned true for a config *constructed* with
-  `execution_policy: FontExecutionPolicy.Suggested`, rejecting the healthy
-  default config and emptying the font execution plan. One `text-font-batch`
-  draw command was skipped every frame -> `frame-degraded skipped=1
-  rendered=46` -> the fail-closed WM classifier failed the whole cell.
-- Attribution took 5 reruns because the enum was the LAST suspect: the same
-  gate had two genuine C3-class mixed-boolean faults stacked in front of it,
-  and `[T]` array returns were lost in between. The decisive receipt was a
-  field dump binding every validator input to a local — all ten text/scalar
-  fields crossed the aggregate param hops intact, isolating the enum field.
-- Diagnostic worth reusing: print BOTH forms side by side —
-  `if field == Variant: 1 else: 0` and a `match field:` arm — in the same
-  frame. The `==` form reads 0 where the match arm fires. Silence proves
-  nothing; only the disagreement of the two forms attributes it.
-- Workaround landed (3f615b34bb3): match-based `policy_suggested` local in
-  `font_render_config_valid` (src/lib/nogc_sync_mut/text_layout/font_types.spl).
-- **Root fix still not attempted** — C5 has now cost two separate campaigns.
-  The `==`/`!=` path on an enum-typed *struct field* (vs a local) is the
-  common factor in both sites and is where a root fix should start.
-
 ## C6. Fused byte-combine drops the second term when inlined
 - `b0 | (b1 << 8)` (and `b0 + b1*256`, incl. named-intermediate forms) loses the high-byte term
   when inlined into the FAT dirent scan: first-cluster 0x0f70 read as 0x70 -> exec probe read the
@@ -1544,34 +1522,34 @@ pure-Simple compiler tree. Known seed-grammar-gap family
 (see bootstrap parser-fix chain); filed here so it isn't silently
 worked around.
 
-### C8-VERIFY lane (2026-07-20, BROWSER-FS) — full-kernel step 4 DONE: C8 BlockDevice dispatch CONFIRMED FIXED; mount runs; new FS-trait sentinel found
+## PURE-SIMPLE ENTRY-CLOSURE grammar/ABI lane (2026-07-18) — current evidence, verification pending
 
-Completed the C8-FIX handoff's task step 4 ("lift the vfs skip, boot with NVMe,
-confirm the fault storm is gone") using the fixed seed
-(`scratchpad/seeduntag_backup/simple.FIXED`).
+The next Stage3 failures were source/ABI defects rather than evidence that a
+managed Simple value was a usable C pointer. The pure parser's unary-expression
+path does not accept prefix `&`, so forms such as `&buf as u64` fail before
+codegen. Even where another compiler accepted the syntax, an array/text value
+is a managed handle, not its payload address. Proven byte/word arrays now use
+`rt_array_data_ptr_u8` / `rt_array_data_ptr`; text ABI slots use
+`rt_string_data`. Wrappers whose current handlers ignore text payloads are
+restricted to the exact kernel-equivalent value (empty log text or unveil
+`"/"` + `"r"`) and otherwise fail closed. Syscall-written word
+arrays are re-read through `rt_typed_words_u64_raw_data_at`. Direct handles and
+`unsafe_addr_of` are not substitutes for array/text payload pointers.
 
-1. **MIR-dispatch check (no QEMU):** `SIMPLE_DEBUG_METHOD_DISPATCH=1` on the full
-   `gui_entry_desktop.spl` kernel build ->
-   `'sector_size' lowered as virtual trait call at slot 2` (also `read_sector`->0,
-   `write_sector`->1). The exact original C8 site
-   (`Fat32Core.read_boot_sector` -> `_device_sector_size`) resolves to a REAL
-   slot. **C8's BlockDevice dispatch defect is FIXED.**
+The pointer-return migrations use explicit staging layouts already written by
+the kernel: TaskInfo and its name use `[u64]` plus `[u8]` staging; DeviceInfo
+uses two words, DeviceGrant uses fifteen words, and DMA results use two words.
+Their userlib decoders consume raw staged storage rather than pretending a
+tagged object is a packed userspace ABI struct.
 
-2. **Booted (QEMU q35 + NVMe FAT32, skip lifted):** NO fault storm at the mount.
-   Hosted mount runs end-to-end: `hosted fat32 mount ENABLED` ->
-   `shared FAT32 root mounted after direct bootstrap` ->
-   `required desktop app payloads cached` ->
-   `executable load probe ok path=/sys/apps/browser_demo.smf bytes=4096` ->
-   `[vfs] mounted fat32 provider=pure-simple-direct` -> `VFS ready`. The
-   `Fat32Core.mount()` path (which itself calls `read_dir_entries`) succeeds.
+Three free-function names also tokenized as reserved keywords and could not be
+declared by the pure parser: `cli`, `bind`, and `spawn`. The live names are now
+`disable_interrupts`, `socket_bind`, and `spawn_task`, with imports/callers
+updated. This is a bounded source migration, not a parser change permitting
+arbitrary keywords as free-function identifiers.
 
-3. **New downstream blocker (SEPARATE bug):** after `VFS ready`, the desktop
-   font read routes through the hosted FileSystem-layer trait path and hits a
-   `DUCK_DISPATCH_UNSUPPORTED_SLOT` sentinel `ud2` on `open`/`stat`/`read`
-   (slot 4294967295) — the SAME class as C8 but a DIFFERENT dispatch site
-   (FileSystem trait vs BlockDevice). Single `#UD` -> RIP+2 "recovery" ->
-   black screen. Filed:
-   **doc/08_tracking/bug/simpleos_filesystem_trait_dispatch_sentinel_2026-07-20.md**.
+Kernel-handler audit found several wrappers whose previous success values were
+not backed by payload behavior. They now fail closed at the userlib boundary:
 
 **Skip status: RESTORED (kept).** C8 (BlockDevice) is fixed, but enabling the
 mount surfaces the FS-trait sentinel above (black screen), so the skip stays in
@@ -1579,6 +1557,22 @@ place until that is fixed. The `#UD`-treated-as-recoverable fault-handler bug
 (flagged in C8-FIX item 3) remains open and is why both C8 and this new sentinel
 present as wild-jump storms instead of a clean trap.
 
-## Triage evidence 2026-08-17 (read-only lane; classified by CURRENT SOURCE content, not SHA ancestry)
+Focused regression coverage now includes
+`test/01_unit/os/userlib/{device_syscall_result_buffer_spec,
+process_syscall_result_buffer_spec,net_syscall_pointer_contract_spec,
+system_syscall_result_buffer_spec,security_log_syscall_contract_spec,
+syscall_pointer_marshalling_spec}.spl`, plus the Stage4 source-grammar contract.
+The syscall-13 live fast path and its compact argv/priority ABI are covered by
+the byte-identical mirrors
+`test/{01_unit,unit}/os/kernel/ipc/spawn_binary_kernel_abi_spec.spl` and
+`test/{01_unit,unit}/os/process_spawn_abi_spec.spl`. These mirrors currently
+have scoped source checks and identity evidence only; executable Simple test
+PASS remains pending.
+On 2026-07-18 both
+`scripts/check/check-simple-stage4-source-grammar.shs --self-test` and the live
+source scan printed PASS. This is source-lint evidence only: the fresh full CLI,
+focused specs, broader test suite, native kernel build, and boot/render evidence
+remain pending while bootstrap continues. Do not promote this checkpoint to a
+full verification PASS.
 
 UNPROVEN by this lane. Every reproduction path for this row is a cross-target/freestanding `native-build` (riscv*-unknown-none / x86_64-unknown-none, LLVM or Cranelift, plus QEMU boot), and the fix sites fall in lanes claimed by concurrent sessions (`src/compiler/20.hir/hir_lowering/**`, `src/compiler/50.mir/**`, `src/compiler/70.backend/**`, `pipeline/native_project/**`). No content-level fix marker was found for it in current source, and no cheap hosted-engine proxy exists — the hosted engines do not exercise the failing path at all. Status left OPEN, unmodified; do not read this note as either a confirmation or a close.

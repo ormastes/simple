@@ -1,0 +1,65 @@
+# Runtime-only extension dispatch over an admitted immutable section-10 view.
+#
+# The view is constructed once by SCI decode/admission.  Each argv token uses
+# the same parsed geometry; it never reparses the section header or extracts a
+# fresh section-sized byte array from the composition image.
+
+use std.nogc_sync_mut.composition.cli_option_route.{CLI_TOKEN_EXTENSION, CLI_TOKEN_MALFORMED, split_cli_extension_token_v1}
+use std.nogc_sync_mut.composition.sci_reader.{SciSectionHandleV1, sci_open_route_section_v1, sci_lookup_route_v1, sci_verify_section_digest_v1}
+
+val SCI_ROUTE_KIND_EXTENSION_NAMESPACE_V1: i64 = 10
+
+struct SciRouteSectionViewV1:
+    bytes: [u8]
+    handle: SciSectionHandleV1
+    integrity_verified: bool
+
+struct SciExtensionDispatchV1:
+    ok: bool
+    routed: bool
+    error: text
+    namespace: text
+    key: text
+    value: text
+    has_value: bool
+    provider_id: text
+    availability: i64
+    missing_policy: i64
+    index_probes: i64
+    records_examined: i64
+
+fn sci_empty_route_section_view_v1() -> SciRouteSectionViewV1:
+    SciRouteSectionViewV1(bytes: [], handle: sci_open_route_section_v1([]), integrity_verified: false)
+
+# Admission intentionally performs the O(section_size) integrity pass once.
+# Lookup is O(log R) probes plus one selected record thereafter.
+fn sci_admit_route_section_v1(bytes: [u8]) -> Result<SciRouteSectionViewV1, text>:
+    val handle = sci_open_route_section_v1(bytes)
+    if not handle.ok:
+        return Err("sci-extension-error: " + handle.error_code)
+    if not sci_verify_section_digest_v1(bytes, handle):
+        return Err("sci-extension-error: SCI_SECTION_DIGEST")
+    Ok(SciRouteSectionViewV1(bytes: bytes, handle: handle, integrity_verified: true))
+
+fn _extension_error(message: text) -> SciExtensionDispatchV1:
+    SciExtensionDispatchV1(false, false, message, "", "", "", false, "", 0, 0, 0, 0, 0)
+
+fn sci_route_admitted_extension_token_v1(view: SciRouteSectionViewV1, token: text) -> SciExtensionDispatchV1:
+    val split = split_cli_extension_token_v1(token)
+    if split.kind == CLI_TOKEN_MALFORMED:
+        return _dispatch_error("sci-extension-error: malformed extension token")
+    if split.kind != CLI_TOKEN_EXTENSION:
+        return SciExtensionDispatchV1(true, false, "", "", "", "", false, "", 0, 0, 0, 0, 0)
+    if not view.integrity_verified or not view.handle.ok:
+        return _extension_error("sci-extension-error: SCI_BAD_HANDLE")
+    val found = sci_lookup_route_v1(view.bytes, view.handle, split.namespace)
+    if not found.ok:
+        return _dispatch_error("sci-extension-error: " + found.error_code)
+    if not found.found or found.route_kind != SCI_ROUTE_KIND_EXTENSION_NAMESPACE_V1:
+        return _dispatch_error("sci-extension-error: unknown namespace '" + split.namespace + "'")
+    SciExtensionDispatchV1(true, true, "", split.namespace, split.key,
+        split.value, split.has_value, found.target, found.command_id,
+        found.component_count, found.index_probes, found.records_examined)
+
+export SCI_ROUTE_KIND_EXTENSION_NAMESPACE_V1, SciRouteSectionViewV1, SciExtensionDispatchV1
+export sci_empty_route_section_view_v1, sci_admit_route_section_v1, sci_route_admitted_extension_token_v1

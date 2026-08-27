@@ -14,11 +14,11 @@
 #   simple check-tier src/compiler Check specific directory
 #   simple check-tier --verbose    Show per-file tier assignments
 
+extern fn rt_file_read_text(path: text) -> text
 use std.io_runtime.{read_file_text}
 use std.io_runtime.{file_exists}
 
 use app.io.mod (cwd, shell)
-use app.cli.query_source_mask.{strip_strings_and_comments}
 
 # ============================================================================
 # Tier keyword data (passed as parameter, no module-level mutable state)
@@ -29,16 +29,13 @@ struct TierKeywords:
     core: [text]
     full: [text]
 
-struct TierKeywordIndex:
-    required_level: {text: i64}
-
 fn load_tier_kw(sdn_path: text) -> TierKeywords:
     """Load tier_keywords.sdn and return keyword sets."""
     var seed: [text] = []
     var core: [text] = []
     var full: [text] = []
 
-    val text_content = read_file_text(sdn_path)
+    val text_content = rt_file_read_text(sdn_path) ?? ""
     if text_content == "":
         return TierKeywords(seed: seed, core: core, full: full)
 
@@ -59,18 +56,18 @@ fn load_tier_kw(sdn_path: text) -> TierKeywords:
         if current_section != "keywords": continue
 
         if trimmed.contains("="):
-            val eq_idx = trimmed.index_of("=")
+            val eq_idx = trimmed.index_of("=") ?? -1
             if eq_idx > 0:
                 val key = trimmed.slice(0, eq_idx).trim()
                 var value_part = trimmed.slice(eq_idx + 1, trimmed.len()).trim()
                 value_part = value_part.replace("\"", "")
 
                 if value_part == "seed":
-                    seed.push(key)
+                    seed = seed + [key]
                 elif value_part == "core":
-                    core.push(key)
+                    core = core + [key]
                 elif value_part == "full":
-                    full.push(key)
+                    full = full + [key]
     TierKeywords(seed: seed, core: core, full: full)
 
 fn kw_is_allowed(keyword: text, tier: text, kw: TierKeywords) -> bool:
@@ -95,28 +92,9 @@ fn kw_is_any(word: text, kw: TierKeywords) -> bool:
         if k == word: return true
     false
 
-fn build_tier_keyword_index(kw: TierKeywords) -> TierKeywordIndex:
-    """Index each keyword at its earliest tier; earlier tiers take priority."""
-    var required_level: {text: i64} = {}
-    for word in kw.seed:
-        if not required_level.contains_key(word):
-            required_level[word] = 0
-    for word in kw.core:
-        if not required_level.contains_key(word):
-            required_level[word] = 1
-    for word in kw.full:
-        if not required_level.contains_key(word):
-            required_level[word] = 2
-    TierKeywordIndex(required_level: required_level)
-
-fn tier_keyword_required_level(word: text, index: TierKeywordIndex) -> i64:
-    if index.required_level.contains_key(word):
-        return index.required_level[word]
-    -1
-
 fn find_word_col(line: text, word: text) -> i64:
     """Find the column position of a word in a line."""
-    val idx = line.index_of(word)
+    val idx = line.index_of(word) ?? -1
     if idx >= 0: return idx + 1
     1
 
@@ -128,53 +106,47 @@ struct OpPattern:
 
 fn get_core_op_patterns() -> [OpPattern]:
     """Return operator patterns that are core-tier (not available in seed)."""
-    [
-        OpPattern(pattern: "??", tier: "core", name: "null_coalesce"),
-        OpPattern(pattern: ".?", tier: "core", name: "optional_chain"),
-        OpPattern(pattern: "?.", tier: "core", name: "optional_chain"),
-        OpPattern(pattern: "|>", tier: "core", name: "pipe_forward"),
-        OpPattern(pattern: "**", tier: "core", name: "power"),
-        OpPattern(pattern: "..=", tier: "core", name: "inclusive_range"),
-        OpPattern(pattern: ":=", tier: "core", name: "walrus")
-    ]
+    var ops: [OpPattern] = []
+    ops = ops + [OpPattern(pattern: "??", tier: "core", name: "null_coalesce")]
+    ops = ops + [OpPattern(pattern: ".?", tier: "core", name: "optional_chain")]
+    ops = ops + [OpPattern(pattern: "?.", tier: "core", name: "optional_chain")]
+    ops = ops + [OpPattern(pattern: "|>", tier: "core", name: "pipe_forward")]
+    ops = ops + [OpPattern(pattern: "**", tier: "core", name: "power")]
+    ops = ops + [OpPattern(pattern: "..=", tier: "core", name: "inclusive_range")]
+    ops = ops + [OpPattern(pattern: ":=", tier: "core", name: "walrus")]
+    ops
 
 fn get_full_op_patterns() -> [OpPattern]:
     """Return operator patterns that are full-tier (not available in core)."""
-    [
-        OpPattern(pattern: ".+", tier: "full", name: "broadcast_add"),
-        OpPattern(pattern: ".-", tier: "full", name: "broadcast_sub"),
-        OpPattern(pattern: ".*", tier: "full", name: "broadcast_mul"),
-        OpPattern(pattern: "./", tier: "full", name: "broadcast_div"),
-        OpPattern(pattern: ".^", tier: "full", name: "broadcast_pow"),
-        OpPattern(pattern: "~>", tier: "full", name: "layer_connect"),
-        OpPattern(pattern: "<<<", tier: "full", name: "gpu_launch_start"),
-        OpPattern(pattern: ">>>", tier: "full", name: "gpu_launch_end")
-    ]
+    var ops: [OpPattern] = []
+    ops = ops + [OpPattern(pattern: ".+", tier: "full", name: "broadcast_add")]
+    ops = ops + [OpPattern(pattern: ".-", tier: "full", name: "broadcast_sub")]
+    ops = ops + [OpPattern(pattern: ".*", tier: "full", name: "broadcast_mul")]
+    ops = ops + [OpPattern(pattern: "./", tier: "full", name: "broadcast_div")]
+    ops = ops + [OpPattern(pattern: ".^", tier: "full", name: "broadcast_pow")]
+    ops = ops + [OpPattern(pattern: "~>", tier: "full", name: "layer_connect")]
+    ops = ops + [OpPattern(pattern: "<<<", tier: "full", name: "gpu_launch_start")]
+    ops = ops + [OpPattern(pattern: ">>>", tier: "full", name: "gpu_launch_end")]
+    ops
 
-fn check_line_operators_with_patterns(
-    code_line: text, tier: text,
-    core_ops: [OpPattern], full_ops: [OpPattern]
-) -> [OpPattern]:
+fn check_line_operators(code_line: text, tier: text) -> [OpPattern]:
     """Check a code line for operator patterns not allowed in the given tier.
     Returns list of violated patterns."""
     var violations: [OpPattern] = []
 
     if tier == "seed":
+        val core_ops = get_core_op_patterns()
         for op in core_ops:
             if code_line.contains(op.pattern):
-                violations.push(op)
+                violations = violations + [op]
 
     if tier == "seed" or tier == "core":
+        val full_ops = get_full_op_patterns()
         for op in full_ops:
             if code_line.contains(op.pattern):
-                violations.push(op)
+                violations = violations + [op]
 
     violations
-
-fn check_line_operators(code_line: text, tier: text) -> [OpPattern]:
-    """Compatibility adapter for callers without request-owned tables."""
-    check_line_operators_with_patterns(
-        code_line, tier, get_core_op_patterns(), get_full_op_patterns())
 
 fn check_line_lambda(code_line: text, tier: text) -> bool:
     """Check if a code line contains lambda syntax (backslash + identifier).
@@ -195,37 +167,50 @@ fn check_line_lambda(code_line: text, tier: text) -> bool:
         i = i + 1
     false
 
-fn tier_word_delimiter(byte: i64) -> bool:
-    byte == 32 or byte == 34 or byte == 33 or byte == 36 or byte == 37 or
-    byte == 38 or byte == 40 or byte == 41 or byte == 42 or byte == 43 or
-    byte == 44 or byte == 45 or byte == 46 or byte == 47 or byte == 58 or
-    byte == 59 or byte == 60 or byte == 61 or byte == 62 or byte == 63 or
-    byte == 64 or byte == 91 or byte == 93 or byte == 94 or byte == 96 or
-    byte == 123 or byte == 124 or byte == 125 or byte == 126
-
-fn tier_word_parts(code: text) -> [text]:
-    """Extract the legacy space/punctuation-delimited word spans once."""
-    var parts: [text] = []
-    var word_start = -1
+fn strip_strings_and_comments(line: text) -> text:
+    """Remove string literal contents and inline comments from a code line.
+    String content is replaced with spaces; everything after # is removed."""
+    var result = ""
+    var in_str = false
     var i = 0
-    while i < code.len():
-        if tier_word_delimiter(code.byte_at(i)):
-            if word_start >= 0:
-                parts.push(code.substring(word_start, i))
-                word_start = -1
-        elif word_start < 0:
-            word_start = i
-        i = i + 1
-    if word_start >= 0:
-        parts.push(code.substring(word_start, code.len()))
-    parts
+    val n = line.len()
 
-fn check_one_file_indexed(
-    file_path: text, tier: text, keyword_index: TierKeywordIndex
-) -> i64:
+    while i < n:
+        val ch = line[i : i + 1]
+
+        if in_str:
+            if ch == "\\":
+                # Skip escaped character
+                result = result + "  "
+                i = i + 2
+                continue
+            if ch == "\"":
+                in_str = false
+                result = result + " "
+            else:
+                result = result + " "
+            i = i + 1
+            continue
+
+        # Not in string
+        if ch == "#":
+            # Inline comment - skip rest of line
+            break
+        if ch == "\"":
+            in_str = true
+            result = result + " "
+            i = i + 1
+            continue
+
+        result = result + ch
+        i = i + 1
+
+    result
+
+fn check_one_file(file_path: text, tier: text, kw: TierKeywords) -> i64:
     """Check if a file stays within the given tier's grammar.
     Returns number of violations found."""
-    val source = read_file_text(file_path)
+    val source = rt_file_read_text(file_path) ?? ""
     if source == "":
         print "Error: could not read {file_path}"
         return -1
@@ -234,9 +219,6 @@ fn check_one_file_indexed(
     var line_num = 1
     var in_docstring = false
     val lines = source.split("\n")
-    val core_ops = get_core_op_patterns()
-    val full_ops = get_full_op_patterns()
-    val active_tier_level = tier_level(tier)
 
     for line in lines:
         val trimmed = line.trim()
@@ -254,7 +236,7 @@ fn check_one_file_indexed(
 
         # Check for opening """ (docstring)
         if trimmed.contains("\"\"\""):
-            val first_idx = trimmed.index_of("\"\"\"")
+            val first_idx = trimmed.index_of("\"\"\"") ?? -1
             if first_idx >= 0:
                 val after_first = trimmed.slice(first_idx + 3, trimmed.len())
                 if not after_first.contains("\"\"\""):
@@ -284,21 +266,49 @@ fn check_one_file_indexed(
         # Strip string literal contents and inline comments
         val code_only = strip_strings_and_comments(trimmed)
 
-        # Extract the same punctuation-delimited words without materializing
-        # roughly thirty full-line replacement strings.
-        val parts = tier_word_parts(code_only)
+        # Inline word extraction: replace punctuation with spaces, split, filter empties
+        var cleaned = code_only
+        cleaned = cleaned.replace("(", " ")
+        cleaned = cleaned.replace(")", " ")
+        cleaned = cleaned.replace(":", " ")
+        cleaned = cleaned.replace(",", " ")
+        cleaned = cleaned.replace(".", " ")
+        cleaned = cleaned.replace("[", " ")
+        cleaned = cleaned.replace("]", " ")
+        cleaned = cleaned.replace("{", " ")
+        cleaned = cleaned.replace("}", " ")
+        cleaned = cleaned.replace("<", " ")
+        cleaned = cleaned.replace(">", " ")
+        cleaned = cleaned.replace("=", " ")
+        cleaned = cleaned.replace("+", " ")
+        cleaned = cleaned.replace("-", " ")
+        cleaned = cleaned.replace("*", " ")
+        cleaned = cleaned.replace("/", " ")
+        cleaned = cleaned.replace("!", " ")
+        cleaned = cleaned.replace("@", " ")
+        cleaned = cleaned.replace("$", " ")
+        cleaned = cleaned.replace("%", " ")
+        cleaned = cleaned.replace("^", " ")
+        cleaned = cleaned.replace("&", " ")
+        cleaned = cleaned.replace("|", " ")
+        cleaned = cleaned.replace("~", " ")
+        cleaned = cleaned.replace("`", " ")
+        cleaned = cleaned.replace("?", " ")
+        cleaned = cleaned.replace(";", " ")
+        cleaned = cleaned.replace("\"", " ")
+        val parts = cleaned.split(" ")
 
         for word in parts:
-            val required_level = tier_keyword_required_level(
-                word, keyword_index)
-            if required_level > active_tier_level:
-                val word_col = find_word_col(line, word)
-                print "{file_path}:{line_num}:{word_col}: error: '{word}' not available in {tier} tier"
-                violations = violations + 1
+            if word.len() == 0:
+                continue
+            if kw_is_any(word, kw):
+                if not kw_is_allowed(word, tier, kw):
+                    val word_col = find_word_col(line, word)
+                    print "{file_path}:{line_num}:{word_col}: error: '{word}' not available in {tier} tier"
+                    violations = violations + 1
 
         # --- Operator/construct checks (on stripped code, before punctuation replacement) ---
-        val op_violations = check_line_operators_with_patterns(
-            code_only, tier, core_ops, full_ops)
+        val op_violations = check_line_operators(code_only, tier)
         for op in op_violations:
             val op_col = find_word_col(line, op.pattern)
             print "{file_path}:{line_num}:{op_col}: error: '{op.pattern}' ({op.name}) not available in {tier} tier"
@@ -311,10 +321,6 @@ fn check_one_file_indexed(
 
         line_num = line_num + 1
     violations
-
-fn check_one_file(file_path: text, tier: text, kw: TierKeywords) -> i64:
-    """Compatibility adapter for callers without a request-owned index."""
-    check_one_file_indexed(file_path, tier, build_tier_keyword_index(kw))
 
 # ============================================================================
 # String helper (local, avoids import issues)
@@ -344,9 +350,9 @@ fn _trim(s: text) -> text:
 fn read_project_tier(root: text) -> text:
     """Read tier from simple.sdn in the given root directory."""
     val sdn_path = "{root}/simple.sdn"
-    if not file_exists(sdn_path):
+    if not rt_file_exists(sdn_path):
         return ""
-    val content = read_file_text(sdn_path)
+    val content = rt_file_read_text(sdn_path) ?? ""
     if content == "":
         return ""
 
@@ -388,9 +394,9 @@ fn read_project_tier(root: text) -> text:
 
 fn read_module_tier(init_path: text) -> text:
     """Read tier from arch { tier = "X" } in an __init__.spl file."""
-    if not file_exists(init_path):
+    if not rt_file_exists(init_path):
         return ""
-    val content = read_file_text(init_path)
+    val content = rt_file_read_text(init_path) ?? ""
     if content == "":
         return ""
 
@@ -445,7 +451,7 @@ fn read_module_tier(init_path: text) -> text:
 
 fn read_file_tier(file_path: text) -> text:
     """Read tier from `# tier: X` directive in first 5 lines of a .spl file."""
-    val content = read_file_text(file_path)
+    val content = rt_file_read_text(file_path) ?? ""
     if content == "":
         return ""
 
@@ -494,7 +500,7 @@ fn scan_module_tiers(root: text) -> [ModuleTier]:
             var dir_path = trimmed
             if dir_path.ends_with(init_suffix):
                 dir_path = dir_path[0 : dir_path.len() - init_suffix.len()]
-            result.push(ModuleTier(dir_path: dir_path, tier: tier))
+            result = result + [ModuleTier(dir_path: dir_path, tier: tier)]
 
     result
 
@@ -583,7 +589,6 @@ fn run_check_tier(args: [text]) -> i64:
     if kw.seed.len() == 0 and kw.core.len() == 0 and kw.full.len() == 0:
         print "Error: could not load {sdn_path}"
         return 1
-    val keyword_index = build_tier_keyword_index(kw)
 
     # Read project-level tier
     val project_tier = read_project_tier(root)
@@ -626,7 +631,7 @@ fn run_check_tier(args: [text]) -> i64:
     # Group files by effective tier for efficient checking
     var seed_files: [text] = []
     var core_files: [text] = []
-    var full_file_count = 0
+    var full_files: [text] = []
     var file_count = 0
 
     for file_path in files:
@@ -645,28 +650,28 @@ fn run_check_tier(args: [text]) -> i64:
                 print "  {rel} -> {effective}"
 
         if effective == "seed":
-            seed_files.push(trimmed)
+            seed_files = seed_files + [trimmed]
         elif effective == "core":
-            core_files.push(trimmed)
+            core_files = core_files + [trimmed]
         else:
-            full_file_count = full_file_count + 1
+            full_files = full_files + [trimmed]
         file_count = file_count + 1
 
     if verbose:
         print ""
 
-    print "Tier check: {file_count} files ({seed_files.len()} seed, {core_files.len()} core, {full_file_count} full)"
+    print "Tier check: {file_count} files ({seed_files.len()} seed, {core_files.len()} core, {full_files.len()} full)"
 
     # Check each tier group
     var total_violations = 0
 
     for f in seed_files:
-        val v = check_one_file_indexed(f, "seed", keyword_index)
+        val v = check_one_file(f, "seed", kw)
         if v > 0:
             total_violations = total_violations + v
 
     for f in core_files:
-        val v = check_one_file_indexed(f, "core", keyword_index)
+        val v = check_one_file(f, "core", kw)
         if v > 0:
             total_violations = total_violations + v
 

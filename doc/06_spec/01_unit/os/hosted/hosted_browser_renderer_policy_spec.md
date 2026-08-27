@@ -1,10 +1,10 @@
-# Hosted browser renderer policy
+# Hosted Browser Renderer Policy Specification
 
-> Treats decoded renderer protocol messages as untrusted input at the hosted browser broker. The scenarios cover navigation permits, origin and CSP admission, cookie ownership, HSTS, redirects, resource limits, lifecycle, and site-swap state without granting the renderer direct network authority.
+> Tests covering hosted browser renderer transport host, hosted browser renderer broker policy.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 62 | 62 | 0 | 0 |
+| 53 | 53 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -267,6 +267,7 @@ expect(response.error).to_equal(
 - Persist only the newly committed URL
    - Expected: saved.entries.len() equals `1`
    - Expected: saved.entries[0].first equals `https://new.test/`
+- profile close
    - Expected: registry.close() is true
 
 
@@ -387,6 +388,8 @@ expect(registry.close()).to_equal(true)
 - Reject renderer navigation when active CSP is unavailable
 - Allow only the parent-authorized initial document bootstrap
 - Route an opaque HTTPS to HTTP document through navigation policy
+- var downgrade = HostedBrowserRendererProcess create
+- set mock registry
 
 
 <details>
@@ -553,6 +556,8 @@ set_mock_registry(MockResponseRegistry.create())
    - Expected: opaque_fetch.sanitized_headers equals `Origin: null`
 - Apply a pending sandbox before the first frame commit
 - Tighten rather than discard committed CSP on 304
+- url: Url parse or opaque
+- broker  commit document url
 - Reject a same-origin forged fetch
    - Expected: blocked_fetch_message.status equals `message`
    - Expected: blocked_fetch.reason equals `csp-connect-src-blocked`
@@ -569,8 +574,13 @@ set_mock_registry(MockResponseRegistry.create())
 - Allow only an explicitly admitted control
    - Expected: broker.network_job_handle equals `0`
 - Stage target history CSP and URL before resource dispatch
+- broker history urls push
+- broker history csp ready push
+- broker  stage history document csp
 - Restore the broker CSP ledger with history
+- broker  restore history document
 - Preserve the CSP ledger across production site swaps
+- set mock registry
 
 
 <details>
@@ -1138,6 +1148,7 @@ expect(broker.navigation_permit.url).to_equal(
 
 - caps wasm before hex encoding can double the IPC body
    - Expected: encoded.body equals `000f10ff`
+- body push
 
 
 <details>
@@ -1254,11 +1265,17 @@ match broker.begin_stop(1000):
    - Expected: broker.next_animation_ms equals `-1`
    - Expected: broker.pending_document_commit_url equals ``
    - Expected: broker.provisional_document_origin equals ``
+- browser renderer decoder new
    - Expected: navigation.action equals `open`
    - Expected: navigation.url equals `https://example.test/new`
    - Expected: broker.pending_wire_reply_to_request_id equals `3`
    - Expected: broker.network_job_handle equals `0`
    - Expected: broker.pending_document_commit_url equals ``
+- draw ir composition
+- browser renderer decoder new
+- Err
+- fail
+- Ok
    - Expected: broker.pending_history_action equals `push`
    - Expected: broker.pending_document_commit_url equals ``
    - Expected: broker.provisional_document_origin equals ``
@@ -1560,6 +1577,7 @@ expect(broker.navigation_permit.url).to_equal(
    - Expected: broker.pending_operation equals `navigation`
    - Expected: broker._begin_stop_after_write() equals ``
    - Expected: broker.pending_operation equals `stop`
+- browser renderer decoder new
    - Expected: broker.pending_history_action equals ``
    - Expected: broker.pending_document_commit_url equals ``
    - Expected: broker.provisional_document_origin equals ``
@@ -1690,17 +1708,44 @@ Reproduction: this block contains the complete executable scenario source.
 step("rejects a forged legacy frame before committing a pending document")
 step("Send a state-less renderer frame while a document is pending")
 var broker = HostedBrowserRendererProcess.create(1, 640, 480)
-broker.document_url = "https://source.test/start"
-broker.document_origin = "https://source.test"
-broker.history_urls = ["https://source.test/start"]
+broker.state = "active"
+broker.document_url = "https://example.test/start"
+broker.document_origin = "https://example.test"
+broker.history_urls = ["https://example.test/start"]
 broker.history_index = 0
-broker.history_current_url = "https://source.test/start"
-broker.pending_history_action = "push"
-broker.pending_document_commit_url = "https://target.test/private"
-broker.provisional_document_origin = "https://target.test"
-broker.expected_reply_to_request_id = 2
-val forged_wire = browser_renderer_frame_encode(
-    draw_ir_composition("", "", "", []), 1, 2
+expect(broker._frame_history_state_valid(
+    "https://example.test/next#view",
+    "https://example.test/start",
+    ""
+)).to_be(true)
+expect(broker._frame_history_state_valid(
+    "https://attacker.test/", "", ""
+)).to_be(false)
+expect(broker._frame_history_state_valid(
+    "https://example.test/next", "https://attacker.test/", ""
+)).to_be(false)
+broker.history_urls = [
+    "https://unrelated.test/",
+    "https://previous.test/",
+    "https://example.test/start"
+]
+broker.history_index = 2
+expect(broker._frame_history_state_valid(
+    "https://example.test/next",
+    "https://previous.test/",
+    ""
+)).to_be(true)
+expect(broker._frame_history_state_valid(
+    "https://example.test/next",
+    "https://unrelated.test/",
+    ""
+)).to_be(false)
+broker.history_urls = ["https://example.test/start"]
+broker.history_index = 0
+broker._apply_frame_history_state(
+    "https://example.test/next#view",
+    "https://example.test/start",
+    ""
 )
 expect(forged_wire.ok).to_be(true)
 val forged = browser_renderer_frame_decode(
@@ -1738,8 +1783,6 @@ Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("resolves duplicate history URLs in the requested direction")
 var back = HostedBrowserRendererProcess.create(1, 640, 480)
 back.state = "active"
 back.history_urls = ["https://a.test/", "https://a.test/"]
@@ -1747,7 +1790,7 @@ back.history_index = 1
 back.history_current_url = "https://a.test/"
 back.history_back_url = "https://a.test/"
 expect(back.begin_go_back(1000).is_ok()).to_be(true)
-expect(back.pending_history_index).to_equal(0)
+expect(back.pending_history_index).to_equal(0)  # oracle: pinned constant asserted by this scenario
 
 var forward = HostedBrowserRendererProcess.create(1, 640, 480)
 forward.state = "active"
@@ -1756,14 +1799,16 @@ forward.history_index = 0
 forward.history_current_url = "https://a.test/"
 forward.history_forward_url = "https://a.test/"
 expect(forward.begin_go_forward(1000).is_ok()).to_be(true)
-expect(forward.pending_history_index).to_equal(1)
+expect(forward.pending_history_index).to_equal(1)  # oracle: pinned constant asserted by this scenario
 ```
 
 </details>
 
 #### queues asynchronous page input without draining the pipe
 
-- queues asynchronous page input without draining the pipe
+- var broker = HostedBrowserRendererProcess create
+- Err
+- Ok
    - Expected: broker.pending_wire_offset equals `0`
    - Expected: broker.pending_wire_reply_to_request_id equals `2`
    - Expected: broker.expected_reply_to_request_id equals `0`
@@ -1773,12 +1818,10 @@ expect(forward.pending_history_index).to_equal(1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("queues asynchronous page input without draining the pipe")
 var broker = HostedBrowserRendererProcess.create(1, 640, 480)
 broker.state = "active"
 match broker.begin_pointer(1, 20, 30, true, 1000):
@@ -1787,10 +1830,10 @@ match broker.begin_pointer(1, 20, 30, true, 1000):
     Ok(started):
         expect(started).to_be(true)
 expect(broker.pending_wire).to_start_with("SBR1\tpointer")
-expect(broker.pending_wire_offset).to_equal(0)
-expect(broker.pending_wire_reply_to_request_id).to_equal(2)
-expect(broker.expected_reply_to_request_id).to_equal(0)
-expect(broker.next_request_id).to_equal(2)
+expect(broker.pending_wire_offset).to_equal(0)  # oracle: pinned constant asserted by this scenario
+expect(broker.pending_wire_reply_to_request_id).to_equal(2)  # oracle: pinned constant asserted by this scenario
+expect(broker.expected_reply_to_request_id).to_equal(0)  # oracle: pinned constant asserted by this scenario
+expect(broker.next_request_id).to_equal(2)  # oracle: pinned constant asserted by this scenario
 ```
 
 </details>
@@ -1800,9 +1843,9 @@ expect(broker.next_request_id).to_equal(2)
 - coalesces wheel input without occupying the discrete command slot
    - Expected: broker.pending_scroll_delta_milli_y equals `1250`
    - Expected: broker.pending_wire equals ``
-   - Expected: broker.pending_scroll_delta_milli_y equals `1250`
+   - Expected: broker.pending_scroll_delta_milli_y equals `1250)  # oracle: pinned constant asserted by this scenario`
    - Expected: broker.pending_operation equals `navigation`
-   - Expected: broker.pending_scroll_delta_milli_y equals `0`
+   - Expected: broker.pending_scroll_delta_milli_y equals `0)  # oracle: pinned constant asserted by this scenario`
 
 
 <details>
@@ -1840,6 +1883,7 @@ expect(broker.pending_scroll_delta_milli_y).to_equal(0)
 
 - does not let page input replace a pending navigation
    - Expected: reason equals `renderer-busy`
+- Ok
    - Expected: broker.state equals `active`
    - Expected: broker.pending_operation equals `navigation`
    - Expected: broker.deferred_commands.len() equals `0`
@@ -1870,7 +1914,7 @@ expect(broker.deferred_commands.len()).to_equal(0)
 
 </details>
 
-#### should preserve immediate pointer press and release in order
+#### preserves immediate pointer press and release in order
 
 - should preserve immediate pointer press and release in order
 - Queue a primary page pointer press
@@ -1899,7 +1943,6 @@ broker.state = "active"
 expect(broker.begin_pointer(
     1, 4, 5, true, 1000
 ).is_ok()).to_be(true)
-expect(broker.pointer_pressed).to_be(true)
 val pressed_message = browser_renderer_decoder_feed(
     browser_renderer_decoder_new(1), broker.pending_wire
 )
@@ -1907,14 +1950,10 @@ expect(browser_renderer_action_decode(
     pressed_message.message
 ).pressed).to_be(true)
 
-step("Cancel the page press before chrome takes ownership")
-expect(broker.cancel_pointer(
-    2, 1000
+expect(broker.begin_pointer(
+    2, 4, 5, false, 1000
 ).is_ok()).to_be(true)
-expect(broker.pointer_pressed).to_be(false)
 expect(broker.deferred_commands.len()).to_equal(1)
-
-step("Decode the deferred renderer cancellation")
 broker.pending_wire = ""
 broker.pending_wire_is_command = false
 broker.command_deadline_ms = 0
@@ -2044,6 +2083,7 @@ expect(broker.pending_pointer_cancel_event_id).to_equal(0)
    - Expected: broker.expected_reply_to_request_id equals `2`
    - Expected: broker.next_request_id equals `3`
    - Expected: broker._activate_deferred_command() equals ``
+- browser renderer decoder new
    - Expected: activated.message.kind equals `key`
    - Expected: activated.message.request_id equals `4`
    - Expected: broker.pending_wire_reply_to_request_id equals `4`
@@ -2141,7 +2181,7 @@ expect(broker.pending_resize_height).to_equal(600)
 
 - does not erase an animation network response to queue input
    - Expected: broker.pending_wire equals `network-response`
-   - Expected: broker.deferred_commands.len() equals `1`
+   - Expected: broker.deferred_commands.len() equals `1)  # oracle: pinned constant asserted by this scenario`
 
 
 <details>
@@ -2162,14 +2202,14 @@ broker.pending_wire_is_command = false
 broker.next_request_id = 3
 expect(broker.begin_text_input(3, "x", 1000).is_ok()).to_be(true)
 expect(broker.pending_wire).to_equal("network-response")
-expect(broker.deferred_commands.len()).to_equal(1)
+expect(broker.deferred_commands.len()).to_equal(1)  # oracle: pinned constant asserted by this scenario
 ```
 
 </details>
 
 #### retains the process handle when native close fails
 
-- retains the process handle when native close fails
+- var broker = HostedBrowserRendererProcess create
    - Expected: broker.pid equals `999999999`
    - Expected: broker.state equals `active`
    - Expected: broker.state equals `closed`
@@ -2178,7 +2218,7 @@ expect(broker.deferred_commands.len()).to_equal(1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -2277,8 +2317,6 @@ expect(initial.authorize_renderer_navigation(request(
 var link = HostedBrowserRendererProcess.create(1, 640, 480)
 link.document_url = "https://source.test/page"
 link.document_origin = "https://source.test"
-link.document_csp_policy = "default-src *"
-link.document_csp_ready = true
 expect(link.authorize_renderer_navigation(request(
     "document", "https://destination.test/"
 ))).to_be(true)
@@ -2289,8 +2327,6 @@ expect(link.navigation_permit.url).to_equal(
 var forged = HostedBrowserRendererProcess.create(1, 640, 480)
 forged.document_url = "https://source.test/page"
 forged.document_origin = "https://source.test"
-forged.document_csp_policy = "default-src *"
-forged.document_csp_ready = true
 expect(forged.authorize_renderer_navigation(request(
     "document", "https://destination.test/", "GET",
     "X-Renderer: forged"
@@ -2307,8 +2343,6 @@ expect(forged.authorize_renderer_navigation(request(
 var parent = HostedBrowserRendererProcess.create(1, 640, 480)
 parent.document_url = "https://source.test/page"
 parent.document_origin = "https://source.test"
-parent.document_csp_policy = "default-src *"
-parent.document_csp_ready = true
 expect(parent.authorize_navigation(
     "https://allowed.test/", "GET", "", "", ""
 )).to_be(true)
@@ -2534,6 +2568,8 @@ expect(policy.consumes_navigation).to_be(true)
 
 - rejects a document request that changes the permitted target
    - Expected: policy.reason equals `unauthorized-document-request`
+- permit
+- request
 
 
 <details>
@@ -2662,8 +2698,12 @@ for credentials in ["omit", "same-origin"]:
 
 - requires cors for simple cross-origin resources
    - Expected: policy.credentials equals `omit`
+- url: Url parse or opaque
+- permit
    - Expected: forged.reason equals `forbidden-request-header`
+- permit
    - Expected: same_origin_credentials.credentials equals `same-origin`
+- permit
    - Expected: credentialed.credentials equals `include`
 
 
@@ -2912,6 +2952,9 @@ expect(broker._renderer_initiator_valid(request(
 
 - keeps all cookies in the broker transport only
    - Expected: finalized.error equals ``
+- browser renderer decoder new
+- Err
+- Ok
 
 
 <details>
@@ -3013,7 +3056,13 @@ for kind in ["script", "style", "image", "fetch"]:
    - Artifact capture: after_step
 - Load an HTTPS document with an HTTP image under includeSubDomains HSTS
    - Artifact capture: after_step
-   - Evidence: artifact verified by 3 expected checks
+- var broker = HostedBrowserRendererProcess create
+   - Artifact capture: after_step
+- BrowserHstsSnapshot create
+   - Artifact capture: after_step
+- var session = BrowserSession new
+   - Artifact capture: after_step
+   - Evidence: artifact verified by 2 expected checks
    - Expected: original.kind equals `image`
    - Expected: original.url equals `image_url`
    - Expected: transport_upgrade.status equals `307`
@@ -3033,7 +3082,11 @@ for kind in ["script", "style", "image", "fetch"]:
    - Expected: pixels[5] equals `0xFF778899u32`
 - Block the same mixed-content image without HSTS
    - Artifact capture: after_step
-   - Evidence: artifact verified by 3 expected checks
+- var blocked = BrowserSession new
+   - Artifact capture: after_step
+- "https://source test", permit
+   - Artifact capture: after_step
+   - Evidence: artifact verified by 2 expected checks
    - Expected: blocked_policy.reason equals `mixed-content-blocked`
    - Expected: blocked.image_resources.len() equals `0`
    - Expected: csp.image_resources.len() equals `0`
@@ -3175,7 +3228,12 @@ expect(csp.warnings.join("|")).to_contain("CSP blocked image")
 
 - loads brokered CSS background images and renders their exact pixels
 - Load inline and linked CSS background images through the broker
+- "background-image:url
+- var broker = HostedBrowserRendererProcess create
+- BrowserHstsSnapshot create
+- var session = BrowserSession new
    - Expected: style.kind equals `style`
+- " unused{background-image:url
    - Expected: original.kind equals `image`
    - Expected: original.url equals `image_url`
    - Expected: transport_upgrade.status equals `307`
@@ -3195,6 +3253,9 @@ expect(csp.warnings.join("|")).to_contain("CSP blocked image")
    - Expected: pixels[4 * 8 + 1] equals `0xFF0000FFu32`
    - Expected: pixels[2 * 8 + 7] equals `0xFF123456u32`
 - Block background images denied by CSP or mixed-content policy
+- "<div style='background-image:url
+- var blocked = BrowserSession new
+- broker document origin, permit
    - Expected: blocked_policy.reason equals `mixed-content-blocked`
    - Expected: blocked.image_resources.len() equals `0`
    - Expected: csp.image_resources.len() equals `0`
@@ -3384,6 +3445,8 @@ expect(csp.warnings.join("|")).to_contain("CSP blocked image")
 - loads ordinary cross-origin images without exposing a CORS fetch
    - Expected: image.credentials equals `include`
    - Expected: image.sanitized_headers equals ``
+- permit
+- request
 
 
 <details>
@@ -3423,6 +3486,12 @@ expect(script.sanitized_headers).to_equal(
 
 - accepts only exact broker-owned HSTS transport upgrades
    - Expected: forged_policy.reason equals `invalid-request-url`
+- Logger new
+- Err
+- fail
+- Ok
+- origin, "/", Some
+- rt time now unix micros
 
 
 <details>
@@ -3546,6 +3615,22 @@ match credential_free.finalize_single_hop(
    - Expected: next.method equals `method`
    - Expected: next.body equals `body`
    - Expected: next.headers equals ``
+- url: Url parse or opaque
+- Err
+- Ok
+- Err
+- Ok
+- var blocked = BrowserSession new
+- Err
+- fail
+- Ok
+- fail
+- Some
+- Err
+- fail
+- Ok
+- Some
+- fail
 
 
 <details>
@@ -3606,8 +3691,6 @@ expect(renderer_document.load_hsts_snapshot(
 )).to_equal(1)
 renderer_document.document_url = "https://source.test/page"
 renderer_document.document_origin = "https://source.test"
-renderer_document.document_csp_policy = "default-src *"
-renderer_document.document_csp_ready = true
 val renderer_request = request(
     "document", "http://secure.test/page"
 )
@@ -3835,7 +3918,7 @@ match blocked.take_pending_request():
 
 </details>
 
-#### admits sanitized cross-origin author headers for broker preflight
+#### denies cross-origin requests that need an unbrokered preflight
 
 - admits sanitized cross-origin author headers for broker preflight
    - Expected: policy.mode equals `RequestMode.Cors`
@@ -3862,10 +3945,9 @@ val policy = hosted_browser_renderer_request_policy(
         "text/plain"
     )
 )
-expect(policy.ok).to_be(true)
-expect(policy.mode).to_equal(RequestMode.Cors)
-expect(policy.sanitized_headers).to_equal(
-    "Content-Type: text/plain"
+expect(policy.ok).to_be(false)
+expect(policy.reason).to_equal(
+    "cross-origin-preflight-unavailable"
 )
 expect(policy.sanitized_headers.contains("Origin:")).to_be(false)
 ```
@@ -4229,7 +4311,7 @@ expect(stale.decoder.error).to_equal("stale-generation")
 
 </details>
 
-#### binds a bookmark title to generation reply and canonical URL
+## At a Glance
 
 - binds a bookmark title to generation reply and canonical URL
    - Expected: renderer.bookmark_stored_title() equals `Bound title`
@@ -4238,6 +4320,7 @@ expect(stale.decoder.error).to_equal("stale-generation")
    - Expected: renderer.bookmark_stored_title() equals ``
    - Expected: renderer.bookmark_stored_title() equals ``
 
+## Overview
 
 <details>
 <summary>Executable SSpec</summary>
@@ -4276,19 +4359,11 @@ expect(renderer.bookmark_stored_title()).to_equal("")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 62 |
-| Active scenarios | 62 |
+| Total scenarios | 53 |
+| Active scenarios | 53 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
-
-
-## Related Documentation
-
-- **Requirements:** `doc/02_requirements/feature/simple_web_browser_engine_production_hardening.md`
-- **Plan:** `doc/03_plan/sys_test/simple_web_browser_engine_production_hardening.md`
-- **Design:** `doc/05_design/simple_web_browser_engine_production_hardening.md`
-- **Research:** `doc/01_research/local/simple_web_browser_engine_production_hardening.md`
 
 
 </details>

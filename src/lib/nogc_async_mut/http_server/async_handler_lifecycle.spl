@@ -1,0 +1,230 @@
+"""
+# Bounded asynchronous HTTP handler lifecycle
+
+Pure-Simple, worker-owned bookkeeping for handlers that complete outside the
+socket event loop.  This module deliberately contains no scheduler or renderer:
+the worker submits an identity, an executor marks it pending/completed, and the
+worker later takes the response.  Terminal transitions are exactly once.
+"""
+
+use std.http_server.types.{HttpResponseData, default_response_data}
+use std.concurrent.channel.{channel_from_id}
+
+enum AsyncHandlerState:
+    Submitted
+    Pending
+    Completed
+    Cancelled
+    TimedOut
+    Rejected
+
+enum AsyncSubmitResult:
+    Accepted(i64)
+    Rejected
+
+enum AsyncCompletionResult:
+    Ready(HttpResponseData)
+    NotReady
+    Gone
+
+class AsyncHandlerJob:
+    job_id: i64
+    connection_id: i64
+    deadline_ms: i64
+    state: AsyncHandlerState
+    response: HttpResponseData
+
+class AsyncHandlerCompletionMessage:
+    job_id: i64
+    response: HttpResponseData
+
+fn send_async_handler_completion(channel_id: i64, job_id: i64,
+                                 response: HttpResponseData) -> bool:
+    """Thread-safe executor hook for returning a response to its worker."""
+    val channel = channel_from_id(channel_id)
+    channel.try_send(AsyncHandlerCompletionMessage(job_id: job_id, response: response))
+
+class AsyncHandlerLifecycle:
+    capacity: i64
+    next_job_id: i64
+    draining: bool
+    jobs: Dict<i64, AsyncHandlerJob>
+
+    static fn create(capacity: i64) -> AsyncHandlerLifecycle:
+        val bounded_capacity = if capacity > 0: capacity else: 1
+        AsyncHandlerLifecycle(
+            capacity: bounded_capacity,
+            next_job_id: 1,
+            draining: false,
+            jobs: {}
+        )
+
+    fn active_count() -> i64:
+        var count = 0
+        val ids = self.jobs.keys()
+        for job_id in ids:
+            if not async_handler_state_is_terminal(self.jobs[job_id].state):
+                count = count + 1
+        count
+
+    fn retained_count() -> i64:
+        self.jobs.keys().len()
+
+    fn state_of(job_id: i64) -> AsyncHandlerState:
+        if self.jobs.contains_key(job_id):
+            return self.jobs[job_id].state
+        AsyncHandlerState.Rejected
+
+    me submit(connection_id: i64, now_ms: i64, timeout_ms: i64) -> AsyncSubmitResult:
+        # Terminal entries remain retained until the worker delivers/reclaims
+        # them, so count every slot to keep memory strictly bounded too.
+        if self.draining or self.retained_count() >= self.capacity:
+            return AsyncSubmitResult.Rejected
+
+        val job_id = self.next_job_id
+        self.next_job_id = self.next_job_id + 1
+        val bounded_timeout = if timeout_ms > 0: timeout_ms else: 1
+        self.jobs[job_id] = AsyncHandlerJob(
+            job_id: job_id,
+            connection_id: connection_id,
+            deadline_ms: now_ms + bounded_timeout,
+            state: AsyncHandlerState.Submitted,
+            response: default_response_data(503, "Service Unavailable", "")
+        )
+        AsyncSubmitResult.Accepted(job_id)
+
+    me mark_pending(job_id: i64) -> bool:
+        if not self.jobs.contains_key(job_id):
+            return false
+        var job = self.jobs[job_id]
+        match job.state:
+            AsyncHandlerState.Submitted:
+                job.state = AsyncHandlerState.Pending
+                self.jobs[job_id] = job
+                true
+            _:
+                false
+
+    me complete(job_id: i64, response: HttpResponseData) -> bool:
+        if not self.jobs.contains_key(job_id):
+            return false
+        var job = self.jobs[job_id]
+        match job.state:
+            AsyncHandlerState.Submitted:
+                job.state = AsyncHandlerState.Completed
+                job.response = response
+                self.jobs[job_id] = job
+                true
+            AsyncHandlerState.Pending:
+                job.state = AsyncHandlerState.Completed
+                job.response = response
+                self.jobs[job_id] = job
+                true
+            _:
+                false
+
+    me cancel_connection(connection_id: i64) -> i64:
+        var cancelled = 0
+        val ids = self.jobs.keys()
+        for job_id in ids:
+            var job = self.jobs[job_id]
+            if job.connection_id == connection_id and not async_handler_state_is_terminal(job.state):
+                job.state = AsyncHandlerState.Cancelled
+                self.jobs[job_id] = job
+                cancelled = cancelled + 1
+        cancelled
+
+    me cancel(job_id: i64) -> bool:
+        """Cancel one submission without affecting sibling multiplexed work."""
+        if not self.jobs.contains_key(job_id):
+            return false
+        var job = self.jobs[job_id]
+        if async_handler_state_is_terminal(job.state):
+            return false
+        job.state = AsyncHandlerState.Cancelled
+        self.jobs[job_id] = job
+        true
+
+    me expire(now_ms: i64) -> i64:
+        var timed_out = 0
+        val ids = self.jobs.keys()
+        for job_id in ids:
+            var job = self.jobs[job_id]
+            if now_ms >= job.deadline_ms and not async_handler_state_is_terminal(job.state):
+                job.state = AsyncHandlerState.TimedOut
+                self.jobs[job_id] = job
+                timed_out = timed_out + 1
+        timed_out
+
+    me take_completed(job_id: i64) -> AsyncCompletionResult:
+        if not self.jobs.contains_key(job_id):
+            return AsyncCompletionResult.Gone
+        val job = self.jobs[job_id]
+        match job.state:
+            AsyncHandlerState.Completed:
+                self.jobs.remove(job_id)
+                AsyncCompletionResult.Ready(job.response)
+            AsyncHandlerState.Cancelled:
+                self.jobs.remove(job_id)
+                AsyncCompletionResult.Gone
+            AsyncHandlerState.TimedOut:
+                self.jobs.remove(job_id)
+                AsyncCompletionResult.Gone
+            _:
+                AsyncCompletionResult.NotReady
+
+    me reclaim_terminal(job_id: i64) -> bool:
+        if not self.jobs.contains_key(job_id):
+            return false
+        if not async_handler_state_is_terminal(self.jobs[job_id].state):
+            return false
+        self.jobs.remove(job_id)
+        true
+
+    me begin_drain() -> i64:
+        self.draining = true
+        # Graceful drain closes admission but preserves accepted work. Existing
+        # jobs still complete or expire at their already-bounded deadlines.
+        self.active_count()
+
+    me cancel_all() -> i64:
+        var cancelled = 0
+        val ids = self.jobs.keys()
+        for job_id in ids:
+            var job = self.jobs[job_id]
+            if not async_handler_state_is_terminal(job.state):
+                job.state = AsyncHandlerState.Cancelled
+                self.jobs[job_id] = job
+                cancelled = cancelled + 1
+        cancelled
+
+    me cleanup_terminal() -> i64:
+        var removed = 0
+        val ids = self.jobs.keys()
+        for job_id in ids:
+            if async_handler_state_is_terminal(self.jobs[job_id].state):
+                self.jobs.remove(job_id)
+                removed = removed + 1
+        removed
+
+fn async_handler_state_is_terminal(state: AsyncHandlerState) -> bool:
+    match state:
+        AsyncHandlerState.Completed: true
+        AsyncHandlerState.Cancelled: true
+        AsyncHandlerState.TimedOut: true
+        AsyncHandlerState.Rejected: true
+        _: false
+
+fn async_handler_state_label(state: AsyncHandlerState) -> text:
+    match state:
+        AsyncHandlerState.Submitted: "submitted"
+        AsyncHandlerState.Pending: "pending"
+        AsyncHandlerState.Completed: "completed"
+        AsyncHandlerState.Cancelled: "cancelled"
+        AsyncHandlerState.TimedOut: "timedout"
+        AsyncHandlerState.Rejected: "rejected"
+
+export AsyncHandlerState, AsyncSubmitResult, AsyncCompletionResult
+export AsyncHandlerJob, AsyncHandlerLifecycle
+export AsyncHandlerCompletionMessage, send_async_handler_completion
+export async_handler_state_is_terminal, async_handler_state_label

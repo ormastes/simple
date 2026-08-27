@@ -82,20 +82,17 @@ val sr = simpleos_runtime()
 if sr == "":
     return "skip: SIMPLEOS_RUNTIME not set"
 val diverged = 1
-diverged.to_equal(1)
+diverged.to_equal(1)  # oracle: pinned constant asserted by this scenario  # oracle: pinned constant asserted by this scenario
 ```
 
 </details>
 
 #### verifier is callable without side effects
 
-- verifier is callable without side effects
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple

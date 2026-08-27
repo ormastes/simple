@@ -17,8 +17,7 @@ Date: 2026-06-25
      Torch/Slang owner readiness is still placeholder-backed
 2. Optional chat template absence:
    - Given no chat template
-   - Then output uses option-like absence and does not expose the runtime's
-     internal absence marker
+   - Then output uses option-like absence and does not contain literal `nil`
 3. Static LoRA adapter:
    - Given one adapter mapping
    - Then the event records adapter readiness/count without exposing adapter
@@ -28,14 +27,13 @@ Date: 2026-06-25
    - Then the event status is `blocked` unless trusted mode is explicit
 5. Dashboard readback:
    - Given probe JSONL
-   - Then the dashboard diagnostics panel renders status/reason without the
-     runtime's internal absence marker
+   - Then the dashboard diagnostics panel renders status/reason nil-free
 6. Security readback:
    - Given probe metadata with sensitive-looking values
    - Then runtime manifest fields do not render credentials, API-key-like
      labels, or local model/adapter paths by default
 7. Runtime blocker readback:
-   - Given Torch/SFFI or Slang loader readiness reports placeholder behavior
+   - Given Torch/SFFI or svLLM loader readiness reports placeholder behavior
    - Then the bridge reports `blocked`
 8. Static serve-plan metadata:
    - Given a manifest with a base model, endpoint, and optional static LoRA
@@ -45,7 +43,7 @@ Date: 2026-06-25
 9. Malformed serve-plan input:
    - Given malformed adapter entries or an invalid endpoint
    - Then the plan reports explicit `invalid_adapter_entry` or
-     `invalid_endpoint` reasons without the runtime's internal absence marker
+     `invalid_endpoint` reasons without literal `nil`
 
 ## Verification Notes
 

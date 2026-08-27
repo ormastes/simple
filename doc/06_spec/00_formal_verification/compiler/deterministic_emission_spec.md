@@ -2,6 +2,29 @@
 
 > Verifies that LeanCodegen produces byte-identical output regardless of the order in which items (structures, inductives, functions, theorems, imports) are added. Both `emit()` and `generate()` must sort by `.name` before rendering.
 
+<!-- sdn-diagram:id=deterministic_emission_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=deterministic_emission_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+deterministic_emission_spec -> verification
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=deterministic_emission_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 4 | 4 | 0 | 0 |
@@ -26,7 +49,7 @@ Verifies that LeanCodegen produces byte-identical output regardless of the order
 | Design | N/A |
 | Research | N/A |
 | Source | `test/00_formal_verification/compiler/deterministic_emission_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -50,19 +73,62 @@ rendering.
 
 #### produces identical output regardless of insertion order
 
-- produces identical output regardless of insertion order
+1. var opts a = codegen LeanCodegenOptions new
+2. opts a = opts a with module name
+3. var cg a = codegen LeanCodegen new
+4. var struct alpha = codegen LeanStructure new
+5. struct alpha = struct alpha add field
+6. var struct beta = codegen LeanStructure new
+7. struct beta = struct beta add field
+8. cg a = cg a add structure
+9. cg a = cg a add structure
+10. var func add = codegen LeanFunction new
+11. func add = func add add param
+12. func add = func add with return type
+13. func add = func add with body
+14. var func mul = codegen LeanFunction new
+15. func mul = func mul add param
+16. func mul = func mul with return type
+17. func mul = func mul with body
+18. cg a = cg a add function
+19. cg a = cg a add function
+20. var thm a = codegen LeanTheorem new
+21. var thm b = codegen LeanTheorem new
+22. cg a = cg a add theorem
+23. cg a = cg a add theorem
+24. var opts b = codegen LeanCodegenOptions new
+25. opts b = opts b with module name
+26. var cg b = codegen LeanCodegen new
+27. var struct beta2 = codegen LeanStructure new
+28. struct beta2 = struct beta2 add field
+29. var struct alpha2 = codegen LeanStructure new
+30. struct alpha2 = struct alpha2 add field
+31. cg b = cg b add structure
+32. cg b = cg b add structure
+33. var func mul2 = codegen LeanFunction new
+34. func mul2 = func mul2 add param
+35. func mul2 = func mul2 with return type
+36. func mul2 = func mul2 with body
+37. var func add2 = codegen LeanFunction new
+38. func add2 = func add2 add param
+39. func add2 = func add2 with return type
+40. func add2 = func add2 with body
+41. cg b = cg b add function
+42. cg b = cg b add function
+43. var thm b2 = codegen LeanTheorem new
+44. var thm a2 = codegen LeanTheorem new
+45. cg b = cg b add theorem
+46. cg b = cg b add theorem
    - Expected: output_a equals `output_b`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 71 lines folded for reproduction.
+Runnable source: 69 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-FORMALVERIFI
-step("produces identical output regardless of insertion order")
 # Build codegen A: add items in alphabetical order
 var opts_a = codegen.LeanCodegenOptions.new()
 opts_a = opts_a.with_module_name("DetTest")
@@ -138,19 +204,32 @@ expect(output_a).to_equal(output_b)
 
 #### sorts inductives deterministically in emit()
 
-- sorts inductives deterministically in emit()
+1. var opts = codegen LeanCodegenOptions new
+2. opts = opts with module name
+3. var cg1 = codegen LeanCodegen new
+4. var ind z = codegen LeanInductive new
+5. ind z = ind z add constructor
+6. var ind a = codegen LeanInductive new
+7. ind a = ind a add constructor
+8. cg1 = cg1 add inductive
+9. cg1 = cg1 add inductive
+10. var cg2 = codegen LeanCodegen new
+11. var ind a2 = codegen LeanInductive new
+12. ind a2 = ind a2 add constructor
+13. var ind z2 = codegen LeanInductive new
+14. ind z2 = ind z2 add constructor
+15. cg2 = cg2 add inductive
+16. cg2 = cg2 add inductive
    - Expected: out1 equals `out2`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 26 lines folded for reproduction.
+Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-FORMALVERIFI
-step("sorts inductives deterministically in emit()")
 var opts = codegen.LeanCodegenOptions.new()
 opts = opts.with_module_name("IndTest")
 
@@ -183,19 +262,50 @@ expect(out1).to_equal(out2)
 
 #### produces identical generate() output regardless of insertion order
 
-- produces identical generate() output regardless of insertion order
+1. var opts a = codegen LeanCodegenOptions new
+2. opts a = opts a with module name
+3. var cg a = codegen LeanCodegen new
+4. var s1 = codegen LeanStructure new
+5. s1 = s1 add field
+6. var s2 = codegen LeanStructure new
+7. s2 = s2 add field
+8. cg a = cg a add structure
+9. cg a = cg a add structure
+10. var f1 = codegen LeanFunction new
+11. f1 = f1 with return type
+12. f1 = f1 with body
+13. var f2 = codegen LeanFunction new
+14. f2 = f2 with return type
+15. f2 = f2 with body
+16. cg a = cg a add function
+17. cg a = cg a add function
+18. var opts b = codegen LeanCodegenOptions new
+19. opts b = opts b with module name
+20. var cg b = codegen LeanCodegen new
+21. var s2b = codegen LeanStructure new
+22. s2b = s2b add field
+23. var s1b = codegen LeanStructure new
+24. s1b = s1b add field
+25. cg b = cg b add structure
+26. cg b = cg b add structure
+27. var f2b = codegen LeanFunction new
+28. f2b = f2b with return type
+29. f2b = f2b with body
+30. var f1b = codegen LeanFunction new
+31. f1b = f1b with return type
+32. f1b = f1b with body
+33. cg b = cg b add function
+34. cg b = cg b add function
    - Expected: gen_a equals `gen_b`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 52 lines folded for reproduction.
+Runnable source: 50 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-FORMALVERIFI
-step("produces identical generate() output regardless of insertion order")
 var opts_a = codegen.LeanCodegenOptions.new()
 opts_a = opts_a.with_module_name("GenTest")
 var cg_a = codegen.LeanCodegen.new(opts_a)
@@ -254,7 +364,12 @@ expect(gen_a).to_equal(gen_b)
 
 #### sorts imports alphabetically in emit()
 
-- sorts imports alphabetically in emit()
+1. var opts = codegen LeanCodegenOptions new
+2. opts = opts with module name
+3. var cg = codegen LeanCodegen new
+4. cg = cg add import
+5. cg = cg add import
+6. cg = cg add import
    - Expected: aesop_pos < mathlib_basic_pos is true
    - Expected: mathlib_basic_pos < mathlib_tactic_pos is true
    - Expected: mathlib_tactic_pos < std_pos is true
@@ -263,12 +378,10 @@ expect(gen_a).to_equal(gen_b)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 25 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-FORMALVERIFI
-step("sorts imports alphabetically in emit()")
 var opts = codegen.LeanCodegenOptions.new()
 opts = opts.with_module_name("ImportTest")
 var cg = codegen.LeanCodegen.new(opts)
@@ -308,51 +421,3 @@ expect(mathlib_tactic_pos < std_pos).to_equal(true)
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-FORMALVERIFI`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `cdb3ca17d82d3730d5e4465b33ae15a2676d7bcf7e556476c8a188faff1a4076`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `cdb3ca17d82d3730d5e4465b33ae15a2676d7bcf7e556476c8a188faff1a4076`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `cdb3ca17d82d3730d5e4465b33ae15a2676d7bcf7e556476c8a188faff1a4076`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/00_formal_verification/compiler/deterministic_emission_spec.spl
-mirror: doc/06_spec/00_formal_verification/compiler/deterministic_emission_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/00_formal_verification/compiler/deterministic_emission_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/00_formal_verification/compiler/deterministic_emission_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/00_formal_verification/compiler/deterministic_emission_spec.spl:45:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'produces identical output regardless of insertion order' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/00_formal_verification/compiler/deterministic_emission_spec.spl:118:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'sorts inductives deterministically in emit()' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/00_formal_verification/compiler/deterministic_emission_spec.spl:147:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'produces identical generate() output regardless of insertion order' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

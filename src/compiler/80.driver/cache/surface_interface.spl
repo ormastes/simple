@@ -1,0 +1,562 @@
+# Canonical interface encoding of ONE frozen `ModuleSurface`.
+#
+# PURPOSE. `hir_cache_closure_digest` folds every surface's raw `content_hash`,
+# so a comment or a function-body edit anywhere in the closure invalidates every
+# HIR cache entry. This module encodes what a surface exposes to OTHER modules,
+# so that a body-only edit leaves the digest unchanged.
+#
+# COMPLETENESS IS THE WHOLE SAFETY ARGUMENT. Encoding too little produces a
+# stale cache HIT, i.e. a silently wrong compiler binary; encoding too much
+# merely over-invalidates, which is slow but correct. So the rule this file
+# follows, and which any edit must keep following, is:
+#
+#     Every field of `ModuleSurface` is either ENCODED here, or DERIVED from a
+#     field encoded here, or listed below with a reason -- and anything this
+#     encoder cannot encode makes the whole surface FAIL CLOSED.
+#
+# Field-by-field justification for `ModuleSurface` (module_surface_types.spl):
+#   ENCODED: canonical_path, module_name, logical_name, canonical_name,
+#     package_name, preferred_registry_name, imports, exports, friends,
+#     internal_exports, callable_values, composite_values, enum_values,
+#     trait_values, type_alias_values, constant_values, impls, export_origins.
+#   DERIVED (not encoded, and safe only because their sources are):
+#     composite_names / enum_names / trait_names / callable_names /
+#     type_alias_names / constant_names are the `name` fields of the
+#     corresponding *_values arrays. `composite_index` is the scalar
+#     projection of `composite_values` (built by
+#     module_surface_declarations.spl from those same fields). The
+#     `import_*` / `export_route_*` parallel arrays are the frozen route
+#     projections of `imports` / `exports`, both of which ARE encoded here
+#     directly and losslessly -- `ParserImport` is {module, items:
+#     [ImportItem{name, has_alias, alias}], is_lazy} and `Export` is
+#     {items: [text]}, i.e. pure text and bools. Encoding the sources rather
+#     than trusting the projections is deliberate: it removes the need to
+#     prove the projections are complete.
+#     `declaration_authority_index` / `export_origin_index` are indices over
+#     the declarations and export origins already encoded.
+#     The `callables`/`composites`/`enums`/`traits`/`type_aliases`/`constants`
+#     Dicts hold the SAME values as the index-aligned *_values arrays; the
+#     arrays are encoded because their order is deterministic, whereas Dict
+#     iteration order is not.
+#   NOT INTERFACE (build bookkeeping, deliberately excluded): physical_index,
+#     generation, frozen, source_index.
+#   REPLACED BY THIS ENCODING: content_length, content_hash -- these are the
+#     raw-content facts whose over-invalidation this module exists to avoid.
+#     They remain the FALLBACK value the caller folds when this returns "".
+#
+# FAIL-CLOSED SENTINEL. `""` means "could not encode"; every success is
+# non-empty. Callers MUST fold the surface's `content_hash` on "", never skip
+# it. Three constructs always fail closed because they carry arbitrary `Expr`
+# trees this encoder cannot canonicalise, and each is downstream-visible:
+# a trait with non-empty `default_methods` (impl lowering INJECTS those bodies,
+# so a default-body edit really is visible to dependents), an enum variant with
+# an explicit discriminant, and a struct-variant field with a default.
+#
+# `span` is excluded everywhere -- see surface_type_encode.spl for that trade.
+#
+# Record: doc/08_tracking/bug/
+# hir_closure_digest_rekey_blocked_by_incomplete_interface_digest_2026-08-23.md
+
+use compiler.driver.cache.surface_type_encode.{surface_type_encode}
+use compiler.frontend.parser_types_expr.{Type}
+use compiler.frontend.parser_types.{
+    AssocTypeDecl, Export, ImportItem, ParserImport, ParserField,
+    ParserTypeParam, TraitBound, Variant, VariantKind
+}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.hir.hir_lowering.module_surface_types.{
+    ModuleSurface, ModuleSurfaceCallable, ModuleSurfaceComposite,
+    ModuleSurfaceConst, ModuleSurfaceEnum, ModuleSurfaceField,
+    ModuleSurfaceImpl, ModuleSurfaceParam, ModuleSurfaceTrait,
+    ModuleSurfaceTypeAlias
+}
+
+fn _si_q(s: text) -> text:
+    """Length-prefix free text so a name cannot be confused with a delimiter."""
+    "{s.len()}:" + s
+
+fn _si_b(b: bool) -> text:
+    if b: "1" else: "0"
+
+fn _si_sorted_texts(items: [text]) -> [text]:
+    """Insertion sort. Used ONLY for Dict keys, whose iteration order is not
+    deterministic; positional lists are never sorted."""
+    var out: [text] = []
+    for item in items:
+        var inserted = false
+        var next: [text] = []
+        for existing in out:
+            if not inserted and item < existing:
+                next.push(item)
+                inserted = true
+            next.push(existing)
+        if not inserted:
+            next.push(item)
+        out = next
+    out
+
+fn _si_visibility(v: Visibility) -> text:
+    match v:
+        case Visibility.Public: "vP"
+        case Visibility.Peer: "vE"
+        case Visibility.Up: "vU"
+        case Visibility.Internal: "vI"
+        case Visibility.Package: "vK"
+        case Visibility.Private: "vR"
+        case _: ""
+
+fn _si_type(t: Type) -> text:
+    surface_type_encode(t)
+
+fn _si_opt_type(has: bool, t: Type) -> text:
+    """Encode an optional type guarded by its `has_` flag. When the flag is
+    false the payload is meaningless and must NOT be decoded."""
+    if not has:
+        return "-"
+    val e = _si_type(t)
+    if e == "":
+        return ""
+    "+" + e
+
+fn _si_types(types: [Type]) -> text:
+    var out = "["
+    var i = 0
+    while i < types.len():
+        if i > 0:
+            out = out + ","
+        val e = _si_type(types[i])
+        if e == "":
+            return ""
+        out = out + e
+        i = i + 1
+    out + "]"
+
+fn _si_type_params(params: [ParserTypeParam]) -> text:
+    """Generic parameters. Bounds and DEFAULTS are downstream-visible -- the
+    re-export materializer reads `param.default` across module boundaries
+    (module_reexport_materialization.spl:517,538) -- so both are encoded."""
+    var out = "["
+    var i = 0
+    while i < params.len():
+        if i > 0:
+            out = out + ","
+        val p = params[i]
+        val bounds = _si_types(p.bounds)
+        if bounds == "":
+            return ""
+        val dflt = _si_opt_type(p.has_default, p.default)
+        if dflt == "":
+            return ""
+        out = out + "tp(" + _si_q(p.name) + "," + bounds + "," + dflt + ")"
+        i = i + 1
+    out + "]"
+
+fn _si_trait_bounds(bounds: [TraitBound]) -> text:
+    var out = "["
+    var i = 0
+    while i < bounds.len():
+        if i > 0:
+            out = out + ","
+        val b = bounds[i]
+        val t = _si_type(b.trait_)
+        if t == "":
+            return ""
+        out = out + "tb(" + _si_q(b.type_param) + "," + t + ")"
+        i = i + 1
+    out + "]"
+
+fn _si_assoc_types(items: [AssocTypeDecl]) -> text:
+    var out = "["
+    var i = 0
+    while i < items.len():
+        if i > 0:
+            out = out + ","
+        val a = items[i]
+        val bounds = _si_types(a.bounds)
+        if bounds == "":
+            return ""
+        val dflt = _si_opt_type(a.has_default, a.default)
+        if dflt == "":
+            return ""
+        out = out + "at(" + _si_q(a.name) + "," + bounds + "," + dflt + ")"
+        i = i + 1
+    out + "]"
+
+fn _si_param(p: ModuleSurfaceParam) -> text:
+    """`type_name` / `array_element_name` are deliberately NOT encoded: they are
+    lossy scalar projections of `type_`, which is encoded losslessly instead.
+    `has_default` is encoded but the default EXPRESSION is not -- the surface
+    itself omits it, so no dependent can read it."""
+    val t = _si_opt_type(p.has_type_, p.type_)
+    if t == "":
+        return ""
+    "pm(" + _si_q(p.name) + "," + t + "," + _si_b(p.has_default) + "," + _si_b(p.is_mutable) + ")"
+
+fn _si_callable(c: ModuleSurfaceCallable) -> text:
+    val tps = _si_type_params(c.type_params)
+    if tps == "":
+        return ""
+    var params = "["
+    var i = 0
+    while i < c.params.len():
+        if i > 0:
+            params = params + ","
+        val e = _si_param(c.params[i])
+        if e == "":
+            return ""
+        params = params + e
+        i = i + 1
+    params = params + "]"
+    val ret = _si_opt_type(c.has_return_type, c.return_type)
+    if ret == "":
+        return ""
+    val vis = _si_visibility(c.visibility)
+    if vis == "":
+        return ""
+    var flags = ""
+    flags = flags + _si_b(c.is_async) + _si_b(c.is_static) + _si_b(c.is_public)
+    flags = flags + _si_b(c.is_method) + _si_b(c.is_mutable) + _si_b(c.is_const)
+    flags = flags + _si_b(c.is_kernel) + _si_b(c.is_extern)
+    "cl(" + _si_q(c.name) + "," + tps + "," + params + "," + ret + "," + vis + "," + flags + ")"
+
+fn _si_field(f: ModuleSurfaceField) -> text:
+    val t = _si_type(f.type_)
+    if t == "":
+        return ""
+    val vis = _si_visibility(f.visibility)
+    if vis == "":
+        return ""
+    "fd(" + _si_q(f.name) + "," + t + "," + vis + "," + _si_q(f.declaring_module) + ")"
+
+fn _si_composite(c: ModuleSurfaceComposite) -> text:
+    val tps = _si_type_params(c.type_params)
+    if tps == "":
+        return ""
+    var fields = "["
+    var i = 0
+    while i < c.fields.len():
+        if i > 0:
+            fields = fields + ","
+        val e = _si_field(c.fields[i])
+        if e == "":
+            return ""
+        fields = fields + e
+        i = i + 1
+    fields = fields + "]"
+    val vis = _si_visibility(c.visibility)
+    if vis == "":
+        return ""
+    "cp(" + _si_q(c.name) + "," + _si_q(c.kind) + "," + tps + "," + vis + "," + _si_b(c.is_public) + ")"
+
+fn _si_parser_field(f: ParserField) -> text:
+    """A struct-variant field. A field DEFAULT is an arbitrary `Expr` this
+    encoder cannot canonicalise, so its presence fails the surface CLOSED
+    rather than being silently ignored."""
+    if f.has_default:
+        return ""
+    val t = _si_type(f.type_)
+    if t == "":
+        return ""
+    val vis = _si_visibility(f.visibility)
+    if vis == "":
+        return ""
+    var flags = _si_b(f.is_public) + _si_b(f.is_volatile) + _si_b(f.has_bits)
+    var bits = "{f.bits}"
+    "pf(" + _si_q(f.name) + "," + t + "," + vis + "," + flags + "," + bits + ")"
+
+fn _si_variant(v: Variant) -> text:
+    """Enum variant. An explicit DISCRIMINANT is an arbitrary `Expr` and is
+    directly downstream-visible (it fixes the tag value), so it fails closed."""
+    if v.has_discriminant:
+        return ""
+    var kind = ""
+    match v.kind:
+        case VariantKind.Unit:
+            kind = "u"
+        case VariantKind.Tuple(types):
+            val e = _si_types(types)
+            if e == "":
+                return ""
+            kind = "t" + e
+        case VariantKind.Struct(fields):
+            var out = "["
+            var i = 0
+            while i < fields.len():
+                if i > 0:
+                    out = out + ","
+                val e = _si_parser_field(fields[i])
+                if e == "":
+                    return ""
+                out = out + e
+                i = i + 1
+            kind = "s" + out + "]"
+        case _:
+            return ""
+    if kind == "":
+        return ""
+    "vr(" + _si_q(v.name) + "," + kind + ")"
+
+fn _si_enum(e: ModuleSurfaceEnum) -> text:
+    val tps = _si_type_params(e.type_params)
+    if tps == "":
+        return ""
+    var variants = "["
+    var i = 0
+    while i < e.variants.len():
+        if i > 0:
+            variants = variants + ","
+        val v = _si_variant(e.variants[i])
+        if v == "":
+            return ""
+        variants = variants + v
+        i = i + 1
+    variants = variants + "]"
+    val vis = _si_visibility(e.visibility)
+    if vis == "":
+        return ""
+    "en(" + _si_q(e.name) + "," + tps + "," + variants + "," + vis + "," + _si_b(e.is_public) + ")"
+
+fn _si_trait(t: ModuleSurfaceTrait) -> text:
+    # Default method BODIES are retained on the surface precisely because impl
+    # lowering injects unoverridden defaults into dependents. A body edit there
+    # IS downstream-visible for this cache, and bodies cannot be encoded here,
+    # so any trait carrying one fails the surface closed.
+    if t.default_methods.len() > 0:
+        return ""
+    val tps = _si_type_params(t.type_params)
+    if tps == "":
+        return ""
+    val supers = _si_types(t.super_traits)
+    if supers == "":
+        return ""
+    val wheres = _si_trait_bounds(t.where_clause)
+    if wheres == "":
+        return ""
+    val assoc = _si_assoc_types(t.assoc_types)
+    if assoc == "":
+        return ""
+    var methods = "["
+    var i = 0
+    while i < t.methods.len():
+        if i > 0:
+            methods = methods + ","
+        val m = _si_callable(t.methods[i])
+        if m == "":
+            return ""
+        methods = methods + m
+        i = i + 1
+    methods = methods + "]"
+    val vis = _si_visibility(t.visibility)
+    if vis == "":
+        return ""
+    "tr(" + _si_q(t.name) + "," + tps + "," + supers + "," + wheres + "," + assoc + "," + methods + "," + vis + "," + _si_b(t.is_public) + ")"
+
+fn _si_impl(im: ModuleSurfaceImpl) -> text:
+    val ty = _si_type(im.type_)
+    if ty == "":
+        return ""
+    val tr = _si_opt_type(im.has_trait_, im.trait_)
+    if tr == "":
+        return ""
+    # `methods` is a Dict: iteration order is not deterministic, so the keys
+    # are sorted before folding. Without this the digest would differ between
+    # two runs over identical input.
+    val keys = _si_sorted_texts(im.methods.keys())
+    var methods = "["
+    var i = 0
+    while i < keys.len():
+        if i > 0:
+            methods = methods + ","
+        val m = _si_callable(im.methods[keys[i]])
+        if m == "":
+            return ""
+        methods = methods + "k" + _si_q(keys[i]) + m
+        i = i + 1
+    methods = methods + "]"
+    "im(" + ty + "," + tr + "," + methods + ")"
+
+fn _si_const(c: ModuleSurfaceConst) -> text:
+    """Constant VALUES are deliberately omitted by the surface itself, so no
+    dependent can read one; the declared shape is what is visible."""
+    val t = _si_opt_type(c.has_type_, c.type_)
+    if t == "":
+        return ""
+    val vis = _si_visibility(c.visibility)
+    if vis == "":
+        return ""
+    var flags = _si_b(c.is_mutable) + _si_b(c.is_public) + _si_b(c.is_volatile) + _si_b(c.has_fixed_address)
+    "cn(" + _si_q(c.name) + "," + t + "," + vis + "," + flags + "," + "{c.fixed_address}" + ")"
+
+fn _si_type_alias(a: ModuleSurfaceTypeAlias) -> text:
+    val tps = _si_type_params(a.type_params)
+    if tps == "":
+        return ""
+    val t = _si_type(a.type_)
+    if t == "":
+        return ""
+    val vis = _si_visibility(a.visibility)
+    if vis == "":
+        return ""
+    "ta(" + _si_q(a.name) + "," + tps + "," + t + "," + vis + "," + _si_b(a.is_public) + ")"
+
+fn _si_imports(imports: [ParserImport]) -> text:
+    var out = "["
+    var i = 0
+    while i < imports.len():
+        if i > 0:
+            out = out + ","
+        val im = imports[i]
+        var items = "["
+        var j = 0
+        while j < im.items.len():
+            if j > 0:
+                items = items + ","
+            val it = im.items[j]
+            items = items + "ii(" + _si_q(it.name) + "," + _si_b(it.has_alias) + "," + _si_q(it.alias) + ")"
+            j = j + 1
+        items = items + "]"
+        out = out + "ip(" + _si_q(im.module) + "," + items + "," + _si_b(im.is_lazy) + ")"
+        i = i + 1
+    out + "]"
+
+fn _si_exports(exports: [Export]) -> text:
+    var out = "["
+    var i = 0
+    while i < exports.len():
+        if i > 0:
+            out = out + ","
+        var items = "["
+        var j = 0
+        val ex = exports[i]
+        while j < ex.items.len():
+            if j > 0:
+                items = items + ","
+            items = items + _si_q(ex.items[j])
+            j = j + 1
+        items = items + "]"
+        out = out + "ex(" + items + ")"
+        i = i + 1
+    out + "]"
+
+fn _si_text_list(items: [text]) -> text:
+    var out = "["
+    var i = 0
+    while i < items.len():
+        if i > 0:
+            out = out + ","
+        out = out + _si_q(items[i])
+        i = i + 1
+    out + "]"
+
+fn surface_interface_encode(s: ModuleSurface) -> text:
+    """Canonical interface encoding of `s`, or "" if it cannot be encoded.
+
+    A "" result is NOT an empty interface -- it means the caller must fall back
+    to this surface's `content_hash`."""
+    var out = "ms("
+    out = out + _si_q(s.canonical_path) + "," + _si_q(s.module_name) + ","
+    out = out + _si_q(s.logical_name) + "," + _si_q(s.canonical_name) + ","
+    out = out + _si_q(s.package_name) + "," + _si_q(s.preferred_registry_name) + ","
+
+    out = out + _si_imports(s.imports) + "," + _si_exports(s.exports) + ","
+    out = out + _si_text_list(s.friends) + "," + _si_text_list(s.internal_exports) + ","
+
+    var i = 0
+    var part = "["
+    while i < s.callable_values.len():
+        if i > 0:
+            part = part + ","
+        val e = _si_callable(s.callable_values[i])
+        if e == "":
+            return ""
+        part = part + e
+        i = i + 1
+    out = out + part + "],"
+
+    i = 0
+    part = "["
+    while i < s.composite_values.len():
+        if i > 0:
+            part = part + ","
+        val e = _si_composite(s.composite_values[i])
+        if e == "":
+            return ""
+        part = part + e
+        i = i + 1
+    out = out + part + "],"
+
+    i = 0
+    part = "["
+    while i < s.enum_values.len():
+        if i > 0:
+            part = part + ","
+        val e = _si_enum(s.enum_values[i])
+        if e == "":
+            return ""
+        part = part + e
+        i = i + 1
+    out = out + part + "],"
+
+    i = 0
+    part = "["
+    while i < s.trait_values.len():
+        if i > 0:
+            part = part + ","
+        val e = _si_trait(s.trait_values[i])
+        if e == "":
+            return ""
+        part = part + e
+        i = i + 1
+    out = out + part + "],"
+
+    i = 0
+    part = "["
+    while i < s.type_alias_values.len():
+        if i > 0:
+            part = part + ","
+        val e = _si_type_alias(s.type_alias_values[i])
+        if e == "":
+            return ""
+        part = part + e
+        i = i + 1
+    out = out + part + "],"
+
+    i = 0
+    part = "["
+    while i < s.constant_values.len():
+        if i > 0:
+            part = part + ","
+        val e = _si_const(s.constant_values[i])
+        if e == "":
+            return ""
+        part = part + e
+        i = i + 1
+    out = out + part + "],"
+
+    i = 0
+    part = "["
+    while i < s.impls.len():
+        if i > 0:
+            part = part + ","
+        val e = _si_impl(s.impls[i])
+        if e == "":
+            return ""
+        part = part + e
+        i = i + 1
+    out = out + part + "],"
+
+    val origin_keys = _si_sorted_texts(s.export_origins.keys())
+    i = 0
+    part = "["
+    while i < origin_keys.len():
+        if i > 0:
+            part = part + ","
+        val k = origin_keys[i]
+        val o = s.export_origins[k]
+        part = part + "eo(" + _si_q(k) + "," + _si_q(o.owner_module) + "," + _si_q(o.source_name) + "," + _si_q(o.resolution_kind) + ")"
+        i = i + 1
+    out = out + part + "]"
+
+    out + ")"
+
+export surface_interface_encode

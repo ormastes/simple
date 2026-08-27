@@ -1,0 +1,151 @@
+# Reachability-scoped assurance enforcement for @rt(hal).
+#
+# A lower-assurance operation is legal outside a Critical-or-higher entry
+# closure.  This pass therefore uses one multi-source graph walk instead of
+# applying the compilation profile to every declaration.  The graph is
+# bounded and indexed once: O(V + E) time and O(V) traversal storage.
+
+use compiler.hir.hir.*
+use compiler.semantics.effect_validation.{effect_fn_names, effect_block_callees}
+
+val RT_HAL_ASSURANCE_MAX_FUNCTIONS: i64 = 65536
+val RT_HAL_ASSURANCE_MAX_EDGES: i64 = 1048576
+
+struct RtHalAssuranceNodeV1:
+    identity: text
+    display_name: text
+    callees: [text]
+    is_critical_entry: bool
+    has_rt_hal: bool
+    assurance_rank: i64
+    line: i64
+
+struct RtHalAssuranceFindingV1:
+    root: text
+    offender: text
+    detail: text
+    line: i64
+
+fn rt_hal_assurance_closure_check_v1(
+    nodes: [RtHalAssuranceNodeV1], max_functions: i64, max_edges: i64
+) -> [RtHalAssuranceFindingV1]:
+    """Check all Critical entry closures in one bounded, cycle-safe walk.
+
+    Roots are queued in input order and callees retain HIR source order, making
+    the selected root and diagnostics deterministic for a deterministic HIR.
+    Unknown reachable edges fail closed because they can conceal a downgraded
+    operation. Unknown edges outside the closure are deliberately irrelevant.
+    """
+    var findings: [RtHalAssuranceFindingV1] = []
+    if nodes.len() > max_functions:
+        findings.push(RtHalAssuranceFindingV1(root: "<compilation>",
+            offender: "<graph>", detail: "analysis limit exceeded: functions", line: 0))
+        return findings
+
+    var index: Dict<text, i64> = {}
+    var edge_count: i64 = 0
+    var node_idx: i64 = 0
+    for node in nodes:
+        if index.has(node.identity):
+            findings.push(RtHalAssuranceFindingV1(root: "<compilation>",
+                offender: node.display_name,
+                detail: "ambiguous duplicate function identity", line: node.line))
+            return findings
+        index[node.identity] = node_idx
+        node_idx = node_idx + 1
+        edge_count = edge_count + node.callees.len()
+        if edge_count > max_edges:
+            findings.push(RtHalAssuranceFindingV1(root: "<compilation>",
+                offender: "<graph>", detail: "analysis limit exceeded: call edges", line: 0))
+            return findings
+
+    # A single multi-source BFS avoids allocating one V-sized seen array per
+    # entry and avoids revisiting shared library closures.
+    var seen: [bool] = []
+    var owner_root: [text] = []
+    var work: [i64] = []
+    for _ in nodes:
+        seen.push(false)
+        owner_root.push("")
+    for node in nodes:
+        if node.is_critical_entry:
+            val ri = index[node.identity]
+            if not seen[ri]:
+                seen[ri] = true
+                owner_root[ri] = node.display_name
+                work.push(ri)
+
+    var cursor: i64 = 0
+    while cursor < work.len():
+        val idx = work[cursor]
+        cursor = cursor + 1
+        val node = nodes[idx]
+        val root = owner_root[idx]
+        if node.has_rt_hal and node.assurance_rank < 3:
+            findings.push(RtHalAssuranceFindingV1(root: root,
+                offender: node.display_name,
+                detail: "lower-assurance rt(hal) operation is reachable", line: node.line))
+        for callee in node.callees:
+            if not index.has(callee):
+                findings.push(RtHalAssuranceFindingV1(root: root,
+                    offender: callee, detail: "callee assurance is unknown", line: node.line))
+            else:
+                val ci = index[callee]
+                if not seen[ci]:
+                    seen[ci] = true
+                    owner_root[ci] = root
+                    work.push(ci)
+    findings
+
+fn rt_hal_assurance_nodes_from_hir_v1(
+    modules: Dict<text, HirModule>, profile_is_critical: bool
+) -> [RtHalAssuranceNodeV1]:
+    """Build qualified graph identities while resolving source-level callees.
+
+    `effect_block_callees` is the existing typed-HIR call collector shared with
+    allocation/effect closure checks. Bare names are accepted only when unique
+    across the compilation; collisions remain an unknown edge and fail closed
+    only if a Critical entry can actually reach that edge.
+    """
+    val fn_names = effect_fn_names(modules)
+    var name_counts: Dict<text, i64> = {}
+    var unique_identity: Dict<text, text> = {}
+    for module_name in modules.keys():
+        for function_ in modules[module_name].functions.values():
+            val count = (name_counts[function_.name] ?? 0) + 1
+            name_counts[function_.name] = count
+            unique_identity[function_.name] = module_name + "::" + function_.name
+
+    var nodes: [RtHalAssuranceNodeV1] = []
+    for module_name in modules.keys():
+        for function_ in modules[module_name].functions.values():
+            var resolved: [text] = []
+            for callee in effect_block_callees(function_.body, fn_names):
+                if (name_counts[callee] ?? 0) == 1:
+                    resolved.push(unique_identity[callee])
+                else:
+                    # This token cannot collide with a valid qualified identity.
+                    resolved.push("<unknown-or-ambiguous:" + callee + ">")
+            val explicitly_critical_entry = function_.func_attr.has_rt_hal and
+                function_.func_attr.rt_hal_assurance_rank >= 3
+            nodes.push(RtHalAssuranceNodeV1(
+                identity: module_name + "::" + function_.name,
+                display_name: module_name + "::" + function_.name,
+                callees: resolved,
+                is_critical_entry: function_.func_attr.is_entry and
+                    (profile_is_critical or explicitly_critical_entry),
+                has_rt_hal: function_.func_attr.has_rt_hal,
+                assurance_rank: function_.func_attr.rt_hal_assurance_rank,
+                line: function_.span.line
+            ))
+    nodes
+
+fn rt_hal_assurance_format_v1(finding: RtHalAssuranceFindingV1) -> text:
+    "[E-RT-HAL-013] " + finding.offender + ": " + finding.detail
+        + " from Critical entry '" + finding.root + "' (line "
+        + finding.line.to_text() + ")"
+
+export RtHalAssuranceNodeV1, RtHalAssuranceFindingV1
+export RT_HAL_ASSURANCE_MAX_FUNCTIONS, RT_HAL_ASSURANCE_MAX_EDGES
+export rt_hal_assurance_closure_check_v1, rt_hal_assurance_nodes_from_hir_v1
+export rt_hal_assurance_format_v1

@@ -1,9 +1,6 @@
 use app.io.mod.{process_run_timeout}
-use app.llm_runtime.manifest.{llm_runtime_manifest}
-use app.llm_runtime.serve_readiness.{llm_runtime_vllm_serve_readiness_default_policy, llm_runtime_vllm_serve_readiness_orchestrate_with_resources}
-use app.mcp.main_lazy_json.{LB, RB, jp, js}
 
-use std.io_runtime.{get_args}
+extern fn rt_cli_get_args() -> [text]
 
 pub class LlmRuntimeControlCliOptions:
     action: text
@@ -136,7 +133,7 @@ pub fn llm_runtime_control_cli_run(argv: [text]) -> i64:
     0
 
 fn main() -> i64:
-    llm_runtime_control_cli_run(get_args())
+    llm_runtime_control_cli_run(rt_cli_get_args())
 
 fn _control_cli_execution_jsonl(opts: LlmRuntimeControlCliOptions) -> text:
     val action = opts.action.trim().to_lower()
@@ -144,8 +141,6 @@ fn _control_cli_execution_jsonl(opts: LlmRuntimeControlCliOptions) -> text:
     val gpu_available = _effective_gpu_available(opts)
     if action == "preflight":
         return _control_cli_preflight_jsonl(action, opts, vllm_available, gpu_available)
-    if action == "readiness":
-        return _control_cli_readiness_jsonl(opts, vllm_available, gpu_available)
     if action == "start":
         val environment_reason = _control_cli_environment_reason(vllm_available, gpu_available)
         if environment_reason != "local_vllm_gpu_ready":
@@ -187,12 +182,6 @@ fn _control_cli_preflight_jsonl(action: text, opts: LlmRuntimeControlCliOptions,
     if models_reason != "live_request_plan_only":
         return _jsonl(action, "not_ready", models_reason, -1, "not_started", endpoint_status, "not_fetched", "models_probe_not_planned", 0, -1, -1)
     _jsonl(action, "planned", "serve_and_models_probe_planned", -1, "not_started", endpoint_status, "not_fetched", "probe_not_run", 0, -1, -1)
-
-fn _control_cli_readiness_jsonl(opts: LlmRuntimeControlCliOptions, vllm_available: bool, gpu_available: bool) -> text:
-    val manifest = llm_runtime_manifest(opts.base_model, opts.endpoint, "", [], "disabled")
-    val policy = llm_runtime_vllm_serve_readiness_default_policy()
-    val run = llm_runtime_vllm_serve_readiness_orchestrate_with_resources(manifest, policy, vllm_available, gpu_available)
-    run.evidence_jsonl
 
 fn _effective_vllm_available(opts: LlmRuntimeControlCliOptions) -> bool:
     if opts.vllm_available:
@@ -249,20 +238,18 @@ fn _control_cli_models_plan_reason(endpoint_status: text) -> text:
     "live_request_plan_only"
 
 fn _jsonl(action: text, status: text, reason: text, pid: i64, running_status: text, endpoint_status: text, models_status: text, models_reason: text, http_status: i64, started_pid: i64, stopped_pid: i64) -> text:
-    LB() +
-        jp("event", js("llm_runtime_vllm_dashboard_control_execution")) +
-        "," + jp("action", js(action)) +
-        "," + jp("status", js(status)) +
-        "," + jp("reason", js(reason)) +
-        "," + jp("pid", _public_pid(pid).to_text()) +
-        "," + jp("running", js(running_status)) +
-        "," + jp("endpoint", js(endpoint_status)) +
-        "," + jp("models_status", js(models_status)) +
-        "," + jp("models_reason", js(models_reason)) +
-        "," + jp("http_status", http_status.to_text()) +
-        "," + jp("started_pid", _public_pid(started_pid).to_text()) +
-        "," + jp("stopped_pid", _public_pid(stopped_pid).to_text()) +
-        RB() + "\n"
+    "{\"event\":\"llm_runtime_vllm_dashboard_control_execution\",\"action\":\"" + action +
+        "\",\"status\":\"" + status +
+        "\",\"reason\":\"" + reason +
+        "\",\"pid\":" + _public_pid(pid).to_text() +
+        ",\"running\":\"" + running_status +
+        "\",\"endpoint\":\"" + endpoint_status +
+        "\",\"models_status\":\"" + models_status +
+        "\",\"models_reason\":\"" + models_reason +
+        "\",\"http_status\":" + http_status.to_text() +
+        ",\"started_pid\":" + _public_pid(started_pid).to_text() +
+        ",\"stopped_pid\":" + _public_pid(stopped_pid).to_text() +
+        ",\"live_evidence_status\":\"not_live_evidence\"}\n"
 
 fn _public_pid(pid: i64) -> i64:
     if pid <= 0:

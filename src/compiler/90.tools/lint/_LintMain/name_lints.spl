@@ -23,44 +23,20 @@ class NameLintClass:
     line: Int
     methods: [NameLintMethod]
 
-class NameLintClassIndex:
-    classes: [NameLintClass]
-    first_by_name: Dict<String, Int>
-
-class NameLintInherited:
-    names: [String]
-    by_name: Dict<String, Bool>
-
-class NameLintParsedMethod:
-    method: NameLintMethod
-    next_index: Int
-
 fn lint_accessor_and_parent_names(path: String, content: String) -> [NameLintWarning]:
-    lint_accessor_and_parent_names_lines(path, content.split("\n"))
-
-fn lint_accessor_and_parent_names_lines(
-    path: String, lines: [String]
-) -> [NameLintWarning]:
-    val classes = name_lint_collect_classes_lines(lines)
-    val index = name_lint_build_class_index(classes)
+    val classes = name_lint_collect_classes(content)
     var warnings: [NameLintWarning] = []
     for class_info in classes:
-        # Both rule families consume the same ancestry. Build it once per
-        # class; the former path repeated class scans and growing-array dedup.
-        val inherited = name_lint_inherited_methods(class_info, index)
-        for warning in name_lint_dummy_accessor_warnings_inherited(
-            path, class_info, inherited):
+        for warning in name_lint_dummy_accessor_warnings(path, class_info, classes):
             warnings.push(warning)
-        for warning in name_lint_similar_parent_method_name_warnings_inherited(
-            path, class_info, inherited):
+        for warning in name_lint_similar_parent_method_name_warnings(path, class_info, classes):
             warnings.push(warning)
     warnings
 
 fn name_lint_collect_classes(content: String) -> [NameLintClass]:
-    name_lint_collect_classes_lines(content.split("\n"))
-
-fn name_lint_collect_classes_lines(lines: [String]) -> [NameLintClass]:
+    val lines = content.split("\n")
     var classes: [NameLintClass] = []
+    var current_class_index = -1
     var i = 0
     while i < lines.len():
         val line = lines[i]
@@ -71,34 +47,23 @@ fn name_lint_collect_classes_lines(lines: [String]) -> [NameLintClass]:
 
         val indent = indent_width(line)
         if trimmed.starts_with("class "):
-            # Own the in-progress class locally and append it once. This avoids
-            # repeated indexed write-back and backend-dependent nested
-            # collection detach behavior after every parsed method.
-            var class_info = name_lint_parse_class(trimmed, indent, i + 1)
+            classes.push(name_lint_parse_class(trimmed, indent, i + 1))
+            current_class_index = classes.len() - 1
             i = i + 1
-            while i < lines.len():
-                val member_line = lines[i]
-                val member_trimmed = member_line.trim()
-                if member_trimmed == "" or member_trimmed.starts_with("#"):
-                    i = i + 1
-                    continue
-                # A nested textual class replaced current_class in the former
-                # scanner. Stop without consuming it so it becomes the next
-                # independently collected class and the outer class is not
-                # resumed after its body.
-                if member_trimmed.starts_with("class "):
-                    break
-                if indent_width(member_line) <= class_info.indent:
-                    break
-                if name_lint_is_method_header(member_trimmed):
-                    val parsed = name_lint_parse_method_with_end(
-                        lines, i, class_info.name, class_info.parent_name)
-                    class_info.methods.push(parsed.method)
-                    i = parsed.next_index
-                    continue
-                i = i + 1
-            classes.push(class_info)
             continue
+
+        if current_class_index >= 0:
+            val class_info = classes[current_class_index]
+            if indent <= class_info.indent:
+                current_class_index = -1
+                continue
+            if name_lint_is_method_header(trimmed):
+                val method = name_lint_parse_method(lines, i, class_info.name, class_info.parent_name)
+                var updated_class = classes[current_class_index]
+                updated_class.methods.push(method)
+                classes[current_class_index] = updated_class
+                i = name_lint_method_body_end(lines, i)
+                continue
 
         i = i + 1
     classes
@@ -156,7 +121,7 @@ fn name_lint_parse_method_with_end(
         if body_trimmed != "" and not body_trimmed.starts_with("#"):
             body.push(body_trimmed)
         j = j + 1
-    val method = NameLintMethod(
+    NameLintMethod(
         class_name: class_name,
         parent_name: parent_name,
         name: name,
@@ -165,7 +130,6 @@ fn name_lint_parse_method_with_end(
         body: body,
         name_checked: name_checked
     )
-    NameLintParsedMethod(method: method, next_index: j)
 
 fn name_lint_method_body_end(lines: [String], index: Int) -> Int:
     val method_indent = indent_width(lines[index])
@@ -224,59 +188,25 @@ fn name_lint_has_name_checked_decorator(lines: [String], index: Int, method_inde
     false
 
 fn name_lint_dummy_accessor_warnings(path: String, class_info: NameLintClass, classes: [NameLintClass]) -> [NameLintWarning]:
-    name_lint_dummy_accessor_warnings_inherited(
-        path, class_info,
-        name_lint_inherited_methods(class_info, name_lint_build_class_index(classes)))
-
-fn name_lint_dummy_accessor_warnings_inherited(
-    path: String, class_info: NameLintClass, inherited: NameLintInherited
-) -> [NameLintWarning]:
     var warnings: [NameLintWarning] = []
+    val inherited = name_lint_inherited_method_names(class_info, classes)
     var suffixes: [String] = []
-    var suffix_index: Dict<String, Int> = {}
-    var suffix_has_real: [Bool] = []
-    var group_head: [Int] = []
-    var group_tail: [Int] = []
-    var next_method: [Int] = []
-    var method_index = 0
-    while method_index < class_info.methods.len():
-        val method = class_info.methods[method_index]
+    for method in class_info.methods:
         val suffix = name_lint_accessor_suffix(method.name)
-        next_method.push(-1)
-        if suffix == "":
-            method_index = method_index + 1
-            continue
-        var group = -1
-        if suffix_index.has(suffix):
-            group = suffix_index[suffix]
-        else:
-            group = suffixes.len()
-            suffix_index[suffix] = group
+        if suffix != "" and not suffixes.contains(suffix):
             suffixes.push(suffix)
-            suffix_has_real.push(false)
-            group_head.push(-1)
-            group_tail.push(-1)
 
-        if group_head[group] < 0:
-            group_head[group] = method_index
-        else:
-            next_method[group_tail[group]] = method_index
-        group_tail[group] = method_index
-        if not name_lint_is_dummy_accessor(method, suffix):
-            suffix_has_real[group] = true
-        method_index = method_index + 1
-
-    var group = 0
-    while group < suffixes.len():
-        if suffix_has_real[group]:
-            group = group + 1
+    for suffix in suffixes:
+        var any_real = false
+        for method in class_info.methods:
+            if name_lint_accessor_suffix(method.name) == suffix and not name_lint_is_dummy_accessor(method, suffix):
+                any_real = true
+        if any_real:
             continue
-        val suffix = suffixes[group]
-        var member = group_head[group]
-        while member >= 0:
-            val method = class_info.methods[member]
-            member = next_method[member]
-            if inherited.by_name.has(method.name):
+        for method in class_info.methods:
+            if name_lint_accessor_suffix(method.name) != suffix:
+                continue
+            if inherited.contains(method.name):
                 continue
             if name_lint_is_dummy_accessor(method, suffix):
                 var transform = "replace calls `obj.{method.name}()` with the varname access `obj.{suffix}`"
@@ -288,24 +218,17 @@ fn name_lint_dummy_accessor_warnings_inherited(
                     message: "accessor '{method.name}' only forwards backing field '{suffix}' without behavior",
                     hint: "{transform}, then delete the wrapper. Auto-fix: `SIMPLE_EXECUTION_MODE=interpret bin/simple run src/compiler/90.tools/fix/accessor_fix_main.spl --apply`. Or add real validation/normalization behavior to justify keeping it."
                 ))
-        group = group + 1
     warnings
 
 fn name_lint_similar_parent_method_name_warnings(path: String, class_info: NameLintClass, classes: [NameLintClass]) -> [NameLintWarning]:
-    name_lint_similar_parent_method_name_warnings_inherited(
-        path, class_info,
-        name_lint_inherited_methods(class_info, name_lint_build_class_index(classes)))
-
-fn name_lint_similar_parent_method_name_warnings_inherited(
-    path: String, class_info: NameLintClass, inherited: NameLintInherited
-) -> [NameLintWarning]:
     var warnings: [NameLintWarning] = []
-    if inherited.names.len() == 0:
+    val inherited = name_lint_inherited_method_names(class_info, classes)
+    if inherited.len() == 0:
         return warnings
     for method in class_info.methods:
-        if method.name_checked or inherited.by_name.has(method.name):
+        if method.name_checked or inherited.contains(method.name):
             continue
-        for parent_name in inherited.names:
+        for parent_name in inherited:
             if name_lint_accessor_prefix_collision_expected(method.name, parent_name):
                 continue
             if name_lint_likely_misspelling(method.name, parent_name):
@@ -352,27 +275,20 @@ fn name_lint_normalize(value: String) -> String:
     out
 
 fn name_lint_inherited_method_names(class_info: NameLintClass, classes: [NameLintClass]) -> [String]:
-    name_lint_inherited_methods(
-        class_info, name_lint_build_class_index(classes)).names
-
-fn name_lint_inherited_methods(
-    class_info: NameLintClass, index: NameLintClassIndex
-) -> NameLintInherited:
     var inherited: [String] = []
-    var by_name: Dict<String, Bool> = {}
     var parent_name = class_info.parent_name
     var depth = 0
     while parent_name != "" and depth < 20:
-        if not index.first_by_name.has(parent_name):
+        val parent_index = name_lint_find_class(classes, parent_name)
+        if parent_index < 0:
             break
-        val parent_class = index.classes[index.first_by_name[parent_name]]
+        val parent_class = classes[parent_index]
         for method in parent_class.methods:
-            if not by_name.has(method.name):
-                by_name[method.name] = true
+            if not inherited.contains(method.name):
                 inherited.push(method.name)
         parent_name = parent_class.parent_name
         depth = depth + 1
-    NameLintInherited(names: inherited, by_name: by_name)
+    inherited
 
 fn name_lint_find_class(classes: [NameLintClass], name: String) -> Int:
     var i = 0
@@ -435,8 +351,9 @@ fn name_lint_bounded_damerau_levenshtein(a: String, b: String, limit: Int) -> In
     if prev_end > limit:
         prev_end = limit
     var j0 = 0
-    while j0 <= prev_end:
-        cells[prev_row * width + (j0 - prev_start)] = j0
+    while j0 <= b_len:
+        prev.push(j0)
+        prev_prev.push(limit + 1)
         j0 = j0 + 1
 
     var i = 1
@@ -465,28 +382,20 @@ fn name_lint_bounded_damerau_levenshtein(a: String, b: String, limit: Int) -> In
                 j - 1, inf) + cost
             var best = name_lint_min3(deletion, insertion, substitution)
             if i > 1 and j > 1:
-                if a.byte_at(i - 1) == b.byte_at(j - 2) and a.byte_at(i - 2) == b.byte_at(j - 1):
-                    val swapped = name_lint_band_cell_get(
-                        cells, prev_prev_row, width,
-                        prev_prev_start, prev_prev_end,
-                        j - 2, inf) + 1
+                if a.substring(i - 1, i) == b.substring(j - 2, j - 1) and a.substring(i - 2, i - 1) == b.substring(j - 1, j):
+                    val swapped = prev_prev[j - 2] + 1
                     if swapped < best:
                         best = swapped
-            if best > inf:
-                best = inf
-            cells[curr_row * width + (j - curr_start)] = best
+            curr.push(best)
+            if best < row_min:
+                row_min = best
             j = j + 1
-        val reusable_row = prev_prev_row
-        prev_prev_row = prev_row
-        prev_row = curr_row
-        curr_row = reusable_row
-        prev_prev_start = prev_start
-        prev_prev_end = prev_end
-        prev_start = curr_start
-        prev_end = curr_end
+        if row_min > limit:
+            return limit + 1
+        prev_prev = prev
+        prev = curr
         i = i + 1
-    name_lint_band_cell_get(
-        cells, prev_row, width, prev_start, prev_end, b_len, inf)
+    prev[b_len]
 
 fn name_lint_band_cell_get(
     cells: [Int], row: Int, width: Int,

@@ -1,6 +1,29 @@
 # Search Limit Guard Specification
 
-> Tests covering search limit guard.
+> <details>
+
+<!-- sdn-diagram:id=search_limit_guard_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=search_limit_guard_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+search_limit_guard_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=search_limit_guard_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -17,23 +40,13 @@
 
 #### guards malformed limit parsing
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- guards malformed limit parsing
-   - Expected: source does not contain `limit = arg[8:].to_int()`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("guards malformed limit parsing")
 val source = rt_file_read_text("src/app/search/main.spl") ?? ""
 
 expect(source).to_contain("fn parse_limit_or_default(value: text) -> i64")
@@ -54,12 +67,12 @@ expect(source.contains("limit = arg[8:].to_int()")).to_equal(false)
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/search_limit_guard_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering search limit guard.
+Tests covering:
 - search limit guard
 
 ## Scenario Summary
@@ -74,53 +87,3 @@ Tests covering search limit guard.
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-UNIT`
-- `REQ-SSPEC-APP`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `0f8648fb72850a88e8f5cc271ec2e5a02dd862957f5f24d45942f2f49017db7b`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `0f8648fb72850a88e8f5cc271ec2e5a02dd862957f5f24d45942f2f49017db7b`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `0f8648fb72850a88e8f5cc271ec2e5a02dd862957f5f24d45942f2f49017db7b`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **79/100**; effective score: **49/100**; blockers: **2**.
-
-SSpec documentization score: 49/100
-source: test/01_unit/app/search_limit_guard_spec.spl
-mirror: doc/06_spec/01_unit/app/search_limit_guard_spec.md (current)
-findings: 5 blockers: 2
-  narrative=100 structure=100 oracle=50
-  traceability=60 evidence=90 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-  raw=79; blocker cap makes effective=49
-doc/06_spec/01_unit/app/search_limit_guard_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/app/search_limit_guard_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/app/search_limit_guard_spec.spl:1:1: blocker SSDOC-ORA-002 [oracle] (-50): scenario relies on source-text inspection as system evidence
-  why: Source presence or self-created arithmetic does not demonstrate production behavior.
-  improve: Observe runtime behavior or a stable generated artifact instead.
-test/01_unit/app/search_limit_guard_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 1 declared requirement(s) have no scenario binding
-  why: A requirement list without scenario evidence is inventory, not traceability.
-  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
-test/01_unit/app/search_limit_guard_spec.spl:15:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'guards malformed limit parsing' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

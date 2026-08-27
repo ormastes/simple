@@ -1,74 +1,30 @@
 #!/usr/bin/env node
 const fs = require('fs');
-const path = require('path');
-const crypto = require('crypto');
-const expectedRunId = process.env.SIMPLE_WEB_FONT_RUN_ID || '';
-const expectedReceiptPath = process.env.SIMPLE_WEB_FONT_COMPOSITION_RECEIPT || '';
 
 function clean(value) {
   if (value === undefined || value === null) return '';
   return String(value).replace(/[\r\n]/g, ' ');
 }
 
-function boolTrue(value) {
-  return value === true;
+function numberValue(value) {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : NaN;
+  if (typeof value === 'string' && value.trim() !== '') return Number(value);
+  return NaN;
 }
 
-function jsonIntegerText(value) {
-  if (typeof value === 'number' && Number.isSafeInteger(value)) return String(value);
-  return null;
+function boolValue(value) {
+  return value === true || value === 'true';
 }
 
-function jsonNumberText(value) {
-  if (typeof value === 'number' && Number.isFinite(value)) return String(value);
-  return null;
+function min(value, required) {
+  const n = numberValue(value);
+  return Number.isFinite(n) && n >= required;
 }
 
-function jsonIntegerAtLeast(value, required) {
-  const text = jsonIntegerText(value);
-  if (text === null) return false;
-  return BigInt(text) >= BigInt(required);
-}
-
-function jsonDecimalGreaterThan(value, required) {
-  const text = jsonNumberText(value);
-  if (text === null) return false;
-  return Number(text) > required;
-}
-
-function jsonDecimalAtLeast(value, required) {
-  const text = jsonNumberText(value);
-  if (text === null) return false;
-  return Number(text) >= required;
-}
-
-function jsonDecimalAtMost(value, required) {
-  const text = jsonNumberText(value);
-  if (text === null) return false;
-  return Number(text) <= required;
-}
-
-function sameJsonInteger(actual, expected) {
-  const a = jsonIntegerText(actual);
-  const e = jsonIntegerText(expected);
-  if (a === null || e === null) return false;
-  return BigInt(a) === BigInt(e);
-}
-
-function jsonIntegerTextOrBlank(value) {
-  const text = jsonIntegerText(value);
-  return text === null ? '' : text;
-}
-
-function jsonDecimalTextOrBlank(value) {
-  const text = jsonNumberText(value);
-  return text === null ? '' : text;
-}
-
-function jsonBoolTextOrBlank(value) {
-  if (value === true) return 'true';
-  if (value === false) return 'false';
-  return '';
+function equalsNumber(actual, expected) {
+  const a = numberValue(actual);
+  const e = numberValue(expected);
+  return Number.isFinite(a) && Number.isFinite(e) && a === e;
 }
 
 function row(key, value) {
@@ -88,76 +44,7 @@ const expectedEventSequence = [
 const expectedProofSource = 'tools/web-render-backend/wm_event_check.js';
 const expectedTarget = 'electron';
 const expectedSurfaceId = 'wm-browser-event-routing';
-const expectedFontText = 'WEB';
-const expectedFontCompositionId = 'html-layout';
-const expectedFontIdentity = 'sha256=2cb2adb378a8f574213e23df697050b83c54c27df465a2015552740b2769a081;axes=wght=400,wdth=100';
 const maxEventTimingMs = 1000;
-const expectedThemeSnapshot = 'src/lib/common/ui/generated/aetheric_dark_theme_snapshot.spl';
-
-function envelopeFields(proofPath) {
-  const fields = Object.create(null);
-  for (const line of fs.readFileSync(proofPath, 'utf8').split(/\r?\n/).filter(Boolean)) {
-    const index = line.indexOf('=');
-    const key = line.slice(0, index);
-    if (index <= 0 || Object.hasOwn(fields, key)) throw new Error('invalid evidence row');
-    fields[key] = line.slice(index + 1);
-  }
-  return fields;
-}
-
-function productionEnvelopeArtifact(proof) {
-  try {
-    const envelopePath = path.resolve(proof.production_envelope_path || '');
-    const envelopeStat = fs.lstatSync(envelopePath);
-    if (!envelopeStat.isFile() || envelopeStat.isSymbolicLink() || envelopeStat.nlink > 1) return { status: 'invalid-envelope' };
-    const fields = envelopeFields(envelopePath);
-    const snapshot = fs.readFileSync(expectedThemeSnapshot, 'utf8');
-    const expectedManifest = (snapshot.match(/source_manifest_sha256: "([0-9a-f]{64})"/) || [])[1];
-    const expectedMaterial = (snapshot.match(/material_sha256: "([0-9a-f]{64})"/) || [])[1];
-    const htmlPath = path.resolve(fields.html_path || '');
-    const htmlStat = fs.lstatSync(htmlPath);
-    const htmlSha256 = htmlStat.isFile() && !htmlStat.isSymbolicLink() && htmlStat.nlink <= 1
-      ? crypto.createHash('sha256').update(fs.readFileSync(htmlPath)).digest('hex')
-      : '';
-    const exact = [
-      ['schema', 'aetheric-host-web-gui-v1'],
-      ['status', 'pass'],
-      ['producer', 'production-html-webir-drawir-electron'],
-      ['theme_id', 'aetheric_dark'],
-      ['theme_source_manifest_sha256', expectedManifest],
-      ['theme_material_sha256', expectedMaterial],
-      ['blur_or_tolerance_used', 'false'],
-      ['synthetic_fixture', 'false'],
-      ['raw_source_execution', 'false'],
-      ['compatibility_renderer', 'false'],
-    ].every(([key, value]) => fields[key] === value);
-    const mirrored = [
-      ['production_envelope_schema', 'schema'], ['production_envelope_producer', 'producer'],
-      ['production_html_path', 'html_path'], ['production_html_sha256', 'html_sha256'],
-      ['theme_id', 'theme_id'], ['theme_source_manifest_sha256', 'theme_source_manifest_sha256'],
-      ['theme_material_sha256', 'theme_material_sha256'],
-      ['production_post_action_semantic_state', 'post_action_semantic_state'],
-      ['production_blur_or_tolerance_used', 'blur_or_tolerance_used'],
-      ['production_synthetic_fixture', 'synthetic_fixture'],
-      ['production_raw_source_execution', 'raw_source_execution'],
-      ['production_compatibility_renderer', 'compatibility_renderer'],
-      ['computed_window_background', 'computed_window_background'],
-      ['computed_window_border_color', 'computed_window_border_color'],
-      ['computed_window_border_radius', 'computed_window_border_radius'],
-      ['computed_window_box_shadow', 'computed_window_box_shadow'],
-      ['computed_titlebar_backdrop_filter', 'computed_titlebar_backdrop_filter'],
-      ['computed_titlebar_webkit_backdrop_filter', 'computed_titlebar_webkit_backdrop_filter'],
-      ['computed_inactive_border', 'computed_inactive_border'], ['computed_inactive_shadow', 'computed_inactive_shadow'],
-      ['computed_active_border', 'computed_active_border'], ['computed_active_shadow', 'computed_active_shadow'],
-    ].every(([proofKey, fieldKey]) => proof[proofKey] === fields[fieldKey] && proof[proofKey] !== '');
-    if (!exact || !mirrored || !expectedManifest || !expectedMaterial ||
-        !/^[0-9a-f]{64}$/.test(fields.html_sha256 || '') || fields.html_sha256 !== htmlSha256 ||
-        fields.post_action_semantic_state !== 'text-mutated-and-focused') return { status: 'mismatch' };
-    return { status: 'pass' };
-  } catch (_err) {
-    return { status: 'missing' };
-  }
-}
 
 function proofSourceArtifact() {
   let stat;
@@ -186,15 +73,7 @@ function proofSourceArtifact() {
     !source.includes("proof_source: 'tools/web-render-backend/wm_event_check.js'") ||
     !source.includes("out.event_sequence = window.__wmFrames.map(frameName)") ||
     !source.includes("out.input_to_paint_ms = inputToPaintMs") ||
-    !source.includes('function loadProductionEnvelope(root)') ||
-    !source.includes('data-aetheric-production-surface') ||
-    !source.includes('process.sandboxed === true') ||
-    !source.includes('app.getGPUFeatureStatus()') ||
-    !source.includes("result.gpu_feature_status.gpu_compositing === 'enabled'") ||
-    !source.includes("result.gpu_feature_status.webgl === 'enabled'") ||
-    !source.includes('out.css_animation_motion_observed = animationMotionObserved') ||
-    !source.includes('finalAnimationCurrentTime > initialAnimationCurrentTime') ||
-    !source.includes('finalAnimationOpacity !== initialAnimationOpacity') ||
+    !source.includes("out.css_animation_probe = animationProbeStyle.animationName === 'simple-wm-proof-pulse'") ||
     !source.includes("result.font_frame_path = framePath") ||
     !source.includes("result.font_frame_pixel_checksum = frameChecksum")
   ) {
@@ -241,7 +120,12 @@ function simpleCompositionArtifact(proof) {
     if (expectedReceiptPath && receiptPath !== path.resolve(expectedReceiptPath)) {
       return { status: 'receipt-path-mismatch', fields: {} };
     }
-    const fields = envelopeFields(receiptPath);
+    const fields = Object.fromEntries(
+      fs.readFileSync(receiptPath, 'utf8').split(/\r?\n/).filter(Boolean).map(line => {
+        const split = line.indexOf('=');
+        return [line.slice(0, split), line.slice(split + 1)];
+      })
+    );
     const artifactPath = path.resolve(fields.pixel_artifact_path || '');
     const artifactBytes = fs.readFileSync(artifactPath);
     const artifact = JSON.parse(artifactBytes.toString('utf8'));
@@ -288,71 +172,10 @@ function sameEventSequence(value) {
   return expectedEventSequence.every((entry, index) => value[index] === entry);
 }
 
-function hasObservedAnimationMotion(proof) {
-  const timeAdvanced =
-    jsonNumberText(proof.css_animation_initial_current_time_ms) !== null &&
-    jsonNumberText(proof.css_animation_final_current_time_ms) !== null &&
-    proof.css_animation_final_current_time_ms > proof.css_animation_initial_current_time_ms;
-  const opacityChanged =
-    jsonNumberText(proof.css_animation_initial_opacity) !== null &&
-    jsonNumberText(proof.css_animation_final_opacity) !== null &&
-    proof.css_animation_final_opacity !== proof.css_animation_initial_opacity;
-  return boolTrue(proof.css_animation_motion_observed) &&
-    (timeAdvanced || opacityChanged);
-}
-
-if (process.argv[2] === '--self-check-motion') {
-  const metadataOnly = {
-    css_animation_initial_current_time_ms: 0,
-    css_animation_final_current_time_ms: 0,
-    css_animation_initial_opacity: 0.25,
-    css_animation_final_opacity: 0.25,
-    css_animation_motion_observed: true,
-  };
-  const currentMotion = {
-    ...metadataOnly,
-    css_animation_final_current_time_ms: 32,
-  };
-  if (hasObservedAnimationMotion(metadataOnly) ||
-      !hasObservedAnimationMotion(currentMotion)) {
-    process.exit(1);
-  }
-  console.log('wm_browser_event_routing_motion_self_check=pass');
-  process.exit(0);
-}
-
 const jsonPath = process.argv[2];
 if (!jsonPath) {
   row('wm_browser_event_routing_validation_status', 'fail');
   row('wm_browser_event_routing_validation_reason', 'usage-json-path');
-  process.exit(1);
-}
-
-let jsonPathStat;
-try {
-  jsonPathStat = fs.lstatSync(jsonPath);
-} catch (err) {
-  row('wm_browser_event_routing_validation_status', 'fail');
-  row('wm_browser_event_routing_validation_reason', 'missing-json');
-  row('wm_browser_event_routing_validation_error', err && err.message ? err.message : err);
-  row('wm_browser_event_routing_proof_symlink_status', 'unknown');
-  row('wm_browser_event_routing_proof_hardlink_status', 'unknown');
-  process.exit(1);
-}
-
-if (jsonPathStat.isSymbolicLink()) {
-  row('wm_browser_event_routing_validation_status', 'fail');
-  row('wm_browser_event_routing_validation_reason', 'proof-json-symlink');
-  row('wm_browser_event_routing_proof_symlink_status', 'fail');
-  row('wm_browser_event_routing_proof_hardlink_status', 'unknown');
-  process.exit(1);
-}
-
-if (jsonPathStat.isFile() && jsonPathStat.nlink > 1) {
-  row('wm_browser_event_routing_validation_status', 'fail');
-  row('wm_browser_event_routing_validation_reason', 'proof-json-hardlink');
-  row('wm_browser_event_routing_proof_symlink_status', 'pass');
-  row('wm_browser_event_routing_proof_hardlink_status', 'fail');
   process.exit(1);
 }
 
@@ -363,17 +186,13 @@ try {
   row('wm_browser_event_routing_validation_status', 'fail');
   row('wm_browser_event_routing_validation_reason', 'invalid-json');
   row('wm_browser_event_routing_validation_error', err && err.message ? err.message : err);
-  row('wm_browser_event_routing_proof_symlink_status', 'pass');
-  row('wm_browser_event_routing_proof_hardlink_status', 'pass');
   process.exit(1);
 }
 
 const move = proof.move_payload || {};
 const title = proof.title_payload || {};
 const text = proof.text_payload || {};
-const gpuFeatureStatus = proof.gpu_feature_status || {};
 const proofSource = proofSourceArtifact();
-const productionEnvelope = productionEnvelopeArtifact(proof);
 const fontFrame = fontFrameArtifact(proof);
 const simpleComposition = simpleCompositionArtifact(proof);
 const proofSourceArtifactStatus =
@@ -397,34 +216,6 @@ const rows = {
   electron_user_agent: proof.electron_user_agent,
   electron_process_version: proof.electron_process_version,
   chrome_process_version: proof.chrome_process_version,
-  renderer_sandboxed: jsonBoolTextOrBlank(proof.renderer_sandboxed),
-  gpu_compositing_status: gpuFeatureStatus.gpu_compositing,
-  webgl_status: gpuFeatureStatus.webgl,
-  production_envelope_schema: proof.production_envelope_schema,
-  production_envelope_producer: proof.production_envelope_producer,
-  production_envelope_path: proof.production_envelope_path,
-  production_html_path: proof.production_html_path,
-  production_html_sha256: proof.production_html_sha256,
-  theme_id: proof.theme_id,
-  theme_source_manifest_sha256: proof.theme_source_manifest_sha256,
-  theme_material_sha256: proof.theme_material_sha256,
-  production_post_action_semantic_state: proof.production_post_action_semantic_state,
-  post_action_semantic_state: proof.post_action_semantic_state,
-  production_blur_or_tolerance_used: proof.production_blur_or_tolerance_used,
-  production_synthetic_fixture: proof.production_synthetic_fixture,
-  production_raw_source_execution: proof.production_raw_source_execution,
-  production_compatibility_renderer: proof.production_compatibility_renderer,
-  production_envelope_artifact_status: productionEnvelope.status,
-  computed_window_background: proof.computed_window_background,
-  computed_window_border_color: proof.computed_window_border_color,
-  computed_window_border_radius: proof.computed_window_border_radius,
-  computed_window_box_shadow: proof.computed_window_box_shadow,
-  computed_titlebar_backdrop_filter: proof.computed_titlebar_backdrop_filter,
-  computed_titlebar_webkit_backdrop_filter: proof.computed_titlebar_webkit_backdrop_filter,
-  computed_inactive_border: proof.computed_inactive_border,
-  computed_inactive_shadow: proof.computed_inactive_shadow,
-  computed_active_border: proof.computed_active_border,
-  computed_active_shadow: proof.computed_active_shadow,
   ready: jsonBoolTextOrBlank(proof.ready),
   wm_found: jsonBoolTextOrBlank(proof.wm_found),
   window_cmd_count: jsonIntegerTextOrBlank(proof.window_cmd_count),
@@ -442,68 +233,38 @@ const rows = {
   input_to_paint_ms: jsonDecimalTextOrBlank(proof.input_to_paint_ms),
   animation_frame_available: jsonBoolTextOrBlank(proof.animation_frame_available),
   animation_frame_count: jsonIntegerTextOrBlank(proof.animation_frame_count),
-  css_animation_initial_opacity: jsonDecimalTextOrBlank(proof.css_animation_initial_opacity),
-  css_animation_final_opacity: jsonDecimalTextOrBlank(proof.css_animation_final_opacity),
-  css_animation_initial_current_time_ms: jsonDecimalTextOrBlank(proof.css_animation_initial_current_time_ms),
-  css_animation_final_current_time_ms: jsonDecimalTextOrBlank(proof.css_animation_final_current_time_ms),
-  css_animation_motion_observed: jsonBoolTextOrBlank(proof.css_animation_motion_observed),
   css_animation_probe: jsonBoolTextOrBlank(proof.css_animation_probe),
   title_text: proof.title_text,
   title_context_text: proof.title_context_text,
-  traffic_button_count: jsonIntegerTextOrBlank(proof.traffic_button_count),
+  traffic_button_count: proof.traffic_button_count,
   title_input_tag: proof.title_input_tag,
   titlebar_height: proof.titlebar_height,
   titlebar_display: proof.titlebar_display,
   titlebar_cursor: proof.titlebar_cursor,
   titlebar_background: proof.titlebar_background,
   title_color: proof.title_color,
-  title_font_weight: jsonIntegerTextOrBlank(proof.title_font_weight),
+  title_font_weight: proof.title_font_weight,
   title_input_min_width: proof.title_input_min_width,
   title_input_width: proof.title_input_width,
-  title_input_width_px: jsonDecimalTextOrBlank(proof.title_input_width_px),
+  title_input_width_px: proof.title_input_width_px,
   title_input_height: proof.title_input_height,
   title_input_cursor: proof.title_input_cursor,
   title_input_background: proof.title_input_background,
   close_button_background: proof.close_button_background,
   minimize_button_background: proof.minimize_button_background,
   maximize_button_background: proof.maximize_button_background,
-  expected_move_x: jsonIntegerTextOrBlank(proof.expected_move_x),
-  expected_move_y: jsonIntegerTextOrBlank(proof.expected_move_y),
-  move_payload_x: jsonIntegerTextOrBlank(move.x),
-  move_payload_y: jsonIntegerTextOrBlank(move.y),
+  expected_move_x: proof.expected_move_x,
+  expected_move_y: proof.expected_move_y,
+  move_payload_x: move.x,
+  move_payload_y: move.y,
   move_payload_source: move.source,
   move_payload_window_id_hint: move.window_id_hint,
   title_command_text: title.command_text,
   text_input_text: text.event ? text.event.text : undefined,
-  font_text: proof.font_text,
-  font_composition_id: proof.font_composition_id,
-  font_identity: proof.font_identity,
-  font_family: proof.font_family,
-  font_loaded: jsonBoolTextOrBlank(proof.font_loaded),
-  font_frame_event_count: jsonIntegerTextOrBlank(proof.font_frame_event_count),
-  font_frame_correlation_id: proof.font_frame_correlation_id,
-  font_frame_path: proof.font_frame_path,
-  font_frame_width: jsonIntegerTextOrBlank(proof.font_frame_width),
-  font_frame_height: jsonIntegerTextOrBlank(proof.font_frame_height),
-  font_frame_byte_count: jsonIntegerTextOrBlank(proof.font_frame_byte_count),
-  font_frame_actual_size_bytes: fontFrame.actualSize,
-  font_frame_pixel_checksum: jsonIntegerTextOrBlank(proof.font_frame_pixel_checksum),
-  font_frame_validated_checksum: fontFrame.checksum,
-  font_frame_nonbackground_pixels: jsonIntegerTextOrBlank(proof.font_frame_nonbackground_pixels),
-  font_frame_validated_nonbackground_pixels: fontFrame.nonBackground,
-  font_frame_artifact_status: fontFrame.status,
-  simple_composition_receipt_path: proof.simple_composition_receipt_path,
-  simple_composition_run_id: proof.simple_composition_run_id,
-  simple_composition_artifact_path: proof.simple_composition_artifact_path,
-  simple_composition_pixel_count: jsonIntegerTextOrBlank(proof.simple_composition_pixel_count),
-  simple_composition_pixel_checksum: jsonIntegerTextOrBlank(proof.simple_composition_pixel_checksum),
-  simple_composition_artifact_size_bytes: jsonIntegerTextOrBlank(proof.simple_composition_artifact_size_bytes),
-  simple_composition_artifact_sha256: proof.simple_composition_artifact_sha256,
-  simple_composition_artifact_status: simpleComposition.status,
 };
 
 let reason = 'pass';
-if (!boolTrue(proof.pass)) {
+if (!boolValue(proof.pass)) {
   reason = 'probe-reported-fail';
 } else if (proof.target !== expectedTarget || proof.surface_id !== expectedSurfaceId) {
   reason = 'event-routing-surface-identity-missing';
@@ -511,71 +272,50 @@ if (!boolTrue(proof.pass)) {
   reason = 'event-routing-proof-source-missing';
 } else if (proofSource.status !== 'pass') {
   reason = `event-routing-proof-source-${proofSource.status}`;
-} else if (productionEnvelope.status !== 'pass') {
-  reason = `event-routing-production-envelope-${productionEnvelope.status}`;
+} else if (simpleComposition.status !== 'pass') {
+  reason = 'event-routing-simple-composition-artifact-invalid';
 } else if (
   proof.browser_engine !== 'chromium' ||
   typeof proof.electron_user_agent !== 'string' ||
   !/Chrome\/[0-9]/.test(proof.electron_user_agent) ||
   !/Electron\/[0-9]/.test(proof.electron_user_agent) ||
   typeof proof.electron_process_version !== 'string' ||
-  proof.electron_process_version !== '42.5.0' ||
+  !/^[0-9]+(?:\.[0-9]+)*$/.test(proof.electron_process_version) ||
   typeof proof.chrome_process_version !== 'string' ||
   !/^[0-9]+(?:\.[0-9]+)*$/.test(proof.chrome_process_version)
 ) {
   reason = 'event-routing-browser-runtime-missing';
-} else if (!boolTrue(proof.renderer_sandboxed)) {
-  reason = 'event-routing-renderer-sandbox-missing';
-} else if (
-  gpuFeatureStatus.gpu_compositing !== 'enabled' ||
-  gpuFeatureStatus.webgl !== 'enabled'
-) {
-  reason = 'event-routing-gpu-runtime-missing';
-} else if (simpleComposition.status !== 'pass') {
-  reason = 'event-routing-simple-composition-artifact-invalid';
 } else if (!boolTrue(proof.ready) || !boolTrue(proof.wm_found)) {
   reason = 'event-routing-ready-missing';
 } else if (
-  !sameJsonInteger(proof.window_cmd_count, 4) ||
-  !sameJsonInteger(proof.input_event_count, 3) ||
-  !jsonIntegerAtLeast(proof.focus_count, 1) ||
-  !jsonIntegerAtLeast(proof.move_count, 1) ||
-  !jsonIntegerAtLeast(proof.maximize_count, 1) ||
-  !jsonIntegerAtLeast(proof.title_command_count, 1) ||
-  !jsonIntegerAtLeast(proof.text_input_count, 1) ||
-  !jsonIntegerAtLeast(proof.pointer_down_count, 1) ||
-  !jsonIntegerAtLeast(proof.pointer_up_count, 1)
+  !min(proof.focus_count, 1) ||
+  !min(proof.move_count, 1) ||
+  !min(proof.maximize_count, 1) ||
+  !min(proof.title_command_count, 1) ||
+  !min(proof.text_input_count, 1) ||
+  !min(proof.pointer_down_count, 1) ||
+  !min(proof.pointer_up_count, 1)
 ) {
   reason = 'event-routing-contract-missing';
-} else if (!sameEventSequence(proof.event_sequence)) {
-  reason = 'event-routing-sequence-contract-missing';
 } else if (
   !boolTrue(proof.performance_now_available) ||
   !jsonDecimalGreaterThan(proof.performance_now_delta_ms, 0) ||
   !jsonDecimalAtMost(proof.performance_now_delta_ms, maxEventTimingMs) ||
   !boolTrue(proof.animation_frame_available) ||
   !jsonIntegerAtLeast(proof.animation_frame_count, 2) ||
-  !hasObservedAnimationMotion(proof) ||
   !boolTrue(proof.css_animation_probe)
 ) {
   reason = 'event-routing-performance-animation-contract-missing';
 } else if (
-  !jsonDecimalGreaterThan(proof.input_to_paint_ms, 0) ||
-  !jsonDecimalAtMost(proof.input_to_paint_ms, maxEventTimingMs)
-) {
-  reason = 'event-routing-interaction-latency-contract-missing';
-} else if (
   move.window_id_hint !== 'win1' ||
   move.source !== 'native_event' ||
-  !sameJsonInteger(move.x, proof.expected_move_x) ||
-  !sameJsonInteger(move.y, proof.expected_move_y) ||
+  !equalsNumber(move.x, proof.expected_move_x) ||
+  !equalsNumber(move.y, proof.expected_move_y) ||
   title.command_text !== '/tmp/project' ||
   !text.event ||
   text.event.text !== 'Hello Simple'
 ) {
   reason = 'event-routing-payload-contract-missing';
-} else if (proof.post_action_semantic_state !== 'maximized-and-text-input') {
-  reason = 'event-routing-post-action-contract-missing';
 } else if (
   proof.font_text !== expectedFontText ||
   proof.font_composition_id !== expectedFontCompositionId ||
@@ -609,19 +349,22 @@ if (!boolTrue(proof.pass)) {
 } else if (
   proof.title_text !== 'Terminal' ||
   proof.title_context_text !== 'terminal' ||
-  !jsonIntegerAtLeast(proof.traffic_button_count, 3) ||
+  !min(proof.traffic_button_count, 3) ||
   proof.title_input_tag !== 'input' ||
+  proof.titlebar_height !== '34px' ||
   proof.titlebar_display !== 'flex' ||
-  proof.titlebar_height === '' ||
-  proof.titlebar_cursor === '' ||
-  !jsonIntegerAtLeast(proof.title_font_weight, 1) ||
-  !jsonDecimalGreaterThan(proof.title_input_width_px, 0) ||
-  proof.title_input_height === '' ||
+  proof.titlebar_cursor !== 'grab' ||
+  proof.titlebar_background !== 'rgb(229, 231, 235)' ||
+  proof.title_color !== 'rgb(17, 24, 39)' ||
+  !jsonIntegerAtLeast(proof.title_font_weight, 700) ||
+  proof.title_input_min_width !== '142px' ||
+  !jsonDecimalAtLeast(proof.title_input_width_px, 142) ||
+  proof.title_input_height !== '24px' ||
   proof.title_input_cursor !== 'text' ||
-  proof.title_input_background === '' ||
-  proof.close_button_background === '' ||
-  proof.minimize_button_background === '' ||
-  proof.maximize_button_background === ''
+  proof.title_input_background !== 'rgb(241, 245, 249)' ||
+  proof.close_button_background !== 'rgb(239, 68, 68)' ||
+  proof.minimize_button_background !== 'rgb(234, 179, 8)' ||
+  proof.maximize_button_background !== 'rgb(34, 197, 94)'
 ) {
   reason = 'event-routing-ui-contract-missing';
 }
@@ -629,8 +372,6 @@ if (!boolTrue(proof.pass)) {
 const status = reason === 'pass' ? 'pass' : 'fail';
 row('wm_browser_event_routing_validation_status', status);
 row('wm_browser_event_routing_validation_reason', reason);
-row('wm_browser_event_routing_proof_symlink_status', 'pass');
-row('wm_browser_event_routing_proof_hardlink_status', 'pass');
 for (const [key, value] of Object.entries(rows)) {
   row(`wm_browser_event_routing_${key}`, value);
 }

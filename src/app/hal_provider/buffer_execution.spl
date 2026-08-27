@@ -1,0 +1,127 @@
+# codex-impl
+# Production composition owner for physical buffer execution followed by
+# one-shot replay dispatch. Ambient preparation belongs to sibling hosted
+# adapters; this owner retains only the fixed executed-access authority.
+
+use std.common.structural.environment_instruction.*
+use std.nogc_sync_mut.io.hal_buffer_dispatch.*
+
+class HalBufferExecutionOwnerV3:
+    access: RtHalBufferExecutedAccessOwnerV3
+
+class HalStreamWritePhysicalExecutorV3:
+    stream_id: i64
+    capability_id: i64
+    sink_bytes: [u8]
+    sealed: bool
+
+fn hal_stream_write_physical_executor_v3(stream_id: i64,
+        capability_id: i64,
+        sink_bytes: [u8]) -> HalStreamWritePhysicalExecutorV3:
+    val ready = stream_id >= 0 and capability_id > 0 and capability_id < 63
+        and sink_bytes.len() <= RT_HAL_BUFFER_MAX_BYTES_V3
+    HalStreamWritePhysicalExecutorV3(
+        if ready: stream_id else: -1,
+        if ready: capability_id else: 0,
+        sink_bytes, ready)
+
+fn _hal_buffer_read_i64_le_v3(bytes: [u8], offset: i64) -> i64:
+    var value = 0
+    var i = 0
+    while i < 8:
+        value = value | ((bytes[offset + i] as i64) << (i * 8))
+        i = i + 1
+    value
+
+fn _hal_buffer_write_i64_le_v3(bytes: [u8], offset: i64, value: i64):
+    var i = 0
+    while i < 8:
+        bytes[offset + i] = ((value >> (i * 8)) & 255) as u8
+        i = i + 1
+
+impl EnvPhysicalExecutorPortV1 for HalStreamWritePhysicalExecutorV3:
+    fn execute(policy: EnvExecutorPolicyV1, instruction: EnvInstructionV1,
+               argument_bytes: [u8], result_bytes: [u8]) -> EnvExecutionReceiptV1:
+        val validation = env_executor_validate_instruction(
+            policy, instruction, argument_bytes, result_bytes)
+        if env_instruction_status_to_i64(validation)
+                != env_instruction_status_to_i64(EnvInstructionStatusV1.Planned):
+            return env_execution_rejected_v1(instruction, validation)
+        if not self.sealed or instruction.opcode != EnvOpcodeV1.StreamWrite
+                or instruction.capability_id != self.capability_id
+                or instruction.argument_length < 8
+                or instruction.result_capacity < 8
+                or _hal_buffer_read_i64_le_v3(
+                    argument_bytes, instruction.argument_offset) != self.stream_id:
+            return env_execution_rejected_v1(
+                instruction, EnvInstructionStatusV1.Diverged)
+        val payload_length = instruction.argument_length - 8
+        if payload_length > self.sink_bytes.len():
+            return env_execution_rejected_v1(
+                instruction, EnvInstructionStatusV1.Overflow)
+        var i = 0
+        while i < payload_length:
+            self.sink_bytes[i] =
+                argument_bytes[instruction.argument_offset + 8 + i]
+            i = i + 1
+        _hal_buffer_write_i64_le_v3(
+            result_bytes, instruction.result_offset, payload_length)
+        env_execution_record_applied_v1(
+            instruction, argument_bytes, result_bytes, 8, true, 0)
+
+@init_phase
+fn hal_buffer_execution_owner_v3(authority_identity_hi: i64,
+        authority_identity_lo: i64,
+        capacity: i64 = 256) -> HalBufferExecutionOwnerV3:
+    HalBufferExecutionOwnerV3(rt_hal_buffer_executed_access_owner_v3(
+        authority_identity_hi, authority_identity_lo, capacity))
+
+impl HalBufferExecutionOwnerV3:
+    me file_read(extraction: RtHalAutomaticExtractionReceiptV1,
+            executor: EnvPhysicalExecutorPortV1, policy: EnvExecutorPolicyV1,
+            argument_bytes: [u8], captured_bytes: [u8], output_bytes: [u8],
+            trace_hi: i64, trace_lo: i64, trace_cursor: i64,
+            trace_length: i64, trace_capacity: i64) -> i32:
+        hal_file_read_buffer_executed_v3(self.access, extraction, executor,
+            policy, argument_bytes, captured_bytes, output_bytes, trace_hi,
+            trace_lo, trace_cursor, trace_length, trace_capacity)
+
+    me stream_read(extraction: RtHalAutomaticExtractionReceiptV1,
+            executor: EnvPhysicalExecutorPortV1, policy: EnvExecutorPolicyV1,
+            argument_bytes: [u8], captured_bytes: [u8], output_bytes: [u8],
+            trace_hi: i64, trace_lo: i64, trace_cursor: i64,
+            trace_length: i64, trace_capacity: i64) -> i32:
+        hal_stream_read_buffer_executed_v3(self.access, extraction, executor,
+            policy, argument_bytes, captured_bytes, output_bytes, trace_hi,
+            trace_lo, trace_cursor, trace_length, trace_capacity)
+
+    me stream_write(extraction: RtHalAutomaticExtractionReceiptV1,
+            executor: EnvPhysicalExecutorPortV1, policy: EnvExecutorPolicyV1,
+            argument_bytes: [u8], captured_bytes: [u8], output_bytes: [u8],
+            trace_hi: i64, trace_lo: i64, trace_cursor: i64,
+            trace_length: i64, trace_capacity: i64) -> i32:
+        hal_stream_write_buffer_executed_v3(self.access, extraction, executor,
+            policy, argument_bytes, captured_bytes, output_bytes, trace_hi,
+            trace_lo, trace_cursor, trace_length, trace_capacity)
+
+    me environment_get(extraction: RtHalAutomaticExtractionReceiptV1,
+            executor: EnvPhysicalExecutorPortV1, policy: EnvExecutorPolicyV1,
+            argument_bytes: [u8], captured_bytes: [u8], output_bytes: [u8],
+            trace_hi: i64, trace_lo: i64, trace_cursor: i64,
+            trace_length: i64, trace_capacity: i64) -> i32:
+        hal_environment_get_buffer_executed_v3(self.access, extraction,
+            executor, policy, argument_bytes, captured_bytes, output_bytes,
+            trace_hi, trace_lo, trace_cursor, trace_length, trace_capacity)
+
+    me random_fill(extraction: RtHalAutomaticExtractionReceiptV1,
+            executor: EnvPhysicalExecutorPortV1, policy: EnvExecutorPolicyV1,
+            argument_bytes: [u8], captured_bytes: [u8], output_bytes: [u8],
+            trace_hi: i64, trace_lo: i64, trace_cursor: i64,
+            trace_length: i64, trace_capacity: i64) -> i32:
+        hal_random_fill_buffer_executed_v3(self.access, extraction, executor,
+            policy, argument_bytes, captured_bytes, output_bytes, trace_hi,
+            trace_lo, trace_cursor, trace_length, trace_capacity)
+
+export HalBufferExecutionOwnerV3, hal_buffer_execution_owner_v3
+export HalStreamWritePhysicalExecutorV3
+export hal_stream_write_physical_executor_v3

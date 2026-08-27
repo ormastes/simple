@@ -1,0 +1,392 @@
+# Typed BlockValue projection into the destination-owned BlockValue bank.
+# Source values are matched synchronously while the caller's frontend graph is
+# rooted. No Any payload or runtime handle is retained.
+use compiler.common.diagnostics.span.{Span}
+use compiler.blocks.blocks.value.{
+    BlockValue, ShellCommands, ShellCommand, RedirectKind, SqlQuery, SqlKind,
+    JsonValue, MarkdownDoc, MarkdownBlock, GraphDiagram, DiagramGraphKind
+}
+use compiler.frontend.parser_types_expr.{Expr, Block}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.hir_destination_block_values.*
+use compiler.hir.hir_lowering.hir_destination_registry_writer.*
+
+fn dest_bv_reserve(slot: i64, generation: i64) -> i64:
+    hdw_bv_reserve(slot, generation)
+
+fn dest_bv_text_rows(slot: i64, generation: i64, values: [text]) -> i64:
+    if values.len() == 0: return -1
+    var first = -1
+    var i = 0
+    while i < values.len():
+        val row = dest_bv_reserve(slot, generation)
+        if row < 0: return -1
+        if i == 0: first = row
+        i = i + 1
+    i = 0
+    while i < values.len():
+        if not hdw_bv_text(slot, generation, first + i, values[i]): return -1
+        i = i + 1
+    first
+
+fn dest_bv_redirect_kind(kind: RedirectKind) -> i64:
+    match kind:
+        case StdoutToFile: 0
+        case StdoutAppend: 1
+        case StderrToFile: 2
+        case StdinFromFile: 3
+        case StderrToStdout: 4
+
+fn dest_bv_shell_command_into(slot: i64, generation: i64, row: i64,
+                              command: ShellCommand) -> bool:
+    val args = dest_bv_text_rows(slot, generation, command.args)
+    if command.args.len() > 0 and args < 0: return false
+    var redirects = -1
+    if command.redirects.len() > 0:
+        var i = 0
+        while i < command.redirects.len():
+            val child = dest_bv_reserve(slot, generation)
+            if child < 0: return false
+            if i == 0: redirects = child
+            i = i + 1
+        i = 0
+        while i < command.redirects.len():
+            val redirect = command.redirects[i]
+            if not hdw_bv_redirect(slot, generation, redirects + i,
+                    dest_bv_redirect_kind(redirect.kind), redirect.target): return false
+            i = i + 1
+    var pipe_to = -1
+    if command.has_pipe_to:
+        pipe_to = dest_bv_reserve(slot, generation)
+        if pipe_to < 0 or not dest_bv_shell_command_into(
+                slot, generation, pipe_to, command.pipe_to): return false
+    hdw_bv_shell_command(slot, generation, row, command.program,
+        args, command.args.len(), redirects, command.redirects.len(),
+        command.has_pipe_to, pipe_to)
+
+fn dest_bv_shell(slot: i64, generation: i64, shell: ShellCommands) -> i64:
+    val parent = dest_bv_reserve(slot, generation)
+    if parent < 0: return -1
+    var commands = -1
+    var i = 0
+    while i < shell.commands.len():
+        val row = dest_bv_reserve(slot, generation)
+        if row < 0: return -1
+        if i == 0: commands = row
+        i = i + 1
+    i = 0
+    while i < shell.commands.len():
+        if not dest_bv_shell_command_into(slot, generation, commands + i,
+                                          shell.commands[i]): return -1
+        i = i + 1
+    if not hdw_bv_shell(slot, generation, parent, shell.raw, commands,
+                        shell.commands.len()): return -1
+    parent
+
+fn dest_bv_sql_kind(kind: SqlKind) -> i64:
+    match kind:
+        case Select: 0
+        case Insert: 1
+        case Update: 2
+        case Delete: 3
+        case Create: 4
+        case Alter: 5
+        case Drop: 6
+        case Other: 7
+
+fn dest_bv_sql(slot: i64, generation: i64, query: SqlQuery) -> i64:
+    val parent = dest_bv_reserve(slot, generation)
+    if parent < 0: return -1
+    val tables = dest_bv_text_rows(slot, generation, query.tables)
+    val columns = dest_bv_text_rows(slot, generation, query.columns)
+    if (query.tables.len() > 0 and tables < 0) or
+       (query.columns.len() > 0 and columns < 0): return -1
+    var params = -1
+    var i = 0
+    while i < query.params.len():
+        val row = dest_bv_reserve(slot, generation)
+        if row < 0: return -1
+        if i == 0: params = row
+        i = i + 1
+    i = 0
+    while i < query.params.len():
+        val param = query.params[i]
+        if not hdw_bv_sql_param(slot, generation, params + i,
+                                param.name, param.position): return -1
+        i = i + 1
+    if not hdw_bv_sql(slot, generation, parent, query.raw,
+            dest_bv_sql_kind(query.kind), tables, query.tables.len(),
+            columns, query.columns.len(), params, query.params.len()): return -1
+    parent
+
+fn dest_bv_json_into(slot: i64, generation: i64, row: i64,
+                     value: JsonValue) -> bool:
+    match value.kind:
+        case Null: hdw_bv_json_scalar(slot, generation, row, HD_BV_JSON_NULL, false, 0.0, "")
+        case Bool(v): hdw_bv_json_scalar(slot, generation, row, HD_BV_JSON_BOOL, v, 0.0, "")
+        case Number(v): hdw_bv_json_scalar(slot, generation, row, HD_BV_JSON_NUMBER, false, v, "")
+        case String(v): hdw_bv_json_scalar(slot, generation, row, HD_BV_JSON_STRING, false, 0.0, v)
+        case Array(values):
+            var first = -1
+            var i = 0
+            while i < values.len():
+                val child = dest_bv_reserve(slot, generation)
+                if child < 0: return false
+                if i == 0: first = child
+                i = i + 1
+            i = 0
+            while i < values.len():
+                if not dest_bv_json_into(slot, generation, first + i,
+                                         values[i]): return false
+                i = i + 1
+            hdw_bv_json_array(slot, generation, row, first, values.len())
+        case Object(fields):
+            var first = -1
+            var i = 0
+            while i < fields.len():
+                val child = dest_bv_reserve(slot, generation)
+                if child < 0: return false
+                if i == 0: first = child
+                i = i + 1
+            i = 0
+            while i < fields.len():
+                val field = fields[i]
+                val value_row = dest_bv_reserve(slot, generation)
+                if value_row < 0 or not dest_bv_json_into(
+                        slot, generation, value_row, field.1): return false
+                if not hdw_bv_json_field(slot, generation, first + i,
+                                         field.0, value_row): return false
+                i = i + 1
+            hdw_bv_json_object(slot, generation, row, first, fields.len())
+
+fn dest_bv_json(slot: i64, generation: i64, value: JsonValue) -> i64:
+    val row = dest_bv_reserve(slot, generation)
+    if row < 0 or not dest_bv_json_into(slot, generation, row, value): return -1
+    row
+
+fn dest_bv_markdown_text_block(slot: i64, generation: i64, row: i64,
+                               block: MarkdownBlock) -> bool:
+    match block:
+        case Heading(level, value): hdw_bv_markdown_block(slot, generation, row, HD_BV_MD_HEADING, level, false, value, "", -1, 0, -1, 0)
+        case Paragraph(value): hdw_bv_markdown_block(slot, generation, row, HD_BV_MD_PARAGRAPH, 0, false, value, "", -1, 0, -1, 0)
+        case CodeBlock(language, code): hdw_bv_markdown_block(slot, generation, row, HD_BV_MD_CODE, 0, false, language, code, -1, 0, -1, 0)
+        case Quote(value): hdw_bv_markdown_block(slot, generation, row, HD_BV_MD_QUOTE, 0, false, value, "", -1, 0, -1, 0)
+        case HorizontalRule: hdw_bv_markdown_block(slot, generation, row, HD_BV_MD_RULE, 0, false, "", "", -1, 0, -1, 0)
+        case List(ordered, items):
+            val values = dest_bv_text_rows(slot, generation, items)
+            if items.len() > 0 and values < 0: return false
+            hdw_bv_markdown_block(slot, generation, row, HD_BV_MD_LIST, 0,
+                                  ordered, "", "", values, items.len(), -1, 0)
+        case Table(headers, rows):
+            val header_rows = dest_bv_text_rows(slot, generation, headers)
+            if headers.len() > 0 and header_rows < 0: return false
+            var table_rows = -1
+            var i = 0
+            while i < rows.len():
+                val child = dest_bv_reserve(slot, generation)
+                if child < 0: return false
+                if i == 0: table_rows = child
+                i = i + 1
+            i = 0
+            while i < rows.len():
+                val cells = dest_bv_text_rows(slot, generation, rows[i])
+                if rows[i].len() > 0 and cells < 0: return false
+                if not hdw_bv_markdown_row(slot, generation, table_rows + i,
+                                           cells, rows[i].len()): return false
+                i = i + 1
+            hdw_bv_markdown_block(slot, generation, row, HD_BV_MD_TABLE, 0,
+                false, "", "", header_rows, headers.len(), table_rows, rows.len())
+
+fn dest_bv_markdown(slot: i64, generation: i64, doc: MarkdownDoc) -> i64:
+    val parent = dest_bv_reserve(slot, generation)
+    if parent < 0: return -1
+    var blocks = -1
+    var i = 0
+    while i < doc.blocks.len():
+        val row = dest_bv_reserve(slot, generation)
+        if row < 0: return -1
+        if i == 0: blocks = row
+        i = i + 1
+    i = 0
+    while i < doc.blocks.len():
+        if not dest_bv_markdown_text_block(slot, generation, blocks + i,
+                                           doc.blocks[i]): return -1
+        i = i + 1
+    if not hdw_bv_markdown(slot, generation, parent, doc.raw, blocks,
+                           doc.blocks.len()): return -1
+    parent
+
+fn dest_bv_graph_kind(kind: DiagramGraphKind) -> i64:
+    match kind:
+        case Flowchart: 0
+        case Sequence: 1
+        case Class: 2
+        case State: 3
+        case ER: 4
+        case Gantt: 5
+        case Dot: 6
+
+fn dest_bv_graph(slot: i64, generation: i64, graph: GraphDiagram) -> i64:
+    val parent = dest_bv_reserve(slot, generation)
+    if parent < 0: return -1
+    var nodes = -1
+    var i = 0
+    while i < graph.nodes.len():
+        val row = dest_bv_reserve(slot, generation)
+        if row < 0: return -1
+        if i == 0: nodes = row
+        i = i + 1
+    var edges = -1
+    i = 0
+    while i < graph.edges.len():
+        val row = dest_bv_reserve(slot, generation)
+        if row < 0: return -1
+        if i == 0: edges = row
+        i = i + 1
+    i = 0
+    while i < graph.nodes.len():
+        val node = graph.nodes[i]
+        var shape_row = -1
+        if node.has_shape:
+            shape_row = dest_bv_reserve(slot, generation)
+            if shape_row < 0 or not hdw_bv_text(slot, generation, shape_row,
+                                                node.shape): return -1
+        if not hdw_bv_graph_node(slot, generation, nodes + i, node.id,
+                node.has_label, node.label, node.has_shape, shape_row): return -1
+        i = i + 1
+    i = 0
+    while i < graph.edges.len():
+        val edge = graph.edges[i]
+        var label = -1
+        var style = -1
+        if edge.has_label:
+            label = dest_bv_reserve(slot, generation)
+            if label < 0 or not hdw_bv_text(slot, generation, label,
+                                            edge.label): return -1
+        if edge.has_style:
+            style = dest_bv_reserve(slot, generation)
+            if style < 0 or not hdw_bv_text(slot, generation, style,
+                                            edge.style): return -1
+        if not hdw_bv_graph_edge(slot, generation, edges + i, edge.source,
+                edge.target, edge.has_label, label, edge.has_style, style): return -1
+        i = i + 1
+    if not hdw_bv_graph(slot, generation, parent, graph.raw,
+            dest_bv_graph_kind(graph.kind), nodes, graph.nodes.len(),
+            edges, graph.edges.len()): return -1
+    parent
+
+impl HirLowering:
+    # Narrow scalar handoff for an external, statically typed custom-block
+    # producer.  The producer owns decoding its source value and writes the
+    # projection root synchronously after begin; this consumer never inspects
+    # or retains BlockValue.Custom's Any payload.  These calls intentionally
+    # remain separate because begin is forbidden while an HIR checkpoint is
+    # active, and commit must consume the exact nonce/generation receipt.
+    me destination_register_custom_projection_codec(type_name: text,
+                                                     span: Span) -> i64:
+        val receipt = hdw_bv_register_codec(self.destination_slot,
+            self.destination_generation, type_name)
+        if receipt < 0:
+            self.error("E-HIR-DEST-CUSTOM-CODEC-REGISTER: typed custom projection codec `" +
+                type_name + "` was rejected", span)
+        receipt
+
+    me destination_begin_custom_projection(codec_receipt: i64,
+                                            type_name: text, nonce: i64,
+                                            source_generation: i64,
+                                            span: Span) -> i64:
+        val token = hdw_bv_begin_projection(self.destination_slot,
+            self.destination_generation, codec_receipt, type_name, nonce,
+            source_generation)
+        if token < 0:
+            self.error("E-HIR-DEST-CUSTOM-PROJECTION-BEGIN: typed custom projection `" +
+                type_name + "` requires an idle destination transaction", span)
+        token
+
+    me destination_commit_custom_projection(type_name: text, token: i64,
+                                             nonce: i64,
+                                             source_generation: i64,
+                                             projection_root: i64,
+                                             span: Span) -> i64:
+        val row = dest_bv_reserve(self.destination_slot,
+                                  self.destination_generation)
+        if row >= 0 and hdw_bv_commit_custom(self.destination_slot,
+                self.destination_generation, row, token, nonce,
+                source_generation, projection_root):
+            return row
+        self.error("E-HIR-DEST-CUSTOM-PROJECTION-COMMIT: typed custom projection `" +
+            type_name + "` did not match its active receipt/root", span)
+        -1
+
+    me destination_abort_custom_projection(type_name: text, token: i64,
+                                            nonce: i64,
+                                            source_generation: i64,
+                                            span: Span) -> bool:
+        if hdw_bv_abort_projection(self.destination_slot,
+                self.destination_generation, token, nonce,
+                source_generation):
+            return true
+        self.error("E-HIR-DEST-CUSTOM-PROJECTION-ABORT: typed custom projection `" +
+            type_name + "` could not consume its active receipt", span)
+        false
+
+    me destination_lower_custom_value(value: BlockValue, span: Span) -> i64:
+        val slot = self.destination_slot
+        val generation = self.destination_generation
+        val diagnostic_count = self.diagnostic_messages.len()
+        val result = match value:
+            case Raw(raw):
+                val row = dest_bv_reserve(slot, generation)
+                if row >= 0 and hdw_bv_raw(slot, generation, row, raw): row else: -1
+            case Regex(pattern):
+                val row = dest_bv_reserve(slot, generation)
+                if row >= 0 and hdw_bv_regex(slot, generation, row, pattern.raw): row else: -1
+            case Shell(shell): dest_bv_shell(slot, generation, shell)
+            case Sql(query): dest_bv_sql(slot, generation, query)
+            case Json(value): dest_bv_json(slot, generation, value)
+            case Markdown(doc): dest_bv_markdown(slot, generation, doc)
+            case Graph(graph): dest_bv_graph(slot, generation, graph)
+            case Error(message):
+                val row = dest_bv_reserve(slot, generation)
+                if row >= 0 and hdw_bv_error(slot, generation, row, message): row else: -1
+            case Expr(source):
+                # BlockValue.Expr's constructor contract roots an AST Expr in
+                # this Any slot. Rebind and consume it synchronously; never
+                # retain the Any or a pointer derived from it.
+                val typed_source: Expr = source
+                val row = dest_bv_reserve(slot, generation)
+                if row < 0: -1
+                else:
+                    val expr = self.destination_lower_expr(typed_source)
+                    if expr >= 0 and hdw_bv_expr(slot, generation, row, expr): row else: -1
+            case LossBlock(source):
+                val typed_source: Block = source
+                val row = dest_bv_reserve(slot, generation)
+                if row < 0: -1
+                else:
+                    val block = self.destination_lower_block(typed_source, true)
+                    if block >= 0 and hdw_bv_loss(slot, generation, row, block): row else: -1
+            case NogradBlock(source):
+                val typed_source: Block = source
+                val row = dest_bv_reserve(slot, generation)
+                if row < 0: -1
+                else:
+                    val block = self.destination_lower_block(typed_source, true)
+                    if block >= 0 and hdw_bv_nograd(slot, generation, row, block): row else: -1
+            case Custom(type_name, _):
+                # The ordinary AST route has no typed producer handoff.  Do
+                # not reinterpret or retain the Any payload: a producer must
+                # instead use the scalar register/begin/commit surface above
+                # before returning its destination BlockValue row.
+                self.destination_custom_any_error(
+                    "custom type `" + type_name +
+                    "` has no active external typed projection transaction", span)
+        if result < 0 and self.diagnostic_messages.len() == diagnostic_count:
+            self.error("E-HIR-DEST-CUSTOM-PROJECTION: typed BlockValue projection failed", span)
+        result
+
+    me destination_custom_any_error(feature: text, span: Span) -> i64:
+        self.error("E-HIR-DEST-CUSTOM-CODEC: no synchronous typed projection transaction for {feature}", span)
+        -1
+
+export HirLowering

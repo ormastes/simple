@@ -1,0 +1,1023 @@
+# Process-owned destination-graph lease registry.
+#
+# This registry is intentionally process-serialized. It is not a thread-safe
+# container: upstream must route every BUILDING call through one HirLowering
+# owner. Acquire rejects every second compile/acquire, while stale state/generation
+# pairs fail closed. Scalar leases remain copyable and are not a synchronization
+# primitive; a future parallel route must place a lock outside this module.
+#
+# The populated HirDestinationGraph value never leaves `_hir_destination_graphs`,
+# is never rebound to a local, and is never assigned. Only scalar leases cross
+# this boundary.
+use compiler.hir.hir_lowering.hir_destination_graph.*
+use compiler.hir.hir_lowering.hir_destination_expr_hot.*
+use compiler.hir.hir_lowering.hir_destination_expr_payloads.*
+use compiler.hir.hir_lowering.hir_destination_control.*
+use compiler.hir.hir_lowering.hir_destination_blocks.*
+use compiler.hir.hir_lowering.hir_destination_types_patterns.*
+use compiler.hir.hir_lowering.hir_destination_function.*
+use compiler.hir.hir_lowering.hir_destination_modules.*
+use compiler.hir.hir_lowering.hir_destination_symbol_graph.*
+use compiler.common.diagnostics.span.{Span}
+
+const HD_REGISTRY_UNINITIALIZED: i64 = 0
+const HD_REGISTRY_BUILDING: i64 = 1
+const HD_REGISTRY_READ: i64 = 2
+const HD_REGISTRY_CONSUMED: i64 = 3
+const HD_REGISTRY_FAILED: i64 = 4
+
+var _hir_destination_graphs: [HirDestinationGraph] = []
+var _hir_destination_slot_generations: [i64] = []
+var _hir_destination_slot_states: [i64] = []
+var _hir_destination_acquired: bool = false
+
+fn hir_destination_registry_slot_exists(slot: i64) -> bool:
+    slot >= 0 and slot < _hir_destination_graphs.len() and
+        slot < _hir_destination_slot_generations.len() and
+        slot < _hir_destination_slot_states.len()
+
+fn hir_destination_registry_state_matches(slot: i64, generation: i64, state: i64) -> bool:
+    hir_destination_registry_slot_exists(slot) and generation >= 0 and
+        _hir_destination_slot_generations[slot] == generation and
+        _hir_destination_slot_states[slot] == state
+
+fn hir_destination_registry_building(slot: i64, generation: i64) -> bool:
+    hir_destination_registry_state_matches(slot, generation, HD_REGISTRY_BUILDING)
+
+fn hir_destination_registry_readable(slot: i64, generation: i64) -> bool:
+    hir_destination_registry_state_matches(slot, generation, HD_REGISTRY_READ)
+
+fn hir_destination_registry_failed(slot: i64, generation: i64) -> bool:
+    hir_destination_registry_state_matches(slot, generation, HD_REGISTRY_FAILED)
+
+fn hir_destination_registry_accounting_visible(slot: i64, generation: i64) -> bool:
+    hir_destination_registry_building(slot, generation) or
+        hir_destination_registry_readable(slot, generation) or
+        hir_destination_registry_failed(slot, generation)
+
+# Stage3 no-GC ownership is process-lifetime. Acquire lazily creates exactly
+# one graph and succeeds exactly once. The graph is never recycled, freed,
+# replaced, or assigned; all storage remains rooted until process exit.
+pub fn hir_destination_registry_acquire(generation: i64) -> i64:
+    if generation < 0 or _hir_destination_acquired: return -1
+    _hir_destination_graphs.push(HirDestinationGraph())
+    _hir_destination_slot_generations.push(generation)
+    _hir_destination_slot_states.push(HD_REGISTRY_UNINITIALIZED)
+    if not _hir_destination_graphs[0].begin_compile(generation):
+        _hir_destination_slot_states[0] = HD_REGISTRY_FAILED
+        _hir_destination_acquired = true
+        return -1
+    _hir_destination_slot_states[0] = HD_REGISTRY_BUILDING
+    _hir_destination_acquired = true
+    0
+
+pub fn hir_destination_registry_freeze(slot: i64, generation: i64) -> bool:
+    if not hir_destination_registry_building(slot, generation): return false
+    if not _hir_destination_graphs[slot].freeze_compile(): return false
+    _hir_destination_slot_states[slot] = HD_REGISTRY_READ
+    true
+
+pub fn hir_destination_registry_release(slot: i64, generation: i64) -> bool:
+    if not hir_destination_registry_readable(slot, generation): return false
+    if _hir_destination_graphs[slot].active_function_count != 0: return false
+    _hir_destination_slot_states[slot] = HD_REGISTRY_CONSUMED
+    true
+
+# Empty graph publication has no module receipt from which MIR could recover
+# the READ lease. BUILDING receipt preflight already proves zero modules and
+# zero functions before freeze, so its post-freeze terminal transition is an
+# infallible scalar commit under this process-serialized owner.
+pub fn hir_destination_registry_release_empty_frozen_preflighted():
+    _hir_destination_slot_states[0] = HD_REGISTRY_CONSUMED
+
+# Atomic terminal token/state commit under the process-serialized registry
+# owner. The graph validates its complete token/function bijection before any
+# mutation, so false retains every receipt and true consumes the generation.
+pub fn hir_destination_registry_release_terminal(slot: i64, generation: i64,
+        expected_function_count: i64) -> bool:
+    if not hir_destination_registry_readable(slot, generation): return false
+    if not _hir_destination_graphs[slot].release_all_functions_terminal(
+            generation, expected_function_count):
+        return false
+    _hir_destination_slot_states[slot] = HD_REGISTRY_CONSUMED
+    true
+
+# Abandon is terminal. The failed graph and every capacity/text payload remain
+# process-rooted for diagnostics and no-GC safety; nothing is reclaimed.
+pub fn hir_destination_registry_abandon(slot: i64, generation: i64) -> bool:
+    if not hir_destination_registry_building(slot, generation): return false
+    if _hir_destination_graphs[slot].active_function_count != 0: return false
+    _hir_destination_graphs[slot].measure_owned_text_payload_bytes()
+    _hir_destination_slot_states[slot] = HD_REGISTRY_FAILED
+    true
+
+pub fn hir_destination_registry_state(slot: i64, generation: i64) -> i64:
+    if not hir_destination_registry_slot_exists(slot): return HD_REGISTRY_UNINITIALIZED
+    if _hir_destination_slot_generations[slot] != generation: return HD_REGISTRY_UNINITIALIZED
+    _hir_destination_slot_states[slot]
+
+pub fn hir_destination_registry_structural_capacity_bytes_estimate(slot: i64, generation: i64) -> i64:
+    if not hir_destination_registry_accounting_visible(slot, generation): return -1
+    _hir_destination_graphs[slot].structural_capacity_bytes_estimate()
+
+pub fn hir_destination_registry_owned_text_payload_bytes(slot: i64, generation: i64) -> i64:
+    if not hir_destination_registry_accounting_visible(slot, generation): return -1
+    _hir_destination_graphs[slot].owned_text_payload_bytes
+
+pub fn hir_destination_registry_owned_text_payload_high_water(slot: i64, generation: i64) -> i64:
+    if not hir_destination_registry_accounting_visible(slot, generation): return -1
+    _hir_destination_graphs[slot].owned_text_payload_high_water
+
+pub fn hir_destination_schedule_count(s: i64, g: i64) -> i64:
+    if hir_destination_registry_readable(s,g):
+        _hir_destination_graphs[s].destination_declarations.schedule_len(g)
+    else: -1
+pub fn hir_destination_schedule_domain(s: i64, g: i64, r: i64) -> i64:
+    if hir_destination_registry_readable(s,g):
+        _hir_destination_graphs[s].destination_declarations.schedule_domain_at(r,g)
+    else: 0
+pub fn hir_destination_schedule_receipt(s: i64, g: i64, r: i64) -> i64:
+    if hir_destination_registry_readable(s,g):
+        _hir_destination_graphs[s].destination_declarations.schedule_receipt_at(r,g)
+    else: -1
+pub fn hir_destination_schedule_source_ordinal(s: i64, g: i64, r: i64) -> i64:
+    if hir_destination_registry_readable(s,g):
+        _hir_destination_graphs[s].destination_declarations.schedule_source_ordinal_at(r,g)
+    else: -1
+pub fn hir_destination_schedule_module(s: i64, g: i64, r: i64) -> i64:
+    if hir_destination_registry_readable(s,g):
+        _hir_destination_graphs[s].destination_declarations.schedule_module_at(r,g)
+    else: -1
+pub fn hir_destination_schedule_source_kind(s: i64, g: i64, r: i64) -> i64:
+    if hir_destination_registry_readable(s,g):
+        _hir_destination_graphs[s].destination_declarations.schedule_source_kind_at(r,g)
+    else: 0
+pub fn hir_destination_schedule_source_local_index(s: i64, g: i64, r: i64) -> i64:
+    if hir_destination_registry_readable(s,g):
+        _hir_destination_graphs[s].destination_declarations.schedule_source_local_index_at(r,g)
+    else: -1
+pub fn hdr_decl_extension_count(s: i64, g: i64) -> i64:
+    if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].destination_declarations.enum_extension_count_at(g) else: -1
+pub fn hdr_decl_extension_i64(s: i64, g: i64, r: i64, c: i64) -> i64:
+    if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].destination_declarations.enum_extension_i64_at(r,g,c) else: -1
+pub fn hdr_decl_extension_text(s: i64, g: i64, r: i64, c: i64) -> text:
+    if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].destination_declarations.enum_extension_text_at(r,g,c) else: ""
+pub fn hdr_decl_extension_constructor_i64(s: i64, g: i64, r: i64, o: i64, c: i64) -> i64:
+    if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].destination_declarations.enum_extension_constructor_i64_at(r,g,o,c) else: -1
+pub fn hdr_decl_extension_constructor_text(s: i64, g: i64, r: i64, o: i64, c: i64) -> text:
+    if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].destination_declarations.enum_extension_constructor_text_at(r,g,o,c) else: ""
+pub fn hdr_decl_extension_constructor_has_discriminant(s: i64, g: i64, r: i64, o: i64) -> bool:
+    hir_destination_registry_readable(s,g) and _hir_destination_graphs[s].destination_declarations.enum_extension_constructor_has_discriminant_at(r,g,o)
+pub fn hdr_decl_extension_payload_name(s: i64, g: i64, r: i64, o: i64, p: i64) -> text:
+    if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].destination_declarations.enum_extension_payload_name_at(r,g,o,p) else: ""
+pub fn hdr_decl_extension_payload_i64(s: i64, g: i64, r: i64, o: i64, p: i64, c: i64) -> i64:
+    if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].destination_declarations.enum_extension_payload_i64_at(r,g,o,p,c) else: -1
+pub fn hdr_decl_extension_variant_name(s: i64, g: i64, r: i64, o: i64) -> text: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].destination_declarations.enum_extension_variant_name_at(r,g,o) else: ""
+pub fn hdr_decl_extension_variant_i64(s: i64, g: i64, r: i64, o: i64, c: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].destination_declarations.enum_extension_variant_i64_at(r,g,o,c) else: -1
+pub fn hdr_decl_extension_variant_has_discriminant(s: i64, g: i64, r: i64, o: i64) -> bool: hir_destination_registry_readable(s,g) and _hir_destination_graphs[s].destination_declarations.enum_extension_variant_has_discriminant_at(r,g,o)
+pub fn hdr_decl_extension_variant_payload_name(s: i64, g: i64, r: i64, v: i64, o: i64) -> text: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].destination_declarations.enum_extension_variant_payload_name_at(r,g,v,o) else: ""
+pub fn hdr_decl_extension_variant_payload_i64(s: i64, g: i64, r: i64, v: i64, o: i64, c: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].destination_declarations.enum_extension_variant_payload_i64_at(r,g,v,o,c) else: -1
+pub fn hdr_decl_extension_attribute_text(s: i64, g: i64, r: i64, o: i64, c: i64) -> text:
+    if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].destination_declarations.enum_extension_attribute_text_at(r,g,o,c) else: ""
+pub fn hdr_decl_extension_attribute_span(s: i64, g: i64, r: i64, o: i64) -> i64:
+    if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].destination_declarations.enum_extension_attribute_span_at(r,g,o) else: -1
+pub fn hdr_decl_extension_attribute_i64(s: i64, g: i64, r: i64, o: i64, c: i64) -> i64:
+    if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].destination_declarations.enum_extension_attribute_i64_at(r,g,o,c) else: -1
+pub fn hdr_decl_extension_attribute_expr(s: i64, g: i64, r: i64, o: i64, e: i64) -> i64:
+    if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].destination_declarations.enum_extension_attribute_expr_at(r,g,o,e) else: -1
+
+# Typed declaration writers. No parser/HIR aggregate crosses this boundary.
+pub fn hdw_decl_reserve(s: i64, g: i64, k: i64, m: i64, y: i64, n: text, v: i64, p: i64) -> i64:
+    if not hir_destination_registry_building(s,g): return -1
+    _hir_destination_graphs[s].destination_declarations.reserve_declaration(k,m,y,n,v,p)
+pub fn hdw_decl_count_building(s: i64, g: i64) -> i64:
+    if hir_destination_registry_building(s,g):
+        _hir_destination_graphs[s].destination_declarations.declaration_count
+    else: -1
+pub fn hdw_decl_nominal_detail_reserve(s: i64, g: i64, k: i64, m: i64, y: i64, h: bool, b: i64, p: i64) -> i64:
+    if not hir_destination_registry_building(s,g): return -1
+    _hir_destination_graphs[s].destination_declarations.reserve_nominal_detail(k,m,y,h,b,p)
+pub fn hdw_decl_nominal_detail_trait(s: i64, g: i64, t: i64) -> i64:
+    if not hir_destination_registry_building(s,g): return -1
+    _hir_destination_graphs[s].destination_declarations.append_nominal_trait(t)
+pub fn hdw_decl_nominal_detail_field(s: i64, g: i64, y: i64, n: text, t: i64, v: i64, u: bool, q: bool, hb: bool, b: i64, ha: bool, a: i64, hd: bool, d: i64, p: i64) -> i64:
+    if not hir_destination_registry_building(s,g): return -1
+    _hir_destination_graphs[s].destination_declarations.append_nominal_field(y,n,t,v,u,q,hb,b,ha,a,hd,d,p)
+pub fn hdw_decl_nominal_detail_finalize(s: i64, g: i64) -> bool:
+    hir_destination_registry_building(s,g) and _hir_destination_graphs[s].destination_declarations.finalize_nominal_detail()
+pub fn hdw_decl_extension_count_building(s: i64, g: i64) -> i64:
+    if hir_destination_registry_building(s,g):
+        _hir_destination_graphs[s].destination_declarations.enum_extension_count
+    else: -1
+pub fn hdw_decl_type_param(s: i64, g: i64, n: text, b: i64, h: bool, d: i64, p: i64) -> i64:
+    if not hir_destination_registry_building(s,g): return -1
+    _hir_destination_graphs[s].destination_declarations.append_type_param(n,b,h,d,p)
+pub fn hdw_decl_type_param_bound(s: i64, g: i64, r: i64, b: i64) -> i64:
+    if not hir_destination_registry_building(s,g): return -1
+    _hir_destination_graphs[s].destination_declarations.append_type_param_bound(r,b)
+pub fn hdw_decl_decorator(s: i64, g: i64, n: text, a: text, p: i64) -> i64:
+    if not hir_destination_registry_building(s,g): return -1
+    _hir_destination_graphs[s].destination_declarations.append_decorator(n,a,p)
+pub fn hdw_decl_raw_attribute(s: i64, g: i64, n: text, a: text, p: i64) -> i64:
+    if not hir_destination_registry_building(s,g): return -1
+    _hir_destination_graphs[s].destination_declarations.append_raw_attribute(n,a,p)
+pub fn hdw_decl_raw_attribute_expr(s: i64, g: i64, d: i64, e: i64) -> i64:
+    if not hir_destination_registry_building(s,g): return -1
+    if not _hir_destination_graphs[s].index_ready(HD_RANGE_EXPR,e): return -1
+    _hir_destination_graphs[s].destination_declarations.append_raw_attribute_expr(d,e)
+pub fn hdw_decl_schedule(s: i64, g: i64, d: i64, r: i64, o: i64, m: i64, k: i64, l: i64) -> i64:
+    if not hir_destination_registry_building(s,g): return -1
+    var valid = false
+    if d == HD_SCHEDULE_SYMBOL:
+        valid = _hir_destination_graphs[s].destination_symbols.building_valid(r,g)
+    elif d == HD_SCHEDULE_FUNCTION:
+        valid = _hir_destination_graphs[s].function_building_matches(r,g)
+    elif d == HD_SCHEDULE_DECLARATION:
+        valid = (r >= 0 and r < _hir_destination_graphs[s].destination_declarations.declaration_count and
+            _hir_destination_graphs[s].destination_declarations.declaration_ready[r])
+    elif d == HD_SCHEDULE_IMPL:
+        valid = r >= 0
+    elif d == HD_SCHEDULE_EXTENSION:
+        valid = (r >= 0 and r < _hir_destination_graphs[s].destination_declarations.enum_extension_count and
+            _hir_destination_graphs[s].destination_declarations.enum_extension_ready[r])
+    if not valid: return -1
+    _hir_destination_graphs[s].destination_declarations.append_schedule(d,r,o,m,k,l)
+pub fn hdw_decl_surface(s: i64, g: i64, u: bool, h: bool, d: text) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].destination_declarations.set_declaration_surface(u,h,d)
+pub fn hdw_decl_actor_field(s: i64, g: i64, y: i64, n: text, t: i64, h: bool, d: i64, p: i64) -> i64:
+    if not hir_destination_registry_building(s,g): return -1
+    _hir_destination_graphs[s].destination_declarations.append_actor_field(y,n,t,h,d,p)
+pub fn hdw_decl_actor_field_full(s: i64, g: i64, y: i64, n: text, t: i64, h: bool, d: i64, v: i64, u: bool, q: bool, hb: bool, b: i64, ha: bool, a: i64, p: i64) -> i64:
+    if not hir_destination_registry_building(s,g): return -1
+    _hir_destination_graphs[s].destination_declarations.append_actor_field_full(y,n,t,h,d,v,u,q,hb,b,ha,a,p)
+pub fn hdw_decl_bitfield_field(s: i64, g: i64, y: i64, n: text, t: i64, o: i64, w: i64, z: bool, p: i64) -> i64:
+    if not hir_destination_registry_building(s,g): return -1
+    _hir_destination_graphs[s].destination_declarations.append_bitfield_field(y,n,t,o,w,z,p)
+pub fn hdw_decl_bitfield_field_full(s: i64, g: i64, y: i64, n: text, ht: bool, t: i64, r: bool, hb: bool, b: i64, o: i64, w: i64, p: i64) -> i64:
+    if not hir_destination_registry_building(s,g): return -1
+    _hir_destination_graphs[s].destination_declarations.append_bitfield_field_full(y,n,ht,t,r,hb,b,o,w,p)
+pub fn hdw_decl_enum_variant(s: i64, g: i64, y: i64, n: text, k: i64, h: bool, d: i64, p: i64) -> i64:
+    if not hir_destination_registry_building(s,g): return -1
+    _hir_destination_graphs[s].destination_declarations.append_enum_variant(y,n,k,h,d,p)
+pub fn hdw_decl_enum_payload(s: i64, g: i64, v: i64, n: text, t: i64, p: i64) -> i64:
+    if not hir_destination_registry_building(s,g): return -1
+    _hir_destination_graphs[s].destination_declarations.append_enum_payload(v,n,t,p)
+pub fn hdw_decl_finalize_actor(s: i64, g: i64, t: i64, c: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].destination_declarations.finalize_actor(t,c)
+pub fn hdw_decl_finalize_actor_full(s: i64, g: i64, ht: bool, t: i64, hc: bool, c: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].destination_declarations.finalize_actor_full(ht,t,hc,c)
+pub fn hdw_decl_finalize_bitfield(s: i64, g: i64, t: i64, w: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].destination_declarations.finalize_bitfield(t,w)
+pub fn hdw_decl_finalize_constant(s: i64, g: i64, h: bool, t: i64, e: i64, m: bool) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].destination_declarations.finalize_constant(h,t,e,m)
+pub fn hdw_decl_finalize_constant_full(s: i64, g: i64, h: bool, t: i64, e: i64, m: bool, v: bool, ha: bool, a: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].destination_declarations.finalize_constant_full(h,t,e,m,v,ha,a)
+pub fn hdw_decl_finalize_enum(s: i64, g: i64, c: bool, d: bool) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].destination_declarations.finalize_enum(c,d)
+pub fn hdw_decl_extension_reserve(s: i64, g: i64, m: i64, tm: i64, ts: i64, p: i64) -> i64:
+    if not hir_destination_registry_building(s,g): return -1
+    _hir_destination_graphs[s].destination_declarations.reserve_enum_extension(m,tm,ts,p)
+pub fn hdw_decl_extension_reserve_full(s: i64, g: i64, m: i64, n: text, c: text, o: i64, p: i64) -> i64:
+    if not hir_destination_registry_building(s,g): return -1
+    _hir_destination_graphs[s].destination_declarations.reserve_enum_extension_full(m,n,c,o,p)
+pub fn hdw_decl_enum_constructor(s: i64, g: i64, v: i64, y: i64, f: i64, p: i64) -> i64:
+    if not hir_destination_registry_building(s,g): return -1
+    _hir_destination_graphs[s].destination_declarations.append_enum_constructor(v,y,f,p)
+pub fn hdw_decl_enum_constructor_full(s: i64, g: i64, r: text, n: text, k: i64, h: bool, d: i64, p: i64) -> i64:
+    if not hir_destination_registry_building(s,g): return -1
+    _hir_destination_graphs[s].destination_declarations.append_enum_constructor_full(r,n,k,h,d,p)
+pub fn hdw_decl_enum_constructor_payload(s: i64, g: i64, c: i64, n: text, t: i64, p: i64) -> i64:
+    if not hir_destination_registry_building(s,g): return -1
+    _hir_destination_graphs[s].destination_declarations.append_enum_constructor_payload(c,n,t,p)
+pub fn hdw_decl_finalize_extension(s: i64, g: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].destination_declarations.finalize_enum_extension()
+pub fn hdr_decl_type_param_bound_range_start(s: i64, g: i64, r: i64) -> i64:
+    if not hir_destination_registry_readable(s,g): return -1
+    _hir_destination_graphs[s].destination_declarations.type_param_bound_range_start_at(r,g)
+pub fn hdr_decl_type_param_bound_range_len(s: i64, g: i64, r: i64) -> i64:
+    if not hir_destination_registry_readable(s,g): return -1
+    _hir_destination_graphs[s].destination_declarations.type_param_bound_range_len_at(r,g)
+pub fn hdr_decl_type_param_bound(s: i64, g: i64, r: i64, o: i64) -> i64:
+    if not hir_destination_registry_readable(s,g): return -1
+    _hir_destination_graphs[s].destination_declarations.type_param_bound_at(r,g,o)
+pub fn hdr_decl_count(s: i64, g: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].destination_declarations.declaration_count_at(g) else: -1
+pub fn hdr_decl_nominal_detail_count(s: i64, g: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].destination_declarations.nominal_detail_count_at(g) else: -1
+pub fn hdr_decl_nominal_detail_lookup(s: i64, g: i64, m: i64, y: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].destination_declarations.nominal_detail_lookup_at(m,y,g) else: -1
+pub fn hdr_decl_nominal_detail_i64(s: i64, g: i64, r: i64, c: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].destination_declarations.nominal_detail_i64_at(r,g,c) else: -1
+pub fn hdr_decl_nominal_detail_has_base(s: i64, g: i64, r: i64) -> bool: hir_destination_registry_readable(s,g) and _hir_destination_graphs[s].destination_declarations.nominal_detail_has_base_at(r,g)
+pub fn hdr_decl_nominal_detail_trait_range_start(s: i64, g: i64, r: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].destination_declarations.nominal_trait_range_start_at(r,g) else: -1
+pub fn hdr_decl_nominal_detail_trait_range_len(s: i64, g: i64, r: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].destination_declarations.nominal_trait_range_len_at(r,g) else: -1
+pub fn hdr_decl_nominal_detail_trait(s: i64, g: i64, r: i64, o: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].destination_declarations.nominal_trait_at(r,g,o) else: -1
+pub fn hdr_decl_nominal_detail_field_range_start(s: i64, g: i64, r: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].destination_declarations.nominal_field_range_start_at(r,g) else: -1
+pub fn hdr_decl_nominal_detail_field_range_len(s: i64, g: i64, r: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].destination_declarations.nominal_field_range_len_at(r,g) else: -1
+pub fn hdr_decl_nominal_detail_field_name(s: i64, g: i64, r: i64, o: i64) -> text: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].destination_declarations.nominal_field_name_at(r,g,o) else: ""
+pub fn hdr_decl_nominal_detail_field_i64(s: i64, g: i64, r: i64, o: i64, c: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].destination_declarations.nominal_field_i64_at(r,g,o,c) else: -1
+pub fn hdr_decl_nominal_detail_field_bool(s: i64, g: i64, r: i64, o: i64, c: i64) -> bool: hir_destination_registry_readable(s,g) and _hir_destination_graphs[s].destination_declarations.nominal_field_bool_at(r,g,o,c)
+pub fn hdr_decl_nominal_detail_field_visibility(s: i64, g: i64, r: i64, o: i64) -> i64: hdr_decl_nominal_detail_field_i64(s,g,r,o,2)
+pub fn hdr_decl_nominal_detail_field_is_public(s: i64, g: i64, r: i64, o: i64) -> bool: hdr_decl_nominal_detail_field_bool(s,g,r,o,0)
+pub fn hdr_decl_i64(s: i64, g: i64, r: i64, c: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].destination_declarations.declaration_i64_at(r,g,c) else: -1
+pub fn hdr_decl_name(s: i64, g: i64, r: i64) -> text: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].destination_declarations.declaration_name_at(r,g) else: ""
+pub fn hdr_decl_bool(s: i64, g: i64, r: i64, c: i64) -> bool: hir_destination_registry_readable(s,g) and _hir_destination_graphs[s].destination_declarations.declaration_bool_at(r,g,c)
+pub fn hdr_decl_actor_i64(s: i64, g: i64, r: i64, c: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].destination_declarations.actor_i64_at(r,g,c) else: -1
+pub fn hdr_decl_actor_bool(s: i64, g: i64, r: i64, c: i64) -> bool: hir_destination_registry_readable(s,g) and _hir_destination_graphs[s].destination_declarations.actor_bool_at(r,g,c)
+pub fn hdr_decl_field_range_start(s: i64, g: i64, r: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].destination_declarations.field_range_start_at(r,g) else: -1
+pub fn hdr_decl_field_range_len(s: i64, g: i64, r: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].destination_declarations.field_range_len_at(r,g) else: -1
+pub fn hdr_decl_field_name(s: i64, g: i64, r: i64, o: i64) -> text: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].destination_declarations.field_name_at(r,g,o) else: ""
+pub fn hdr_decl_field_i64(s: i64, g: i64, r: i64, o: i64, c: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].destination_declarations.field_i64_at(r,g,o,c) else: -1
+pub fn hdr_decl_field_bool(s: i64, g: i64, r: i64, o: i64, c: i64) -> bool: hir_destination_registry_readable(s,g) and _hir_destination_graphs[s].destination_declarations.field_bool_at(r,g,o,c)
+pub fn hdr_decl_bitfield_i64(s: i64, g: i64, r: i64, c: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].destination_declarations.bitfield_i64_at(r,g,c) else: -1
+pub fn hdr_decl_enum_bool(s: i64, g: i64, r: i64, c: i64) -> bool: hir_destination_registry_readable(s,g) and _hir_destination_graphs[s].destination_declarations.enum_bool_at(r,g,c)
+pub fn hdr_decl_enum_raw_attribute_range_start(s: i64, g: i64, r: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].destination_declarations.enum_raw_attribute_range_start_at(r,g) else: -1
+pub fn hdr_decl_enum_raw_attribute_range_count(s: i64, g: i64, r: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].destination_declarations.enum_raw_attribute_range_count_at(r,g) else: -1
+pub fn hdr_decl_enum_variant_range_start(s: i64, g: i64, r: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].destination_declarations.enum_variant_range_start_at(r,g) else: -1
+pub fn hdr_decl_enum_variant_range_len(s: i64, g: i64, r: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].destination_declarations.enum_variant_range_len_at(r,g) else: -1
+pub fn hdr_decl_lookup(s: i64, g: i64, m: i64, y: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].destination_declarations.declaration_lookup_at(m,y,g) else: -1
+pub fn hdr_decl_enum_variant_lookup(s: i64, g: i64, r: i64, n: text) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].destination_declarations.enum_variant_lookup_at(r,g,n) else: -1
+pub fn hdr_decl_enum_payload_lookup(s: i64, g: i64, r: i64, v: i64, n: text) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].destination_declarations.enum_payload_lookup_at(r,g,v,n) else: -1
+pub fn hdr_decl_enum_variant_raw_attribute_range_start(s: i64, g: i64, r: i64, o: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].destination_declarations.enum_variant_raw_attribute_range_start_at(r,g,o) else: -1
+pub fn hdr_decl_enum_variant_raw_attribute_range_count(s: i64, g: i64, r: i64, o: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].destination_declarations.enum_variant_raw_attribute_range_count_at(r,g,o) else: -1
+pub fn hdr_decl_enum_variant_name(s: i64, g: i64, r: i64, o: i64) -> text: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].destination_declarations.enum_variant_name_at(r,g,o) else: ""
+pub fn hdr_decl_enum_variant_i64(s: i64, g: i64, r: i64, o: i64, c: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].destination_declarations.enum_variant_i64_at(r,g,o,c) else: -1
+pub fn hdr_decl_enum_variant_has_discriminant(s: i64, g: i64, r: i64, o: i64) -> bool: hir_destination_registry_readable(s,g) and _hir_destination_graphs[s].destination_declarations.enum_variant_has_discriminant_at(r,g,o)
+pub fn hdr_decl_enum_payload_name(s: i64, g: i64, r: i64, v: i64, o: i64) -> text: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].destination_declarations.enum_payload_name_at(r,g,v,o) else: ""
+pub fn hdr_decl_enum_payload_i64(s: i64, g: i64, r: i64, v: i64, o: i64, c: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].destination_declarations.enum_payload_i64_at(r,g,v,o,c) else: -1
+pub fn hdr_decl_constant_i64(s: i64, g: i64, r: i64, c: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].destination_declarations.constant_i64_at(r,g,c) else: -1
+pub fn hdr_decl_constant_bool(s: i64, g: i64, r: i64, c: i64) -> bool: hir_destination_registry_readable(s,g) and _hir_destination_graphs[s].destination_declarations.constant_bool_at(r,g,c)
+pub fn hdr_decl_extension_bool(s: i64, g: i64, r: i64, c: i64) -> bool: hir_destination_registry_readable(s,g) and _hir_destination_graphs[s].destination_declarations.enum_extension_bool_at(r,g,c)
+pub fn hdr_decl_extension_range(s: i64, g: i64, r: i64, k: i64, l: bool) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].destination_declarations.enum_extension_range_at(r,g,k,l) else: -1
+pub fn hdr_decl_raw_attribute_i64(s: i64, g: i64, r: i64, c: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].destination_declarations.raw_attribute_i64_at(r,g,c) else: -1
+pub fn hdr_decl_raw_attribute_text(s: i64, g: i64, r: i64, c: i64) -> text: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].destination_declarations.raw_attribute_text_at(r,g,c) else: ""
+pub fn hdr_decl_raw_attribute_bool(s: i64, g: i64, r: i64, c: i64) -> bool: hir_destination_registry_readable(s,g) and _hir_destination_graphs[s].destination_declarations.raw_attribute_bool_at(r,g,c)
+pub fn hdr_decl_raw_attribute_expr(s: i64, g: i64, r: i64, o: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].destination_declarations.raw_attribute_expr_at(r,g,o) else: -1
+
+# Declaration metadata is a distinct graph-owned scalar arena. Producers pass
+# only typed scalar columns; parser/HIR aggregate values never cross registry.
+pub fn hdw_declaration_metadata(s: i64, g: i64, k: i64, m: i64, o: i64, n: text, t0: text, t1: text, f0: bool, f1: bool, f2: bool, v0: i64, v1: i64, v2: i64, v3: i64, v4: i64, v5: i64, p: i64) -> i64:
+    if not hir_destination_registry_building(s,g): return -1
+    _hir_destination_graphs[s].declaration_metadata.append_scalar(k,m,o,n,t0,t1,f0,f1,f2,v0,v1,v2,v3,v4,v5,p)
+pub fn hdw_declaration_metadata_count_building(s: i64, g: i64) -> i64:
+    if hir_destination_registry_building(s,g): _hir_destination_graphs[s].declaration_metadata.count else: -1
+pub fn hdw_declaration_metadata_module_range(s: i64, g: i64, m: i64, k: i64, a: i64, n: i64) -> i64:
+    if not hir_destination_registry_building(s,g): return -1
+    _hir_destination_graphs[s].declaration_metadata.publish_module_range(m,k,a,n)
+pub fn hdw_declaration_metadata_child_range(s: i64, g: i64, k: i64, a: i64, n: i64) -> i64:
+    if not hir_destination_registry_building(s,g): return -1
+    _hir_destination_graphs[s].declaration_metadata.publish_child_range(k,a,n)
+
+export HD_REGISTRY_UNINITIALIZED, HD_REGISTRY_BUILDING, HD_REGISTRY_READ, HD_REGISTRY_CONSUMED, HD_REGISTRY_FAILED
+export hir_destination_registry_building, hir_destination_registry_readable, hir_destination_registry_failed
+
+# Writer dispatch. These are intentionally thin: validation is O(1), and the
+# call is issued directly on the registry element so value semantics cannot
+# synthesize a local aggregate copy.
+pub fn hdw_reserve_span(s: i64, g: i64, a: i64, b: i64, l: i64, c: i64, f: text, n: i64) -> i64:
+    if not hir_destination_registry_building(s,g): return -1
+    _hir_destination_graphs[s].reserve_span(Span(start: a, end: b, line: l, col: c, file: f, length: n))
+pub fn hdw_reserve_expr(s: i64, g: i64, a: i64, b: i64, l: i64, c: i64, f: text, n: i64) -> i64:
+    if not hir_destination_registry_building(s,g): return -1
+    _hir_destination_graphs[s].reserve_expr(Span(start: a, end: b, line: l, col: c, file: f, length: n))
+pub fn hdw_reserve_stmt(s: i64, g: i64, a: i64, b: i64, l: i64, c: i64, f: text, n: i64) -> i64:
+    if not hir_destination_registry_building(s,g): return -1
+    _hir_destination_graphs[s].reserve_stmt(Span(start: a, end: b, line: l, col: c, file: f, length: n))
+pub fn hdw_reserve_block(s: i64, g: i64, a: i64, b: i64, l: i64, c: i64, f: text, n: i64) -> i64:
+    if not hir_destination_registry_building(s,g): return -1
+    _hir_destination_graphs[s].reserve_block(Span(start: a, end: b, line: l, col: c, file: f, length: n))
+pub fn hdw_reserve_type(s: i64, g: i64, a: i64, b: i64, l: i64, c: i64, f: text, n: i64) -> i64:
+    if not hir_destination_registry_building(s,g): return -1
+    _hir_destination_graphs[s].reserve_type(Span(start: a, end: b, line: l, col: c, file: f, length: n))
+pub fn hdw_reserve_pattern(s: i64, g: i64, a: i64, b: i64, l: i64, c: i64, f: text, n: i64) -> i64:
+    if not hir_destination_registry_building(s,g): return -1
+    _hir_destination_graphs[s].reserve_pattern(Span(start: a, end: b, line: l, col: c, file: f, length: n))
+pub fn hdw_reserve_effect(s: i64, g: i64, a: i64, b: i64, l: i64, c: i64, f: text, n: i64) -> i64:
+    if not hir_destination_registry_building(s,g): return -1
+    _hir_destination_graphs[s].reserve_effect(Span(start: a, end: b, line: l, col: c, file: f, length: n))
+pub fn hdw_reserve_dim(s: i64, g: i64, a: i64, b: i64, l: i64, c: i64, f: text, n: i64) -> i64:
+    if not hir_destination_registry_building(s,g): return -1
+    _hir_destination_graphs[s].reserve_dim(Span(start: a, end: b, line: l, col: c, file: f, length: n))
+pub fn hdw_reserve_aux(s: i64, g: i64, a: i64, b: i64, l: i64, c: i64, f: text, n: i64) -> i64:
+    if not hir_destination_registry_building(s,g): return -1
+    _hir_destination_graphs[s].reserve_aux(Span(start: a, end: b, line: l, col: c, file: f, length: n))
+pub fn hdw_reserve_range(s: i64, g: i64, k: i64, t: i64, n: i64) -> i64: if hir_destination_registry_building(s,g): _hir_destination_graphs[s].reserve_range(k,t,n) else: -1
+pub fn hdw_set_range_at(s: i64, g: i64, h: i64, t: i64, o: i64, v: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].set_range_at(h,t,o,v)
+pub fn hdw_publish_range(s: i64, g: i64, h: i64, k: i64, t: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].publish_range(h,k,t)
+pub fn hdw_checkpoint(s: i64, g: i64) -> i64: if hir_destination_registry_building(s,g): _hir_destination_graphs[s].reserve_checkpoint() else: -1
+pub fn hdw_commit_checkpoint(s: i64, g: i64, i: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].commit_checkpoint(i)
+pub fn hdw_rollback(s: i64, g: i64, i: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].rollback_checkpoint(i)
+pub fn hdw_recover(s: i64, g: i64, i: i64, m: text) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].recover_unpublished_or_poison(i,m)
+pub fn hdw_reserve_module(s: i64, g: i64, d: i64, n: text, p: text) -> i64: if hir_destination_registry_building(s,g): _hir_destination_graphs[s].reserve_module(d,n,p) else: -1
+pub fn hdw_begin_module_declarations(s: i64, g: i64, i: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].begin_module_declarations(i)
+pub fn hdw_fail_module(s: i64, g: i64, i: i64, m: text) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].fail_module(i,m)
+pub fn hdw_finalize_module(s: i64, g: i64, i: i64, r: i64, rn: i64, t: i64, tn: i64, m: i64, mn: i64, e: i64, en: i64, u: i64, un: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].finalize_module(i,r,rn,t,tn,m,mn,e,en,u,un)
+pub fn hdw_reserve_function(s: i64, g: i64, m: i64, r: i64, y: i64, n: text, p: i64, o: i64) -> i64: if hir_destination_registry_building(s,g): _hir_destination_graphs[s].reserve_function(m,r,y,n,p,o) else: -1
+pub fn hdw_finalize_function(s: i64, g: i64, i: i64, tp: i64, tn: i64, p: i64, pn: i64, r: i64, e: i64, en: i64, m: i64, mn: i64, v: i64, f: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].finalize_function(i,tp,tn,p,pn,r,e,en,m,mn,v,f)
+pub fn hdw_function_root_building(s: i64, g: i64, r: i64) -> i64: if hir_destination_registry_building(s,g): _hir_destination_graphs[s].function_root_building_at(r,g) else: -1
+pub fn hdw_function_token_building(s: i64, g: i64, r: i64) -> i64: if hir_destination_registry_building(s,g): _hir_destination_graphs[s].function_token_building_at(r,g) else: -1
+pub fn hdw_function_count_building(s: i64, g: i64) -> i64: if hir_destination_registry_building(s,g): _hir_destination_graphs[s].function_count else: -1
+pub fn hdw_function_module_building(s: i64, g: i64, r: i64) -> i64: if hir_destination_registry_building(s,g): _hir_destination_graphs[s].function_module_building_at(r,g) else: -1
+pub fn hdw_module_name_building(s: i64, g: i64, i: i64) -> text: if hir_destination_registry_building(s,g): _hir_destination_graphs[s].module_name_building_at(i,g) else: ""
+pub fn hdw_module_function_count_building(s: i64, g: i64, i: i64) -> i64: if hir_destination_registry_building(s,g): _hir_destination_graphs[s].module_function_count_building_at(i,g) else: -1
+pub fn hdw_module_count_building(s: i64, g: i64) -> i64: if hir_destination_registry_building(s,g): _hir_destination_graphs[s].module_count_building_at(g) else: -1
+
+pub fn hdw_set_expr_type(s: i64, g: i64, i: i64, h: bool, t: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].set_expr_type(i,h,t)
+pub fn hdw_int(s: i64, g: i64, i: i64, v: i64, h: bool, x: text) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_int(i,v,h,x)
+pub fn hdw_float(s: i64, g: i64, i: i64, v: f64, h: bool, x: text) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_float(i,v,h,x)
+pub fn hdw_string(s: i64, g: i64, i: i64, v: text, h: bool, a: i64, n: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_string(i,v,h,a,n)
+pub fn hdw_bool(s: i64, g: i64, i: i64, v: bool) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_bool(i,v)
+pub fn hdw_char(s: i64, g: i64, i: i64, v: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_char_scalar(i,v)
+pub fn hdw_unit(s: i64, g: i64, i: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_unit(i)
+pub fn hdw_nil(s: i64, g: i64, i: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_nil(i)
+pub fn hdw_error(s: i64, g: i64, i: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_error(i)
+pub fn hdw_var(s: i64, g: i64, i: i64, v: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_var(i,v)
+pub fn hdw_named_var(s: i64, g: i64, i: i64, v: i64, n: text) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_named_var(i,v,n)
+pub fn hdw_qualified_named_var(s: i64, g: i64, i: i64, m: i64, v: i64, n: text) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_qualified_named_var(i,m,v,n)
+pub fn hdw_unary(s: i64, g: i64, i: i64, o: i64, c: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_unary(i,o,c)
+pub fn hdw_binary(s: i64, g: i64, i: i64, o: i64, l: i64, r: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_binary(i,o,l,r)
+pub fn hdw_expr_range(s: i64, g: i64, i: i64, h: i64, k0: i64, a0: i64, n0: i64, k1: i64, a1: i64, n1: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_expr_range_payload(i,h,k0,a0,n0,k1,a1,n1)
+pub fn hdw_array(s: i64, g: i64, i: i64, a: i64, n: i64, h: bool, t: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_array(i,a,n,h,t)
+pub fn hdw_array_repeat(s: i64, g: i64, i: i64, v: i64, n: i64, h: bool, t: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_array_repeat(i,v,n,h,t)
+pub fn hdw_tuple(s: i64, g: i64, i: i64, a: i64, n: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_tuple(i,a,n)
+pub fn hdw_dict(s: i64, g: i64, i: i64, a: i64, n: i64, k: i64, h: bool, v: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_dict(i,a,n,k,h,v)
+pub fn hdw_set(s: i64, g: i64, i: i64, a: i64, n: i64, h: bool, t: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_set(i,a,n,h,t)
+pub fn hdw_field(s: i64, g: i64, i: i64, b: i64, n: text, h: bool, r: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_field(i,b,n,h,r)
+pub fn hdw_resolved_field(s: i64, g: i64, i: i64, b: i64, n: text, m: i64, r: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_resolved_field(i,b,n,m,r)
+pub fn hdw_index(s: i64, g: i64, i: i64, b: i64, x: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_index(i,b,x)
+pub fn hdw_tuple_index(s: i64, g: i64, i: i64, b: i64, x: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_tuple_index(i,b,x)
+pub fn hdw_optional_chain(s: i64, g: i64, i: i64, b: i64, f: text) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_optional_chain(i,b,f)
+pub fn hdw_null_coalesce(s: i64, g: i64, i: i64, l: i64, r: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_null_coalesce(i,l,r)
+pub fn hdw_single_expr(s: i64, g: i64, i: i64, h: i64, c: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_single_expr(i,h,c)
+pub fn hdw_call(s: i64, g: i64, i: i64, c: i64, a: i64, n: i64, t: i64, tn: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_call(i,c,a,n,t,tn)
+pub fn hdw_method_call(s: i64, g: i64, i: i64, r: i64, m: text, a: i64, n: i64, x: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_method_call(i,r,m,a,n,x)
+pub fn hdw_static_call(s: i64, g: i64, i: i64, t: i64, m: text, a: i64, n: i64, x: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_static_call(i,t,m,a,n,x)
+pub fn hdw_lambda(s: i64, g: i64, i: i64, p: i64, pn: i64, b: i64, c: i64, cn: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_lambda(i,p,pn,b,c,cn)
+pub fn hdw_host_gpu(s: i64, g: i64, i: i64, l: i64, p: i64, m: i64, b: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_host_gpu(i,l,p,m,b)
+pub fn hdw_return_rich(s: i64, g: i64, i: i64, h: bool, v: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_return_rich(i,h,v)
+pub fn hdw_return_unit(s: i64, g: i64, i: i64, h: bool, v: i64, t: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_return_bootstrap_unit(i,h,v,t)
+pub fn hdw_break(s: i64, g: i64, i: i64, l: text, h: bool, v: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_break(i,l,h,v)
+pub fn hdw_yield(s: i64, g: i64, i: i64, h: bool, v: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_yield(i,h,v)
+pub fn hdw_continue(s: i64, g: i64, i: i64, h: bool, l: text) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_continue(i,h,l)
+pub fn hdw_struct_lit(s: i64, g: i64, i: i64, t: i64, a: i64, n: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_struct_lit(i,t,a,n)
+pub fn hdw_enum_lit(s: i64, g: i64, i: i64, t: i64, v: text, h: bool, p: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_enum_lit(i,t,v,h,p)
+pub fn hdw_cast_like(s: i64, g: i64, i: i64, h: i64, v: i64, t: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_cast_like(i,h,v,t)
+pub fn hdw_range(s: i64, g: i64, i: i64, a: i64, b: i64, n: bool, h: bool, x: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_range(i,a,b,n,h,x)
+pub fn hdw_optional_range(s: i64, g: i64, i: i64, ha: bool, a: i64, hb: bool, b: i64, n: bool, h: bool, x: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_optional_range(i,ha,a,hb,b,n,h,x)
+pub fn hdw_comprehension(s: i64, g: i64, i: i64, k: i64, v: i64, a: i64, n: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_comprehension(i,k,v,a,n)
+pub fn hdw_custom_block(s: i64, g: i64, i: i64, k: text, a: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_custom_block(i,k,a)
+pub fn hdw_inline_asm(s: i64, g: i64, i: i64, a: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_inline_asm(i,a)
+pub fn hdw_inline_asm_match(s: i64, g: i64, i: i64, a: i64, n: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_inline_asm_match(i,a,n)
+pub fn hdw_type_test(s: i64, g: i64, i: i64, v: i64, n: text) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_type_test(i,v,n)
+pub fn hdw_dict_comprehension(s: i64, g: i64, i: i64, k: i64, v: i64, a: i64, n: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_dict_comprehension(i,k,v,a,n)
+pub fn hdw_array_suffix(s: i64, g: i64, i: i64, a: i64, n: i64, x: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_array_suffix(i,a,n,x)
+pub fn hdw_kernel_launch(s: i64, g: i64, i: i64, k: i64, d: i64, b: i64, a: i64, n: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_kernel_launch(i,k,d,b,a,n)
+pub fn hdw_gpu_intrinsic(s: i64, g: i64, i: i64, k: i64, h: bool, d: i64, a: i64, n: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_gpu_intrinsic(i,k,h,d,a,n)
+
+pub fn hdw_if(s: i64, g: i64, i: i64, c: i64, t: i64, h: bool, e: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_if(i,c,t,h,e)
+pub fn hdw_if_chain(s: i64, g: i64, i: i64, a: i64, n: i64, h: bool, e: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_if_chain(i,a,n,h,e)
+pub fn hdw_match(s: i64, g: i64, i: i64, x: i64, a: i64, n: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_match(i,x,a,n)
+pub fn hdw_loop(s: i64, g: i64, i: i64, b: i64, h: bool, l: text) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_loop(i,b,h,l)
+pub fn hdw_while(s: i64, g: i64, i: i64, c: i64, b: i64, h: bool, l: text) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_while(i,c,b,h,l)
+pub fn hdw_for(s: i64, g: i64, i: i64, y: i64, x: i64, b: i64, h: bool, l: text) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_for(i,y,x,b,h,l)
+pub fn hdw_with(s: i64, g: i64, i: i64, a: i64, n: i64, b: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_with(i,a,n,b)
+pub fn hdw_block_control(s: i64, g: i64, i: i64, h: i64, b: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_block_control(i,h,b)
+pub fn hdw_try_catch(s: i64, g: i64, i: i64, b: i64, a: i64, n: i64, h: bool, f: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_try_catch(i,b,a,n,h,f)
+
+pub fn hdw_stmt_expr(s: i64, g: i64, i: i64, e: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_stmt_expr(i,e)
+pub fn hdw_stmt_let(s: i64, g: i64, i: i64, y: i64, t: i64, x: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_stmt_let(i,y,t,x)
+pub fn hdw_stmt_assign(s: i64, g: i64, i: i64, t: i64, o: i64, v: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_stmt_assign(i,t,o,v)
+pub fn hdw_stmt_block(s: i64, g: i64, i: i64, b: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_stmt_block(i,b)
+pub fn hdw_stmt_asm_assert(s: i64, g: i64, i: i64, a: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_stmt_asm_assert(i,a)
+pub fn hdw_stmt_shared_val(s: i64, g: i64, i: i64, y: i64, t: i64, h: bool, x: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_stmt_shared(i,false,y,t,h,x)
+pub fn hdw_stmt_shared_var(s: i64, g: i64, i: i64, y: i64, t: i64, h: bool, x: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_stmt_shared(i,true,y,t,h,x)
+pub fn hdw_stmt_gpu_launch(s: i64, g: i64, i: i64, gr: i64, gn: i64, br: i64, bn: i64, b: i64, p: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_stmt_gpu_launch(i,gr,gn,br,bn,b,p)
+pub fn hdw_finalize_block(s: i64, g: i64, i: i64, a: i64, n: i64, h: bool, v: i64, c: i64, cn: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].finalize_block(i,a,n,h,v,c,cn)
+
+pub fn hdw_type_int(s: i64, g: i64, i: i64, b: i64, n: bool) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_type_int(i,b,n)
+pub fn hdw_type_float(s: i64, g: i64, i: i64, b: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_type_float(i,b)
+pub fn hdw_type_leaf(s: i64, g: i64, i: i64, h: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_type_leaf(i,h)
+pub fn hdw_type_tuple(s: i64, g: i64, i: i64, a: i64, n: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_type_tuple(i,a,n)
+pub fn hdw_type_array(s: i64, g: i64, i: i64, e: i64, h: bool, z: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_type_array(i,e,h,z)
+pub fn hdw_type_unary(s: i64, g: i64, i: i64, h: i64, c: i64, m: bool) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_type_unary(i,h,c,m)
+pub fn hdw_type_atomic(s: i64, g: i64, i: i64, c: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_type_atomic(i,c)
+pub fn hdw_type_dict(s: i64, g: i64, i: i64, k: i64, v: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_type_dict(i,k,v)
+pub fn hdw_type_result(s: i64, g: i64, i: i64, o: i64, e: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_type_result(i,o,e)
+pub fn hdw_type_named(s: i64, g: i64, i: i64, m: i64, y: i64, a: i64, n: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_type_named(i,m,y,a,n)
+pub fn hdw_destination_type_shape(s: i64, g: i64, i: i64) -> i64: if hir_destination_registry_building(s,g) and _hir_destination_graphs[s].index_ready(HD_RANGE_TYPE,i): _hir_destination_graphs[s].type_shape[i] else: 0
+pub fn hdw_destination_type_child0(s: i64, g: i64, i: i64) -> i64: if hir_destination_registry_building(s,g) and _hir_destination_graphs[s].index_ready(HD_RANGE_TYPE,i): _hir_destination_graphs[s].type_i0[i] else: -1
+pub fn hdw_destination_type_child1(s: i64, g: i64, i: i64) -> i64: if hir_destination_registry_building(s,g) and _hir_destination_graphs[s].index_ready(HD_RANGE_TYPE,i): _hir_destination_graphs[s].type_i1[i] else: -1
+pub fn hdw_destination_type_named_module(s: i64, g: i64, i: i64) -> i64: if hir_destination_registry_building(s,g) and _hir_destination_graphs[s].index_ready(HD_RANGE_TYPE,i) and _hir_destination_graphs[s].type_shape[i]==HD_TYPE_NAMED: _hir_destination_graphs[s].type_i1[i] else: -1
+pub fn hdw_destination_type_range_length(s: i64, g: i64, i: i64) -> i64: if hir_destination_registry_building(s,g) and _hir_destination_graphs[s].index_ready(HD_RANGE_TYPE,i): _hir_destination_graphs[s].type_r0_len[i] else: -1
+pub fn hdw_destination_type_range_value(s: i64, g: i64, i: i64, o: i64) -> i64:
+    if not hir_destination_registry_building(s,g) or not _hir_destination_graphs[s].index_ready(HD_RANGE_TYPE,i) or o<0 or o>=_hir_destination_graphs[s].type_r0_len[i]: return -1
+    _hir_destination_graphs[s].range_value_at(_hir_destination_graphs[s].type_r0_start[i],HD_AUX_RANGE_NONE,o)
+pub fn hdw_type_param(s: i64, g: i64, i: i64, t: text, a: i64, n: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_type_param(i,t,a,n)
+pub fn hdw_type_union(s: i64, g: i64, i: i64, a: i64, n: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_type_union(i,a,n)
+pub fn hdw_type_dyn_trait(s: i64, g: i64, i: i64, y: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_type_dyn_trait(i,y)
+pub fn hdw_type_qualified_dyn_trait(s: i64, g: i64, i: i64, m: i64, y: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_type_qualified_dyn_trait(i,m,y)
+pub fn hdw_type_function(s: i64, g: i64, i: i64, p: i64, pn: i64, r: i64, e: i64, en: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_type_function(i,p,pn,r,e,en)
+pub fn hdw_type_projection(s: i64, g: i64, i: i64, b: i64, n: text) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_type_projection(i,b,n)
+pub fn hdw_type_infer(s: i64, g: i64, i: i64, d: i64, l: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_type_infer(i,d,l)
+pub fn hdw_type_tensor(s: i64, g: i64, i: i64, e: i64, d: i64, n: i64, h: bool, k: i64, x: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_type_tensor(i,e,d,n,h,k,x)
+pub fn hdw_type_layer(s: i64, g: i64, i: i64, a: i64, n: i64, b: i64, m: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_type_layer(i,a,n,b,m)
+
+pub fn hdw_pattern_wildcard(s: i64, g: i64, i: i64, h: bool, t: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_pattern_wildcard(i,h,t)
+pub fn hdw_pattern_literal(s: i64, g: i64, i: i64, v: i64, h: bool, t: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_pattern_literal(i,v,h,t)
+pub fn hdw_pattern_binding(s: i64, g: i64, i: i64, y: i64, m: bool, h: bool, t: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_pattern_binding(i,y,m,h,t)
+pub fn hdw_pattern_sequence(s: i64, g: i64, i: i64, k: i64, a: i64, n: i64, h: bool, r: i64, ht: bool, t: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_pattern_sequence(i,k,a,n,h,r,ht,t)
+pub fn hdw_pattern_struct(s: i64, g: i64, i: i64, t: i64, a: i64, n: i64, h: bool, x: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_pattern_struct(i,t,a,n,h,x)
+pub fn hdw_pattern_enum(s: i64, g: i64, i: i64, t: i64, v: text, h: bool, p: i64, ht: bool, x: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_pattern_enum(i,t,v,h,p,ht,x)
+pub fn hdw_pattern_range(s: i64, g: i64, i: i64, a: i64, b: i64, n: bool, h: bool, t: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_pattern_range(i,a,b,n,h,t)
+pub fn hdw_pattern_optional_range(s: i64, g: i64, i: i64, ha: bool, a: i64, hb: bool, b: i64, n: bool, h: bool, t: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_pattern_optional_range(i,ha,a,hb,b,n,h,t)
+pub fn hdw_pattern_error(s: i64, g: i64, i: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_pattern_error(i)
+pub fn hdw_pattern_region(s: i64, g: i64, i: i64, d: bool, b: text) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_pattern_region(i,d,b)
+pub fn hdw_pattern_type_test(s: i64, g: i64, i: i64, t: text, b: text) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_pattern_type_test(i,t,b)
+pub fn hdw_pattern_as(s: i64, g: i64, i: i64, p: i64, a: i64, h: bool, t: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_pattern_as(i,p,a,h,t)
+
+pub fn hdw_effect_pure(s: i64, g: i64, i: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_effect_pure(i)
+pub fn hdw_effect_io(s: i64, g: i64, i: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_effect_io(i)
+pub fn hdw_effect_async(s: i64, g: i64, i: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_effect_async(i)
+pub fn hdw_effect_throws(s: i64, g: i64, i: i64, t: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_effect_throws(i,t)
+pub fn hdw_effect_mutates(s: i64, g: i64, i: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_effect_mutates(i)
+pub fn hdw_effect_allocates(s: i64, g: i64, i: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_effect_allocates(i)
+pub fn hdw_effect_custom(s: i64, g: i64, i: i64, n: text) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_effect_custom(i,n)
+
+pub fn hdw_dim_literal(s: i64, g: i64, i: i64, v: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_dim_literal(i,v)
+pub fn hdw_dim_named(s: i64, g: i64, i: i64, n: text, hl: bool, l: i64, hh: bool, h: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_dim_named(i,n,hl,l,hh,h)
+pub fn hdw_dim_var(s: i64, g: i64, i: i64, v: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_dim_var(i,v)
+pub fn hdw_dim_dynamic(s: i64, g: i64, i: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_dim_dynamic(i)
+pub fn hdw_dim_broadcast(s: i64, g: i64, i: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_dim_broadcast(i)
+pub fn hdw_dim_const_param(s: i64, g: i64, i: i64, n: text) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_dim_const_param(i,n)
+pub fn hdw_dim_add(s: i64, g: i64, i: i64, l: i64, r: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_dim_add(i,l,r)
+pub fn hdw_dim_mul(s: i64, g: i64, i: i64, l: i64, r: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_dim_mul(i,l,r)
+pub fn hdw_dim_div(s: i64, g: i64, i: i64, l: i64, r: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_dim_div(i,l,r)
+
+pub fn hdw_interpolation(s: i64, g: i64, i: i64, e: i64, h: bool, f: text) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_interpolation(i,e,h,f)
+pub fn hdw_call_arg(s: i64, g: i64, i: i64, h: bool, n: text, v: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_call_arg(i,h,n,v)
+pub fn hdw_named_expr(s: i64, g: i64, i: i64, n: text, v: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_named_expr(i,n,v)
+pub fn hdw_dict_entry(s: i64, g: i64, i: i64, k: i64, v: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_dict_entry(i,k,v)
+pub fn hdw_if_arm(s: i64, g: i64, i: i64, c: i64, b: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_if_arm(i,c,b)
+pub fn hdw_match_arm(s: i64, g: i64, i: i64, p: i64, h: bool, x: i64, b: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_match_arm(i,p,h,x,b)
+pub fn hdw_catch(s: i64, g: i64, i: i64, hp: bool, p: i64, ht: bool, t: i64, b: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_catch(i,hp,p,ht,t,b)
+pub fn hdw_with_item(s: i64, g: i64, i: i64, c: i64, h: bool, t: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_with_item(i,c,h,t)
+pub fn hdw_comp_for(s: i64, g: i64, i: i64, y: i64, x: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_comp_for(i,y,x)
+pub fn hdw_comp_if(s: i64, g: i64, i: i64, c: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_comp_if(i,c)
+pub fn hdw_tensor_suffix(s: i64, g: i64, i: i64, hd: bool, d: i64, hv: bool, v: i64, x: i64, t: bool, p: bool, hb: bool, b: i64, r: text) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_tensor_suffix(i,hd,d,hv,v,x,t,p,hb,b,r)
+pub fn hdw_bv_reserve(s: i64, g: i64) -> i64: if hir_destination_registry_building(s,g): _hir_destination_graphs[s].bv_reserve() else: -1
+pub fn hdw_bv_expr(s: i64, g: i64, r: i64, e: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].bv_write_expr(r,e)
+pub fn hdw_bv_loss(s: i64, g: i64, r: i64, b: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].bv_write_loss(r,b)
+pub fn hdw_bv_nograd(s: i64, g: i64, r: i64, b: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].bv_write_nograd(r,b)
+pub fn hdw_bv_text(s: i64, g: i64, r: i64, v: text) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].bv_write_text(r,v)
+pub fn hdw_bv_raw(s: i64, g: i64, r: i64, v: text) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].bv_write_raw(r,v)
+pub fn hdw_bv_regex(s: i64, g: i64, r: i64, v: text) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].bv_write_regex(r,v)
+pub fn hdw_bv_shell(s: i64, g: i64, r: i64, v: text, a: i64, n: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].bv_write_shell(r,v,a,n)
+pub fn hdw_bv_shell_command(s: i64, g: i64, r: i64, p: text, a: i64, n: i64, d: i64, dn: i64, h: bool, x: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].bv_write_shell_command(r,p,a,n,d,dn,h,x)
+pub fn hdw_bv_redirect(s: i64, g: i64, r: i64, k: i64, t: text) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].bv_write_redirect(r,k,t)
+pub fn hdw_bv_sql(s: i64, g: i64, r: i64, v: text, k: i64, t: i64, tn: i64, c: i64, cn: i64, p: i64, pn: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].bv_write_sql(r,v,k,t,tn,c,cn,p,pn)
+pub fn hdw_bv_sql_param(s: i64, g: i64, r: i64, n: text, p: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].bv_write_sql_param(r,n,p)
+pub fn hdw_bv_json_scalar(s: i64, g: i64, r: i64, k: i64, b: bool, n: f64, t: text) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].bv_write_json_scalar(r,k,b,n,t)
+pub fn hdw_bv_json_array(s: i64, g: i64, r: i64, a: i64, n: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].bv_write_json_array(r,a,n)
+pub fn hdw_bv_json_field(s: i64, g: i64, r: i64, n: text, v: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].bv_write_json_field(r,n,v)
+pub fn hdw_bv_json_object(s: i64, g: i64, r: i64, a: i64, n: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].bv_write_json_object(r,a,n)
+pub fn hdw_bv_markdown(s: i64, g: i64, r: i64, v: text, a: i64, n: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].bv_write_markdown(r,v,a,n)
+pub fn hdw_bv_markdown_block(s: i64, g: i64, r: i64, k: i64, l: i64, o: bool, a: text, b: text, v: i64, n: i64, w: i64, wn: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].bv_write_markdown_block(r,k,l,o,a,b,v,n,w,wn)
+pub fn hdw_bv_markdown_row(s: i64, g: i64, r: i64, a: i64, n: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].bv_write_markdown_row(r,a,n)
+pub fn hdw_bv_graph(s: i64, g: i64, r: i64, v: text, k: i64, a: i64, n: i64, e: i64, en: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].bv_write_graph(r,v,k,a,n,e,en)
+pub fn hdw_bv_graph_node(s: i64, g: i64, r: i64, id: text, h: bool, l: text, x: bool, t: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].bv_write_graph_node(r,id,h,l,x,t)
+pub fn hdw_bv_graph_edge(s: i64, g: i64, r: i64, a: text, b: text, h: bool, l: i64, x: bool, t: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].bv_write_graph_edge(r,a,b,h,l,x,t)
+pub fn hdw_bv_register_codec(s: i64, g: i64, n: text) -> i64: if hir_destination_registry_building(s,g): _hir_destination_graphs[s].bv_register_codec(n) else: -1
+pub fn hdw_bv_begin_projection(s: i64, g: i64, c: i64, n: text, x: i64, q: i64) -> i64: if hir_destination_registry_building(s,g): _hir_destination_graphs[s].bv_begin_projection(c,n,x,q) else: -1
+pub fn hdw_bv_commit_custom(s: i64, g: i64, r: i64, t: i64, x: i64, q: i64, p: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].bv_commit_custom(r,t,x,q,p)
+pub fn hdw_bv_abort_projection(s: i64, g: i64, t: i64, x: i64, q: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].bv_abort_projection(t,x,q)
+pub fn hdw_bv_error(s: i64, g: i64, r: i64, m: text) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].bv_write_error(r,m)
+pub fn hdw_publish_destination_symbol(s: i64, g: i64, y: i64, n: text, ht: bool, t: i64, v: i64, o: i64, m: i64, mi: i64, k: i64, u: bool, hd: bool, d: text, c: i64, p: i64, q: bool) -> i64: if hir_destination_registry_building(s,g): _hir_destination_graphs[s].publish_destination_symbol(y,n,ht,t,v,o,m,mi,k,u,hd,d,c,p,q) else: -1
+pub fn hdw_update_destination_symbol_type(s: i64, g: i64, y: i64, t: i64, v: i64, o: i64, m: i64, mi: i64, k: i64, u: bool) -> i64: if hir_destination_registry_building(s,g): _hir_destination_graphs[s].update_destination_symbol_type(y,t,v,o,m,mi,k,u) else: -1
+pub fn hdw_destination_symbol_lookup_in_module(s: i64, g: i64, m: i64, y: i64) -> i64: if hir_destination_registry_building(s,g): _hir_destination_graphs[s].destination_symbols.building_lookup(m,y,g) else: -1
+pub fn hdw_destination_symbol_id(s: i64, g: i64, r: i64) -> i64: if hir_destination_registry_building(s,g) and _hir_destination_graphs[s].destination_symbols.building_valid(r,g): _hir_destination_graphs[s].destination_symbols.symbol[r] else: -1
+pub fn hdw_destination_symbol_type(s: i64, g: i64, r: i64) -> i64: if hir_destination_registry_building(s,g) and _hir_destination_graphs[s].destination_symbols.building_valid(r,g): _hir_destination_graphs[s].destination_symbols.type_index[r] else: -1
+pub fn hdw_destination_symbol_visibility(s: i64, g: i64, r: i64) -> i64: if hir_destination_registry_building(s,g) and _hir_destination_graphs[s].destination_symbols.building_valid(r,g): _hir_destination_graphs[s].destination_symbols.visibility[r] else: -1
+pub fn hdw_destination_symbol_owner(s: i64, g: i64, r: i64) -> i64: if hir_destination_registry_building(s,g) and _hir_destination_graphs[s].destination_symbols.building_valid(r,g): _hir_destination_graphs[s].destination_symbols.owner_symbol[r] else: -1
+pub fn hdw_destination_symbol_module_symbol(s: i64, g: i64, r: i64) -> i64: if hir_destination_registry_building(s,g) and _hir_destination_graphs[s].destination_symbols.building_valid(r,g): _hir_destination_graphs[s].destination_symbols.module_symbol[r] else: -1
+pub fn hdw_destination_symbol_module(s: i64, g: i64, r: i64) -> i64: if hir_destination_registry_building(s,g) and _hir_destination_graphs[s].destination_symbols.building_valid(r,g): _hir_destination_graphs[s].destination_symbols.module_index[r] else: -1
+pub fn hdw_destination_symbol_kind(s: i64, g: i64, r: i64) -> i64: if hir_destination_registry_building(s,g) and _hir_destination_graphs[s].destination_symbols.building_valid(r,g): _hir_destination_graphs[s].destination_symbols.kind[r] else: -1
+pub fn hdw_destination_symbol_mutable(s: i64, g: i64, r: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].destination_symbols.building_valid(r,g) and _hir_destination_graphs[s].destination_symbols.mutable_[r]
+pub fn hdw_destination_symbol_name(s: i64, g: i64, r: i64) -> text: if hir_destination_registry_building(s,g) and _hir_destination_graphs[s].destination_symbols.building_valid(r,g): _hir_destination_graphs[s].destination_symbols.name[r] else: ""
+pub fn hdw_destination_symbol_has_type(s: i64, g: i64, r: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].destination_symbols.building_valid(r,g) and _hir_destination_graphs[s].destination_symbols.has_type[r]
+pub fn hdw_destination_symbol_has_defining_module(s: i64, g: i64, r: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].destination_symbols.building_valid(r,g) and _hir_destination_graphs[s].destination_symbols.has_defining_module[r]
+pub fn hdw_destination_symbol_defining_module(s: i64, g: i64, r: i64) -> text: if hir_destination_registry_building(s,g) and _hir_destination_graphs[s].destination_symbols.building_valid(r,g): _hir_destination_graphs[s].destination_symbols.defining_module[r] else: ""
+pub fn hdw_destination_symbol_scope(s: i64, g: i64, r: i64) -> i64: if hir_destination_registry_building(s,g) and _hir_destination_graphs[s].destination_symbols.building_valid(r,g): _hir_destination_graphs[s].destination_symbols.scope[r] else: -1
+pub fn hdw_destination_symbol_span(s: i64, g: i64, r: i64) -> i64: if hir_destination_registry_building(s,g) and _hir_destination_graphs[s].destination_symbols.building_valid(r,g): _hir_destination_graphs[s].destination_symbols.span_index[r] else: -1
+pub fn hdw_destination_symbol_is_public(s: i64, g: i64, r: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].destination_symbols.building_valid(r,g) and _hir_destination_graphs[s].destination_symbols.is_public[r]
+pub fn hdw_destination_module_text_range(s: i64, g: i64, n: i64) -> i64: if hir_destination_registry_building(s,g): _hir_destination_graphs[s].reserve_destination_module_text_range(n) else: -1
+pub fn hdw_destination_module_text_set(s: i64, g: i64, h: i64, o: i64, v: text) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].set_destination_module_text_range_at(h,o,v)
+pub fn hdw_destination_module_text_publish(s: i64, g: i64, h: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].publish_destination_module_text_range(h)
+pub fn hdw_publish_destination_module_authority(s: i64, g: i64, m: i64, k: text, q: text, l: text, u: text, p: text, f: i64, r: i64) -> i64: if hir_destination_registry_building(s,g): _hir_destination_graphs[s].publish_destination_module_authority(m,k,q,l,u,p,f,r) else: -1
+pub fn hdw_destination_visibility_allows(s: i64, g: i64, o: i64, r: i64, v: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].destination_visibility_allows_building(o,r,v)
+pub fn hdw_destination_module_facade_count(s: i64, g: i64, m: i64) -> i64:
+    if not hir_destination_registry_building(s,g): return -1
+    val row=_hir_destination_graphs[s].destination_module_authority.building_row(m,g); if row>=0: _hir_destination_graphs[s].destination_module_authority.facade_len[row] else: -1
+pub fn hdw_destination_module_facade_at(s: i64, g: i64, m: i64, o: i64) -> text:
+    if not hir_destination_registry_building(s,g): return ""
+    val row=_hir_destination_graphs[s].destination_module_authority.building_row(m,g)
+    if row<0 or o<0 or o>=_hir_destination_graphs[s].destination_module_authority.facade_len[row]: return ""
+    _hir_destination_graphs[s].destination_module_authority.text_value[_hir_destination_graphs[s].destination_module_authority.facade_start[row]+o]
+pub fn hdw_destination_module_friend_count(s: i64, g: i64, m: i64) -> i64:
+    if not hir_destination_registry_building(s,g): return -1
+    val row=_hir_destination_graphs[s].destination_module_authority.building_row(m,g); if row>=0: _hir_destination_graphs[s].destination_module_authority.friend_len[row] else: -1
+pub fn hdw_destination_module_friend_at(s: i64, g: i64, m: i64, o: i64) -> text:
+    if not hir_destination_registry_building(s,g): return ""
+    val row=_hir_destination_graphs[s].destination_module_authority.building_row(m,g)
+    if row<0 or o<0 or o>=_hir_destination_graphs[s].destination_module_authority.friend_len[row]: return ""
+    _hir_destination_graphs[s].destination_module_authority.text_value[_hir_destination_graphs[s].destination_module_authority.friend_start[row]+o]
+pub fn hdw_destination_module_lookup_source(s: i64, g: i64, k: text) -> i64: if hir_destination_registry_building(s,g): _hir_destination_graphs[s].destination_module_authority.building_module_by_source(k,g) else: -1
+pub fn hdw_publish_destination_member(s: i64, g: i64, m: i64, o: i64, n: text, d: i64, y: i64, ht: bool, t: i64, hd: bool, e: i64, v: bool, hb: bool, b: i64, ha: bool, a: i64, p: i64) -> i64: if hir_destination_registry_building(s,g): _hir_destination_graphs[s].publish_destination_member(m,o,n,d,y,ht,t,hd,e,v,hb,b,ha,a,p) else: -1
+pub fn hdw_stage_destination_member(s: i64, g: i64, m: i64, o: i64, n: text, y: i64, ht: bool, t: i64, hd: bool, e: i64, v: bool, hb: bool, b: i64, ha: bool, a: i64, p: i64) -> i64: if hir_destination_registry_building(s,g): _hir_destination_graphs[s].stage_destination_member(m,o,n,y,ht,t,hd,e,v,hb,b,ha,a,p) else: -1
+pub fn hdw_drain_destination_members(s: i64, g: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].drain_destination_members()
+pub fn hdw_destination_member_lookup_name(s: i64, g: i64, m: i64, o: i64, n: text) -> i64: if hir_destination_registry_building(s,g): _hir_destination_graphs[s].destination_members.building_lookup_name(m,o,n,g) else: -1
+pub fn hdw_destination_member_lookup_ordinal(s: i64, g: i64, m: i64, o: i64, d: i64) -> i64: if hir_destination_registry_building(s,g): _hir_destination_graphs[s].destination_members.building_lookup_ordinal(m,o,d,g) else: -1
+pub fn hdw_destination_member_range_start(s: i64, g: i64, m: i64, o: i64) -> i64: if hir_destination_registry_building(s,g): _hir_destination_graphs[s].destination_members.owner_range_start(m,o,g,false) else: -1
+pub fn hdw_destination_member_range_len(s: i64, g: i64, m: i64, o: i64) -> i64: if hir_destination_registry_building(s,g): _hir_destination_graphs[s].destination_members.owner_range_len(m,o,g,false) else: -1
+pub fn hdw_destination_member_resolve_from_symbol(s: i64, g: i64, m: i64, b: i64, n: text) -> i64: if hir_destination_registry_building(s,g): _hir_destination_graphs[s].resolve_destination_member_from_symbol(m,b,n) else: -1
+fn hdw_staged_member_index(s: i64, g: i64, r: i64) -> i64:
+    if not hir_destination_registry_building(s,g) or r<HD_STAGED_MEMBER_HANDLE_BASE: return -1
+    val row=r-HD_STAGED_MEMBER_HANDLE_BASE
+    if row>=0 and row<_hir_destination_graphs[s].destination_members.staged_count: row else: -1
+pub fn hdw_destination_member_symbol(s: i64, g: i64, r: i64) -> i64:
+    val staged=hdw_staged_member_index(s,g,r)
+    if staged>=0: return _hir_destination_graphs[s].destination_members.staged_symbol[staged]
+    if hir_destination_registry_building(s,g) and _hir_destination_graphs[s].destination_members.building_valid(r,g): _hir_destination_graphs[s].destination_members.symbol[r] else: -1
+pub fn hdw_destination_member_has_type(s: i64, g: i64, r: i64) -> bool:
+    val staged=hdw_staged_member_index(s,g,r)
+    if staged>=0: return _hir_destination_graphs[s].destination_members.staged_has_type[staged]
+    hir_destination_registry_building(s,g) and _hir_destination_graphs[s].destination_members.building_valid(r,g) and _hir_destination_graphs[s].destination_members.has_type[r]
+pub fn hdw_destination_member_type(s: i64, g: i64, r: i64) -> i64:
+    val staged=hdw_staged_member_index(s,g,r)
+    if staged>=0: return _hir_destination_graphs[s].destination_members.staged_type[staged]
+    if hir_destination_registry_building(s,g) and _hir_destination_graphs[s].destination_members.building_valid(r,g): _hir_destination_graphs[s].destination_members.type_index[r] else: -1
+pub fn hdw_destination_member_owner(s: i64, g: i64, r: i64) -> i64:
+    val staged=hdw_staged_member_index(s,g,r)
+    if staged>=0: return _hir_destination_graphs[s].destination_members.staged_owner[staged]
+    if hir_destination_registry_building(s,g) and _hir_destination_graphs[s].destination_members.building_valid(r,g): _hir_destination_graphs[s].destination_members.owner_symbol[r] else: -1
+pub fn hdw_destination_member_module(s: i64, g: i64, r: i64) -> i64:
+    val staged=hdw_staged_member_index(s,g,r)
+    if staged>=0: return _hir_destination_graphs[s].destination_members.staged_module[staged]
+    if hir_destination_registry_building(s,g) and _hir_destination_graphs[s].destination_members.building_valid(r,g): _hir_destination_graphs[s].destination_members.module_index[r] else: -1
+pub fn hdw_destination_member_name(s: i64, g: i64, r: i64) -> text:
+    val staged=hdw_staged_member_index(s,g,r)
+    if staged>=0: return _hir_destination_graphs[s].destination_members.staged_name[staged]
+    if hir_destination_registry_building(s,g) and _hir_destination_graphs[s].destination_members.building_valid(r,g): _hir_destination_graphs[s].destination_members.name[r] else: ""
+pub fn hdw_destination_member_ordinal(s: i64, g: i64, r: i64) -> i64:
+    val staged=hdw_staged_member_index(s,g,r)
+    if staged>=0: return _hir_destination_graphs[s].destination_members.staged_ordinal[staged]
+    if hir_destination_registry_building(s,g) and _hir_destination_graphs[s].destination_members.building_valid(r,g): _hir_destination_graphs[s].destination_members.ordinal[r] else: -1
+pub fn hdw_destination_member_has_default(s: i64, g: i64, r: i64) -> bool:
+    val staged=hdw_staged_member_index(s,g,r)
+    if staged>=0: return _hir_destination_graphs[s].destination_members.staged_has_default[staged]
+    hir_destination_registry_building(s,g) and _hir_destination_graphs[s].destination_members.building_valid(r,g) and _hir_destination_graphs[s].destination_members.has_default[r]
+pub fn hdw_destination_member_default(s: i64, g: i64, r: i64) -> i64:
+    val staged=hdw_staged_member_index(s,g,r)
+    if staged>=0: return _hir_destination_graphs[s].destination_members.staged_default[staged]
+    if hir_destination_registry_building(s,g) and _hir_destination_graphs[s].destination_members.building_valid(r,g): _hir_destination_graphs[s].destination_members.default_expr[r] else: -1
+pub fn hdw_destination_member_volatile(s: i64, g: i64, r: i64) -> bool:
+    val staged=hdw_staged_member_index(s,g,r)
+    if staged>=0: return _hir_destination_graphs[s].destination_members.staged_volatile[staged]
+    hir_destination_registry_building(s,g) and _hir_destination_graphs[s].destination_members.building_valid(r,g) and _hir_destination_graphs[s].destination_members.volatile_[r]
+pub fn hdw_destination_member_has_bits_attr(s: i64, g: i64, r: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].destination_members.building_valid(r,g) and _hir_destination_graphs[s].destination_members.has_bits_attr[r]
+pub fn hdw_destination_member_bits_width(s: i64, g: i64, r: i64) -> i64: if hir_destination_registry_building(s,g) and _hir_destination_graphs[s].destination_members.building_valid(r,g): _hir_destination_graphs[s].destination_members.bits[r] else: -1
+pub fn hdw_destination_member_has_fixed_address(s: i64, g: i64, r: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].destination_members.building_valid(r,g) and _hir_destination_graphs[s].destination_members.has_fixed_address[r]
+pub fn hdw_destination_member_fixed_address(s: i64, g: i64, r: i64) -> i64: if hir_destination_registry_building(s,g) and _hir_destination_graphs[s].destination_members.building_valid(r,g): _hir_destination_graphs[s].destination_members.fixed_address[r] else: -1
+pub fn hdw_destination_member_span(s: i64, g: i64, r: i64) -> i64: if hir_destination_registry_building(s,g) and _hir_destination_graphs[s].destination_members.building_valid(r,g): _hir_destination_graphs[s].destination_members.span_index[r] else: -1
+pub fn hdw_destination_member_visibility(s: i64, g: i64, r: i64) -> i64:
+    if not hir_destination_registry_building(s,g): return -1
+    val m=hdw_destination_member_module(s,g,r); val y=hdw_destination_member_symbol(s,g,r)
+    if m<0 or y<0: return -1
+    val symbol_row=_hir_destination_graphs[s].destination_symbols.building_lookup(m,y,g)
+    if symbol_row>=0: _hir_destination_graphs[s].destination_symbols.visibility[symbol_row] else: -1
+pub fn hdw_module_identity_building(s: i64, g: i64, m: i64) -> i64: if hir_destination_registry_building(s,g) and m >= 0 and m < _hir_destination_graphs[s].module_count and _hir_destination_graphs[s].module_generation[m] == g: _hir_destination_graphs[s].module_identity[m] else: -1
+pub fn hdw_text_aux(s: i64, g: i64, i: i64, v: text) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_text_aux(i,v)
+pub fn hdw_symbol_aux(s: i64, g: i64, i: i64, v: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_symbol_aux(i,v)
+pub fn hdw_module_import_aux(s: i64, g: i64, i: i64, t: i64, d: i64, o: i64, n: text, x: text, l: i64, w: bool, a: bool, z: bool) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_module_import_aux(i,t,d,o,n,x,l,w,a,z)
+pub fn hdw_module_export_aux(s: i64, g: i64, i: i64, t: i64, o: i64, n: text, x: text, l: i64, w: bool, a: bool) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_module_export_aux(i,t,o,n,x,l,w,a)
+pub fn hdw_param_aux(s: i64, g: i64, i: i64, y: i64, t: i64, h: bool, d: i64, m: bool, n: text) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_param_aux(i,y,t,h,d,m,n)
+pub fn hdw_type_param_metadata(s: i64, g: i64, i: i64, y: i64, n: text, b: i64, bn: i64, h: bool, d: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_type_param_metadata(i,y,n,b,bn,h,d)
+pub fn hdw_function_attr_metadata(s: i64, g: i64, i: i64, f: i64, h: bool, x: text, l: i64, b: i64, u: i64, p: i64, m: i64, e: text) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_function_attr_metadata(i,f,h,x,l,b,u,p,m,e)
+pub fn hdw_export_metadata(s: i64, g: i64, i: i64, c: bool, n: text) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_export_metadata(i,c,n)
+pub fn hdw_driver_metadata(s: i64, g: i64, i: i64, k: i64, c: i64, v: i64, d: i64, n: i64, x: text, a: text) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_driver_metadata(i,k,c,v,d,n,x,a)
+pub fn hdw_vhdl_metadata(s: i64, g: i64, i: i64, h: bool, a: i64, n: i64, hc: bool, c: i64, r: i64, rn: i64, f: bool) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_vhdl_metadata(i,h,a,n,hc,c,r,rn,f)
+pub fn hdw_vhdl_generic(s: i64, g: i64, i: i64, n: text, t: text, d: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_vhdl_generic(i,n,t,d)
+pub fn hdw_vhdl_clocked(s: i64, g: i64, i: i64, c: text, r: text, h: bool, p: i64, y: i64, d: i64, v: bool, e: i64, n: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_vhdl_clocked(i,c,r,h,p,y,d,v,e,n)
+pub fn hdw_vhdl_return(s: i64, g: i64, i: i64, l: text, t: text) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_vhdl_return(i,l,t)
+pub fn hdw_doc_metadata(s: i64, g: i64, i: i64, d: text) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_doc_metadata(i,d)
+pub fn hdw_gpu_metadata(s: i64, g: i64, i: i64, t: text, b: text) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_gpu_metadata(i,t,b)
+pub fn hdw_contract_clause_metadata(s: i64, g: i64, i: i64, k: i64, p: i64, b: text) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_contract_clause_metadata(i,k,p,b)
+pub fn hdw_contract_metadata(s: i64, g: i64, i: i64, c: i64, n: i64, p: text, o: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_contract_metadata(i,c,n,p,o)
+pub fn hdw_generic_template_metadata(s: i64, g: i64, i: i64, e: bool) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_generic_template_metadata(i,e)
+pub fn hdw_method_resolution(s: i64, g: i64, i: i64, h: i64, a: i64, b: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_method_resolution(i,h,a,b)
+pub fn hdw_qualified_method_resolution(s: i64, g: i64, i: i64, h: i64, m: i64, a: i64, b: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_qualified_method_resolution(i,h,m,a,b)
+pub fn hdw_named_pattern(s: i64, g: i64, i: i64, n: text, p: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_named_pattern(i,n,p)
+pub fn hdw_enum_payload_aux(s: i64, g: i64, i: i64, h: bool, a: i64, n: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_enum_payload_aux(i,h,a,n)
+pub fn hdw_pattern_payload_aux(s: i64, g: i64, i: i64, h: bool, a: i64, n: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_pattern_payload_aux(i,h,a,n)
+pub fn hdw_custom_value_aux(s: i64, g: i64, i: i64, k: i64, a: i64, b: i64, t: text, u: text, r: i64, n: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_custom_value_aux(i,k,a,b,t,u,r,n)
+pub fn hdw_asm_constraint(s: i64, g: i64, i: i64, n: text, k: i64, l: i64, t: text, v: i64, h: bool, o: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_asm_constraint(i,n,k,l,t,v,h,o)
+pub fn hdw_asm(s: i64, g: i64, i: i64, t: text, v: bool, c: i64, cn: i64, l: i64, ln: i64, a: i64, an: i64, o: i64, on: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_asm(i,t,v,c,cn,l,ln,a,an,o,on)
+pub fn hdw_asm_version(s: i64, g: i64, i: i64, o: text, v: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_asm_version(i,o,v)
+pub fn hdw_asm_spec(s: i64, g: i64, i: i64, a: i64, n: i64, o: i64, b: i64, c: i64, v: i64, vn: i64) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_asm_spec(i,a,n,o,b,c,v,vn)
+pub fn hdw_asm_arm(s: i64, g: i64, i: i64, h: bool, a: i64, w: bool, hb: bool, b: i64, e: bool, m: text) -> bool: hir_destination_registry_building(s,g) and _hir_destination_graphs[s].write_asm_arm(i,h,a,w,hb,b,e,m)
+
+# Frozen scalar reader dispatch. No row, range, graph, array, or optional owner
+# crosses the registry seam.
+pub fn hdr_release_function(s: i64, g: i64, t: i64) -> bool: hir_destination_registry_readable(s,g) and _hir_destination_graphs[s].release_function(t,g)
+pub fn hdr_span_start(s: i64, g: i64, i: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].span_start_at(i,g) else: -1
+pub fn hdr_span_end(s: i64, g: i64, i: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].span_end_at(i,g) else: -1
+pub fn hdr_span_line(s: i64, g: i64, i: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].span_line_at(i,g) else: -1
+pub fn hdr_span_col(s: i64, g: i64, i: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].span_col_at(i,g) else: -1
+pub fn hdr_span_file(s: i64, g: i64, i: i64) -> text: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].span_file_at(i,g) else: ""
+pub fn hdr_span_length(s: i64, g: i64, i: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].span_length_at(i,g) else: -1
+pub fn hdr_expr_shape(s: i64, g: i64, i: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].expr_shape_at(i) else: 0
+pub fn hdr_expr_i64(s: i64, g: i64, i: i64, c: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].expr_i64_at(i,c) else: -1
+pub fn hdr_expr_defining_module(s: i64, g: i64, i: i64) -> i64:
+    if not hir_destination_registry_readable(s,g): return -1
+    val shape=_hir_destination_graphs[s].expr_shape_at(i)
+    if shape==HD_EXPR_QUALIFIED_NAMED_VAR: _hir_destination_graphs[s].expr_i64_at(i,1) else if shape==HD_EXPR_RESOLVED_FIELD: _hir_destination_graphs[s].expr_i64_at(i,2) else: -1
+pub fn hdr_expr_resolved_symbol(s: i64, g: i64, i: i64) -> i64:
+    if not hir_destination_registry_readable(s,g): return -1
+    val shape=_hir_destination_graphs[s].expr_shape_at(i)
+    if shape==HD_EXPR_QUALIFIED_NAMED_VAR: _hir_destination_graphs[s].expr_i64_at(i,0) else if shape==HD_EXPR_RESOLVED_FIELD: _hir_destination_graphs[s].expr_i64_at(i,1) else: -1
+pub fn hdr_expr_bool(s: i64, g: i64, i: i64, c: i64) -> bool: hir_destination_registry_readable(s,g) and _hir_destination_graphs[s].expr_bool_at(i,c)
+pub fn hdr_expr_text(s: i64, g: i64, i: i64, c: i64) -> text: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].expr_text_at(i,c) else: ""
+pub fn hdr_expr_span(s: i64, g: i64, i: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].expr_span_at(i) else: -1
+pub fn hdr_expr_diagnostic(s: i64, g: i64, i: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].expr_diagnostic_at(i) else: -1
+pub fn hdr_expr_payload(s: i64, g: i64, i: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].expr_payload_at(i) else: -1
+pub fn hdr_expr_type(s: i64, g: i64, i: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].expr_type_at(i) else: -1
+pub fn hdr_expr_range(s: i64, g: i64, i: i64, b: bool) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].expr_range_at(i,b) else: -1
+pub fn hdr_expr_range_has_start(s: i64, g: i64, i: i64) -> bool: hir_destination_registry_readable(s,g) and _hir_destination_graphs[s].expr_range_has_start_at(i)
+pub fn hdr_expr_range_has_end(s: i64, g: i64, i: i64) -> bool: hir_destination_registry_readable(s,g) and _hir_destination_graphs[s].expr_range_has_end_at(i)
+pub fn hdr_float_value(s: i64, g: i64, i: i64) -> f64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].float_value_at(i) else: 0.0
+pub fn hdr_float_bits(s: i64, g: i64, i: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].float_bits_at(i) else: 0
+pub fn hdr_block_ready(s: i64, g: i64, i: i64) -> bool: hir_destination_registry_readable(s,g) and _hir_destination_graphs[s].block_is_ready(i)
+pub fn hdr_block_stmt_range(s: i64, g: i64, i: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].block_stmt_range_at(i) else: -1
+pub fn hdr_block_cap_range(s: i64, g: i64, i: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].block_cap_range_at(i) else: -1
+pub fn hdr_block_value(s: i64, g: i64, i: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].block_value_at(i) else: -1
+pub fn hdr_block_span(s: i64, g: i64, i: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].block_span_at(i) else: -1
+pub fn hdr_stmt_shape(s: i64, g: i64, i: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].stmt_shape_at(i) else: 0
+pub fn hdr_stmt_i64(s: i64, g: i64, i: i64, c: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].stmt_i64_at(i,c) else: -1
+pub fn hdr_stmt_bool(s: i64, g: i64, i: i64, c: i64) -> bool: hir_destination_registry_readable(s,g) and _hir_destination_graphs[s].stmt_bool_at(i,c)
+pub fn hdr_stmt_span(s: i64, g: i64, i: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].stmt_span_at(i) else: -1
+pub fn hdr_aux_shape(s: i64, g: i64, i: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].aux_shape_at(i) else: 0
+pub fn hdr_aux_i64(s: i64, g: i64, i: i64, c: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].aux_i64_at(i,c) else: -1
+pub fn hdr_method_resolution_defining_module(s: i64, g: i64, i: i64) -> i64:
+    if not hir_destination_registry_readable(s,g) or _hir_destination_graphs[s].aux_shape_at(i)!=HD_AUX_METHOD_RESOLUTION: return -1
+    _hir_destination_graphs[s].aux_i64_at(i,3)
+pub fn hdr_aux_bool(s: i64, g: i64, i: i64, c: i64) -> bool: hir_destination_registry_readable(s,g) and _hir_destination_graphs[s].aux_bool_at(i,c)
+pub fn hdr_aux_text(s: i64, g: i64, i: i64, c: i64) -> text: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].aux_text_at(i,c) else: ""
+pub fn hdr_aux_range(s: i64, g: i64, i: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].aux_range_at(i) else: -1
+pub fn hdr_aux_span(s: i64, g: i64, i: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].aux_span_at(i) else: -1
+pub fn hdr_module_route_target(s: i64, g: i64, i: i64) -> i64: hdr_aux_i64(s,g,i,0)
+pub fn hdr_module_route_offset(s: i64, g: i64, i: i64) -> i64: hdr_aux_i64(s,g,i,1)
+pub fn hdr_module_import_item_offset(s: i64, g: i64, i: i64) -> i64: hdr_aux_i64(s,g,i,2)
+pub fn hdr_module_route_target_name(s: i64, g: i64, i: i64) -> text: hdr_aux_text(s,g,i,0)
+pub fn hdr_module_route_source_name(s: i64, g: i64, i: i64) -> text: hdr_aux_text(s,g,i,1)
+pub fn hdr_module_route_local_name(s: i64, g: i64, i: i64) -> text:
+    val local=hdr_aux_i64(s,g,i,4)
+    if local>=0: hdr_aux_text(s,g,local,0) else: ""
+pub fn hdr_module_route_is_glob(s: i64, g: i64, i: i64) -> bool: hdr_aux_bool(s,g,i,0)
+pub fn hdr_module_import_has_alias(s: i64, g: i64, i: i64) -> bool: hdr_aux_bool(s,g,i,1)
+pub fn hdr_module_import_is_lazy(s: i64, g: i64, i: i64) -> bool: hdr_aux_i64(s,g,i,3)==1
+pub fn hdr_range_kind(s: i64, g: i64, h: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].range_kind_at(h,g) else: 0
+pub fn hdr_range_subtype(s: i64, g: i64, h: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].range_subtype_at(h,g) else: 0
+pub fn hdr_range_length(s: i64, g: i64, h: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].range_length_at(h,g) else: -1
+pub fn hdr_range_published(s: i64, g: i64, h: i64) -> bool: hir_destination_registry_readable(s,g) and _hir_destination_graphs[s].range_published_at(h,g)
+pub fn hdr_range_value(s: i64, g: i64, h: i64, t: i64, o: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].range_value_at(h,t,o) else: -1
+pub fn hdr_token_active(s: i64, g: i64, t: i64) -> bool: hir_destination_registry_readable(s,g) and _hir_destination_graphs[s].token_active_at(t,g)
+pub fn hdr_token_root(s: i64, g: i64, t: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].token_root_at(t,g) else: -1
+pub fn hdr_token_released(s: i64, g: i64, t: i64) -> bool: hir_destination_registry_readable(s,g) and _hir_destination_graphs[s].token_released_at(t,g)
+pub fn hdr_diagnostic(s: i64, g: i64, i: i64) -> text: if hir_destination_registry_state_matches(s,g,HD_REGISTRY_BUILDING) or hir_destination_registry_readable(s,g) or hir_destination_registry_failed(s,g): _hir_destination_graphs[s].diagnostic_at(i) else: ""
+pub fn hdr_error(s: i64, g: i64) -> text: if hir_destination_registry_state_matches(s,g,HD_REGISTRY_BUILDING) or hir_destination_registry_readable(s,g) or hir_destination_registry_failed(s,g): _hir_destination_graphs[s].graph_error() else: ""
+pub fn hdr_type_shape(s: i64, g: i64, i: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].type_shape_at(i) else: 0
+pub fn hdr_type_i64(s: i64, g: i64, i: i64, c: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].type_i64_at(i,c) else: -1
+pub fn hdr_type_qualified_dyn_trait_module(s: i64, g: i64, i: i64) -> i64: if hir_destination_registry_readable(s,g) and _hir_destination_graphs[s].type_shape_at(i)==HD_TYPE_QUALIFIED_DYN_TRAIT: _hir_destination_graphs[s].type_i64_at(i,1) else: -1
+pub fn hdr_type_dyn_trait_symbol(s: i64, g: i64, i: i64) -> i64:
+    if not hir_destination_registry_readable(s,g): return -1
+    val shape=_hir_destination_graphs[s].type_shape_at(i)
+    if shape==HD_TYPE_DYN_TRAIT or shape==HD_TYPE_QUALIFIED_DYN_TRAIT: _hir_destination_graphs[s].type_i64_at(i,0) else: -1
+pub fn hdr_type_bool(s: i64, g: i64, i: i64, c: i64) -> bool: hir_destination_registry_readable(s,g) and _hir_destination_graphs[s].type_bool_at(i,c)
+pub fn hdr_type_text(s: i64, g: i64, i: i64) -> text: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].type_text_at(i) else: ""
+pub fn hdr_type_range(s: i64, g: i64, i: i64, b: bool) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].type_range_at(i,b) else: -1
+pub fn hdr_type_span(s: i64, g: i64, i: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].type_span_at(i) else: -1
+pub fn hdr_pattern_shape(s: i64, g: i64, i: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].pattern_shape_at(i) else: 0
+pub fn hdr_pattern_i64(s: i64, g: i64, i: i64, c: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].pattern_i64_at(i,c) else: -1
+pub fn hdr_pattern_bool(s: i64, g: i64, i: i64) -> bool: hir_destination_registry_readable(s,g) and _hir_destination_graphs[s].pattern_bool_at(i)
+pub fn hdr_pattern_endpoint_present(s: i64, g: i64, i: i64, e: bool) -> bool: hir_destination_registry_readable(s,g) and _hir_destination_graphs[s].pattern_endpoint_present_at(i,e)
+pub fn hdr_pattern_text(s: i64, g: i64, i: i64, c: i64) -> text: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].pattern_text_at(i,c) else: ""
+pub fn hdr_pattern_range(s: i64, g: i64, i: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].pattern_range_at(i) else: -1
+pub fn hdr_pattern_type(s: i64, g: i64, i: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].pattern_type_at(i) else: -1
+pub fn hdr_pattern_span(s: i64, g: i64, i: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].pattern_span_at(i) else: -1
+pub fn hdr_effect_shape(s: i64, g: i64, i: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].effect_shape_at(i) else: 0
+pub fn hdr_effect_type(s: i64, g: i64, i: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].effect_type_at(i) else: -1
+pub fn hdr_effect_name(s: i64, g: i64, i: i64) -> text: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].effect_name_at(i) else: ""
+pub fn hdr_effect_span(s: i64, g: i64, i: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].effect_span_at(i) else: -1
+pub fn hdr_dim_shape(s: i64, g: i64, i: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].dim_shape_at(i) else: 0
+pub fn hdr_dim_i64(s: i64, g: i64, i: i64, c: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].dim_i64_at(i,c) else: -1
+pub fn hdr_dim_has(s: i64, g: i64, i: i64, c: i64) -> bool: hir_destination_registry_readable(s,g) and _hir_destination_graphs[s].dim_has_at(i,c)
+pub fn hdr_dim_text(s: i64, g: i64, i: i64) -> text: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].dim_text_at(i) else: ""
+pub fn hdr_dim_span(s: i64, g: i64, i: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].dim_span_at(i) else: -1
+pub fn hdr_function_root(s: i64, g: i64, r: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].function_root_at(r,g) else: -1
+pub fn hdr_function_token(s: i64, g: i64, r: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].function_token_at(r,g) else: -1
+pub fn hdr_function_symbol(s: i64, g: i64, r: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].function_symbol_at(r,g) else: -1
+pub fn hdr_function_module(s: i64, g: i64, r: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].function_module_at(r,g) else: -1
+pub fn hdr_function_name(s: i64, g: i64, r: i64) -> text: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].function_name_at(r,g) else: ""
+pub fn hdr_function_overload_ordinal(s: i64, g: i64, r: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].function_overload_ordinal_at(r,g) else: -1
+pub fn hdr_function_flags(s: i64, g: i64, r: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].function_flags_at(r,g) else: 0
+pub fn hdr_function_visibility(s: i64, g: i64, r: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].function_visibility_at(r,g) else: -1
+pub fn hdr_function_span(s: i64, g: i64, r: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].function_span_at(r,g) else: -1
+pub fn hdr_function_type_params(s: i64, g: i64, r: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].function_type_params_at(r,g) else: -1
+pub fn hdr_function_params(s: i64, g: i64, r: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].function_params_at(r,g) else: -1
+pub fn hdr_function_return_type(s: i64, g: i64, r: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].function_return_type_at(r,g) else: -1
+pub fn hdr_function_effects(s: i64, g: i64, r: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].function_effects_at(r,g) else: -1
+pub fn hdr_function_metadata(s: i64, g: i64, r: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].function_metadata_at(r,g) else: -1
+pub fn hdr_function_type_param(s: i64, g: i64, r: i64, o: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].function_type_param_at(r,g,o) else: -1
+pub fn hdr_function_param(s: i64, g: i64, r: i64, o: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].function_param_at(r,g,o) else: -1
+pub fn hdr_function_effect(s: i64, g: i64, r: i64, o: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].function_effect_at(r,g,o) else: -1
+pub fn hdr_function_metadata_row(s: i64, g: i64, r: i64, o: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].function_metadata_row_at(r,g,o) else: -1
+pub fn hdr_module_identity(s: i64, g: i64, i: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].module_identity_at(i,g) else: -1
+pub fn hdr_module_name(s: i64, g: i64, i: i64) -> text: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].module_name_at(i,g) else: ""
+pub fn hdr_module_path(s: i64, g: i64, i: i64) -> text: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].module_path_at(i,g) else: ""
+pub fn hdr_module_function_roots(s: i64, g: i64, i: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].module_function_roots_at(i,g) else: -1
+pub fn hdr_module_function_tokens(s: i64, g: i64, i: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].module_function_tokens_at(i,g) else: -1
+pub fn hdr_module_imports(s: i64, g: i64, i: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].module_imports_at(i,g) else: -1
+pub fn hdr_module_exports(s: i64, g: i64, i: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].module_exports_at(i,g) else: -1
+pub fn hdr_module_surfaces(s: i64, g: i64, i: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].module_surfaces_at(i,g) else: -1
+pub fn hdr_module_declaration_start(s: i64, g: i64, i: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].module_declaration_start_at(i,g) else: -1
+pub fn hdr_module_declaration_count(s: i64, g: i64, i: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].module_declaration_count_at(i,g) else: -1
+pub fn hdr_module_extension_start(s: i64, g: i64, i: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].module_extension_start_at(i,g) else: -1
+pub fn hdr_module_extension_count(s: i64, g: i64, i: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].module_extension_count_at(i,g) else: -1
+pub fn hdr_count(s: i64, g: i64, k: i64) -> i64:
+    if not hir_destination_registry_readable(s,g): return -1
+    if k == HD_RANGE_EXPR: return _hir_destination_graphs[s].expr_count
+    if k == HD_RANGE_STMT: return _hir_destination_graphs[s].stmt_count
+    if k == HD_RANGE_TYPE: return _hir_destination_graphs[s].type_count
+    if k == HD_RANGE_PATTERN: return _hir_destination_graphs[s].pattern_count
+    if k == HD_RANGE_EFFECT: return _hir_destination_graphs[s].effect_count
+    if k == HD_RANGE_DIM: return _hir_destination_graphs[s].dim_count
+    if k == HD_RANGE_AUX: return _hir_destination_graphs[s].aux_count
+    if k == HD_RANGE_BLOCK: return _hir_destination_graphs[s].block_count
+    if k == HD_RANGE_TOKEN: return _hir_destination_graphs[s].pending_count
+    if k == 10: return _hir_destination_graphs[s].function_count
+    if k == 11: return _hir_destination_graphs[s].span_count
+    if k == 12: return _hir_destination_graphs[s].module_count
+    if k == 13: return _hir_destination_graphs[s].destination_symbols.count
+    if k == 14: return _hir_destination_graphs[s].destination_members.count
+    if k == 15: return _hir_destination_graphs[s].destination_module_authority.count
+    if k == 16: return _hir_destination_graphs[s].destination_module_authority.text_count
+    if k == 17: return _hir_destination_graphs[s].declaration_metadata.count
+    if k == 18: return _hir_destination_graphs[s].declaration_metadata.range_count
+    if k == 19: return _hir_destination_graphs[s].declaration_metadata.child_range_count
+    if k == 20: return _hir_destination_graphs[s].block_values.count
+    -1
+pub fn hdr_capacity_count(s: i64, g: i64, k: i64) -> i64:
+    if not hir_destination_registry_readable(s,g): return -1
+    if k == HD_RANGE_EXPR: return _hir_destination_graphs[s].expr_capacity_count()
+    if k == HD_RANGE_STMT: return _hir_destination_graphs[s].stmt_capacity_count()
+    if k == HD_RANGE_TYPE: return _hir_destination_graphs[s].type_capacity_count()
+    if k == HD_RANGE_PATTERN: return _hir_destination_graphs[s].pattern_capacity_count()
+    if k == HD_RANGE_EFFECT: return _hir_destination_graphs[s].effect_capacity_count()
+    if k == HD_RANGE_DIM: return _hir_destination_graphs[s].dim_capacity_count()
+    if k == HD_RANGE_AUX: return _hir_destination_graphs[s].aux_capacity_count()
+    if k == HD_RANGE_BLOCK: return _hir_destination_graphs[s].block_capacity_count()
+    if k == HD_RANGE_TOKEN: return _hir_destination_graphs[s].token_capacity_count()
+    if k == 10: return _hir_destination_graphs[s].function_capacity_count()
+    if k == 11: return _hir_destination_graphs[s].span_capacity
+    if k == 12: return _hir_destination_graphs[s].module_capacity_count()
+    if k == 13: return _hir_destination_graphs[s].destination_symbols.capacity
+    if k == 14: return _hir_destination_graphs[s].destination_members.capacity
+    if k == 15: return _hir_destination_graphs[s].destination_module_authority.capacity
+    if k == 16: return _hir_destination_graphs[s].destination_module_authority.text_capacity
+    if k == 17: return _hir_destination_graphs[s].declaration_metadata.capacity
+    if k == 18: return _hir_destination_graphs[s].declaration_metadata.range_capacity
+    if k == 19: return _hir_destination_graphs[s].declaration_metadata.child_range_capacity
+    if k == 20: return _hir_destination_graphs[s].block_values.ready.len()
+    -1
+
+pub fn hdr_declaration_metadata_count(s: i64, g: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].declaration_metadata.count else: -1
+pub fn hdr_declaration_metadata_kind(s: i64, g: i64, r: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].declaration_metadata.kind_at(r,g) else: 0
+pub fn hdr_declaration_metadata_module(s: i64, g: i64, r: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].declaration_metadata.module_at(r,g) else: -1
+pub fn hdr_declaration_metadata_owner(s: i64, g: i64, r: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].declaration_metadata.owner_at(r,g) else: -1
+pub fn hdr_declaration_metadata_name(s: i64, g: i64, r: i64) -> text: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].declaration_metadata.name_at(r,g) else: ""
+pub fn hdr_declaration_metadata_text(s: i64, g: i64, r: i64, c: i64) -> text:
+    if not hir_destination_registry_readable(s,g): return ""
+    if c==0: _hir_destination_graphs[s].declaration_metadata.text0_at(r,g) else if c==1: _hir_destination_graphs[s].declaration_metadata.text1_at(r,g) else: ""
+pub fn hdr_declaration_metadata_bool(s: i64, g: i64, r: i64, c: i64) -> bool:
+    if not hir_destination_registry_readable(s,g): return false
+    if c==0: _hir_destination_graphs[s].declaration_metadata.flag0_at(r,g) else if c==1: _hir_destination_graphs[s].declaration_metadata.flag1_at(r,g) else if c==2: _hir_destination_graphs[s].declaration_metadata.flag2_at(r,g) else: false
+pub fn hdr_declaration_metadata_i64(s: i64, g: i64, r: i64, c: i64) -> i64:
+    if not hir_destination_registry_readable(s,g): return -1
+    if c==0: return _hir_destination_graphs[s].declaration_metadata.value0_at(r,g)
+    if c==1: return _hir_destination_graphs[s].declaration_metadata.value1_at(r,g)
+    if c==2: return _hir_destination_graphs[s].declaration_metadata.value2_at(r,g)
+    if c==3: return _hir_destination_graphs[s].declaration_metadata.value3_at(r,g)
+    if c==4: return _hir_destination_graphs[s].declaration_metadata.value4_at(r,g)
+    if c==5: return _hir_destination_graphs[s].declaration_metadata.value5_at(r,g)
+    -1
+pub fn hdr_declaration_metadata_span(s: i64, g: i64, r: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].declaration_metadata.span_at(r,g) else: -1
+pub fn hdr_declaration_metadata_module_range(s: i64, g: i64, m: i64, k: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].declaration_metadata.find_module_range(m,k,g,true) else: -1
+pub fn hdr_declaration_metadata_range_start(s: i64, g: i64, r: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].declaration_metadata.range_start_at(r,g,true) else: -1
+pub fn hdr_declaration_metadata_range_len(s: i64, g: i64, r: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].declaration_metadata.range_len_at(r,g,true) else: -1
+pub fn hdr_declaration_metadata_child_range_start(s: i64, g: i64, r: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].declaration_metadata.child_range_start_at(r,g,true) else: -1
+pub fn hdr_declaration_metadata_child_range_len(s: i64, g: i64, r: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].declaration_metadata.child_range_len_at(r,g,true) else: -1
+pub fn hdr_declaration_metadata_child_range_kind(s: i64, g: i64, r: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].declaration_metadata.child_range_kind_at(r,g,true) else: 0
+pub fn hdr_expr_range_length(s: i64, g: i64, i: i64, b: bool) -> i64:
+    if not hir_destination_registry_readable(s,g) or not _hir_destination_graphs[s].index_ready(HD_RANGE_EXPR,i): return -1
+    if b: _hir_destination_graphs[s].expr_r1_len[i] else: _hir_destination_graphs[s].expr_r0_len[i]
+pub fn hdr_type_range_length(s: i64, g: i64, i: i64, b: bool) -> i64:
+    if not hir_destination_registry_readable(s,g) or not _hir_destination_graphs[s].index_ready(HD_RANGE_TYPE,i): return -1
+    if b: _hir_destination_graphs[s].type_r1_len[i] else: _hir_destination_graphs[s].type_r0_len[i]
+pub fn hdr_pattern_range_length(s: i64, g: i64, i: i64) -> i64:
+    if not hir_destination_registry_readable(s,g) or not _hir_destination_graphs[s].index_ready(HD_RANGE_PATTERN,i): return -1
+    _hir_destination_graphs[s].pattern_r0_len[i]
+pub fn hdr_aux_range_length(s: i64, g: i64, i: i64) -> i64:
+    if not hir_destination_registry_readable(s,g) or not _hir_destination_graphs[s].index_ready(HD_RANGE_AUX,i): return -1
+    _hir_destination_graphs[s].aux_r0_len[i]
+pub fn hdr_block_stmt_length(s: i64, g: i64, i: i64) -> i64:
+    if not hir_destination_registry_readable(s,g) or not _hir_destination_graphs[s].block_is_ready(i): return -1
+    _hir_destination_graphs[s].block_stmt_len[i]
+pub fn hdr_block_cap_length(s: i64, g: i64, i: i64) -> i64:
+    if not hir_destination_registry_readable(s,g) or not _hir_destination_graphs[s].block_is_ready(i): return -1
+    _hir_destination_graphs[s].block_cap_len[i]
+pub fn hdr_bv_shape(s: i64, g: i64, r: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].block_values.shape_at(r,g) else: 0
+pub fn hdr_bv_i64(s: i64, g: i64, r: i64, c: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].block_values.i64_at(r,g,c) else: -1
+pub fn hdr_bv_bool(s: i64, g: i64, r: i64, c: i64) -> bool: hir_destination_registry_readable(s,g) and _hir_destination_graphs[s].block_values.bool_at(r,g,c)
+pub fn hdr_bv_text(s: i64, g: i64, r: i64, c: i64) -> text: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].block_values.text_at(r,g,c) else: ""
+pub fn hdr_bv_f64(s: i64, g: i64, r: i64) -> f64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].block_values.f64_at(r,g) else: 0.0
+pub fn hdr_bv_range(s: i64, g: i64, r: i64, b: bool) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].block_values.range_at(r,g,b) else: -1
+pub fn hdr_bv_range_len(s: i64, g: i64, r: i64, b: bool) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].block_values.range_len_at(r,g,b) else: -1
+pub fn hdr_destination_symbol_lookup_in_module(s: i64, g: i64, m: i64, y: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].destination_symbols.lookup(m,y,g) else: -1
+pub fn hdr_destination_symbol_id(s: i64, g: i64, r: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].destination_symbols.symbol_at(r,g) else: -1
+pub fn hdr_destination_symbol_type(s: i64, g: i64, r: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].destination_symbols.type_at(r,g) else: -1
+pub fn hdr_destination_symbol_visibility(s: i64, g: i64, r: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].destination_symbols.visibility_at(r,g) else: -1
+pub fn hdr_destination_symbol_owner(s: i64, g: i64, r: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].destination_symbols.owner_at(r,g) else: -1
+pub fn hdr_destination_symbol_module_symbol(s: i64, g: i64, r: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].destination_symbols.module_symbol_at(r,g) else: -1
+pub fn hdr_destination_symbol_module(s: i64, g: i64, r: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].destination_symbols.module_at(r,g) else: -1
+pub fn hdr_destination_symbol_kind(s: i64, g: i64, r: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].destination_symbols.kind_at(r,g) else: -1
+pub fn hdr_destination_symbol_mutable(s: i64, g: i64, r: i64) -> bool: hir_destination_registry_readable(s,g) and _hir_destination_graphs[s].destination_symbols.mutable_at(r,g)
+pub fn hdr_destination_symbol_name(s: i64, g: i64, r: i64) -> text: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].destination_symbols.name_at(r,g) else: ""
+pub fn hdr_destination_symbol_has_type(s: i64, g: i64, r: i64) -> bool: hir_destination_registry_readable(s,g) and _hir_destination_graphs[s].destination_symbols.has_type_at(r,g)
+pub fn hdr_destination_symbol_has_defining_module(s: i64, g: i64, r: i64) -> bool: hir_destination_registry_readable(s,g) and _hir_destination_graphs[s].destination_symbols.has_defining_module_at(r,g)
+pub fn hdr_destination_symbol_defining_module(s: i64, g: i64, r: i64) -> text: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].destination_symbols.defining_module_at(r,g) else: ""
+pub fn hdr_destination_symbol_scope(s: i64, g: i64, r: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].destination_symbols.scope_at(r,g) else: -1
+pub fn hdr_destination_symbol_span(s: i64, g: i64, r: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].destination_symbols.span_at(r,g) else: -1
+pub fn hdr_destination_symbol_is_public(s: i64, g: i64, r: i64) -> bool: hir_destination_registry_readable(s,g) and _hir_destination_graphs[s].destination_symbols.is_public_at(r,g)
+pub fn hdr_destination_visibility_allows(s: i64, g: i64, o: i64, r: i64, v: i64) -> bool: hir_destination_registry_readable(s,g) and _hir_destination_graphs[s].destination_module_authority.visibility_allows(o,r,v,g,true)
+pub fn hdr_destination_module_logical_path(s: i64, g: i64, m: i64) -> text:
+    if not hir_destination_registry_readable(s,g): return ""
+    val row=_hir_destination_graphs[s].destination_module_authority.row(m,g); if row>=0: _hir_destination_graphs[s].destination_module_authority.source_key[row] else: ""
+pub fn hdr_destination_module_package_path(s: i64, g: i64, m: i64) -> text:
+    if not hir_destination_registry_readable(s,g): return ""
+    val row=_hir_destination_graphs[s].destination_module_authority.row(m,g); if row>=0: _hir_destination_graphs[s].destination_module_authority.package_path[row] else: ""
+pub fn hdr_destination_module_layer_path(s: i64, g: i64, m: i64) -> text:
+    if not hir_destination_registry_readable(s,g): return ""
+    val row=_hir_destination_graphs[s].destination_module_authority.row(m,g); if row>=0: _hir_destination_graphs[s].destination_module_authority.layer_path[row] else: ""
+pub fn hdr_destination_module_facade_count(s: i64, g: i64, m: i64) -> i64:
+    if not hir_destination_registry_readable(s,g): return -1
+    val row=_hir_destination_graphs[s].destination_module_authority.row(m,g); if row>=0: _hir_destination_graphs[s].destination_module_authority.facade_len[row] else: -1
+pub fn hdr_destination_module_facade_at(s: i64, g: i64, m: i64, o: i64) -> text:
+    if not hir_destination_registry_readable(s,g): return ""
+    val row=_hir_destination_graphs[s].destination_module_authority.row(m,g)
+    if row<0 or o<0 or o>=_hir_destination_graphs[s].destination_module_authority.facade_len[row]: return ""
+    _hir_destination_graphs[s].destination_module_authority.text_value[_hir_destination_graphs[s].destination_module_authority.facade_start[row]+o]
+pub fn hdr_destination_module_friend_count(s: i64, g: i64, m: i64) -> i64:
+    if not hir_destination_registry_readable(s,g): return -1
+    val row=_hir_destination_graphs[s].destination_module_authority.row(m,g); if row>=0: _hir_destination_graphs[s].destination_module_authority.friend_len[row] else: -1
+pub fn hdr_destination_module_friend_at(s: i64, g: i64, m: i64, o: i64) -> text:
+    if not hir_destination_registry_readable(s,g): return ""
+    val row=_hir_destination_graphs[s].destination_module_authority.row(m,g)
+    if row<0 or o<0 or o>=_hir_destination_graphs[s].destination_module_authority.friend_len[row]: return ""
+    _hir_destination_graphs[s].destination_module_authority.text_value[_hir_destination_graphs[s].destination_module_authority.friend_start[row]+o]
+pub fn hdr_destination_module_lookup_source(s: i64, g: i64, k: text) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].destination_module_authority.module_by_source(k,g) else: -1
+pub fn hdr_destination_member_lookup_name(s: i64, g: i64, m: i64, o: i64, n: text) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].destination_members.lookup_name(m,o,n,g) else: -1
+pub fn hdr_destination_member_lookup_ordinal(s: i64, g: i64, m: i64, o: i64, d: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].destination_members.lookup_ordinal(m,o,d,g) else: -1
+pub fn hdr_destination_member_range_start(s: i64, g: i64, m: i64, o: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].destination_members.owner_range_start(m,o,g,true) else: -1
+pub fn hdr_destination_member_range_len(s: i64, g: i64, m: i64, o: i64) -> i64: if hir_destination_registry_readable(s,g): _hir_destination_graphs[s].destination_members.owner_range_len(m,o,g,true) else: -1
+pub fn hdr_destination_member_i64(s: i64, g: i64, r: i64, c: i64) -> i64:
+    if not hir_destination_registry_readable(s,g) or not _hir_destination_graphs[s].destination_members.valid(r,g): return -1
+    if c==0: return _hir_destination_graphs[s].destination_members.module_index[r]
+    if c==1: return _hir_destination_graphs[s].destination_members.owner_symbol[r]
+    if c==2: return _hir_destination_graphs[s].destination_members.ordinal[r]
+    if c==3: return _hir_destination_graphs[s].destination_members.symbol[r]
+    if c==4: return _hir_destination_graphs[s].destination_members.type_index[r]
+    if c==5: return _hir_destination_graphs[s].destination_members.default_expr[r]
+    if c==6: return _hir_destination_graphs[s].destination_members.bits[r]
+    if c==7: return _hir_destination_graphs[s].destination_members.fixed_address[r]
+    if c==8: return _hir_destination_graphs[s].destination_members.span_index[r]
+    -1
+pub fn hdr_destination_member_name(s: i64, g: i64, r: i64) -> text: if hir_destination_registry_readable(s,g) and _hir_destination_graphs[s].destination_members.valid(r,g): _hir_destination_graphs[s].destination_members.name[r] else: ""
+pub fn hdr_destination_member_bool(s: i64, g: i64, r: i64, c: i64) -> bool:
+    if not hir_destination_registry_readable(s,g) or not _hir_destination_graphs[s].destination_members.valid(r,g): return false
+    if c==0: return _hir_destination_graphs[s].destination_members.has_type[r]
+    if c==1: return _hir_destination_graphs[s].destination_members.has_default[r]
+    if c==2: return _hir_destination_graphs[s].destination_members.volatile_[r]
+    if c==3: return _hir_destination_graphs[s].destination_members.has_fixed_address[r]
+    if c==4: return _hir_destination_graphs[s].destination_members.has_bits_attr[r]
+    false
+pub fn hdr_destination_member_symbol(s: i64, g: i64, r: i64) -> i64: if hir_destination_registry_readable(s,g) and _hir_destination_graphs[s].destination_members.valid(r,g): _hir_destination_graphs[s].destination_members.symbol[r] else: -1
+pub fn hdr_destination_member_owner(s: i64, g: i64, r: i64) -> i64: if hir_destination_registry_readable(s,g) and _hir_destination_graphs[s].destination_members.valid(r,g): _hir_destination_graphs[s].destination_members.owner_symbol[r] else: -1
+pub fn hdr_destination_member_module(s: i64, g: i64, r: i64) -> i64: if hir_destination_registry_readable(s,g) and _hir_destination_graphs[s].destination_members.valid(r,g): _hir_destination_graphs[s].destination_members.module_index[r] else: -1
+pub fn hdr_destination_member_ordinal(s: i64, g: i64, r: i64) -> i64: if hir_destination_registry_readable(s,g) and _hir_destination_graphs[s].destination_members.valid(r,g): _hir_destination_graphs[s].destination_members.ordinal[r] else: -1
+pub fn hdr_destination_member_has_type(s: i64, g: i64, r: i64) -> bool: hir_destination_registry_readable(s,g) and _hir_destination_graphs[s].destination_members.valid(r,g) and _hir_destination_graphs[s].destination_members.has_type[r]
+pub fn hdr_destination_member_type(s: i64, g: i64, r: i64) -> i64: if hir_destination_registry_readable(s,g) and _hir_destination_graphs[s].destination_members.valid(r,g): _hir_destination_graphs[s].destination_members.type_index[r] else: -1
+pub fn hdr_destination_member_has_default(s: i64, g: i64, r: i64) -> bool: hir_destination_registry_readable(s,g) and _hir_destination_graphs[s].destination_members.valid(r,g) and _hir_destination_graphs[s].destination_members.has_default[r]
+pub fn hdr_destination_member_default(s: i64, g: i64, r: i64) -> i64: if hir_destination_registry_readable(s,g) and _hir_destination_graphs[s].destination_members.valid(r,g): _hir_destination_graphs[s].destination_members.default_expr[r] else: -1
+pub fn hdr_destination_member_volatile(s: i64, g: i64, r: i64) -> bool: hir_destination_registry_readable(s,g) and _hir_destination_graphs[s].destination_members.valid(r,g) and _hir_destination_graphs[s].destination_members.volatile_[r]
+pub fn hdr_destination_member_has_bits_attr(s: i64, g: i64, r: i64) -> bool: hir_destination_registry_readable(s,g) and _hir_destination_graphs[s].destination_members.valid(r,g) and _hir_destination_graphs[s].destination_members.has_bits_attr[r]
+pub fn hdr_destination_member_bits_width(s: i64, g: i64, r: i64) -> i64: if hir_destination_registry_readable(s,g) and _hir_destination_graphs[s].destination_members.valid(r,g): _hir_destination_graphs[s].destination_members.bits[r] else: -1
+pub fn hdr_destination_member_has_fixed_address(s: i64, g: i64, r: i64) -> bool: hir_destination_registry_readable(s,g) and _hir_destination_graphs[s].destination_members.valid(r,g) and _hir_destination_graphs[s].destination_members.has_fixed_address[r]
+pub fn hdr_destination_member_fixed_address(s: i64, g: i64, r: i64) -> i64: if hir_destination_registry_readable(s,g) and _hir_destination_graphs[s].destination_members.valid(r,g): _hir_destination_graphs[s].destination_members.fixed_address[r] else: -1
+pub fn hdr_destination_member_span(s: i64, g: i64, r: i64) -> i64: if hir_destination_registry_readable(s,g) and _hir_destination_graphs[s].destination_members.valid(r,g): _hir_destination_graphs[s].destination_members.span_index[r] else: -1

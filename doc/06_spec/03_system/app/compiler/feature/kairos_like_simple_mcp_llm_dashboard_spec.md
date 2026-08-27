@@ -18,7 +18,6 @@
 ### REQ-KAIROS-001: session identity and lifecycle
 
 #### should create and persist an assistant session with stable identity
-#### should allow a paused session to resume with preserved state
 
 - should allow a paused session to resume with preserved state
    - Expected: session.state equals `running`
@@ -64,7 +63,7 @@ match resumed:
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -91,7 +90,7 @@ expect(timeline[0].message).to_equal("periodic wake")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -109,7 +108,7 @@ expect(timeline[1].source).to_equal("assistant")
 
 ### REQ-KAIROS-004: child-agent delegation
 
-#### should track a child task with parent linkage and terminal summary
+#### track a child task with parent linkage and terminal summary
 
 - should track a child task with parent linkage and terminal summary
    - Expected: session.children[0] equals `assistant-child-1`
@@ -144,7 +143,7 @@ match loaded:
 
 ### REQ-KAIROS-005 and REQ-KAIROS-006: briefs and notifications
 
-#### should produce a compact brief from recent session activity
+#### produce a compact brief from recent session activity
 
 - should produce a compact brief from recent session activity
 
@@ -180,7 +179,7 @@ expect_internal_absence_hidden(brief)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -270,7 +269,7 @@ expect(view.primary_action.route_target).to_equal("blocked")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -287,7 +286,7 @@ expect(view.primary_action.route_target).to_equal("assistant_core")
 
 </details>
 
-#### should expose operator-visible task tree and recent events
+#### expose operator-visible task tree and recent events
 
 - should expose operator-visible task tree and recent events
 
@@ -315,7 +314,7 @@ expect_internal_absence_hidden((live_lines + digest_lines).join("\n"))
 
 ### REQ-KAIROS-011 and REQ-KAIROS-012: recovery and bounded retention
 
-#### should preserve structured failure evidence after a child-task crash
+#### preserve structured failure evidence after a child-task crash
 
 - should preserve structured failure evidence after a child-task crash
    - Expected: view.failure_state equals `error`
@@ -345,7 +344,7 @@ expect(view.failure_count).to_equal(1)
 
 </details>
 
-#### should apply bounded retention or coalescing under bursty signals
+#### apply bounded retention or coalescing under bursty signals
 
 - should apply bounded retention or coalescing under bursty signals
    - Expected: durable.status equals `pruned`
@@ -391,7 +390,7 @@ expect_internal_absence_hidden(projection.notice)
 
 ### absence-safe web route contract
 
-#### should render authenticated /agents without internal absence markers
+#### render authenticated /agents without internal absence markers
 
 - should render authenticated /agents without internal absence markers
 

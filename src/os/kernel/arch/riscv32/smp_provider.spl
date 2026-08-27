@@ -1,0 +1,24 @@
+# Pure-Simple RV32 SMP provider.
+#
+# `_smp_online_count` is ABI-pinned linker storage updated atomically by every
+# hart in the entry assembly.  A naked RV32 load is the hardware boundary;
+# polling policy and result ownership remain in Pure Simple.
+
+use os.kernel.arch.riscv32.smp_policy.{hal_rv32_smp_should_wait}
+
+@naked
+fn hal_rv32_smp_online_count() -> u32:
+    # Fixed registers are intentional: the current bootstrap seed does not
+    # preserve operand-bound inline-assembly constraints through HIR lowering.
+    asm volatile:
+        "la a0, _smp_online_count"
+        "lw a0, 0(a0)"
+        "ret"
+
+pub fn hal_rv32_smp_wait(expected_harts: u32, spin_limit: u32) -> u64:
+    var online_harts = hal_rv32_smp_online_count()
+    var spins: u32 = 0
+    while hal_rv32_smp_should_wait(online_harts, spins, expected_harts, spin_limit):
+        online_harts = hal_rv32_smp_online_count()
+        spins = spins + 1
+    online_harts as u64

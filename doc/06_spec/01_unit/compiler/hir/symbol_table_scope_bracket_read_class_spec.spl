@@ -1,0 +1,310 @@
+# EVERY `self.scopes[...]` bracket read in `SymbolTable` survives a corrupted `current_scope` (lane SYM-SCOPE-GUARD)
+
+> Purpose: the behavior asserted in this spec  Audience: engineers reading this spec to confirm the behavior still holds.
+
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 6 | 6 | 0 | 0 |
+
+<details>
+<summary>Full Scenario Manual</summary>
+
+# EVERY `self.scopes[...]` bracket read in `SymbolTable` survives a corrupted `current_scope` (lane SYM-SCOPE-GUARD)
+
+Purpose: the behavior asserted in this spec  Audience: engineers reading this spec to confirm the behavior still holds.
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Compiler / HIR |
+| Status | Active |
+| Source | `test/01_unit/compiler/hir/symbol_table_scope_bracket_read_class_spec.spl` |
+| Updated | 2026-08-22 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Purpose and audience
+
+Purpose: the behavior asserted in this spec  Audience: engineers reading this spec to confirm the behavior still holds.
+
+## Operator workflow
+
+1. Run `bin/simple test test/01_unit/compiler/hir/symbol_table_scope_bracket_read_class_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the behavior under test.
+
+## Compatibility and limitations
+
+Covers the behavior asserted here; platform-specific behavior is out of scope.
+
+## Scenarios
+
+### SymbolTable scope-dict bracket reads are guarded at every entry point
+
+#### declare() of a non-type symbol does not read an out-of-range scope
+
+- Verify: declare() of a non-type symbol does not read an out-of-range scope
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 26 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-SSPEC-LOCAL-001
+step("Verify: declare() of a non-type symbol does not read an out-of-range scope")
+var symbols = SymbolTable.new()
+# The corrupted / never-pushed scope id from the filed bug.
+symbols.current_scope = ScopeId(id: 999)
+
+val id = symbols.define(
+    "LateVariable",
+    SymbolKind.Variable,
+    nil,
+    Span.empty(),
+    Visibility.Private,
+    true,
+    nil
+)
+
+# It must have produced a real symbol id, not crashed and not
+# returned a sentinel.
+expect(id.id).to_be_greater_than(-1)
+
+# Having recovered to the always-present root scope, the name must be
+# findable again -- a guard that merely swallowed the write would
+# leave this unresolvable and is not acceptable.
+match symbols.lookup("LateVariable"):
+    case Some(found): expect(found.id).to_equal(id.id)
+    case nil: expect(false).to_equal(true)
+```
+
+</details>
+
+#### declare() of a TYPE symbol takes the first-write-wins path without an out-of-range read
+
+- Verify: declare() of a TYPE symbol takes the first-write-wins path without an out-of-range read
+   - Expected: second.id equals `first.id`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 29 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-SSPEC-LOCAL-001
+step("Verify: declare() of a TYPE symbol takes the first-write-wins path without an out-of-range read")
+# Type symbols take a SEPARATE, earlier bracket read in declare()
+# than the one non-type symbols reach, so this is a distinct site.
+var symbols = SymbolTable.new()
+symbols.current_scope = ScopeId(id: -3)
+
+val first = symbols.define(
+    "LateStruct",
+    SymbolKind.Struct,
+    nil,
+    Span.empty(),
+    Visibility.Private,
+    false,
+    nil
+)
+expect(first.id).to_be_greater_than(-1)
+
+# First-write-wins must still hold after the recovery.
+val second = symbols.define(
+    "LateStruct",
+    SymbolKind.Struct,
+    nil,
+    Span.empty(),
+    Visibility.Private,
+    false,
+    nil
+)
+expect(second.id).to_equal(first.id)
+```
+
+</details>
+
+#### pop_scope() does not read an out-of-range scope
+
+- Verify: pop_scope() does not read an out-of-range scope
+   - Expected: symbols.current_scope.id equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Verify: pop_scope() does not read an out-of-range scope")
+# @req: REQ-SSPEC-LOCAL-001
+var symbols = SymbolTable.new()
+symbols.current_scope = ScopeId(id: 4242)
+
+symbols.pop_scope()
+
+# There is no parent to walk to from a bogus id; the only safe
+# resting place is the always-present root scope.
+expect(symbols.current_scope.id).to_equal(0)
+```
+
+</details>
+
+#### pop_scope() still performs a REAL pop when the scope id is valid
+
+- Verify: pop_scope() still performs a REAL pop when the scope id is valid
+   - Expected: symbols.current_scope.id equals `pushed.id`
+   - Expected: symbols.current_scope.id equals `outer`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-SSPEC-LOCAL-001
+step("Verify: pop_scope() still performs a REAL pop when the scope id is valid")
+# Guards against a "break too eagerly" regression: the fix must not
+# turn pop_scope into a no-op for legitimate scopes.
+var symbols = SymbolTable.new()
+val outer = symbols.current_scope.id
+val pushed = symbols.push_scope(ScopeKind.Block)
+expect(symbols.current_scope.id).to_equal(pushed.id)
+
+symbols.pop_scope()
+expect(symbols.current_scope.id).to_equal(outer)
+```
+
+</details>
+
+#### push_scope inserts into scopes before advancing next_scope_id
+
+- Verify: push_scope inserts into scopes before advancing next_scope_id
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 26 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Verify: push_scope inserts into scopes before advancing next_scope_id")
+# @req: REQ-SSPEC-LOCAL-001
+# The precondition every range guard in the file relies on: the
+# counter must never lead the dict, or `0 <= id < next_scope_id`
+# stops being an exact substitute for dict membership and each guard
+# silently degrades to the unguarded, trapping behaviour.
+var symbols = SymbolTable.new()
+val pushed = symbols.push_scope(ScopeKind.Block)
+
+# The freshly pushed id must be strictly inside the admitted range...
+expect(pushed.id).to_be_less_than(symbols.next_scope_id)
+
+# ...and must genuinely be readable, i.e. the dict really does have
+# the key the range check now admits.
+symbols.define(
+    "InsideFreshScope",
+    SymbolKind.Variable,
+    nil,
+    Span.empty(),
+    Visibility.Private,
+    true,
+    nil
+)
+match symbols.lookup("InsideFreshScope"):
+    case Some(_): expect(true).to_equal(true)
+    case nil: expect(false).to_equal(true)
+```
+
+</details>
+
+#### the id one past the end is never admitted
+
+- Verify: the id one past the end is never admitted
+   - Expected: symbols.lookup_or_invalid("anything").is_valid() is false
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Verify: the id one past the end is never admitted")
+# @req: REQ-SSPEC-LOCAL-001
+var symbols = SymbolTable.new()
+symbols.current_scope = ScopeId(id: symbols.next_scope_id)
+
+match symbols.lookup("anything"):
+    case Some(_): expect(false).to_equal(true)
+    case nil: expect(true).to_equal(true)
+
+expect(symbols.lookup_or_invalid("anything").is_valid()).to_equal(false)
+```
+
+</details>
+
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 6 |
+| Active scenarios | 6 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
+
+
+</details>
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `21a9c09e2d5c17cf3b2821d2b521841b7ddebe252949914d614c82a0c1ece96f`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `21a9c09e2d5c17cf3b2821d2b521841b7ddebe252949914d614c82a0c1ece96f`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `21a9c09e2d5c17cf3b2821d2b521841b7ddebe252949914d614c82a0c1ece96f`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **90/100**; effective score: **90/100**; blockers: **0**.
+
+SSpec documentization score: 90/100
+source: test/01_unit/compiler/hir/symbol_table_scope_bracket_read_class_spec.spl
+mirror: doc/06_spec/01_unit/compiler/hir/symbol_table_scope_bracket_read_class_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=90
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/compiler/hir/symbol_table_scope_bracket_read_class_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/compiler/hir/symbol_table_scope_bracket_read_class_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: traceability, evidence
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/compiler/hir/symbol_table_scope_bracket_read_class_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-10): 1 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/01_unit/compiler/hir/symbol_table_scope_bracket_read_class_spec.spl:80:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'declare() of a non-type symbol does not read an out-of-range scope' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/compiler/hir/symbol_table_scope_bracket_read_class_spec.spl:108:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'declare() of a TYPE symbol takes the first-write-wins path without an out-of-range read' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/compiler/hir/symbol_table_scope_bracket_read_class_spec.spl:139:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'pop_scope() does not read an out-of-range scope' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

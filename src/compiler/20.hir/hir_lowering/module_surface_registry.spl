@@ -5,12 +5,11 @@ use compiler.frontend.parser_types.*
 use compiler.hir.hir_lowering.module_surface_types.{ModuleSurface, ModuleSurfaceBuilder, ModuleSurfacesByName}
 use compiler.hir.hir_lowering.module_surface_declarations.{module_surface_from_module}
 use compiler.hir.hir_lowering.module_surface_export_index.{module_surface_name_index_build}
-use compiler.hir.hir_lowering.module_surface_registry_index.{module_surfaces_freeze, module_surfaces_frozen_alignment, module_surfaces_frozen_alignment_error}
+use compiler.hir.hir_lowering.module_surface_registry_index.{module_surfaces_freeze}
 use compiler.hir.hir_lowering.module_surface_source_identity.{module_surface_canonical_path, module_surface_declaration_matches}
 
 extern fn rt_hash_text(content: text) -> i64
 extern fn rt_transient_heap_promote(value: Any) -> bool
-
 impl ModuleSurfacesByName:
     static fn empty() -> ModuleSurfacesByName:
         ModuleSurfacesByName(
@@ -40,12 +39,14 @@ impl ModuleSurfaceBuilder:
         # in the stable scalar representation.
         if self.ordered_names.len() != self.ordered_indices.len():
             return Err("module surface builder name/index arrays have different lengths")
-        var existing_position = 0
-        while existing_position < self.ordered_names.len():
-            if self.ordered_names[existing_position] == name:
-                if self.ordered_indices[existing_position] != surface_index:
-                    return Err("module surface name maps to conflicting indices: {name}")
-            existing_position = existing_position + 1
+
+        # The builder dictionary is authoritative before freeze.  Consult it
+        # once instead of scanning the growing ordered projection twice for
+        # every alias (quadratic construction for large module sets).
+        if self.index_by_name.contains_key(name):
+            if self.index_by_name[name] != surface_index:
+                return Err("module surface name maps to conflicting indices: {name}")
+            return Ok(())
 
         val name_result = module_surfaces_add_name(
             self.index_by_name, name, surface_index)
@@ -53,11 +54,6 @@ impl ModuleSurfaceBuilder:
             return Err(name_result.unwrap_err())
         self.index_by_name = name_result.unwrap()
 
-        var position = 0
-        while position < self.ordered_names.len():
-            if self.ordered_names[position] == name:
-                return Ok(())
-            position = position + 1
         self.ordered_names = self.ordered_names.push(name)
         self.ordered_indices = self.ordered_indices.push(surface_index)
         Ok(())
@@ -148,29 +144,6 @@ impl ModuleSurfaceBuilder:
             self.frozen = true
         result
 
-    # Native bootstrap must keep the registry owner in the caller. Returning a
-    # class through Result can preserve the Ok tag while losing its payload.
-    # Populate and freeze the caller-created owner, and return scalar status.
-    me finish_into(registry: ModuleSurfacesByName) -> text:
-        if self.frozen:
-            return "module surface builder is frozen"
-        if registry == nil:
-            return "module surface destination is missing"
-        val validation = module_surfaces_validate_index_alignment(
-            self.surfaces, self.index_by_name,
-            self.ordered_names, self.ordered_indices)
-        if validation.is_err():
-            return validation.unwrap_err()
-        registry.surfaces = self.surfaces
-        registry.index_by_name = self.index_by_name
-        registry.ordered_names = self.ordered_names
-        registry.ordered_indices = self.ordered_indices
-        val freeze_result = module_surfaces_freeze(registry)
-        if freeze_result.is_err():
-            return freeze_result.unwrap_err()
-        self.frozen = true
-        ""
-
 pub(package) fn module_surfaces_by_name_from_parts(
     surfaces: [ModuleSurface],
     index_by_name: Dict<text, i64>,
@@ -191,11 +164,7 @@ pub(package) fn module_surfaces_by_name_from_parts(
     val freeze_result = module_surfaces_freeze(registry)
     if freeze_result.is_err():
         return Err(freeze_result.unwrap_err())
-    # module_surfaces_freeze mutates this class owner in place. Do not unwrap
-    # and rewrap its class-valued Result payload: the staged native ABI can
-    # preserve Ok while losing that nested payload to nil. The original owner
-    # remains authoritative and now contains the frozen fields.
-    Ok(registry)
+    Ok(freeze_result.unwrap())
 
 pub(package) fn module_surfaces_add_name(index_by_name: Dict<text, i64>, name: text, surface_index: i64) -> Result<Dict<text, i64>, text>:
     # contains_key + index read, never `.get()`: a native `Dict.get()` HIT
@@ -270,83 +239,3 @@ pub fn module_surfaces_from_modules(modules: Dict<text, ParserModule>, sources: 
             return Err("parsed module has no source surface: {alias}")
         val alias_result = builder.add_indexed_name(alias, matching_index)
         if alias_result.is_err():
-            return Err(alias_result.unwrap_err())
-    val origin_result = builder.resolve_export_origins()
-    if origin_result.is_err():
-        return Err(origin_result.unwrap_err())
-    builder.finish()
-
-pub fn module_surface_promote(surface: ModuleSurface) -> bool:
-    # A class/raw carrier may already outlive the current scope and therefore
-    # cannot be relied on as the traversal root for children allocated in this
-    # per-file scope. Promote the retained scalar/array owners explicitly.
-    # Dict<text, aggregate> is construction-only; retained declaration payload
-    # arrays are the required follow-up owner before Stage 3 can be admitted.
-    val origin_index = surface.export_origin_index
-    if not rt_transient_heap_promote(surface.imports) or
-       not rt_transient_heap_promote(surface.exports) or
-       not rt_transient_heap_promote(surface.composite_names) or
-       not rt_transient_heap_promote(surface.enum_names) or
-       not rt_transient_heap_promote(surface.trait_names) or
-       not rt_transient_heap_promote(surface.callable_names) or
-       not rt_transient_heap_promote(surface.type_alias_names) or
-       not rt_transient_heap_promote(surface.constant_names) or
-       not rt_transient_heap_promote(surface.import_item_offsets) or
-       not rt_transient_heap_promote(surface.import_item_names) or
-       not rt_transient_heap_promote(surface.import_item_aliases) or
-       not rt_transient_heap_promote(surface.import_item_has_alias) or
-       not rt_transient_heap_promote(surface.callable_values) or
-       not rt_transient_heap_promote(surface.composite_values) or
-       not rt_transient_heap_promote(surface.enum_values) or
-       not rt_transient_heap_promote(surface.trait_values) or
-       not rt_transient_heap_promote(surface.type_alias_values) or
-       not rt_transient_heap_promote(surface.constant_values) or
-       not rt_transient_heap_promote(surface.impls) or
-       not rt_transient_heap_promote(origin_index.names) or
-       not rt_transient_heap_promote(origin_index.owner_modules) or
-       not rt_transient_heap_promote(origin_index.source_names) or
-       not rt_transient_heap_promote(origin_index.resolution_kinds):
-        return false
-    rt_transient_heap_promote(surface)
-
-pub fn module_surfaces_promote(registry: ModuleSurfacesByName) -> bool:
-    # Each surface raw object was already promoted in its per-file scope.
-    # Freeze attaches these route arrays later, in the registry scope; a graph
-    # walk cannot traverse an old raw allocation that is no longer registered
-    # in the current transient scope. Promote the new children explicitly
-    # while their owning scope is paused, then retain the registry carriers.
-    var surface_index = 0
-    while surface_index < registry.surfaces.len():
-        val surface = registry.surfaces[surface_index]
-        if not rt_transient_heap_promote(surface.composite_names) or
-           not rt_transient_heap_promote(surface.enum_names) or
-           not rt_transient_heap_promote(surface.trait_names) or
-           not rt_transient_heap_promote(surface.callable_names) or
-           not rt_transient_heap_promote(surface.type_alias_names) or
-           not rt_transient_heap_promote(surface.constant_names) or
-           not rt_transient_heap_promote(surface.composite_values) or
-           not rt_transient_heap_promote(surface.enum_values) or
-           not rt_transient_heap_promote(surface.trait_values) or
-           not rt_transient_heap_promote(surface.callable_values) or
-           not rt_transient_heap_promote(surface.type_alias_values) or
-           not rt_transient_heap_promote(surface.constant_values) or
-           not rt_transient_heap_promote(surface.import_target_indices) or
-           not rt_transient_heap_promote(surface.import_target_names) or
-           not rt_transient_heap_promote(surface.import_item_offsets) or
-           not rt_transient_heap_promote(surface.import_item_names) or
-           not rt_transient_heap_promote(surface.import_item_aliases) or
-           not rt_transient_heap_promote(surface.import_item_has_alias) or
-           not rt_transient_heap_promote(surface.export_route_sources) or
-           not rt_transient_heap_promote(surface.export_route_locals) or
-           not rt_transient_heap_promote(surface.export_route_target_indices) or
-           not rt_transient_heap_promote(surface.export_route_target_names) or
-           not rt_transient_heap_promote(surface.export_route_is_glob):
-            return false
-        surface_index = surface_index + 1
-    rt_transient_heap_promote(registry)
-
-pub fn module_surfaces_retained_alignment(registry: ModuleSurfacesByName) -> bool:
-    module_surfaces_frozen_alignment(registry)
-
-pub fn module_surfaces_retained_alignment_error(registry: ModuleSurfacesByName) -> text:
-    module_surfaces_frozen_alignment_error(registry)

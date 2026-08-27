@@ -58,6 +58,11 @@ physical_xrandr_has_8k80() {
     '
 }
 
+normalize_window_receipt() {
+    sed -n 's/^.*\(window_present_damage width=7680 height=4320 .*$\)/\1/p' |
+        tail -n 1
+}
+
 if [ "${1:-}" = "--self-test" ]; then
     positive='DP-0 connected primary 7680x4320+0+0
     EDID:
@@ -76,6 +81,17 @@ if [ "${1:-}" = "--self-test" ]; then
     fi
     if printf '%s\n' "$slow_mode" | physical_xrandr_has_8k80; then
         echo "engine2d_vulkan_window_8k_selftest=failed reason=accepted-slow-mode"
+        exit 1
+    fi
+    prefixed_receipt='test module::bench ... window_present_damage width=7680 height=4320 frames=20 device_type=discrete'
+    normalized="$(printf '%s\n' "$prefixed_receipt" | normalize_window_receipt)"
+    if [ "$normalized" != 'window_present_damage width=7680 height=4320 frames=20 device_type=discrete' ]; then
+        echo "engine2d_vulkan_window_8k_selftest=failed reason=prefixed-receipt-not-normalized"
+        exit 1
+    fi
+    if printf '%s\n' 'test module::bench ... no receipt' |
+            normalize_window_receipt | grep -q .; then
+        echo "engine2d_vulkan_window_8k_selftest=failed reason=malformed-receipt-accepted"
         exit 1
     fi
     echo "engine2d_vulkan_window_8k_selftest=pass"
@@ -157,6 +173,7 @@ fi
 
 RUN_DIR="$(mktemp -d "$BUILD_DIR/run.XXXXXX")"
 RECEIPT="$RUN_DIR/receipt.env"
+WINDOW_RECEIPT="$RUN_DIR/window.env"
 cleanup() {
     if [ -n "$XVFB_PID" ]; then
         kill "$XVFB_PID" 2>/dev/null || true
@@ -215,11 +232,17 @@ if ! (
 fi
 sed -n '1,160p' "$RECEIPT"
 
-grep -q '^window_present_damage width=7680 height=4320 ' "$RECEIPT"
-grep -q 'damage_bytes=1320960 source_update_bytes=1320960 dynamic_content=true damage_rects=1 ' "$RECEIPT"
-grep -q 'readback_bytes=0 fallback=false completion_known=true ' "$RECEIPT"
-grep -q 'present_mode=window-swapchain ' "$RECEIPT"
-grep -q "device_type=$DEVICE_TYPE " "$RECEIPT"
+# Cargo prefixes nocapture output with the test name. Normalize the one
+# machine-readable row before enforcing it; never silently exit from a grep.
+normalize_window_receipt < "$RECEIPT" > "$WINDOW_RECEIPT"
+if [ ! -s "$WINDOW_RECEIPT" ] ||
+   ! grep -q 'damage_bytes=1320960 source_update_bytes=1320960 dynamic_content=true damage_rects=1 ' "$WINDOW_RECEIPT" ||
+   ! grep -q 'readback_bytes=0 fallback=false completion_known=true ' "$WINDOW_RECEIPT" ||
+   ! grep -q 'present_mode=window-swapchain ' "$WINDOW_RECEIPT" ||
+   ! grep -q "device_type=$DEVICE_TYPE " "$WINDOW_RECEIPT"; then
+    echo "engine2d_vulkan_window_8k_evidence_status=failed reason=malformed-window-receipt"
+    exit 1
+fi
 if [ "$PHYSICAL" = "1" ]; then
     awk '
         /^window_present_damage / {
@@ -234,7 +257,7 @@ if [ "$PHYSICAL" = "1" ]; then
                 (value["rss_kib"] + 0) > 0 && (value["checksum"] + 0) > 0
             exit(ok ? 0 : 1)
         }
-    ' "$RECEIPT" || {
+    ' "$WINDOW_RECEIPT" || {
         echo "engine2d_vulkan_window_8k_evidence_status=failed reason=physical-receipt-incomplete-or-over-budget"
         exit 1
     }

@@ -944,29 +944,6 @@ check(depth == 4)
 
 </details>
 
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Compiler |
-| Status | Active |
-| Source | `test/02_integration/compiler/lexer_integration_spec.spl` |
-| Updated | 2026-08-26 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering Lexer Tokenization Integration, Lexer Symbol Recognition Integration, Lexer Error Handling Integration, Lexer Unicode Integration, Lexer Whitespace Integration, Lexer Number Literals Integration, Lexer String Literals Integration, Lexer Operator Recognition Integration, Lexer Performance Integration.
-- Lexer Tokenization Integration
-- Lexer Symbol Recognition Integration
-- Lexer Error Handling Integration
-- Lexer Unicode Integration
-- Lexer Whitespace Integration
-- Lexer Number Literals Integration
-- Lexer String Literals Integration
-- Lexer Operator Recognition Integration
-- Lexer Performance Integration
-
 ## Scenario Summary
 
 | Metric | Count |

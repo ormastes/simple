@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 9 | 9 | 0 | 0 |
+| 8 | 8 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -29,7 +29,7 @@
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -71,6 +71,13 @@ expect(baremetal.cache_strategy).to_equal("simpleos_vfs_prewarm")
    - Expected: plan.include_mmap_cache is true
 
 
+- Verify: should plan SMF launch through SimpleOS VFS prewarm
+   - Expected: plan.target_os equals `simpleos`
+   - Expected: plan.entry_kind equals `smf`
+   - Expected: plan.cache_strategy equals `simpleos_vfs_prewarm`
+   - Expected: plan.include_mmap_cache is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
@@ -99,10 +106,16 @@ expect(plan.include_mmap_cache).to_equal(true)
    - Expected: plan.include_arg_parser is false
 
 
-<details>
-<summary>Executable SSpec</summary>
+- Verify: should plan native SimpleOS app launch without app arg parser
+   - Expected: plan.target_os equals `simpleos`
+   - Expected: plan.entry_kind equals `native`
+   - Expected: plan.include_arg_parser is false
 
-Runnable source: 8 lines folded for reproduction.
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -120,7 +133,7 @@ expect(plan.include_arg_parser).to_equal(false)
 
 ### REQ-101: WM hover prefetch
 
-#### prefetch cached executable bytes on hover without launching
+#### should prefetch cached executable bytes on hover without launching
 
 - prefetch cached executable bytes on hover without launching
    - Expected: hit is true
@@ -132,9 +145,9 @@ expect(plan.include_arg_parser).to_equal(false)
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -157,7 +170,7 @@ expect(app_registry_cached_bytes("/sys/apps/simple").len()).to_equal(3)  # oracl
 
 </details>
 
-#### record a miss for an executable that is not warmed yet
+#### should record a miss for an executable that is not warmed yet
 
 - record a miss for an executable that is not warmed yet
    - Expected: hit is false
@@ -168,7 +181,7 @@ expect(app_registry_cached_bytes("/sys/apps/simple").len()).to_equal(3)  # oracl
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -233,7 +246,7 @@ expect(app_registry_cached_bytes("/sys/apps/editor").len()).to_equal(5)  # oracl
 
 </details>
 
-#### reject empty hover paths without recording a prefetch
+#### should reject empty hover paths without recording a prefetch
 
 - reject empty hover paths without recording a prefetch
    - Expected: hit is false
@@ -242,9 +255,9 @@ expect(app_registry_cached_bytes("/sys/apps/editor").len()).to_equal(5)  # oracl
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -262,7 +275,7 @@ expect(launcher_prefetch_last_path()).to_equal("")
 
 ### REQ-102: launcher icon index prefetch
 
-#### prefetch the executable path for a seeded launcher icon
+#### should prefetch the executable path for a seeded launcher icon
 
 - prefetch the executable path for a seeded launcher icon
    - Expected: hit is true
@@ -272,9 +285,9 @@ expect(launcher_prefetch_last_path()).to_equal("")
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -295,7 +308,7 @@ expect(launcher_get_running_app_count()).to_equal(0)  # oracle: launcher_get_run
 
 </details>
 
-#### reject out-of-range icon indexes
+#### should reject out-of-range icon indexes
 
 - reject out-of-range icon indexes
    - Expected: hit is false
@@ -303,9 +316,9 @@ expect(launcher_get_running_app_count()).to_equal(0)  # oracle: launcher_get_run
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -342,8 +355,8 @@ Tests covering SimpleOS app startup prefetch, REQ-100: SimpleOS launch metadata,
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 9 |
-| Active scenarios | 9 |
+| Total scenarios | 8 |
+| Active scenarios | 8 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

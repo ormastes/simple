@@ -2,6 +2,29 @@
 
 > Verifies that the generated `*.debug.json` sidecar files produced by the FPGA Linux generation scripts maintain their exact key order after the MDSOC capsule reorganization.
 
+<!-- sdn-diagram:id=debug_sidecar_json_order_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=debug_sidecar_json_order_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+debug_sidecar_json_order_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=debug_sidecar_json_order_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 14 | 14 | 0 | 0 |
@@ -24,7 +47,7 @@ Verifies that the generated `*.debug.json` sidecar files produced by the FPGA Li
 | Requirements | doc/02_requirements/feature/rtl_riscv_mdsoc_reorg.md |
 | Design | doc/05_design/rtl_riscv_mdsoc_capsules.md |
 | Source | `test/03_system/compiler/debug_sidecar_json_order_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -76,19 +99,17 @@ Display policy: `embed_tui`
 
 #### AC-3: fpga_linux_manifest.spl contains reportMarkers key string
 
-- AC-3: fpga_linux_manifest.spl contains reportMarkers key string
+1. check msg
    - Expected: has_key is true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("AC-3: fpga_linux_manifest.spl contains reportMarkers key string")
 val path = manifest_src_path()
 check_msg(rt_file_exists(path), "file not found (SA-3 not run yet): " + path)
 val content = read_file(path)
@@ -100,19 +121,17 @@ expect(has_key).to_equal(true)
 
 #### AC-3: fpga_linux_manifest.spl contains runnerSuccessMarkers key string
 
-- AC-3: fpga_linux_manifest.spl contains runnerSuccessMarkers key string
+1. check msg
    - Expected: has_key is true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("AC-3: fpga_linux_manifest.spl contains runnerSuccessMarkers key string")
 val path = manifest_src_path()
 check_msg(rt_file_exists(path), "file not found (SA-3 not run yet): " + path)
 val content = read_file(path)
@@ -124,18 +143,19 @@ expect(has_key).to_equal(true)
 
 #### AC-3: reportMarkers appears before runnerSuccessMarkers in manifest source
 
-- AC-3: reportMarkers appears before runnerSuccessMarkers in manifest source
+1. check msg
+2. check msg
+3. check msg
+4. check msg
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("AC-3: reportMarkers appears before runnerSuccessMarkers in manifest source")
 val path = manifest_src_path()
 check_msg(rt_file_exists(path), "file not found (SA-3 not run yet): " + path)
 val pos_report = source_key_offset("reportMarkers")
@@ -150,18 +170,19 @@ expect(pos_report).to_be_less_than(pos_runner)
 
 #### AC-3: sourceMap appears after runnerSuccessMarkers in manifest source
 
-- AC-3: sourceMap appears after runnerSuccessMarkers in manifest source
+1. check msg
+2. check msg
+3. check msg
+4. check msg
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("AC-3: sourceMap appears after runnerSuccessMarkers in manifest source")
 val path = manifest_src_path()
 check_msg(rt_file_exists(path), "file not found (SA-3 not run yet): " + path)
 val pos_runner = source_key_offset("runnerSuccessMarkers")
@@ -176,19 +197,18 @@ expect(pos_runner).to_be_less_than(pos_source_map)
 
 #### AC-3: D-4 invariant — no json_ helper functions exist outside fpga_linux_manifest.spl
 
-- AC-3: D-4 invariant — no json_ helper functions exist outside fpga_linux_manifest.spl
+1. check msg
+2. check msg
    - Expected: has_json_helper is false
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("AC-3: D-4 invariant — no json_ helper functions exist outside fpga_linux_manifest.spl")
 # The D-4 decision states all json_* helpers live exclusively in
 # fpga_linux_manifest.spl. Verify that fpga_linux_orchestrator.spl
 # does not contain json_ helper definitions.
@@ -206,18 +226,16 @@ expect(has_json_helper).to_equal(false)
 
 #### AC-3: RV32 generated debug.json key-order check is pending until SA-3 complete
 
-- AC-3: RV32 generated debug.json key-order check is pending until SA-3 complete
+1. pending
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("AC-3: RV32 generated debug.json key-order check is pending until SA-3 complete")
 pending("SA-3 gate — build output not yet generated by split scripts")
 ```
 
@@ -225,18 +243,17 @@ pending("SA-3 gate — build output not yet generated by split scripts")
 
 #### AC-3: RV32 generated debug.json has reportMarkers key
 
-- AC-3: RV32 generated debug.json has reportMarkers key
+1. pending
+2. check msg
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("AC-3: RV32 generated debug.json has reportMarkers key")
 if not rt_file_exists(rv32_build_dir()):
     pending("SA-3 gate — build output not yet generated")
 val pos = debug_json_key_offset(rv32_build_dir(), "reportMarkers")
@@ -248,18 +265,17 @@ expect(pos).to_be_greater_than(-1)
 
 #### AC-3: RV32 generated debug.json has runnerSuccessMarkers key
 
-- AC-3: RV32 generated debug.json has runnerSuccessMarkers key
+1. pending
+2. check msg
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("AC-3: RV32 generated debug.json has runnerSuccessMarkers key")
 if not rt_file_exists(rv32_build_dir()):
     pending("SA-3 gate — build output not yet generated")
 val pos = debug_json_key_offset(rv32_build_dir(), "runnerSuccessMarkers")
@@ -271,18 +287,18 @@ expect(pos).to_be_greater_than(-1)
 
 #### AC-3: RV32 generated debug.json reportMarkers precedes runnerSuccessMarkers
 
-- AC-3: RV32 generated debug.json reportMarkers precedes runnerSuccessMarkers
+1. pending
+2. check msg
+3. check msg
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("AC-3: RV32 generated debug.json reportMarkers precedes runnerSuccessMarkers")
 if not rt_file_exists(rv32_build_dir()):
     pending("SA-3 gate — build output not yet generated")
 val pos_report = debug_json_key_offset(rv32_build_dir(), "reportMarkers")
@@ -296,18 +312,16 @@ expect(pos_report).to_be_less_than(pos_runner)
 
 #### AC-3: RV64 generated debug.json key-order check is pending until SA-3 complete
 
-- AC-3: RV64 generated debug.json key-order check is pending until SA-3 complete
+1. pending
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("AC-3: RV64 generated debug.json key-order check is pending until SA-3 complete")
 pending("SA-3 gate — build output not yet generated by split scripts")
 ```
 
@@ -315,18 +329,17 @@ pending("SA-3 gate — build output not yet generated by split scripts")
 
 #### AC-3: RV64 generated debug.json has reportMarkers key
 
-- AC-3: RV64 generated debug.json has reportMarkers key
+1. pending
+2. check msg
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("AC-3: RV64 generated debug.json has reportMarkers key")
 if not rt_file_exists(rv64_build_dir()):
     pending("SA-3 gate — build output not yet generated")
 val pos = debug_json_key_offset(rv64_build_dir(), "reportMarkers")
@@ -338,18 +351,18 @@ expect(pos).to_be_greater_than(-1)
 
 #### AC-3: RV64 generated debug.json reportMarkers precedes runnerSuccessMarkers
 
-- AC-3: RV64 generated debug.json reportMarkers precedes runnerSuccessMarkers
+1. pending
+2. check msg
+3. check msg
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("AC-3: RV64 generated debug.json reportMarkers precedes runnerSuccessMarkers")
 if not rt_file_exists(rv64_build_dir()):
     pending("SA-3 gate — build output not yet generated")
 val pos_report = debug_json_key_offset(rv64_build_dir(), "reportMarkers")
@@ -365,18 +378,16 @@ expect(pos_report).to_be_less_than(pos_runner)
 
 #### AC-3: debug.json sha256 comparison is pending until SA-1 baseline exists
 
-- AC-3: debug.json sha256 comparison is pending until SA-1 baseline exists
+1. pending
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("AC-3: debug.json sha256 comparison is pending until SA-1 baseline exists")
 pending("SA-1 baseline gate — doc/09_report/verify/rtl_mdsoc_baseline_2026-05-02.md not yet created")
 ```
 
@@ -384,19 +395,18 @@ pending("SA-1 baseline gate — doc/09_report/verify/rtl_mdsoc_baseline_2026-05-
 
 #### AC-3: baseline contains debug.json section when present
 
-- AC-3: baseline contains debug.json section when present
+1. pending
+2. check msg
    - Expected: has_json_section is true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("AC-3: baseline contains debug.json section when present")
 if not rt_file_exists(baseline_path()):
     pending("SA-1 baseline gate — " + baseline_path() + " not yet created")
 val baseline = read_file(baseline_path())
@@ -420,60 +430,8 @@ expect(has_json_section).to_equal(true)
 
 ## Related Documentation
 
-- **Requirements:** `doc/02_requirements/feature/rtl_riscv_mdsoc_reorg.md`
-- **Design:** `doc/05_design/rtl_riscv_mdsoc_capsules.md`
+- **Requirements:** [doc/02_requirements/feature/rtl_riscv_mdsoc_reorg.md](doc/02_requirements/feature/rtl_riscv_mdsoc_reorg.md)
+- **Design:** [doc/05_design/rtl_riscv_mdsoc_capsules.md](doc/05_design/rtl_riscv_mdsoc_capsules.md)
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `41873616ebb9210a58fb9c2cb0b75e1808072d6b0c2de20b20fb07d07856b9b0`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `41873616ebb9210a58fb9c2cb0b75e1808072d6b0c2de20b20fb07d07856b9b0`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `41873616ebb9210a58fb9c2cb0b75e1808072d6b0c2de20b20fb07d07856b9b0`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **82/100**; effective score: **49/100**; blockers: **1**.
-
-SSpec documentization score: 49/100
-source: test/03_system/compiler/debug_sidecar_json_order_spec.spl
-mirror: doc/06_spec/03_system/compiler/debug_sidecar_json_order_spec.md (current)
-findings: 6 blockers: 1
-  narrative=100 structure=100 oracle=50
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-  raw=82; blocker cap makes effective=49
-doc/06_spec/03_system/compiler/debug_sidecar_json_order_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/compiler/debug_sidecar_json_order_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/compiler/debug_sidecar_json_order_spec.spl:1:1: blocker SSDOC-ORA-001 [oracle] (-50): unconditional pending or fail-fast scaffold remains
-  why: A passing-looking document without an oracle is not conformance evidence.
-  improve: Replace placeholders with an observable production assertion.
-test/03_system/compiler/debug_sidecar_json_order_spec.spl:133:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'AC-3: fpga_linux_manifest.spl contains reportMarkers key string' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/compiler/debug_sidecar_json_order_spec.spl:142:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'AC-3: fpga_linux_manifest.spl contains runnerSuccessMarkers key string' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/compiler/debug_sidecar_json_order_spec.spl:151:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'AC-3: reportMarkers appears before runnerSuccessMarkers in manifest source' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

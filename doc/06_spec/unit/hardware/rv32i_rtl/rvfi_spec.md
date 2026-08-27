@@ -1,38 +1,21 @@
 # Rvfi Specification
 
-> Tests covering RV32I RVFI manifest, RV32I RVFI trace.
-
-| Tests | Active | Skipped | Pending |
-|-------|--------|---------|--------:|
-| 9 | 9 | 0 | 0 |
-
-<details>
-<summary>Full Scenario Manual</summary>
-
-# Rvfi Specification
-
 ## Scenarios
 
 ### RV32I RVFI manifest
 
 #### lists standard RVFI output ports
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- lists standard RVFI output ports
+1. expect ports len
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("lists standard RVFI output ports")
 val ports = rvfi_port_manifest()
 expect ports.len() == 17
 expect ports[0].name == "rvfi_valid"
@@ -43,18 +26,20 @@ expect ports[2].name == "rvfi_insn"
 
 #### renders formal wrapper port comments
 
-- renders formal wrapper port comments
+1. check
+
+2. check
+
+3. check
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("renders formal wrapper port comments")
 val text = rvfi_formal_wrapper_ports("rv32i_core")
 check(text.contains("rvfi_valid"))
 check(text.contains("rvfi_mem_wdata"))
@@ -65,18 +50,18 @@ check(text.contains("std_logic_vector(31 downto 0)"))
 
 #### renders VHDL scalar and vector port types
 
-- renders VHDL scalar and vector port types
+1. expect rvfi vhdl type
+
+2. expect rvfi vhdl type
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("renders VHDL scalar and vector port types")
 expect rvfi_vhdl_type(1) == "std_logic"
 expect rvfi_vhdl_type(32) == "std_logic_vector(31 downto 0)"
 ```
@@ -85,18 +70,24 @@ expect rvfi_vhdl_type(32) == "std_logic_vector(31 downto 0)"
 
 #### renders an RVFI formal VHDL wrapper
 
-- renders an RVFI formal VHDL wrapper
+1. check
+
+2. check
+
+3. check
+
+4. check
+
+5. check
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("renders an RVFI formal VHDL wrapper")
 val text = rvfi_formal_wrapper_vhdl("rv32i_core_rvfi", "rv32i_core")
 check(text.contains("entity rv32i_core_rvfi is"))
 check(text.contains("dut: entity work.rv32i_core"))
@@ -107,22 +98,72 @@ check(text.contains("rvfi_mem_wdata => rvfi_mem_wdata"))
 
 </details>
 
+#### reports missing RVFI ports before formal flow runs
+
+1. expect missing len
+
+2. check
+
+3. check
+
+4. check
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val entity = "entity rv32i_core is port (clk : in std_logic; reset_n : in std_logic); end entity;"
+val missing = rvfi_missing_vhdl_ports(entity)
+expect missing.len() == 17
+expect missing[0] == "rvfi_valid"
+val readiness = rvfi_formal_readiness("rv32i_core", entity)
+check(not readiness.ready)
+check(readiness.message.contains("missing 17 RVFI ports"))
+check(rvfi_render_formal_readiness(readiness).contains("- rvfi_mem_wdata"))
+```
+
+</details>
+
+#### accepts a VHDL entity with the full RVFI manifest
+
+1. check
+
+2. expect readiness missing ports len
+
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val wrapper = rvfi_formal_wrapper_vhdl("rv32i_core_rvfi", "rv32i_core")
+val readiness = rvfi_formal_readiness("rv32i_core_rvfi", wrapper)
+check(readiness.ready)
+expect readiness.missing_ports.len() == 0
+```
+
+</details>
+
 ### RV32I RVFI trace
 
 #### captures one retired instruction when RVFI is enabled
 
-- captures one retired instruction when RVFI is enabled
+1. check
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("captures one retired instruction when RVFI is enabled")
 val trace = rvfi_trace_from_snapshot(rvfi_enabled_config(7), 3, snapshot_sample())
 check(trace.rvfi_valid)
 expect trace.rvfi_order == 10
@@ -137,18 +178,16 @@ expect trace.rvfi_rd_wdata == 14
 
 #### suppresses valid when RVFI is disabled
 
-- suppresses valid when RVFI is disabled
+1. check
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("suppresses valid when RVFI is disabled")
 val trace = rvfi_trace_from_snapshot(rvfi_disabled_config(), 0, snapshot_sample())
 check(not trace.rvfi_valid)
 ```
@@ -157,18 +196,20 @@ check(not trace.rvfi_valid)
 
 #### computes byte masks from memory width
 
-- computes byte masks from memory width
+1. expect rvfi mask for width
+
+2. expect rvfi mask for width
+
+3. expect rvfi mask for width
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("computes byte masks from memory width")
 expect rvfi_mask_for_width(0) == 0x1
 expect rvfi_mask_for_width(1) == 0x3
 expect rvfi_mask_for_width(2) == 0xF
@@ -178,18 +219,18 @@ expect rvfi_mask_for_width(2) == 0xF
 
 #### extracts RVFI snapshot from the actual core datapath
 
-- extracts RVFI snapshot from the actual core datapath
+1. check
+
+2. check
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("extracts RVFI snapshot from the actual core datapath")
 val insn = 0x00108293  # addi x5, x1, 1
 val rf0 = regfile_create()
 val rf1 = regfile_write(rf0, 1, 41, true)
@@ -210,18 +251,16 @@ check(not snapshot.dmem_we)
 
 #### builds optional RVFI output from core signals
 
-- builds optional RVFI output from core signals
+1. check
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("builds optional RVFI output from core signals")
 val insn = 0x00108293  # addi x5, x1, 1
 val rf0 = regfile_create()
 val rf1 = regfile_write(rf0, 1, 6, true)
@@ -245,13 +284,13 @@ expect trace.rvfi_rd_wdata == 7
 |-------|-------|
 | Category | Hardware & OS |
 | Status | Active |
-| Source | `test/unit/hardware/rv32i_rtl/rvfi_spec.spl` |
-| Updated | 2026-08-26 |
+| Source | `test/01_unit/hardware/rv32i_rtl/rvfi_spec.spl` |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering RV32I RVFI manifest, RV32I RVFI trace.
+Tests covering:
 - RV32I RVFI manifest
 - RV32I RVFI trace
 
@@ -259,59 +298,9 @@ Tests covering RV32I RVFI manifest, RV32I RVFI trace.
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 9 |
-| Active scenarios | 9 |
+| Total scenarios | 11 |
+| Active scenarios | 11 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
 
-
-</details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-UNIT`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `d4df0700fcf17a84c3ae41ddbafc6740cef35e5cd822cd7692fca4849e2542c3`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `d4df0700fcf17a84c3ae41ddbafc6740cef35e5cd822cd7692fca4849e2542c3`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `d4df0700fcf17a84c3ae41ddbafc6740cef35e5cd822cd7692fca4849e2542c3`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/unit/hardware/rv32i_rtl/rvfi_spec.spl
-mirror: doc/06_spec/unit/hardware/rv32i_rtl/rvfi_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/unit/hardware/rv32i_rtl/rvfi_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/unit/hardware/rv32i_rtl/rvfi_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/unit/hardware/rv32i_rtl/rvfi_spec.spl:45:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'lists standard RVFI output ports' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/unit/hardware/rv32i_rtl/rvfi_spec.spl:53:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'renders formal wrapper port comments' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/unit/hardware/rv32i_rtl/rvfi_spec.spl:61:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'renders VHDL scalar and vector port types' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

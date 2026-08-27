@@ -1,46 +1,156 @@
 #!/bin/sh
+# Offline, checksum-pinned admission for the reusable FreeBSD QEMU base image.
 set -eu
 
-# Canonical, offline-only admission for the FreeBSD QEMU base image. The image
-# is shared outside a checkout; mutable overlays never become media evidence.
-FREEBSD_VERSION="14.4"
-FREEBSD_IMAGE_NAME="FreeBSD-${FREEBSD_VERSION}-RELEASE-amd64-BASIC-CLOUDINIT-ufs.qcow2"
-STORAGE_ROOT="${SIMPLE_BIG_STORAGE_ROOT:-${HOME}/.simple}"
-MEDIA_DIR="${SIMPLE_FREEBSD_MEDIA_DIR:-${STORAGE_ROOT}/qemu/images/freebsd}"
-MEDIA_PATH="${SIMPLE_FREEBSD_MEDIA_PATH:-${MEDIA_DIR}/${FREEBSD_IMAGE_NAME}}"
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+storage=$(${script_dir}/simple-big-storage-root.shs --print | sed -n 's/^simple_big_storage_root=//p')
+version=${SIMPLE_FREEBSD_VERSION:-14.4}
+name="FreeBSD-${version}-RELEASE-amd64-BASIC-CLOUDINIT-ufs.qcow2"
+image=${SIMPLE_FREEBSD_MEDIA_PATH:-${storage}/qemu/images/freebsd/${name}}
+sidecar=${SIMPLE_FREEBSD_MEDIA_SHA256_FILE:-${image}.sha256}
+qemu_img=${SIMPLE_FREEBSD_QEMU_IMG:-qemu-img}
 
-usage() { printf 'Usage: %s --check [--path QCOW2]\n' "$0" >&2; exit 2; }
-[ "$#" -ge 1 ] && [ "$1" = "--check" ] || usage
-shift
-if [ "$#" -gt 0 ]; then
-    [ "$#" -eq 2 ] && [ "$1" = "--path" ] || usage
-    MEDIA_PATH="$2"
-fi
-
-hash_file() {
-    if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
-    elif command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'
-    elif command -v sha256 >/dev/null 2>&1; then sha256 -q "$1"
-    else return 1
+sha256_file() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    elif command -v sha256 >/dev/null 2>&1; then
+        sha256 -q "$1"
+    else
+        printf '%s\n' 'freebsd_media_reason=missing-sha256-tool' >&2
+        return 1
     fi
 }
 
-expected_sha="${SIMPLE_FREEBSD_MEDIA_SHA256:-}"
-if [ -z "$expected_sha" ] && [ -r "${MEDIA_PATH}.sha256" ]; then
-    expected_sha="$(awk 'NF { print $1; exit }' "${MEDIA_PATH}.sha256")"
-fi
-reason="none"
-actual_sha=""
-if [ ! -f "$MEDIA_PATH" ]; then reason="image_missing"
-elif [ -z "$expected_sha" ]; then reason="trusted_sha_missing"
-elif ! printf '%s\n' "$expected_sha" | grep -Eq '^[0-9a-fA-F]{64}$'; then reason="trusted_sha_invalid"
-elif ! actual_sha="$(hash_file "$MEDIA_PATH")"; then reason="sha_tool_missing"
-elif [ "$actual_sha" != "$expected_sha" ]; then reason="sha_mismatch"
-fi
-if [ "$reason" = "none" ]; then status=pass; else status=fail; fi
-printf 'freebsd_media_status=%s\n' "$status"
-printf 'freebsd_media_path=%s\n' "$MEDIA_PATH"
-printf 'freebsd_media_expected_sha256=%s\n' "$expected_sha"
-printf 'freebsd_media_actual_sha256=%s\n' "$actual_sha"
-printf 'freebsd_media_reason=%s\n' "$reason"
-[ "$reason" = "none" ]
+valid_sha256() {
+    [ "${#1}" -eq 64 ] || return 1
+    case "$1" in *[!0-9A-Fa-f]*) return 1 ;; esac
+}
+
+expected_sha256() {
+    if [ -n "${SIMPLE_FREEBSD_MEDIA_SHA256:-}" ]; then
+        printf '%s\n' "${SIMPLE_FREEBSD_MEDIA_SHA256}"
+    elif [ -r "${sidecar}" ]; then
+        awk 'NR == 1 { print $1; exit }' "${sidecar}"
+    else
+        return 1
+    fi
+}
+
+check_media() {
+    [ -f "${image}" ] || { printf '%s\n' "freebsd_media_reason=missing-image:${image}"; return 1; }
+    [ -s "${image}" ] || { printf '%s\n' "freebsd_media_reason=empty-image:${image}"; return 1; }
+    expected=$(expected_sha256) || {
+        printf '%s\n' "freebsd_media_reason=missing-trusted-sha256:${sidecar}"
+        return 1
+    }
+    valid_sha256 "${expected}" || { printf '%s\n' 'freebsd_media_reason=invalid-trusted-sha256'; return 1; }
+    actual=$(sha256_file "${image}") || return 1
+    [ "$(printf '%s' "${actual}" | tr A-F a-f)" = "$(printf '%s' "${expected}" | tr A-F a-f)" ] || {
+        printf '%s\n' 'freebsd_media_reason=sha256-mismatch'
+        return 1
+    }
+    command -v "${qemu_img}" >/dev/null 2>&1 || {
+        printf '%s\n' "freebsd_media_reason=missing-qemu-img:${qemu_img}"
+        return 1
+    }
+    "${qemu_img}" check -q "${image}" >/dev/null 2>&1 || {
+        printf '%s\n' 'freebsd_media_reason=invalid-qcow2'
+        return 1
+    }
+    printf '%s\n' 'freebsd_media_status=pass'
+    printf '%s\n' "freebsd_media_path=${image}"
+    printf '%s\n' "freebsd_media_sha256=$(printf '%s' "${actual}" | tr A-F a-f)"
+    printf '%s\n' "freebsd_media_sidecar=${sidecar}"
+}
+
+supply_media() {
+    source_path=$1
+    expected=$2
+    [ -f "${source_path}" ] && [ -r "${source_path}" ] || {
+        printf '%s\n' "freebsd_media_reason=unreadable-source:${source_path}" >&2
+        return 1
+    }
+    valid_sha256 "${expected}" || { printf '%s\n' 'freebsd_media_reason=invalid-expected-sha256' >&2; return 1; }
+    source_sha=$(sha256_file "${source_path}") || return 1
+    [ "$(printf '%s' "${source_sha}" | tr A-F a-f)" = "$(printf '%s' "${expected}" | tr A-F a-f)" ] || {
+        printf '%s\n' 'freebsd_media_reason=source-sha256-mismatch' >&2
+        return 1
+    }
+    command -v "${qemu_img}" >/dev/null 2>&1 || { printf '%s\n' "freebsd_media_reason=missing-qemu-img:${qemu_img}" >&2; return 1; }
+    "${qemu_img}" check -q "${source_path}" >/dev/null 2>&1 || { printf '%s\n' 'freebsd_media_reason=invalid-source-qcow2' >&2; return 1; }
+    mkdir -p "$(dirname -- "${image}")"
+    if [ -e "${image}" ]; then
+        existing_sha=$(sha256_file "${image}") || return 1
+        [ "${existing_sha}" = "${source_sha}" ] || {
+            printf '%s\n' "freebsd_media_reason=destination-exists-with-different-content:${image}" >&2
+            return 1
+        }
+        printf '%s  %s\n' "$(printf '%s' "${source_sha}" | tr A-F a-f)" "${name}" > "${sidecar}.supply.$$"
+        mv "${sidecar}.supply.$$" "${sidecar}"
+        SIMPLE_FREEBSD_MEDIA_SHA256="${source_sha}" check_media
+        return
+    fi
+    tmp="${image}.supply.$$"
+    sidecar_tmp="${sidecar}.supply.$$"
+    trap 'rm -f "${tmp}" "${sidecar_tmp}"' EXIT HUP INT TERM
+    cp "${source_path}" "${tmp}"
+    copied_sha=$(sha256_file "${tmp}")
+    [ "${copied_sha}" = "${source_sha}" ] || { printf '%s\n' 'freebsd_media_reason=copy-sha256-mismatch' >&2; return 1; }
+    printf '%s  %s\n' "$(printf '%s' "${source_sha}" | tr A-F a-f)" "${name}" > "${sidecar_tmp}"
+    mv "${tmp}" "${image}"
+    mv "${sidecar_tmp}" "${sidecar}"
+    trap - EXIT HUP INT TERM
+    SIMPLE_FREEBSD_MEDIA_SHA256="${source_sha}" check_media
+}
+
+self_test() {
+    work=${TMPDIR:-/tmp}/simple-freebsd-media-self-test.$$
+    trap 'rm -rf "${work}"' EXIT HUP INT TERM
+    mkdir -p "${work}/bin"
+    printf '#!/bin/sh\nexit 0\n' > "${work}/bin/qemu-img"
+    chmod +x "${work}/bin/qemu-img"
+    printf 'fixture qcow2 bytes\n' > "${work}/source.qcow2"
+    digest=$(sha256_file "${work}/source.qcow2")
+    SIMPLE_BIG_STORAGE_ROOT="${work}/store" SIMPLE_FREEBSD_QEMU_IMG="${work}/bin/qemu-img" \
+        "$0" --supply "${work}/source.qcow2" "${digest}" >/dev/null
+    SIMPLE_BIG_STORAGE_ROOT="${work}/store" SIMPLE_FREEBSD_QEMU_IMG="${work}/bin/qemu-img" \
+        "$0" --check | grep -qx 'freebsd_media_status=pass'
+    printf 'different fixture bytes\n' > "${work}/different.qcow2"
+    different_digest=$(sha256_file "${work}/different.qcow2")
+    if SIMPLE_BIG_STORAGE_ROOT="${work}/store" SIMPLE_FREEBSD_QEMU_IMG="${work}/bin/qemu-img" \
+        "$0" --supply "${work}/different.qcow2" "${different_digest}" >/dev/null 2>&1; then
+        printf '%s\n' 'freebsd_media_self_test=overwrite-not-rejected' >&2
+        return 1
+    fi
+    if SIMPLE_BIG_STORAGE_ROOT="${work}/store" SIMPLE_FREEBSD_QEMU_IMG="${work}/bin/qemu-img" \
+        SIMPLE_FREEBSD_MEDIA_SHA256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+        "$0" --check >/dev/null 2>&1; then
+        printf '%s\n' 'freebsd_media_self_test=fail' >&2
+        return 1
+    fi
+    printf '%s\n' 'freebsd_media_self_test=pass'
+}
+
+case "${1:---print}" in
+    --print)
+        printf '%s\n' "freebsd_media_path=${image}"
+        printf '%s\n' "freebsd_media_sidecar=${sidecar}"
+        printf '%s\n' 'freebsd_media_supply=offline-local-copy'
+        ;;
+    --check) check_media ;;
+    --supply)
+        [ "$#" -eq 3 ] || { printf '%s\n' 'usage: simple-freebsd-media.shs --supply SOURCE SHA256' >&2; exit 64; }
+        supply_media "$2" "$3"
+        ;;
+    --resume)
+        check_media
+        digest=$(expected_sha256)
+        printf '%s\n' "QEMU_VM_PATH=${image}"
+        printf '%s\n' "QEMU_BASE_VM_SHA256=$(printf '%s' "${digest}" | tr A-F a-f)"
+        printf '%s\n' 'freebsd_media_resume_command=sh scripts/check/check-freebsd-bootstrap-qemu.shs --smoke'
+        ;;
+    --self-test) self_test ;;
+    *) printf '%s\n' 'usage: simple-freebsd-media.shs [--print|--check|--resume|--self-test|--supply SOURCE SHA256]' >&2; exit 64 ;;
+esac

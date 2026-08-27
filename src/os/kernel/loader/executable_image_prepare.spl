@@ -30,8 +30,7 @@ use os.kernel.types.task_types.{
     user_process_image_entry, user_process_image_stack_top,
     user_process_image_stack_size, user_process_image_initial_sp,
     user_process_image_segments,
-    user_load_segment_file_offset, user_load_segment_virt_addr,
-    user_load_segment_mem_size,
+    user_load_segment_virt_addr, user_load_segment_mem_size,
     user_load_segment_file_size, user_load_segment_flags
 }
 
@@ -42,7 +41,7 @@ pub struct ExecutablePreparedImageV1:
 pub fn executable_prepare_max_source_bytes_v1() -> u64:
     67108864u64
 
-pub(package) fn executable_prepare_read_exact_v1(
+fn _prepare_read_exact(
     mut table: MountTable,
     handle: ExecutableImageHandleV1
 ) -> [u8]?:
@@ -80,8 +79,7 @@ fn _prepare_process_image_matches(
     while i < segments.len():
         val segment = segments[i]
         val load_range = handle.verified_load_ranges[i]
-        if user_load_segment_file_offset(segment) != load_range.file_offset or
-            user_load_segment_virt_addr(segment) != load_range.virtual_address or
+        if user_load_segment_virt_addr(segment) != load_range.virtual_address or
             user_load_segment_mem_size(segment) != load_range.memory_size or
             user_load_segment_file_size(segment) != load_range.file_size or
             ((user_load_segment_flags(segment) & 2u32) != 0u32) != load_range.writable or
@@ -97,10 +95,29 @@ pub fn executable_prepare_image_v1(
     entry_point: u64,
     arch: Architecture
 ) -> Result<ExecutablePreparedImageV1, ExecutableLoadConsumerErrorV1>:
+    executable_prepare_image_with_launch_v1(
+        table, handle, consumer, entry_point, arch, "authority-image", [], [])
+
+pub fn executable_prepare_image_with_launch_v1(
+    mut table: MountTable,
+    handle: ExecutableImageHandleV1,
+    consumer: ExecutableLoadConsumerV1,
+    entry_point: u64,
+    arch: Architecture,
+    canonical_path: text,
+    argv: [text],
+    envp: [text]
+) -> Result<ExecutablePreparedImageV1, ExecutableLoadConsumerErrorV1>:
+    """Prepare exactly the authenticated image and launch stack inputs.
+
+    The loader handle still supplies executable bytes and identity.  The caller
+    may supply launch strings only after its architecture owner has validated
+    them against the recipe and caller capabilities.
+    """
     val planned = executable_load_consumer_plan_v1(consumer, handle, entry_point)
     if planned.failure != ExecutableLoadConsumerErrorV1.None:
         return Err(planned.failure)
-    val source = executable_prepare_read_exact_v1(table, handle)
+    val source = _prepare_read_exact(table, handle)
     if not source.?:
         return Err(ExecutableLoadConsumerErrorV1.SourceReadFailed)
     val bytes = source.unwrap()
@@ -108,7 +125,7 @@ pub fn executable_prepare_image_v1(
         return Err(ExecutableLoadConsumerErrorV1.DigestMismatch)
     if elf_admit_executable(bytes, arch).is_err():
         return Err(ExecutableLoadConsumerErrorV1.ElfRejected)
-    val built = build_user_process_image("authority-image", bytes, arch, [], [])
+    val built = build_user_process_image(canonical_path, bytes, arch, argv, envp)
     if built.is_err():
         return Err(ExecutableLoadConsumerErrorV1.ProcessImageMismatch)
     val image = built.unwrap()
@@ -142,4 +159,5 @@ pub fn executable_prepare_image_v1(
     Ok(ExecutablePreparedImageV1(image: image, mapping: mapping))
 
 export ExecutablePreparedImageV1
-export executable_prepare_max_source_bytes_v1, executable_prepare_image_v1
+export executable_prepare_max_source_bytes_v1, executable_prepare_image_v1,
+    executable_prepare_image_with_launch_v1

@@ -17,6 +17,9 @@ description: "Codex design skill (Step 4 in cooperative pipeline). Architecture 
 
 ## Prerequisites Check
 
+Consume the retained feature-plus-layer knowledge receipt before architecture
+or test design. Reject stale path coverage and MDSOC+/ECS on kernel/drivers.
+
 | Artifact | Path | If missing |
 |----------|------|-----------|
 | Requirements | `doc/02_requirements/feature/<feature>.md` | Run research first |
@@ -127,10 +130,6 @@ specs:
 4. Update `@step`, `@capture`, `@inline`, `@prev`, helper/checker names, and
    manual visibility until the primary flow is understandable without opening
    the source test and the generator reports `0 stubs`.
-5. Run `simple sspec-maintain scan <spec>` and design against all seven score
-   dimensions, stable findings, mirror state, and blocker cap. Record the
-   requirement-to-scenario mapping; a scaffold with an unresolved oracle stays
-   fail-fast and cannot satisfy an AC.
 
 Reference: `doc/07_guide/infra/sspec_scenario_manual.md`.
 
@@ -187,7 +186,6 @@ Reference: `doc/07_guide/infra/sspec_scenario_manual.md`.
 
 ## Rules
 
-- **One App, One Host Interface:** Design apps to run on all OSes identically; platform difference lives only behind HAL (SOSIX, CompositorBackend, DedicatedHost) or config. Ban per-OS code forks, platform conditionals in app logic, and adapter copying. See `doc/04_architecture/os/one_app_host_interface_rule.md`.
 - If requirements missing, do research first — never design without requirements
 - If another LLM already created artifacts, review and extend — never overwrite
 - Every REQ-NNN must have test coverage

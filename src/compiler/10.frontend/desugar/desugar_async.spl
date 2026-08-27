@@ -10,8 +10,6 @@
 # - actor def -> class with message passing
 
 use compiler.frontend.parser_types.*
-use compiler.frontend.parser_types_expr.*
-use compiler.frontend.block_types.{span_new}
 use compiler.common.dependency.visibility.{Visibility}
 use compiler.frontend.desugar.suspension_analysis.{
     analyze_suspensions,
@@ -27,10 +25,10 @@ use compiler.frontend.desugar.poll_generator.{
 }
 
 # ================================================================
-# Async ParserFunction Desugaring
+# Async Function Desugaring
 # ================================================================
 
-fn desugar_async_function(func: ParserFunction) -> (ParserFunction, [ParserEnum], [ParserFunction]):
+fn desugar_async_function(func: Function) -> (Function, [Enum], [Function]):
     """Transform async fn to fn returning Future<T> with state machine.
 
     Generates:
@@ -77,7 +75,7 @@ fn desugar_async_function(func: ParserFunction) -> (ParserFunction, [ParserEnum]
     val generated_enums = _destruct_0[1]
     val generated_functions = _destruct_0[2]
 
-    val transformed_func = ParserFunction(
+    val transformed_func = Function(
         name: func.name,
         type_params: func.type_params,
         params: func.params,
@@ -87,7 +85,7 @@ fn desugar_async_function(func: ParserFunction) -> (ParserFunction, [ParserEnum]
         visibility: func.visibility,
         is_async: false,  # No longer async after desugaring
         is_static: func.is_static,
-        is_public: func.is_public,
+        is_public: func.visibility.is_public(),
         is_method: func.is_method,
         is_mutable: func.is_mutable,
         is_const: func.is_const,
@@ -102,7 +100,7 @@ fn desugar_async_function(func: ParserFunction) -> (ParserFunction, [ParserEnum]
 
     [transformed_func, generated_enums, generated_functions]
 
-fn desugar_async_body(body: Block, func: ParserFunction) -> (Block, [ParserEnum], [ParserFunction]):
+fn desugar_async_body(body: Block, func: Function) -> (Block, [Enum], [Function]):
     """Transform async function body using state machine generation.
 
     Analyzes the function for suspension points (await expressions) and
@@ -110,7 +108,7 @@ fn desugar_async_body(body: Block, func: ParserFunction) -> (Block, [ParserEnum]
     future_ready() wrapper.
 
     Args:
-        body: ParserFunction body to transform
+        body: Function body to transform
         func: Complete function definition (for name, etc.)
 
     Returns:
@@ -230,7 +228,7 @@ fn desugar_await_expr(expr: Expr) -> Expr:
                 case Pending: yield_to_runtime()
     """
     match expr_kind(expr):
-        case ExprKind.Await(awaited):
+        case exprkind_Await(awaited):
             # Simple desugaring: await x => block_on(x)
             Expr(
                 kind: ExprKind.Call(
@@ -256,7 +254,7 @@ fn desugar_spawn_expr(expr: Expr) -> Expr:
         spawn_actor(Worker(id: 1))
     """
     match expr_kind(expr):
-        case ExprKind.Spawn(spawned):
+        case exprkind_Spawn(spawned):
             Expr(
                 kind: ExprKind.Call(
                     Expr(kind: ExprKind.Ident("spawn_actor"), span: spawned.span),
@@ -271,29 +269,32 @@ fn desugar_spawn_expr(expr: Expr) -> Expr:
 # Actor Definition Desugaring
 # ================================================================
 
-fn desugar_actor(act_def: ActorDef) -> ParserClass:
+fn desugar_actor(act_def: ActorDef) -> Class:
     """Transform actor definition to class.
 
     Actors are just classes with special instantiation semantics.
     The spawn keyword handles the difference.
     """
-    ParserClass(
+    Class(
         name: act_def.name,
         type_params: act_def.type_params,
         fields: act_def.fields,
         methods: act_def.methods,
         visibility: act_def.visibility,
-        is_public: act_def.is_public,
+        is_public: act_def.visibility.is_public(),
         doc_comment: act_def.doc_comment,
         attributes: act_def.attributes,
-        span: act_def.span
+        span: act_def.span,
+        ordered_methods: act_def.ordered_methods,
+        base_type: nil,
+        implemented_traits: []
     )
 
 # ================================================================
-# Full ParserModule Desugaring
+# Full Module Desugaring
 # ================================================================
 
-fn desugar_module(module: ParserModule) -> ParserModule:
+fn desugar_module(module: Module) -> Module:
     """Desugar entire module.
 
     - Transform all async functions (generates state machines)
@@ -306,15 +307,13 @@ fn desugar_module(module: ParserModule) -> ParserModule:
     var desugared_functions: Dict<text, ParserFunction> = {}
     var desugared_function_headers: Dict<text, ParserFunctionHeader> = {}
     var desugared_function_order: [text] = []
-    var generated_enums: Dict<text, ParserEnum> = module.enums  # Start with existing enums
-    var generated_helper_functions: Dict<text, ParserFunction> = {}
+    var generated_enums: Dict<text, Enum> = module.enums  # Start with existing enums
+    var generated_helper_functions: Dict<text, Function> = {}
     var generated_helper_names: [text] = []
 
-    val function_names = module.function_order
-    var function_index = 0
-    while function_index < function_names.len():
-        val name = function_names[function_index]
-        val func: ParserFunction = module.functions[name]
+    for _item_1 in module.functions:
+        val name = _item_1[0]
+        val func = _item_1[1]
         val _destruct_2 = desugar_async_function(func)
         val desugared = _destruct_2[0]
         val gen_enums = _destruct_2[1]
@@ -326,20 +325,21 @@ fn desugar_module(module: ParserModule) -> ParserModule:
 
         # Add generated enums to module
         for enum_ in gen_enums:
+            if generated_enums.contains_key(enum_.name):
+                panic("generated async enum collides with declaration: " + enum_.name)
             generated_enums[enum_.name] = enum_
+            generated_enum_names.push(enum_.name)
 
         # Add generated poll functions to module
         for gen_func in gen_funcs:
             generated_helper_functions[gen_func.name] = gen_func
-            generated_helper_names.push(gen_func.name)
-        function_index = function_index + 1
 
     # Merge generated functions with desugared functions
     val helper_names = generated_helper_names
     var helper_index = 0
     while helper_index < helper_names.len():
         val name = helper_names[helper_index]
-        val func: ParserFunction = generated_helper_functions[name]
+        val func: Function = generated_helper_functions[name]
         desugared_functions[name] = func
         desugared_function_headers[name] = parser_function_header(func)
         desugared_function_order.push(name)
@@ -347,26 +347,24 @@ fn desugar_module(module: ParserModule) -> ParserModule:
 
     # Desugar actors to classes
     var classes_with_actors = module.classes
-    val actor_names = module.actor_order
-    var actor_index = 0
-    while actor_index < actor_names.len():
-        val name = actor_names[actor_index]
-        val act_def: ActorDef = module.actors[name]
+    for _item_4 in module.actors:
+        val name = _item_4[0]
+        val act_def = _item_4[1]
         val as_class = desugar_actor(act_def)
         classes_with_actors[name] = as_class
-        actor_index = actor_index + 1
 
-    ParserModule(
+    Module(
         name: module.name,
         imports: module.imports,
+        explicit_import_count: module.explicit_import_count,
         exports: module.exports,
+        explicit_export_count: module.explicit_export_count,
         domain_blocks: module.domain_blocks,
         functions: desugared_functions,
         function_headers: desugared_function_headers,
         function_order: desugared_function_order,
         classes: classes_with_actors,
         actors: {},  # All actors converted to classes
-        actor_order: [],
         structs: module.structs,
         enums: generated_enums,  # Includes generated state enums
         bitfields: module.bitfields,
@@ -381,6 +379,8 @@ fn desugar_module(module: ParserModule) -> ParserModule:
         mock_decls: module.mock_decls,
         tagged_layer: module.tagged_layer,
         layer_dag_edges: module.layer_dag_edges,
+        friends: module.friends,
+        internal_exports: module.internal_exports,
         # D1: desugaring REBUILDS the module, so every field it forgets is
         # silently reset to its default. `extend <Enum>:` sections are not
         # async syntax and must survive untouched -- dropping them made the
@@ -388,7 +388,7 @@ fn desugar_module(module: ParserModule) -> ParserModule:
         extend_enums: module.extend_enums
     )
 
-fn desugar_function_body(func: ParserFunction) -> ParserFunction:
+fn desugar_function_body(func: Function) -> Function:
     """Desugar await/spawn expressions in function body."""
     val desugared_body = desugar_block(func.body)
 
@@ -417,7 +417,7 @@ fn desugar_function_body(func: ParserFunction) -> ParserFunction:
 
 fn desugar_block(block: Block) -> Block:
     """Desugar statements in a block."""
-    var desugared_stmts: [Stmt] = []
+    var desugared_stmts = []
 
     for stmt in block.stmts:
         val desugared = desugar_stmt(stmt)
@@ -431,7 +431,7 @@ fn desugar_block(block: Block) -> Block:
 fn desugar_stmt(stmt: Stmt) -> Stmt:
     """Desugar a single statement."""
     match stmt_kind(stmt):
-        case StmtKind.Expr(expr):
+        case stmtkind_Expr(expr):
             val desugared_expr = desugar_expr(expr)
             Stmt(kind: StmtKind.Expr(desugared_expr), span: stmt.span)
         case _:
@@ -441,9 +441,9 @@ fn desugar_expr(expr: Expr) -> Expr:
     """Recursively desugar expressions."""
     # First check if this expression itself needs desugaring
     match expr_kind(expr):
-        case ExprKind.Await(_):
+        case exprkind_Await(_):
             return desugar_await_expr(expr)
-        case ExprKind.Spawn(_):
+        case exprkind_Spawn(_):
             return desugar_spawn_expr(expr)
         case _:
             pass

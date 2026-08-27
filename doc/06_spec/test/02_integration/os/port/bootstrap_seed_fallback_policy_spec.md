@@ -27,7 +27,7 @@ bootstrap_seed_fallback_policy_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 4 | 4 | 0 | 0 |
+| 5 | 5 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -49,7 +49,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val src = file_read("src/app/cli/bootstrap_main.spl")
 val bin_catalog = file_read("bin/FILE.md")
-expect(src).to_contain("bootstrap_main cannot emit a seed-wrapper fallback")
+expect(src).to_contain("extern fn rt_native_build(args: [text]) -> i64")
 expect(forbidden_bootstrap_marker(src)).to_equal("ok")
 expect(file_exists("bin/simple.bootstrap_seed_wrapper.c")).to_equal(false)
 expect(bin_catalog.contains("bootstrap_seed_wrapper")).to_equal(false)
@@ -87,7 +87,7 @@ Reproduction: this block contains the complete executable scenario source.
 val rust_dispatch = file_read("src/compiler_rust/driver/src/main.rs")
 val cli_dispatch = file_read("src/app/cli/_CliMain/main_and_help.spl")
 val native_entry = file_read("src/app/cli/native_build_main.spl")
-val native_targets = file_read("src/app/io/_CliCompile/compile_targets.spl")
+val native_targets = file_read("src/app/io/_CliCompile/native_build.spl")
 val rust_native_build = file_read("src/compiler_rust/driver/src/cli/native_build.rs")
 val bootstrap_script = file_read("scripts/bootstrap/bootstrap-from-scratch.sh")
 val parser_types = file_read("src/compiler/10.frontend/parser_types.spl")
@@ -145,7 +145,7 @@ expect(bootstrap_script).to_contain("Pure-Simple mode:")
 expect(bootstrap_script).to_contain("reusing Rust seed, rebuilding only pure-Simple stages.")
 expect(bootstrap_script).to_contain("--mode")
 expect(bootstrap_script).to_contain("bootstrap_mode")
-expect(bootstrap_script).to_contain("find src/compiler src/app src/lib -name '*.spl'")
+expect(bootstrap_script).to_contain("Source-level invalidation belongs to the native-build cache")
 expect(bootstrap_script).to_contain("SIMPLE_.*(AOP|MDSOC|WEAV|LOAD|INTERPRET|EXECUTION|LIB|NATIVE_BUILD)")
 expect(cli_dispatch).to_contain("fn native_build_requests_simple_llvm(args: [text]) -> bool:")
 expect(cli_dispatch).to_contain("return cli_native_build(args)")
@@ -183,12 +183,29 @@ expect(module_resolver).to_contain("test_resolve_file_module_before_same_name_pa
 
 </details>
 
+#### uses the Rust native-build handler only for bootstrap seed or cross target
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val rust_dispatch = file_read("src/compiler_rust/driver/src/main.rs")
+
+expect(rust_dispatch).to_contain("fn native_build_uses_rust_handler(args: &[String], bootstrap: Option<&str>) -> bool {")
+expect(rust_dispatch).to_contain("bootstrap == Some(\"1\") || native_build_wants_cross_target(args)")
+```
+
+</details>
+
 #### keeps staged bootstrap fallback policy from reusing stale artifacts
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -200,7 +217,10 @@ expect(bootstrap_script).to_contain("stage3_bin=")
 expect(bootstrap_script).to_contain("rm -f \"" + shell_var("stage2_bin") + "\" \"" + shell_var("stage3_bin") + "\"")
 expect(bootstrap_script).to_contain("[ \"" + shell_var("stage2_status") + "\" -eq 0 ] && [ -x \"" + shell_var("stage2_bin") + "\" ]")
 expect(bootstrap_script).to_contain("if [ \"" + shell_var("stage4_is_seed") + "\" -eq 1 ]; then")
-expect(bootstrap_script).to_contain("\"" + shell_var("stage_for_build") + "\" run src/app/cli/native_build_main.spl --")
+expect(bootstrap_script).to_contain("--target \"" + shell_var("PLATFORM") + "\"")
+expect(bootstrap_script.contains("src/compiler_rust/target/bootstrap")).to_equal(false)
+expect(bootstrap_script.contains("\"" + shell_var("stage_for_build") + "\" run src/app/cli/native_build_main.spl --")).to_equal(false)
+expect(bootstrap_script).to_contain("\"" + shell_var("stage_for_build") + "\" native-build")
 ```
 
 </details>
@@ -212,7 +232,7 @@ expect(bootstrap_script).to_contain("\"" + shell_var("stage_for_build") + "\" ru
 | Category | Hardware & OS |
 | Status | Active |
 | Source | `test/02_integration/os/port/bootstrap_seed_fallback_policy_spec.spl` |
-| Updated | 2026-07-06 |
+| Updated | 2026-07-11 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -224,8 +244,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 4 |
-| Active scenarios | 4 |
+| Total scenarios | 5 |
+| Active scenarios | 5 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

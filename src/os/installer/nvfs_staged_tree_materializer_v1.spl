@@ -1,0 +1,75 @@
+"""Bounded retained-tree publication through the committed NVFS provider.
+
+The current NVFS implementation is explicitly DBFS-backed.  This capsule keeps
+that identity honest and reuses the DBFS streaming materializer, which owns the
+single-copy <=64 KiB read/append loop, retained-file finish check, expected
+SHA-256 binding, and three-state publication interpretation.  NVFS therefore
+adds no whole-file or whole-tree retention and claims no tree transaction.
+"""
+
+use os.installer.staged_root_tree_enumerator_v1.{
+    StagedRootTreeEnumerationV1, StagedRootTreeEntryV1}
+use os.installer.staged_root_tree_retained_provider_v1.{
+    StagedRootTreeRetainedProviderV1}
+use os.installer.dbfs_staged_tree_materializer_v1.{
+    StagedTreePublicationSinkV1,
+    nvfs_materialize_retained_file_with_sink_v1,
+    materialize_retained_tree_with_sink_v1}
+use nogc_sync_mut.fs_driver.nvfs_driver.{
+    NvfsDriver, NVFS_STREAM_INGEST_PROVIDER_V1}
+
+pub class NvfsStagedFileMaterializeReceiptV1:
+    ok: bool
+    error_code: text
+    exact_path: text
+    exact_size: i64
+    sha256: text
+    published: bool
+    publication_state: text
+    provider_id: text
+
+pub class NvfsStagedTreeMaterializeReceiptV1:
+    ok: bool
+    error_code: text
+    error_path: text
+    files_planned: i64
+    files_published: i64
+    directories_planned: i64
+    directories_published: i64
+    bytes_published: i64
+    tree_atomic: bool
+    publication_model: text
+    current_entry_state: text
+    provider_id: text
+
+pub(package) fn nvfs_materialize_retained_file_v1(
+    driver: NvfsDriver, provider: StagedRootTreeRetainedProviderV1,
+    entry: StagedRootTreeEntryV1,
+) -> NvfsStagedFileMaterializeReceiptV1:
+    val receipt = nvfs_materialize_retained_file_with_sink_v1(
+        driver, provider, entry)
+    NvfsStagedFileMaterializeReceiptV1(
+        ok: receipt.ok, error_code: receipt.error_code,
+        exact_path: receipt.exact_path, exact_size: receipt.exact_size,
+        sha256: receipt.sha256, published: receipt.published,
+        publication_state: receipt.publication_state,
+        provider_id: NVFS_STREAM_INGEST_PROVIDER_V1)
+
+pub(package) fn image_builder_materialize_retained_tree_to_nvfs_v1(
+    driver: NvfsDriver, provider: StagedRootTreeRetainedProviderV1,
+    plan: StagedRootTreeEnumerationV1,
+) -> NvfsStagedTreeMaterializeReceiptV1:
+    val receipt = materialize_retained_tree_with_sink_v1(
+        StagedTreePublicationSinkV1.Nvfs(driver: driver), provider, plan,
+        "nvfs-dbfs-backed-per-entry-atomic-v1")
+    NvfsStagedTreeMaterializeReceiptV1(
+        ok: receipt.ok, error_code: receipt.error_code,
+        error_path: receipt.error_path,
+        files_planned: receipt.files_planned,
+        files_published: receipt.files_published,
+        directories_planned: receipt.directories_planned,
+        directories_published: receipt.directories_published,
+        bytes_published: receipt.bytes_published,
+        tree_atomic: false, publication_model: receipt.publication_model,
+        current_entry_state: receipt.current_entry_state,
+        provider_id: NVFS_STREAM_INGEST_PROVIDER_V1)

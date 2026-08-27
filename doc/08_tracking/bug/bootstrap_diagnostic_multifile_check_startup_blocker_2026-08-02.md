@@ -1,7 +1,6 @@
 # Bootstrap diagnostic multi-file check startup blocker
 
-Status: FIXED
-Status re-verified 2026-08-17 by source inspection (triage shard 00).
+**Status:** BLOCKED — unsafe to enable chunking without per-file terminal records
 **Area:** bootstrap diagnostics / check entrypoint / interpreter startup
 
 ## Live evidence

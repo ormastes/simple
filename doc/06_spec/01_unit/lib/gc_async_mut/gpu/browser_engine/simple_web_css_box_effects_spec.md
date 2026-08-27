@@ -3,7 +3,7 @@
 > Focused parser and Draw IR producer evidence for nonuniform border radii and
 
 | Tests | Active | Skipped | Pending |
-|-------|--------|---------|--------:|
+|-------|-------:|--------:|--------:|
 | 7 | 7 | 0 | 0 |
 
 <details>

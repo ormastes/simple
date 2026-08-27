@@ -44,8 +44,6 @@ Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-STD
-step("can test boolean")
 expect true
 ```
 
@@ -187,30 +185,6 @@ expect true
 #### first group
 
 #### second group
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Standard Library |
-| Status | Active |
-| Source | `test/01_unit/std/shared_examples_spec.spl` |
-| Updated | 2026-08-26 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering Shared Examples (TEST-010, TEST-011), Basic shared_examples usage, Shared examples with fixtures, Multiple shared examples in same context, Nested contexts with shared examples, include_examples alias, Shared Examples Edge Cases, shared examples with no dependencies, shared examples in nested context, Shared examples with local state.
-- Shared Examples (TEST-010, TEST-011)
-- Basic shared_examples usage
-- Shared examples with fixtures
-- Multiple shared examples in same context
-- Nested contexts with shared examples
-- include_examples alias
-- Shared Examples Edge Cases
-- shared examples with no dependencies
-- shared examples in nested context
-- Shared examples with local state
 
 ## Scenario Summary
 

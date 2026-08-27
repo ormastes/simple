@@ -13,8 +13,7 @@
 # "Deferred" section).
 
 use std.common.bytes.span.{ByteSpan}
-use std.common.compress.gzip.{gzip_crc32}
-use std.common.hash.adler32.{adler32}
+use std.common.bytes.checksum.{Crc32, Adler32}
 use std.common.compress.typed.deflate_typed.{deflate_stored}
 
 # ============================================================================
@@ -88,25 +87,21 @@ fn _zlib_store(data: [u8]) -> [u8]:
     var out: [u8] = [0x78u8, 0x01u8]
     var deflated = deflate_stored(ByteSpan.new(data))
     out = _extend(out, deflated.buf)
-    out = _extend(out, _u32_be(adler32(data)))
+    var ad = Adler32.new()
+    ad.update(ByteSpan.new(data))
+    out = _extend(out, _u32_be(ad.raw()))
     out
 
 fn _chunk(type_name: text, data: [u8]) -> [u8]:
-    """Build a PNG chunk: length BE, 4-byte type, data, CRC-32(type + data) BE.
-
-    CRC is computed over one flat [u8] via the gzip_crc32 free function, NOT
-    the incremental Crc32+ByteSpan pair: the cross-module ByteSpan misreads
-    small heap-built arrays on the deployed interpreter (every chunk CRC came
-    out wrong; see bug doc byte_span_cross_module_misread_2026-07-19), and
-    flat-array free functions are the documented safe cross-module shape.
-    """
+    """Build a PNG chunk: length BE, 4-byte type, data, CRC-32(type + data) BE."""
     val type_bytes = type_name.bytes()
     var out = _u32_be(data.len())
     out = _extend(out, type_bytes)
     out = _extend(out, data)
-    var crc_input = _extend([], type_bytes)
-    crc_input = _extend(crc_input, data)
-    out = _extend(out, _u32_be(gzip_crc32(crc_input).to_i64()))
+    var crc = Crc32.new()
+    crc.update(ByteSpan.new(type_bytes))
+    crc.update(ByteSpan.new(data))
+    out = _extend(out, _u32_be(crc.raw()))
     out
 
 fn _u32_be(v: i64) -> [u8]:

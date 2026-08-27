@@ -1,6 +1,29 @@
 # Screen Ansi Specification
 
-> Tests covering Screen.put_text ANSI style splice, compound RESET+STYLE prefix tokens, suffix style restore across block boundary, partial overwrite inside styled block, RESET not lost past styled block end, cross-row style leak prevention, visible width stability, round-trip stability, plain text and styled text contiguity, Unicode box drawing.
+> 1. var s = Screen new
+
+<!-- sdn-diagram:id=screen_ansi_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=screen_ansi_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+screen_ansi_spec -> app
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=screen_ansi_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -22,18 +45,25 @@
 
 #### col 0 is BOLD, col 2 is CYAN, col 4 is unstyled after overwrite
 
-- col 0 is BOLD, col 2 is CYAN, col 4 is unstyled after overwrite
+1. var s = Screen new
+2. s = s put styled
+3. s = s put styled
+4. s = s put text
+5. expect style at col
+6. expect char at col
+7. expect style at col
+8. expect char at col
+9. expect style at col
+10. expect char at col
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("col 0 is BOLD, col 2 is CYAN, col 4 is unstyled after overwrite")
 var s = Screen.new(10, 1)
 s = s.put_styled(0, 0, "AB", BOLD)
 s = s.put_styled(0, 2, "CD", CYAN)
@@ -54,18 +84,22 @@ expect char_at_col(line, 4) to_equal("X")
 
 #### mid-block overwrite inside CYAN preserves CYAN for suffix
 
-- mid-block overwrite inside CYAN preserves CYAN for suffix
+1. var s = Screen new
+2. s = s put styled
+3. s = s put styled
+4. s = s put text
+5. expect style at col
+6. expect style at col
+7. expect char at col
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("mid-block overwrite inside CYAN preserves CYAN for suffix")
 var s = Screen.new(10, 1)
 s = s.put_styled(0, 0, "AB", BOLD)
 s = s.put_styled(0, 2, "CDEF", CYAN)
@@ -84,18 +118,24 @@ expect char_at_col(line, 4) to_equal("E")
 
 #### keeps CYAN on suffix B after overwriting across BOLD/CYAN boundary
 
-- keeps CYAN on suffix B after overwriting across BOLD/CYAN boundary
+1. var s = Screen new
+2. s = s put styled
+3. s = s put styled
+4. s = s put text
+5. expect style at col
+6. expect char at col
+7. expect style at col
+8. expect char at col
+9. expect style at col
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("keeps CYAN on suffix B after overwriting across BOLD/CYAN boundary")
 var s = Screen.new(10, 1)
 s = s.put_styled(0, 0, "AAA", BOLD)
 s = s.put_styled(0, 3, "BBB", CYAN)
@@ -115,18 +155,21 @@ expect style_at_col(line, 4).contains("\u{001b}[36m") to_equal(true)
 
 #### restores CYAN when overwriting the first char of a CYAN block
 
-- restores CYAN when overwriting the first char of a CYAN block
+1. var s = Screen new
+2. s = s put styled
+3. s = s put text
+4. expect char at col
+5. expect char at col
+6. expect style at col
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("restores CYAN when overwriting the first char of a CYAN block")
 var s = Screen.new(10, 1)
 s = s.put_styled(0, 3, "HELLO", CYAN)
 s = s.put_text(0, 3, "X")
@@ -144,18 +187,24 @@ expect style_at_col(line, 4).contains("\u{001b}[36m") to_equal(true)
 
 #### suffix keeps BOLD, overwritten char does not
 
-- suffix keeps BOLD, overwritten char does not
+1. var s = Screen new
+2. s = s put styled
+3. s = s put text
+4. expect style at col
+5. expect char at col
+6. expect style at col
+7. expect char at col
+8. expect style at col
+9. expect style at col
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("suffix keeps BOLD, overwritten char does not")
 var s = Screen.new(10, 1)
 s = s.put_styled(0, 0, "ABCDE", BOLD)
 s = s.put_text(0, 2, "X")
@@ -178,18 +227,22 @@ expect style_at_col(line, 4) to_equal(BOLD)
 
 #### BOLD does not bleed into plain overwrite at boundary
 
-- BOLD does not bleed into plain overwrite at boundary
+1. var s = Screen new
+2. s = s put styled
+3. s = s put text
+4. expect style at col
+5. expect char at col
+6. expect style at col
+7. expect style at col
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("BOLD does not bleed into plain overwrite at boundary")
 var s = Screen.new(10, 1)
 s = s.put_styled(0, 0, "AB", BOLD)
 s = s.put_text(0, 2, "XY")
@@ -209,18 +262,19 @@ expect style_at_col(line, 3) to_equal("")
 
 #### row ends with RESET after full-width styled write + partial overwrite
 
-- row ends with RESET after full-width styled write + partial overwrite
+1. var s = Screen new
+2. s = s put styled
+3. s = s put text
+4. expect ends with reset
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("row ends with RESET after full-width styled write + partial overwrite")
 var s = Screen.new(5, 2)
 s = s.put_styled(0, 0, "ABCDE", BOLD)
 s = s.put_text(0, 3, "X")
@@ -231,18 +285,19 @@ expect ends_with_reset(s.buffer[0]) to_equal(true)
 
 #### row ends with RESET after end-of-line styled write + overwrite
 
-- row ends with RESET after end-of-line styled write + overwrite
+1. var s = Screen new
+2. s = s put styled
+3. s = s put text
+4. expect ends with reset
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("row ends with RESET after end-of-line styled write + overwrite")
 var s = Screen.new(10, 2)
 s = s.put_styled(0, 7, "ABC", CYAN)
 s = s.put_text(0, 8, "X")
@@ -253,18 +308,20 @@ expect ends_with_reset(s.buffer[0]) to_equal(true)
 
 #### row 1 is not affected by row 0 style
 
-- row 1 is not affected by row 0 style
+1. var s = Screen new
+2. s = s put styled
+3. s = s put text
+4. s = s put text
+5. expect style at col
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("row 1 is not affected by row 0 style")
 var s = Screen.new(5, 2)
 s = s.put_styled(0, 0, "HELLO", BOLD)
 s = s.put_text(0, 2, "X")
@@ -279,18 +336,22 @@ expect style_at_col(s.buffer[1], 0) to_equal("")
 
 #### stable after 5 overlapping writes
 
-- stable after 5 overlapping writes
+1. var s = Screen new
+2. s = s put styled
+3. s = s put text
+4. s = s put text
+5. s = s put styled
+6. s = s put text
+7. expect visible width
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("stable after 5 overlapping writes")
 var s = Screen.new(10, 1)
 s = s.put_styled(0, 0, "ABCDE", BOLD)
 s = s.put_text(0, 1, "X")
@@ -304,18 +365,21 @@ expect visible_width(s.buffer[0]) to_equal(10)
 
 #### stable after three styled blocks + gap overwrite
 
-- stable after three styled blocks + gap overwrite
+1. var s = Screen new
+2. s = s put styled
+3. s = s put styled
+4. s = s put styled
+5. s = s put text
+6. expect visible width
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("stable after three styled blocks + gap overwrite")
 var s = Screen.new(20, 1)
 s = s.put_styled(0, 0, "AAA", BOLD)
 s = s.put_styled(0, 5, "BBB", CYAN)
@@ -328,18 +392,21 @@ expect visible_width(s.buffer[0]) to_equal(20)
 
 #### clips plain text at the right edge without growing the row
 
-- clips plain text at the right edge without growing the row
+1. var s = Screen new
+2. s = s put text
+3. expect visible width
+4. expect char at col
+5. expect char at col
+6. expect char at col
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("clips plain text at the right edge without growing the row")
 var s = Screen.new(10, 1)
 s = s.put_text(0, 8, "ABCDE")
 expect visible_width(s.buffer[0]) to_equal(10)
@@ -352,18 +419,23 @@ expect char_at_col(s.buffer[0], 10) to_equal("")
 
 #### clips styled text at the right edge and terminates style
 
-- clips styled text at the right edge and terminates style
+1. var s = Screen new
+2. s = s put styled
+3. expect visible width
+4. expect char at col
+5. expect char at col
+6. expect char at col
+7. expect style at col
+8. expect ends with reset
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("clips styled text at the right edge and terminates style")
 var s = Screen.new(10, 1)
 s = s.put_styled(0, 7, "ABCDE", CYAN)
 val line = s.buffer[0]
@@ -381,18 +453,30 @@ expect ends_with_reset(line) to_equal(true)
 
 #### two successive overwrites on same row produce correct styles
 
-- two successive overwrites on same row produce correct styles
+1. var s = Screen new
+2. s = s put styled
+3. s = s put styled
+4. s = s put text
+5. s = s put text
+6. expect style at col
+7. expect char at col
+8. expect style at col
+9. expect style at col
+10. expect style at col
+11. expect char at col
+12. expect style at col
+13. expect style at col
+14. expect visible width
+15. expect ends with reset
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 28 lines folded for reproduction.
+Runnable source: 26 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("two successive overwrites on same row produce correct styles")
 var s = Screen.new(10, 1)
 s = s.put_styled(0, 0, "ABCDE", BOLD)
 s = s.put_styled(0, 5, "FGHIJ", CYAN)
@@ -427,18 +511,20 @@ expect ends_with_reset(line) to_equal(true)
 
 #### plain text is contiguous for .contains()
 
-- plain text is contiguous for .contains()
+1. var s = Screen new
+2. s = s put text
+3. s = s put text
+4. expect s buffer[0] contains
+5. expect s buffer[0] contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("plain text is contiguous for .contains()")
 var s = Screen.new(20, 1)
 s = s.put_text(0, 0, "Hello")
 s = s.put_text(0, 10, "World")
@@ -450,18 +536,20 @@ expect s.buffer[0].contains("World") to_equal(true)
 
 #### styled text is contiguous within a single put_styled
 
-- styled text is contiguous within a single put_styled
+1. var s = Screen new
+2. s = s put styled
+3. s = s put styled
+4. expect s buffer[0] contains
+5. expect s buffer[0] contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("styled text is contiguous within a single put_styled")
 var s = Screen.new(20, 1)
 s = s.put_styled(0, 0, "Bold", BOLD)
 s = s.put_styled(0, 10, "Cyan", CYAN)
@@ -475,18 +563,23 @@ expect s.buffer[0].contains("Cyan") to_equal(true)
 
 #### draw_box renders corners and borders at correct positions
 
-- draw_box renders corners and borders at correct positions
+1. var s = Screen new
+2. s = s draw box
+3. expect char at col
+4. expect char at col
+5. expect char at col
+6. expect char at col
+7. expect char at col
+8. expect char at col
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("draw_box renders corners and borders at correct positions")
 var s = Screen.new(20, 5)
 s = s.draw_box(0, 0, 20, 5, "Test")
 expect char_at_col(s.buffer[0], 0) to_equal("\u{250c}")
@@ -507,12 +600,12 @@ expect char_at_col(s.buffer[2], 19) to_equal("\u{2502}")
 | Category | Application |
 | Status | In Progress |
 | Source | `test/01_unit/app/ui/screen_ansi_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering Screen.put_text ANSI style splice, compound RESET+STYLE prefix tokens, suffix style restore across block boundary, partial overwrite inside styled block, RESET not lost past styled block end, cross-row style leak prevention, visible width stability, round-trip stability, plain text and styled text contiguity, Unicode box drawing.
+Tests covering:
 - Screen.put_text ANSI style splice
 - compound RESET+STYLE prefix tokens
 - suffix style restore across block boundary
@@ -536,51 +629,3 @@ Tests covering Screen.put_text ANSI style splice, compound RESET+STYLE prefix to
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-UNIT`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `53b093cc3eab32c34746010f34f29dbeaefec6ab846c4340ecbb8ca73da8204a`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `53b093cc3eab32c34746010f34f29dbeaefec6ab846c4340ecbb8ca73da8204a`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `53b093cc3eab32c34746010f34f29dbeaefec6ab846c4340ecbb8ca73da8204a`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/01_unit/app/ui/screen_ansi_spec.spl
-mirror: doc/06_spec/01_unit/app/ui/screen_ansi_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/app/ui/screen_ansi_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/app/ui/screen_ansi_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/app/ui/screen_ansi_spec.spl:126:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'col 0 is BOLD, col 2 is CYAN, col 4 is unstyled after overwrite' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/ui/screen_ansi_spec.spl:144:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'mid-block overwrite inside CYAN preserves CYAN for suffix' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/ui/screen_ansi_spec.spl:160:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'keeps CYAN on suffix B after overwriting across BOLD/CYAN boundary' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

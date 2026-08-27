@@ -1,0 +1,107 @@
+# Explicit frozen-schema migration evidence for Formal Verification 2.0.
+#
+# Migration is an admission boundary, not a convenience conversion.  The
+# caller must name both schemas and bind the cache entry to the exact frozen V1
+# policy hash.  Any ambiguity or stale cache state rejects before V2 material
+# can be admitted.
+
+use compiler.common.assurance.policy_schema.{ResolvedAssurancePolicyV1,
+    ResolvedAssurancePolicyV2}
+use std.common.crypto.sha256.{sha256_text}
+
+const FV2_POLICY_SCHEMA_V1 = "ResolvedAssurancePolicyV1"
+const FV2_POLICY_SCHEMA_V2 = "ResolvedAssurancePolicyV2"
+
+pub struct PolicySchemaMigrationRequestV1:
+    source_version: text
+    target_version: text
+    source_policy_hash: text
+    cached_policy_hash: text
+
+pub struct PolicySchemaMigrationReceiptV1:
+    accepted: bool
+    source_version: text
+    target_version: text
+    source_policy_hash: text
+    target_policy_hash: text
+    stale_cache_invalidated: bool
+    invalidated_cache_hash: text
+    replacement_cache_hash: text
+    receipt_hash: text
+    diagnostic: text
+
+    fn passed() -> bool:
+        self.accepted and self.diagnostic == "" and
+            self.source_version == FV2_POLICY_SCHEMA_V1 and
+            self.target_version == FV2_POLICY_SCHEMA_V2 and
+            self.source_policy_hash != "" and self.target_policy_hash != "" and
+            self.stale_cache_invalidated and self.invalidated_cache_hash != "" and
+            self.replacement_cache_hash == self.target_policy_hash and
+            self.receipt_hash != ""
+
+pub struct PolicySchemaCacheV1:
+    schema_version: text
+    policy_hash: text
+
+    fn contains(version: text, policy_hash: text) -> bool:
+        self.schema_version == version and self.policy_hash == policy_hash
+
+pub struct PolicySchemaCacheMigrationResultV1:
+    cache: PolicySchemaCacheV1
+    receipt: PolicySchemaMigrationReceiptV1
+
+fn rejected_policy_migration_v1(
+    request: PolicySchemaMigrationRequestV1,
+    diagnostic: text
+) -> PolicySchemaMigrationReceiptV1:
+    PolicySchemaMigrationReceiptV1(false, request.source_version,
+        request.target_version, request.source_policy_hash, "", false, "", "",
+        "", diagnostic)
+
+pub fn migrate_policy_schema_v1_to_v2(
+    policy: ResolvedAssurancePolicyV1,
+    request: PolicySchemaMigrationRequestV1
+) -> PolicySchemaMigrationReceiptV1:
+    if request.source_version == "" or request.target_version == "":
+        return rejected_policy_migration_v1(request,
+            "FV2-E-MIGRATION-UNVERSIONED: source and target schemas are required")
+    if request.source_version != FV2_POLICY_SCHEMA_V1 or
+            request.target_version != FV2_POLICY_SCHEMA_V2:
+        return rejected_policy_migration_v1(request,
+            "FV2-E-MIGRATION-INCOMPATIBLE: only the frozen V1-to-V2 policy migration is admitted")
+    val exact_source_hash = policy.policy_hash()
+    if request.source_policy_hash != exact_source_hash:
+        return rejected_policy_migration_v1(request,
+            "FV2-E-MIGRATION-SOURCE-HASH: source policy hash does not bind the V1 value")
+    if request.cached_policy_hash != exact_source_hash:
+        return rejected_policy_migration_v1(request,
+            "FV2-E-MIGRATION-STALE-CACHE: cached policy identity is absent or stale")
+    val migrated = ResolvedAssurancePolicyV2.upgrade_v1(policy)
+    val target_hash = migrated.policy_hash()
+    val receipt_hash = sha256_text("PolicySchemaMigrationReceipt-v1" +
+        "|source_version=" + request.source_version +
+        "|target_version=" + request.target_version +
+        "|source_hash=" + exact_source_hash +
+        "|target_hash=" + target_hash +
+        "|invalidated_cache_hash=" + request.cached_policy_hash)
+    PolicySchemaMigrationReceiptV1(true, request.source_version,
+        request.target_version, exact_source_hash, target_hash, true,
+        request.cached_policy_hash, target_hash, receipt_hash, "")
+
+pub fn migrate_policy_cache_v1_to_v2(
+    policy: ResolvedAssurancePolicyV1,
+    cache: PolicySchemaCacheV1,
+    request: PolicySchemaMigrationRequestV1
+) -> PolicySchemaCacheMigrationResultV1:
+    if not cache.contains(request.source_version, request.cached_policy_hash):
+        return PolicySchemaCacheMigrationResultV1(cache,
+            rejected_policy_migration_v1(request,
+                "FV2-E-MIGRATION-CACHE-OWNER: the cache owner has no exact V1 entry to invalidate"))
+    val receipt = migrate_policy_schema_v1_to_v2(policy, request)
+    if not receipt.passed():
+        return PolicySchemaCacheMigrationResultV1(cache, receipt)
+    # Return the owner's replacement state, not merely an assertion that an
+    # invalidation happened.  The old V1 identity is no longer addressable.
+    PolicySchemaCacheMigrationResultV1(
+        PolicySchemaCacheV1(request.target_version, receipt.target_policy_hash),
+        receipt)

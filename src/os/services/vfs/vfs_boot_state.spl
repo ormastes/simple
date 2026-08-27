@@ -2,7 +2,11 @@
 use os.services.vfs.vfs.{VfsManager, Filesystem}
 use os.kernel.loader.container_namespace.{ContainerNamespaceView}
 use os.services.vfs.vfs_service.{VfsService}
-use common.string_core.{char_from_code}
+use common.string_core.{char_from_code, str_char_at}
+use os.services.vfs.vfs_dispatch.{
+    g_vfs_dispatch_write_file_text, g_vfs_dispatch_write_file_bytes,
+    g_vfs_dispatch_delete_file, g_vfs_dispatch_file_exists
+}
 use os.services.vfs.vfs_block_adapters.{
     NvmeBlockAdapter
 }
@@ -29,46 +33,33 @@ use os.services.pcimgr.pcimgr.{pcimgr_init, pcimgr_find_by_class, pcimgr_find_by
 use os.services.pcimgr.driver_match.{PCI_CLASS_STORAGE, PCI_SUBCLASS_NVME}
 use os.kernel.types.capability_types.{CAP_RIGHT_READ, CAP_RIGHT_WRITE, CAP_RIGHT_QUEUE_SUBMIT, SIMPLEOS_NVME_SYSTEM_QUEUE_ID}
 use os.kernel.types.device_mem_types.{DeviceGrant, device_grant_resource_set_label, device_grant_is_isolated}
-use os.kernel.boot.boot_nvme_production_handoff.{boot_nvme_production_handoff_provision_bound}
+use os.kernel.boot.boot_nvme_production_handoff.{boot_nvme_production_handoff_provision}
 use os.kernel.boot.mmio.{mmio_read32, mmio_write32, mmio_read64, mmio_read16, mmio_read8, mmio_write8}
 use os.kernel.memory.memory_swap_runtime.{memory_swap_runtime_install_block_device}
 use std.io.dma.{DmaDir, DmaOwner, DmaCachePolicy, SharedDmaBuffer, dma_alloc}
-use std.thread_sffi.{mutex_raw_create, mutex_raw_lock, mutex_raw_unlock}
-use os.services.vfs.vfs_immutable_include_tree_state_v1.{
-    VfsIncludeMutationTicketV1, vfs_include_mutation_begin_v1,
-    vfs_include_mutation_finish_v1
-}
-use std.fs_driver.mount_table.{
-    MountTable, MountId, DbfsRootMountSealV1, DbfsRootMountSealInfoV1
-}
+use std.fs_driver.mount_table.{MountTable, MountId}
 use std.fs_driver.fat32_stub.{FsFat32Driver}
 use std.fs_driver.instance.{DriverInstance}
-use std.fs_driver.types.{MountOptions}
+use std.fs_driver.types.{MountOptions, Path}
 use std.fs_driver.error.{FsError}
 use std.fs_driver.mount_table.{PositionedDriverKind}
-use std.fs_driver.types.{FileHandle, FileStat, OpenFlags}
+use std.fs_driver.types.{FileHandle, OpenFlags}
 use os.kernel.types.fs_types.{FileFlags, DirEntry, FsNodeKind}
-use std.fs_driver.nvfs_posix_driver.{NvfsPosixDriver}
+use std.fs_driver.nvfs_hosted_driver.{NvfsHostedDriver}
 use os.kernel.log.klog_api.{log_raw_println}
 use os.kernel.loader.app_registry.{app_registry_load, app_registry_load_hardcoded_fallback, app_registry_fat32_alias, app_registry_root_alias, app_registry_cached_bytes, app_registry_cache_bytes, app_registry_cache_boot_app_id, app_registry_boot_seed_entries, app_registry_leaf_for_canonical}
 use os.services.vfs.nvme_boot_runtime_owner.*
 use os.services.vfs.direct_fat32_boot_reader.*
 
 val PURE_FAT32_FILE_READ_MAX: u64 = 33554432
-@unsafe(reason: "raw boot diagnostic line output ABI", capabilities: [ffi])
 extern fn serial_println(msg: text)
-@unsafe(reason: "foreign byte indexing requires caller-proven array bounds", capabilities: [ffi])
+extern fn rt_text_to_bytes(s: text) -> [u8]
+extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_array_new_with_cap(cap: i64) -> [u8]
+extern fn rt_byte_array_new(cap: i64) -> [u8]
+extern fn rt_typed_bytes_u8_push(array: [u8], value: i64) -> bool
 extern fn rt_bytes_u8_at(array: [u8], index: i64) -> i64
 
-@always_inline
-fn _vfs_state_serial_println(msg: text):
-    unsafe(capabilities: [ffi]):
-        serial_println(msg)
-
-@always_inline
-fn _vfs_state_elf_byte(bytes: [u8], index: i64) -> i64:
-    unsafe(capabilities: [ffi]):
-        rt_bytes_u8_at(bytes, index) & 0xFF
 
 var g_vfs: VfsManager = VfsManager.new()
 class VfsFileSize:
@@ -78,252 +69,50 @@ class VfsFileSize:
         self.bytes
 var g_c_adapter: CNvmeBlockAdapter = CNvmeBlockAdapter.new()
 var g_root_fat32: Fat32Core? = nil
-var g_root_nvfs_hosted: NvfsPosixDriver? = nil
+var g_root_nvfs_hosted: NvfsHostedDriver? = nil
 var g_vfs_initialized: bool = false
 var g_vfs_boot_storage_provider: text = "not-mounted"
 var g_vfs_boot_storage_pure_simple: bool = false
-var g_mount_table: MountTable? = Some(MountTable.new())
-val g_mount_table_mutex_v1: i64 = mutex_raw_create()
-var g_mount_table_quarantined_v1: bool = false
-var g_mount_table_lease_active_v1: bool = false
-var g_mount_table_owner_epoch_v1: u64 = 1u64
-var g_mount_table_next_lease_nonce_v1: u64 = 1u64
-var g_mount_table_active_lease_nonce_v1: u64 = 0u64
-var g_include_positioned_handle_ids_v1: [u64] = []
-var g_include_positioned_tickets_v1: [VfsIncludeMutationTicketV1] = []
+var g_mount_table: MountTable = MountTable.new()
 
-fn _positioned_open_may_write_v1(flags: OpenFlags) -> bool:
-    (flags.bits & (1 | 2 | 64 | 512 | 1024)) != 0
-
-fn _mount_affects_include_v1(path: text) -> bool:
-    path == "/" or path == "/usr" or path == "/usr/include" or
-        path.starts_with("/usr/include/")
-
-fn _include_positioned_ticket_take_v1(handle_id: u64) -> VfsIncludeMutationTicketV1?:
-    var index: i64 = 0
-    while index < g_include_positioned_handle_ids_v1.len():
-        if g_include_positioned_handle_ids_v1[index] == handle_id:
-            val ticket = g_include_positioned_tickets_v1[index]
-            g_include_positioned_handle_ids_v1.remove(index)
-            g_include_positioned_tickets_v1.remove(index)
-            return Some(ticket)
-        index = index + 1
-    nil
-
-fn _vfs_state_mount_table_raw_lock_v1() -> bool:
-    if g_mount_table_mutex_v1 <= 0 or g_mount_table_quarantined_v1:
-        return false
-    if not mutex_raw_lock(g_mount_table_mutex_v1): return false
-    if g_mount_table_quarantined_v1:
-        _ = mutex_raw_unlock(g_mount_table_mutex_v1)
-        return false
-    true
-
-fn vfs_state_mount_table_lock_v1() -> bool:
-    if not _vfs_state_mount_table_raw_lock_v1(): return false
-    if g_mount_table_lease_active_v1 or not g_mount_table.?:
-        _ = mutex_raw_unlock(g_mount_table_mutex_v1)
-        return false
-    true
-
-fn vfs_state_mount_table_unlock_v1() -> bool:
-    if mutex_raw_unlock(g_mount_table_mutex_v1): return true
-    g_mount_table_quarantined_v1 = true
-    false
-
-pub(package) struct VfsMountTableOwnerHandleV1:
-    """Copyable coordinate for the canonical VFS owner, never table state."""
-    epoch: u64
-
-pub(package) struct VfsMountTableLeaseV1:
-    """Unique blocking loan moved out of the canonical owner under its lock."""
-    epoch: u64
-    nonce: u64
-    table: MountTable
-
-fn _vfs_state_advance_mount_table_owner_epoch_v1() -> bool:
-    if g_mount_table_owner_epoch_v1 == 0u64 or
-        g_mount_table_owner_epoch_v1 == 0xffffffffffffffffu64:
-        g_mount_table_quarantined_v1 = true
-        return false
-    g_mount_table_owner_epoch_v1 = g_mount_table_owner_epoch_v1 + 1u64
-    true
-
-pub(package) fn vfs_state_mount_table_owner_handle_v1(
-) -> VfsMountTableOwnerHandleV1?:
-    if not vfs_state_mount_table_lock_v1(): return nil
-    val handle = VfsMountTableOwnerHandleV1(
-        epoch: g_mount_table_owner_epoch_v1)
-    if not vfs_state_mount_table_unlock_v1(): return nil
-    Some(handle)
-
-pub(package) fn vfs_state_mount_table_owner_handle_is_live_v1(
-    handle: VfsMountTableOwnerHandleV1
-) -> bool:
-    if not vfs_state_mount_table_lock_v1(): return false
-    val live = handle.epoch != 0u64 and
-        handle.epoch == g_mount_table_owner_epoch_v1
-    if not vfs_state_mount_table_unlock_v1(): return false
-    live
-
-pub(package) fn vfs_state_mount_table_owner_handles_same_live_v1(
-    left: VfsMountTableOwnerHandleV1,
-    right: VfsMountTableOwnerHandleV1
-) -> bool:
-    """Compare opaque coordinates only while the canonical owner is locked."""
-    if not vfs_state_mount_table_lock_v1(): return false
-    val same = left.epoch != 0u64 and
-        left.epoch == right.epoch and
-        left.epoch == g_mount_table_owner_epoch_v1
-    if not vfs_state_mount_table_unlock_v1(): return false
-    same
-
-pub(package) fn vfs_state_mount_table_lease_begin_v1(
-    handle: VfsMountTableOwnerHandleV1
-) -> VfsMountTableLeaseV1?:
-    """Move the sole table value out; ordinary VFS operations fail closed."""
-    if not _vfs_state_mount_table_raw_lock_v1(): return nil
-    val bad_lease_start = g_mount_table_lease_active_v1 or not g_mount_table.? or
-        handle.epoch == 0u64 or handle.epoch != g_mount_table_owner_epoch_v1
-    if bad_lease_start:
-        _ = mutex_raw_unlock(g_mount_table_mutex_v1)
-        return nil
-    if g_mount_table_next_lease_nonce_v1 == 0u64 or
-        g_mount_table_next_lease_nonce_v1 == 0xffffffffffffffffu64:
-        g_mount_table_quarantined_v1 = true
-        _ = mutex_raw_unlock(g_mount_table_mutex_v1)
-        return nil
-    val nonce = g_mount_table_next_lease_nonce_v1
-    g_mount_table_next_lease_nonce_v1 = nonce + 1u64
-    val table = g_mount_table.unwrap()
-    g_mount_table = nil
-    g_mount_table_lease_active_v1 = true
-    g_mount_table_active_lease_nonce_v1 = nonce
-    if not vfs_state_mount_table_unlock_v1(): return nil
-    Some(VfsMountTableLeaseV1(
-        epoch: handle.epoch, nonce: nonce, table: table))
-
-pub(package) fn vfs_state_mount_table_lease_restore_v1(
-    lease: VfsMountTableLeaseV1
-) -> bool:
-    """Restore exactly one live lease; stale/double restores quarantine owner."""
-    if not _vfs_state_mount_table_raw_lock_v1(): return false
-    if not g_mount_table_lease_active_v1 or g_mount_table.? or
-        lease.epoch == 0u64 or lease.epoch != g_mount_table_owner_epoch_v1 or
-        lease.nonce == 0u64 or
-        lease.nonce != g_mount_table_active_lease_nonce_v1:
-        g_mount_table_quarantined_v1 = true
-        _ = mutex_raw_unlock(g_mount_table_mutex_v1)
-        return false
-    g_mount_table = Some(lease.table)
-    g_mount_table_lease_active_v1 = false
-    g_mount_table_active_lease_nonce_v1 = 0u64
-    vfs_state_mount_table_unlock_v1()
-
-# Narrow owner port for the server-data namespace.  Only opaque seals and
-# immutable revalidation facts cross this seam; the MountTable and DBFS driver
-# remain owned here.
-pub fn vfs_state_acquire_dbfs_root_mount_seal_v1(
-) -> Result<DbfsRootMountSealV1, FsError>:
-    if not vfs_state_mount_table_lock_v1(): return Err(FsError.IoError(code: 0u32))
-    var table = g_mount_table.unwrap()
-    val result = table.acquire_dbfs_root_mount_seal()
-    g_mount_table = Some(table)
-    if not vfs_state_mount_table_unlock_v1(): return Err(FsError.IoError(code: 0u32))
-    result
-
-pub fn vfs_state_revalidate_dbfs_root_mount_seal_v1(
-    seal: DbfsRootMountSealV1
-) -> Result<DbfsRootMountSealInfoV1, FsError>:
-    if not vfs_state_mount_table_lock_v1(): return Err(FsError.IoError(code: 0u32))
-    var table = g_mount_table.unwrap()
-    val result = table.revalidate_dbfs_root_mount_seal(seal)
-    if not vfs_state_mount_table_unlock_v1(): return Err(FsError.IoError(code: 0u32))
-    result
-
-pub fn vfs_state_close_dbfs_root_mount_seal_v1(
-    seal: DbfsRootMountSealV1
-) -> Result<(), FsError>:
-    if not vfs_state_mount_table_lock_v1(): return Err(FsError.IoError(code: 0u32))
-    var table = g_mount_table.unwrap()
-    val result = table.close_dbfs_root_mount_seal(seal)
-    g_mount_table = Some(table)
-    if not vfs_state_mount_table_unlock_v1(): return Err(FsError.IoError(code: 0u32))
-    result
-
-# Owner APIs for mutable root and MountTable state. Ordinary operations receive
-# a mutex-scoped loan and commit only through this declaring module; the sole
-# blocking exception is the exact nonce-bound lease above.
-fn vfs_state_reset_rootfs() -> bool:
-    val ticket = vfs_include_mutation_begin_v1("/usr/include")
-    if ticket.is_err(): return false
-    if not vfs_state_mount_table_lock_v1():
-        _ = vfs_include_mutation_finish_v1(ticket.unwrap())
-        return false
+# Owner APIs for mutable root and MountTable state. Callers may work on a
+# value-semantic driver copy, but only this declaring module commits it.
+fn vfs_state_reset_rootfs():
     g_root_fat32 = nil
     g_root_nvfs_hosted = nil
-    g_mount_table_lease_active_v1 = false
-    g_mount_table_active_lease_nonce_v1 = 0u64
-    g_mount_table = Some(MountTable.new())
-    if not _vfs_state_advance_mount_table_owner_epoch_v1():
-        _ = vfs_state_mount_table_unlock_v1()
-        _ = vfs_include_mutation_finish_v1(ticket.unwrap())
-        return false
+    g_mount_table = MountTable.new()
     g_vfs_initialized = false
     g_vfs_boot_storage_provider = "not-mounted"
     g_vfs_boot_storage_pure_simple = false
-    if not vfs_state_mount_table_unlock_v1():
-        _ = vfs_include_mutation_finish_v1(ticket.unwrap())
-        return false
-    vfs_include_mutation_finish_v1(ticket.unwrap())
 
 fn vfs_state_mark_rootfs_ready():
     g_vfs_initialized = true
 
-fn vfs_state_commit_root_nvfs(driver: NvfsPosixDriver):
+fn vfs_state_commit_root_nvfs(driver: NvfsHostedDriver):
     g_root_nvfs_hosted = Some(driver)
 
 fn vfs_state_mount(path: text, driver: DriverInstance, options: MountOptions) -> Result<MountId, FsError>:
-    val ticket = if _mount_affects_include_v1(path):
-        val begun = vfs_include_mutation_begin_v1("/usr/include")
-        if begun.is_err(): return Err(FsError.Permission)
-        begun.unwrap()
-    else:
-        nil
-    if not vfs_state_mount_table_lock_v1():
-        _ = vfs_include_mutation_finish_v1(ticket)
-        return Err(FsError.IoError(code: 0u32))
-    var table = g_mount_table.unwrap()
+    var table = g_mount_table
     val result = table.mount(path, driver, options)
-    g_mount_table = Some(table)
-    if not vfs_state_mount_table_unlock_v1():
-        _ = vfs_include_mutation_finish_v1(ticket)
-        return Err(FsError.IoError(code: 0u32))
-    if not vfs_include_mutation_finish_v1(ticket):
-        return Err(FsError.IoError(code: 0u32))
+    g_mount_table = table
     result
 
 fn vfs_state_unmount(path: text) -> Result<(), FsError>:
-    val ticket = if _mount_affects_include_v1(path):
-        val begun = vfs_include_mutation_begin_v1("/usr/include")
-        if begun.is_err(): return Err(FsError.Permission)
-        begun.unwrap()
-    else:
-        nil
-    if not vfs_state_mount_table_lock_v1():
-        _ = vfs_include_mutation_finish_v1(ticket)
-        return Err(FsError.IoError(code: 0u32))
-    var table = g_mount_table.unwrap()
+    var table = g_mount_table
     val result = table.unmount(path)
-    g_mount_table = Some(table)
-    if not vfs_state_mount_table_unlock_v1():
-        _ = vfs_include_mutation_finish_v1(ticket)
-        return Err(FsError.IoError(code: 0u32))
-    if not vfs_include_mutation_finish_v1(ticket):
-        return Err(FsError.IoError(code: 0u32))
+    g_mount_table = table
     result
 
 fn vfs_state_positioned_open(path: text, flags: OpenFlags) -> Result<FileHandle, FsError>:
+    var table = g_mount_table
+    val result = table.open(path, flags)
+    g_mount_table = table
+    result
+
+fn vfs_state_positioned_open_binding_v1(
+    path: text, flags: OpenFlags
+) -> Result<PositionedOpenBindingV1, FsError>:
+    """Issue one MountTable-selected positioned binding under the owner lock."""
     var include_ticket: VfsIncludeMutationTicketV1? = nil
     if _positioned_open_may_write_v1(flags):
         val begun = vfs_include_mutation_begin_v1(path)
@@ -333,95 +122,56 @@ fn vfs_state_positioned_open(path: text, flags: OpenFlags) -> Result<FileHandle,
         _ = vfs_include_mutation_finish_v1(include_ticket)
         return Err(FsError.IoError(code: 0u32))
     var table = g_mount_table.unwrap()
-    val result = table.open(path, flags)
-    g_mount_table = Some(table)
-    # Bind the include mutation lease to its handle while the same owner lock
-    # still excludes close. Publishing the handle before these parallel arrays
-    # were updated let concurrent close lose or consume the wrong lease.
+    val result = table.positioned_open_binding_v1(path, flags)
     var include_ticket_registered = false
     if result.is_ok() and include_ticket.?:
-        g_include_positioned_handle_ids_v1.push(result.unwrap().id)
-        g_include_positioned_tickets_v1.push(include_ticket.unwrap())
-        include_ticket_registered = true
+        val file_object_id = table.positioned_binding_file_object_id_v1(
+            result.unwrap())
+        if file_object_id != 0u64:
+            g_include_positioned_handle_ids_v1.push(file_object_id)
+            g_include_positioned_tickets_v1.push(include_ticket.unwrap())
+            include_ticket_registered = true
+    g_mount_table = Some(table)
     if not vfs_state_mount_table_unlock_v1():
-        # A registered lease remains pinned when unlock quarantines the table;
-        # finishing it here would falsely declare immutable-include stability
-        # while the corresponding writable handle is still live.
         if not include_ticket_registered:
             _ = vfs_include_mutation_finish_v1(include_ticket)
         return Err(FsError.IoError(code: 0u32))
     if result.is_err():
         _ = vfs_include_mutation_finish_v1(include_ticket)
         return result
+    if include_ticket.? and not include_ticket_registered:
+        _ = vfs_include_mutation_finish_v1(include_ticket)
+        return Err(FsError.StaleHandle)
     result
 
 fn vfs_state_positioned_close(handle: FileHandle) -> Result<(), FsError>:
-    if not vfs_state_mount_table_lock_v1():
-        return Err(FsError.IoError(code: 0u32))
-    var table = g_mount_table.unwrap()
+    var table = g_mount_table
     val result = table.close(handle)
-    # A driver-close failure leaves the handle live in MountTable. Retain its
-    # include mutation lease in that case; only a successful close may declare
-    # the guarded tree stable again.
-    val include_ticket = if result.is_ok():
-        _include_positioned_ticket_take_v1(handle.id)
-    else:
-        nil
-    g_mount_table = Some(table)
-    if not vfs_state_mount_table_unlock_v1():
-        _ = vfs_include_mutation_finish_v1(include_ticket)
-        return Err(FsError.IoError(code: 0u32))
-    if not vfs_include_mutation_finish_v1(include_ticket):
-        return Err(FsError.IoError(code: 0u32))
-    result
-
-fn vfs_state_positioned_fstat(handle: FileHandle) -> Result<FileStat, FsError>:
-    if not vfs_state_mount_table_lock_v1(): return Err(FsError.IoError(code: 0u32))
-    var table = g_mount_table.unwrap()
-    val result = table.positioned_fstat(handle.id)
-    g_mount_table = Some(table)
-    if not vfs_state_mount_table_unlock_v1(): return Err(FsError.IoError(code: 0u32))
-    result
-
-fn vfs_state_positioned_ftruncate(handle: FileHandle, new_size: i64) -> Result<(), FsError>:
-    """Resize one MountTable-owned positioned file object without path lookup."""
-    if not vfs_state_mount_table_lock_v1(): return Err(FsError.IoError(code: 0u32))
-    var table = g_mount_table.unwrap()
-    val result = table.ftruncate(handle, new_size)
-    g_mount_table = Some(table)
-    if not vfs_state_mount_table_unlock_v1(): return Err(FsError.IoError(code: 0u32))
+    g_mount_table = table
     result
 
 fn vfs_state_fsync(handle: FileHandle) -> Result<(), FsError>:
-    if not vfs_state_mount_table_lock_v1(): return Err(FsError.IoError(code: 0u32))
-    var table = g_mount_table.unwrap()
+    var table = g_mount_table
     val result = table.fsync(handle)
-    g_mount_table = Some(table)
-    if not vfs_state_mount_table_unlock_v1(): return Err(FsError.IoError(code: 0u32))
+    g_mount_table = table
     result
 
 fn vfs_state_fdatasync(handle: FileHandle) -> Result<(), FsError>:
-    if not vfs_state_mount_table_lock_v1(): return Err(FsError.IoError(code: 0u32))
-    var table = g_mount_table.unwrap()
+    var table = g_mount_table
     val result = table.fdatasync(handle)
-    g_mount_table = Some(table)
-    if not vfs_state_mount_table_unlock_v1(): return Err(FsError.IoError(code: 0u32))
+    g_mount_table = table
     result
 
 fn vfs_state_positioned_read(file_id: u64, kind: PositionedDriverKind, offset: u64, length: u64) -> Result<[u8], FsError>:
-    if not vfs_state_mount_table_lock_v1(): return Err(FsError.IoError(code: 0u32))
-    var table = g_mount_table.unwrap()
+    var table = g_mount_table
     val result = table.positioned_read_bytes(file_id, kind, offset, length)
-    g_mount_table = Some(table)
-    if not vfs_state_mount_table_unlock_v1(): return Err(FsError.IoError(code: 0u32))
+    g_mount_table = table
     result
 
 fn vfs_state_positioned_write(file_id: u64, kind: PositionedDriverKind, offset: u64, data: [u8]) -> Result<u64, FsError>:
-    if not vfs_state_mount_table_lock_v1(): return Err(FsError.IoError(code: 0u32))
-    var table = g_mount_table.unwrap()
+    var table = g_mount_table
     val result = table.positioned_write_bytes(file_id, kind, offset, data)
-    g_mount_table = Some(table)
-    if not vfs_state_mount_table_unlock_v1(): return Err(FsError.IoError(code: 0u32))
+    g_mount_table = table
     result
 
 
@@ -475,22 +225,15 @@ fn vfs_boot_nvme_assign_discovered_user_namespace_hardware_driver_instance(
 
 # Boot orchestration mutates canonical state in its declaring module.
 fn _vfs_boot_reset_storage_state():
-    if not vfs_state_mount_table_lock_v1(): return
     g_root_fat32 = nil
     g_root_nvfs_hosted = nil
     g_vfs_initialized = false
-    g_mount_table_lease_active_v1 = false
-    g_mount_table_active_lease_nonce_v1 = 0u64
-    g_mount_table = Some(MountTable.new())
-    if not _vfs_state_advance_mount_table_owner_epoch_v1():
-        _ = vfs_state_mount_table_unlock_v1()
-        return
+    g_mount_table = MountTable.new()
     g_vfs = VfsManager.new()
     g_vfs_boot_storage_provider = "not-mounted"
     g_vfs_boot_storage_pure_simple = false
     nvme_boot_runtime_reset_leases()
     direct_fat32_boot_reader_reset()
-    _ = vfs_state_mount_table_unlock_v1()
 
 pub fn vfs_boot_init() -> bool:
     """Initialize the full storage stack: PCI -> NVMe -> FAT32 -> VFS.
@@ -588,25 +331,25 @@ fn _vfs_boot_init_pure_nvme_fat32(nvme_idx: u64) -> bool:
     """Try the pure-Simple NVMe -> BlockDevice -> FAT32 stack first."""
     g_pure_nvme_root_fat32_ready = false
     log_raw_println("[vfs-init] Trying pure-Simple NVMe + FAT32 stack...")
-    _vfs_state_serial_println("[vfs-init] pure-nvme begin")
+    serial_println("[vfs-init] pure-nvme begin")
     val grant_result = pcimgr_grant_device(nvme_idx, 0)
     if grant_result.is_err():
         log_raw_println("[vfs-init] pure-Simple NVMe grant failed: {grant_result.unwrap_err()}")
-        _vfs_state_serial_println("[vfs-init] pure-nvme grant failed")
+        serial_println("[vfs-init] pure-nvme grant failed")
         return false
     nvme_boot_runtime_reset()
     val grant = grant_result.unwrap()
-    _vfs_state_serial_println("[vfs-init] pure-nvme grant ok")
+    serial_println("[vfs-init] pure-nvme grant ok")
     val nvme_init = nvme_boot_runtime_init(grant)
     if nvme_init.is_err():
         log_raw_println("[vfs-init] pure-Simple NVMe init failed: {nvme_init.unwrap_err()}")
-        _vfs_state_serial_println("[vfs-init] pure-nvme init failed")
+        serial_println("[vfs-init] pure-nvme init failed")
         return false
     val transfer_evidence_result = nvme_boot_runtime_transfer_evidence(
         device_grant_is_isolated(grant))
     if transfer_evidence_result.is_err():
         log_raw_println("[vfs-init] pure-Simple NVMe transfer probe failed: {transfer_evidence_result.unwrap_err()}")
-        _vfs_state_serial_println("[vfs-init] pure-nvme transfer failed")
+        serial_println("[vfs-init] pure-nvme transfer failed")
         return false
     val transfer_evidence = transfer_evidence_result.unwrap()
     val lease_result = vfs_boot_nvme_system_fat32_lease_from_transfer_evidence(
@@ -617,7 +360,7 @@ fn _vfs_boot_init_pure_nvme_fat32(nvme_idx: u64) -> bool:
     val lease = if lease_result.is_err():
         val lease_err = lease_result.unwrap_err()
         log_raw_println("[vfs-init] pure-Simple NVMe evidence lease policy degraded: {lease_err}")
-        _vfs_state_serial_println("[vfs-init] pure-nvme lease policy degraded " + lease_err)
+        serial_println("[vfs-init] pure-nvme lease policy degraded " + lease_err)
         vfs_boot_nvme_system_fat32_lease(nvme_boot_runtime_sector_size(), nvme_boot_runtime_sector_count(), grant)
     else:
         lease_result.unwrap()
@@ -625,16 +368,12 @@ fn _vfs_boot_init_pure_nvme_fat32(nvme_idx: u64) -> bool:
     val bounce_init = adapter.init_bounce_buffer()
     if bounce_init.is_err():
         log_raw_println("[vfs-init] pure-Simple NVMe bounce buffer failed: {bounce_init.unwrap_err()}")
-        _vfs_state_serial_println("[vfs-init] pure-nvme bounce failed")
+        serial_println("[vfs-init] pure-nvme bounce failed")
         return false
-    val backend_binding = nvme_boot_runtime_backend_binding(lease.base_lba, lease.lba_count)
-    if backend_binding.is_err():
-        log_raw_println("[vfs-init] pure-Simple NVMe backend identity unavailable: {backend_binding.unwrap_err()}")
-        _vfs_state_serial_println("[vfs-init] pure-nvme backend identity unavailable")
-        return false
+    boot_nvme_production_handoff_provision(adapter, transfer_evidence, lease)
     val boot_dma = _vfs_boot_nvme_shared_dma(4096u32)
     if boot_dma.is_err():
-        _vfs_state_serial_println("[vfs-init] boot sector dma alloc failed")
+        serial_println("[vfs-init] boot sector dma alloc failed")
         return false
     val boot_shared = boot_dma.unwrap()
     var zero_i: u64 = 0
@@ -645,34 +384,54 @@ fn _vfs_boot_init_pure_nvme_fat32(nvme_idx: u64) -> bool:
     if boot_sector_probe.is_err():
         val boot_read_err = boot_sector_probe.unwrap_err()
         log_raw_println("[vfs-init] pure-Simple FAT32 boot sector read failed: {boot_read_err}")
-        _vfs_state_serial_println("[vfs-init] boot sector direct read failed " + boot_read_err)
+        serial_println("[vfs-init] boot sector direct read failed " + boot_read_err)
         return false
-    _vfs_state_serial_println("[vfs-init] boot sector direct read ok")
+    serial_println("[vfs-init] boot sector direct read ok")
     if not _vfs_boot_init_direct_fat32_reader_from_addr(boot_shared.cpu_virt_addr):
         log_raw_println("[vfs-init] pure-Simple direct FAT32 mount failed")
-        _vfs_state_serial_println("[vfs-init] fat32 direct mount failed")
+        serial_println("[vfs-init] fat32 direct mount failed")
         return false
     var version_probe = _vfs_boot_read_version_probe_raw()
     if version_probe.len() <= 0:
         log_raw_println("[vfs-init] version file read probe failed path=/VERSION.TXT")
-        _vfs_state_serial_println("[vfs-init] version read failed")
+        serial_println("[vfs-init] version read failed")
         return false
-    _vfs_state_serial_println("[vfs-init] numeric version probe ok bytes={version_probe.len()}")
+    serial_println("[vfs-init] numeric version probe ok bytes={version_probe.len()}")
     app_registry_load_hardcoded_fallback()
     val exec_probe = _vfs_boot_read_app_name11_raw(0x42u32, 0x52u32, 0x4Fu32, 0x57u32, 0x53u32, 0x4Du32, 0x46u32, 0x20u32, 0x53u32, 0x4Du32, 0x46u32)
     if exec_probe.len() <= 4 or not _bytes_have_elf_magic(exec_probe):
-        _vfs_state_serial_println("[vfs-init] exec probe failed")
+        serial_println("[vfs-init] exec probe failed")
         return false
-    # The direct reader above is only bootstrap evidence.  Completion requires
-    # publishing the same lease-backed adapter through the canonical shared
-    # FAT32 owner; returning success without this commit gave callers a
-    # path-only filesystem that could not issue MountTable execution authority.
+    # BUG(codegen, freestanding entry-closure cranelift): BlockDevice
+    # trait-object dispatch performs an extra dereference — the indirect call
+    # in Fat32Core.read_boot_sector (+0x18, self._device_sector_size()) jumps
+    # to the callee's own first 8 code bytes read as an address
+    # (rip=cr2=0x0001e0ec8148e589 = "push rbp; mov rbp,rsp; sub rsp,0x1e0"),
+    # and the recovering fault handler then storms without progressing.
+    # Until that dispatch bug is fixed, skip the hosted SharedFat32Driver
+    # mount so the desktop keeps its degraded-but-rendering fallback. The
+    # scalar direct reader above has already validated geometry, version,
+    # and app-payload reads at their correct clusters.
+    #
+    # RE-VERIFIED 2026-07-17 (SEED-CODEGEN lane): re-enabling this call in a
+    # clean own-seed `--entry-closure --opt-level=aggressive` freestanding
+    # build reproduces the IDENTICAL fault signature (cr2=0x0001e0ec8148e589,
+    # incrementing by 2 per recovered fault — 29k+ occurrences in ~20s),
+    # confirming C8 is still open. A separate, real vtable-compaction bug was
+    # found and fixed while investigating (see bug doc C8 section addendum)
+    # but does not touch this dispatch site: NvmeBlockAdapter implements all
+    # 3 BlockDevice methods with no gap, so its vtable is byte-identical
+    # before/after that fix — it was never the cause here. Skip stays in
+    # place; C8's actual mechanism remains unresolved.
+    if true:
+        serial_println("[vfs-init] hosted fat32 mount skipped: blockdevice-dispatch-codegen-bug")
+        return false
     val pure_root_mount = nvme_boot_runtime_commit_system_fat32(adapter, lease)
     if pure_root_mount.is_ok():
         log_raw_println("[vfs-init] shared FAT32 root mounted after direct bootstrap")
     else:
         log_raw_println("[vfs-init] shared FAT32 root mount required after direct bootstrap")
-        _vfs_state_serial_println("[vfs-init] shared FAT32 root mount failed")
+        serial_println("[vfs-init] shared FAT32 root mount failed")
         return false
     g_root_fat32 = nil
     g_vfs_initialized = true
@@ -683,17 +442,13 @@ fn _vfs_boot_init_pure_nvme_fat32(nvme_idx: u64) -> bool:
     val hello_bytes = _vfs_boot_read_app_name11_raw(0x48u32, 0x45u32, 0x4Cu32, 0x4Cu32, 0x4Fu32, 0x53u32, 0x4Du32, 0x46u32, 0x53u32, 0x4Du32, 0x46u32)
     val clang_bytes = _vfs_boot_read_app_name11_raw(0x43u32, 0x4Cu32, 0x41u32, 0x4Eu32, 0x47u32, 0x53u32, 0x4Du32, 0x46u32, 0x53u32, 0x4Du32, 0x46u32)
     if hello_bytes.len() <= 4 or clang_bytes.len() <= 4:
-        _vfs_state_serial_println("[vfs-init] required desktop app payload missing")
+        serial_println("[vfs-init] required desktop app payload missing")
         return false
     app_registry_cache_bytes("/sys/apps/hello_world", hello_bytes)
     app_registry_cache_bytes("/sys/apps/clang", clang_bytes)
     app_registry_cache_boot_app_id(3u64, hello_bytes)
     app_registry_cache_boot_app_id(12u64, clang_bytes)
-    # Publish only after every boot prerequisite has committed. A failed
-    # bootstrap path must not leave an apparently ready storage handoff.
-    boot_nvme_production_handoff_provision_bound(
-        adapter, transfer_evidence, lease, backend_binding.unwrap())
-    _vfs_state_serial_println("[vfs-init] required desktop app payloads cached")
+    serial_println("[vfs-init] required desktop app payloads cached")
     log_raw_println("[vfs-init] version file read ok path=/sys/version.txt bytes={version_probe.len()}")
     log_raw_println("[vfs-init] executable load probe ok path=/sys/apps/browser_demo.smf bytes={exec_probe.len()}")
     log_raw_println("[vfs] mounted fat32 provider=pure-simple-direct")
@@ -886,10 +641,10 @@ fn _known_app_has_elf_magic(buf_addr: u64) -> bool:
 fn _bytes_have_elf_magic(bytes: [u8]) -> bool:
     if bytes.len() < 4:
         return false
-    _vfs_state_elf_byte(bytes, 0) == 0x7F and
-        _vfs_state_elf_byte(bytes, 1) == 0x45 and
-        _vfs_state_elf_byte(bytes, 2) == 0x4C and
-        _vfs_state_elf_byte(bytes, 3) == 0x46
+    (rt_bytes_u8_at(bytes, 0) & 0xFF) == 0x7F and
+        (rt_bytes_u8_at(bytes, 1) & 0xFF) == 0x45 and
+        (rt_bytes_u8_at(bytes, 2) & 0xFF) == 0x4C and
+        (rt_bytes_u8_at(bytes, 3) & 0xFF) == 0x46
 
 fn _copy_bytes_from_addr(addr: u64, size: u64) -> [u8]:
     var out: [u8] = []
@@ -916,9 +671,9 @@ fn _cache_c_fat32_exec_bytes(path: text) -> [u8]:
 fn _seed_c_fat32_exec_bytes(label: text, path: text) -> [u8]:
     val bytes = _cache_c_fat32_exec_bytes(path)
     if bytes.len() > 0:
-        _vfs_state_serial_println("[vfs-fix] {label} seeded len={bytes.len()} path={path}")
+        serial_println("[vfs-fix] {label} seeded len={bytes.len()} path={path}")
     else:
-        _vfs_state_serial_println("[vfs-fix] {label} probe skipped path={path}")
+        serial_println("[vfs-fix] {label} probe skipped path={path}")
     bytes
 
 fn _seed_root_fat32_app_registry(root: Fat32Core):
@@ -934,9 +689,9 @@ fn _seed_root_fat32_app_registry(root: Fat32Core):
 fn _seed_root_fat32_exec_bytes(root: Fat32Core, label: text, path: text) -> [u8]:
     val bytes = vfs_boot_root_read_file_bytes_once(root, path)
     if bytes.len() > 4 and _bytes_have_elf_magic(bytes):
-        _vfs_state_serial_println("[vfs-fix] {label} seeded len={bytes.len()} path={path}")
+        serial_println("[vfs-fix] {label} seeded len={bytes.len()} path={path}")
         return bytes
-    _vfs_state_serial_println("[vfs-fix] {label} probe skipped path={path}")
+    serial_println("[vfs-fix] {label} probe skipped path={path}")
     []
 
 fn _seed_root_fat32_exec_cache(root: Fat32Core):

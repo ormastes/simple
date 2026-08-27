@@ -5,11 +5,9 @@
 
 use std.common.string_core.{char_from_code}
 
-extern fn rt_string_bytes(value: text) -> [i64]
-
 # Local definitions (runtime can't re-export imported symbols)
 fn LB() -> text:
-    char_from_code(123)
+    (123 as char).to_string()
 
 fn RB() -> text:
     char_from_code(125)
@@ -55,9 +53,6 @@ fn jo5(p1: String, p2: String, p3: String, p4: String, p5: String) -> String:
 # Build JSON array from list of strings
 fn ja(items: [String]) -> String:
     "[" + items.join(",") + "]"
-
-fn unwrap_idx(opt_idx: i64) -> i64:
-    opt_idx
 
 # --- JSON parsing helpers ---
 
@@ -178,34 +173,14 @@ fn SB_R() -> text:
 fn find_sub(haystack: text, needle: text) -> i64:
     if not haystack.contains(needle):
         return -1
-    # O(n) byte scan: the literal slice compare `haystack[i:i+nlen]` was O(i)
-    # per position (UTF-8 slice), i.e. O(n^2) — slow for keys late in a large
-    # body. Byte access is O(1). Returns a CHAR index (callers substring by
-    # char): ci counts char-start bytes; ASCII keys' first byte never collides
-    # with UTF-8 multibyte bytes (all >= 0x80).
-    val hb = rt_string_bytes(haystack)
-    val nb = rt_string_bytes(needle)
-    val nlen = nb.len()
-    val hlen = hb.len()
+    val nlen = needle.len()
+    val hlen = haystack.len()
     if nlen == 0:
         return 0
-    val first = nb[0].to_i64()
     var i = 0
-    var ci = -1
     while i <= hlen - nlen:
-        val v = hb[i].to_i64()
-        if v < 128 or v >= 192:
-            ci = ci + 1
-        if v == first:
-            var j = 1
-            var matched = true
-            while j < nlen:
-                if hb[i + j].to_i64() != nb[j].to_i64():
-                    matched = false
-                    break
-                j = j + 1
-            if matched:
-                return ci
+        if haystack[i:i + nlen] == needle:
+            return i
         i = i + 1
     -1
 
@@ -222,67 +197,42 @@ fn skip_ws(s: text, start: i64) -> i64:
     return i
 
 fn read_string_end(s: text, start_quote: i64) -> i64:
-    # O(n) byte scan. Indexed char_at()/text-array cs[i]/`for ch in s` are all
-    # O(n) per step in the interpreter, making this O(n^2) and dominating MCP
-    # handshake/tools-list latency. Byte indexing is O(1). Returns a CHAR index
-    # (callers substring by char): UTF-8 multibyte bytes are all >= 0x80 and
-    # never collide with the ASCII structural bytes, so `ci` counts char-start
-    # bytes to recover the char index. See test/05_perf/mcp_json_perf_spec.spl.
-    val b = rt_string_bytes(s)
-    var i = 0
-    var ci = -1
+    var i = start_quote + 1
     var escaped = false
-    while i < b.len():
-        val v = b[i].to_i64()
-        if v < 128 or v >= 192:
-            ci = ci + 1
-        if ci > start_quote:
-            if escaped:
-                escaped = false
-            elif v == 92:
-                escaped = true
-            elif v == 34:
-                return ci
+    while i < s.len():
+        val ch = char_at(s, i)
+        if escaped:
+            escaped = false
+        elif ch == "\\":
+            escaped = true
+        elif ch == Q():
+            return i
         i = i + 1
     return -1
 
 fn read_nested_end(s: text, start_index: i64) -> i64:
-    # O(n) byte scan. Indexed char_at()/text-array cs[i]/`for ch in s` are all
-    # O(n) per step in the interpreter, so this was O(n^2):
-    # extract_field_raw('result') over a ~2KB tools/list response took ~6.9ms/
-    # call and grew quadratically with the 151-tool response size, dominating
-    # handshake latency (codex timeout). Byte indexing is O(1). Returns a CHAR
-    # index (callers substring by char): UTF-8 multibyte bytes are all >= 0x80
-    # and never collide with the ASCII structural bytes ({ } [ ] " \), so `ci`
-    # counts char-start bytes to recover the char index.
-    # See test/05_perf/mcp_json_perf_spec.spl.
-    val b = rt_string_bytes(s)
-    var i = 0
-    var ci = -1
+    var i = start_index
     var depth = 0
     var in_string = false
     var escaped = false
-    while i < b.len():
-        val v = b[i].to_i64()
-        if v < 128 or v >= 192:
-            ci = ci + 1
-        if ci >= start_index:
-            if in_string:
-                if escaped:
-                    escaped = false
-                elif v == 92:
-                    escaped = true
-                elif v == 34:
-                    in_string = false
-            else:
-                if v == 34:
-                    in_string = true
-                elif v == 123 or v == 91:
-                    depth = depth + 1
-                elif v == 125 or v == 93:
-                    depth = depth - 1
-                    if depth == 0:
-                        return ci
+    while i < s.len():
+        val ch = char_at(s, i)
+        if in_string:
+            if escaped:
+                escaped = false
+            elif ch == "\\":
+                escaped = true
+            elif ch == Q():
+                in_string = false
+        else:
+            if ch == Q():
+                in_string = true
+            elif ch == LB() or ch == SB_L():
+                depth = depth + 1
+            elif ch == RB() or ch == SB_R():
+                depth = depth - 1
+                if depth == 0:
+                    return i
         i = i + 1
     return -1
 
@@ -368,4 +318,3 @@ fn extract_nested_raw(json: text, key: text) -> text:
     extract_field_raw(json=params, key=key)
 
 # --- Exports ---
-export unwrap_idx

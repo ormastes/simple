@@ -1,0 +1,79 @@
+use std.spec
+use compiler.common.assurance.formal_status.{FormalStatus}
+use compiler.common.assurance.flight_rules.{assurance_text_hash}
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.assurance.formal_receipt.{ProofReceiptV1}
+use compiler.common.assurance.replay_receipt.{ReplayCheckerClassV1,
+    ReplayOutcomeV1, ReplayCheckerReceiptV1, close_independent_replay_v1}
+use verification.simpleos_capability_rights_refinement.{CAPABILITY_RIGHTS_CASE_COUNT_V1, capability_rights_spec_v1, capability_rights_mutant_v1, capability_rights_verification_cache_key_v1, validate_simpleos_capability_rights_refinement_v1, promote_simpleos_capability_rights_refinement_v2}
+use os.kernel.types.capability_types.{capability_rights_allow}
+
+fn cap_axiom_report() -> text:
+    "'KernelCapabilities.rights_allow9_sound' depends on axioms: [propext, Quot.sound]"
+
+fn cap_checker(class_: ReplayCheckerClassV1) -> ReplayCheckerReceiptV1:
+    ReplayCheckerReceiptV1(
+        "ReplayCheckerReceipt-v1", class_,
+        if class_ == ReplayCheckerClassV1.FreshLeanKernel: "leanchecker" else: "nanoda",
+        "pinned", sha256_text(if class_ == ReplayCheckerClassV1.FreshLeanKernel: "fresh-lean-binary" else: "independent-kernel-binary"), "KernelCapabilities", "KernelCapabilities.rights_allow9_sound", sha256_text("kernel-capabilities-olean"),
+        sha256_text("policy"), sha256_text("output"), ReplayOutcomeV1.Accepted, "")
+
+describe "FV2 SimpleOS capability-rights refinement":
+    it "checks the complete 9-bit product domain and emits source refinement only":
+        val receipt = validate_simpleos_capability_rights_refinement_v1(cap_axiom_report())
+        expect(receipt.diagnostic).to_equal("")
+        expect(receipt.checked_case_count).to_equal(CAPABILITY_RIGHTS_CASE_COUNT_V1)
+        expect(receipt.counterexample_count).to_equal(0)
+        expect(receipt.mutant_counterexample_count).to_be_greater_than(0)
+        expect(receipt.status).to_equal(FormalStatus.ModelProven)
+        val key = capability_rights_verification_cache_key_v1()
+        expect(receipt.permits_model_evidence(key)).to_be(true)
+        expect(receipt.permits_source_refinement(key)).to_be(false)
+        expect(receipt.status.permits_verified_release()).to_be(false)
+
+    it "promotes only with an exact typed proof and independent replay closure":
+        val model = validate_simpleos_capability_rights_refinement_v1(cap_axiom_report())
+        val replay = close_independent_replay_v1(
+            cap_checker(ReplayCheckerClassV1.FreshLeanKernel),
+            cap_checker(ReplayCheckerClassV1.IndependentKernel))
+        var proof = ProofReceiptV1(
+            model.model_theorem_root, FormalStatus.ModelProven, "cache",
+            sha256_text("kernel-capabilities-olean"), [
+                "fv2-simpleos-source-semantics:" + model.source_semantics_hash,
+                "fv2-simpleos-model-semantics:" + model.model_semantics_hash],
+            assurance_text_hash(cap_axiom_report()), model.trust_manifest_hash,
+            "", replay.hash())
+        val promoted = promote_simpleos_capability_rights_refinement_v2(
+            model, proof, replay)
+        expect(promoted.status).to_equal(FormalStatus.SourceRefined)
+        expect(promoted.permits_source_refinement(
+            capability_rights_verification_cache_key_v1())).to_be(true)
+
+        proof.theorem_dependencies = []
+        val detached = promote_simpleos_capability_rights_refinement_v2(
+            model, proof, replay)
+        expect(detached.status).to_equal(FormalStatus.Failed)
+        expect(detached.diagnostic).to_contain("DEPENDENCY")
+
+    it "preserves the zero-request fail-closed rule":
+        expect(capability_rights_allow(7u32, 0u32)).to_be(false)
+        expect(capability_rights_spec_v1(7u32, 0u32)).to_be(false)
+        expect(capability_rights_mutant_v1(7u32, 0u32)).to_be(true)
+
+    it "requires theorem trust evidence before validation":
+        val receipt = validate_simpleos_capability_rights_refinement_v1("")
+        expect(receipt.status).to_equal(FormalStatus.Failed)
+        expect(receipt.diagnostic).to_contain("AUDIT")
+
+    it "rejects a native decision axiom even when Lean produced a theorem":
+        val receipt = validate_simpleos_capability_rights_refinement_v1(
+            "declaration KernelCapabilities.rights_allow9_sound depends on axioms: [propext, KernelCapabilities.rights_allow9_sound._native.bv_decide.ax_1_5]"
+        )
+        expect(receipt.status).to_equal(FormalStatus.Failed)
+        expect(receipt.axiom_audit_hash).to_equal("")
+
+    it "invalidates source-refinement reuse when a semantic key edge changes":
+        val receipt = validate_simpleos_capability_rights_refinement_v1(cap_axiom_report())
+        val key = capability_rights_verification_cache_key_v1()
+        key.contract_hash = "stale-contract"
+        expect(receipt.permits_source_refinement(key)).to_be(false)

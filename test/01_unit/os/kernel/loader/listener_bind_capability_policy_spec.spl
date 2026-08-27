@@ -1,0 +1,52 @@
+use std.spec.{describe, it, expect}
+use os.kernel.loader.web_launch_grants.{
+    SIMPLEOS_WEB_EXECUTABLE_V1, SIMPLEOS_WEB_CONFIGURED_BIND_IPV4_V1,
+    web_launch_grants_v1
+}
+use os.kernel.loader.dbd_launch_grants_v1.{
+    SIMPLEOS_DBD_EXECUTABLE_V1, SIMPLEOS_DBD_CONFIGURED_BIND_IPV4_V1,
+    dbd_launch_grants_v1
+}
+use os.kernel.ipc.cspace_spawn.{CapGrant}
+use os.kernel.types.capability_types.{CapabilityKind}
+
+fn _listener_policy_has_v1(grants: [CapGrant], kind: CapabilityKind) -> bool:
+    for grant in grants:
+        if grant.requested == kind: return true
+    false
+
+describe("listener bind exact capability policy"):
+    it("allows WEB only at configured loopback 8080"):
+        val web = web_launch_grants_v1(
+            SIMPLEOS_WEB_EXECUTABLE_V1, SIMPLEOS_WEB_CONFIGURED_BIND_IPV4_V1)
+        expect(_listener_policy_has_v1(web, CapabilityKind.NetBindIpv4(
+            address: SIMPLEOS_WEB_CONFIGURED_BIND_IPV4_V1,
+            port: 8080u16))).to_equal(true)
+        expect(_listener_policy_has_v1(web, CapabilityKind.NetListen(
+            port: 8080u16))).to_equal(true)
+
+    it("denies WEB wildcard 8080 and loopback 5433"):
+        val web = web_launch_grants_v1(
+            SIMPLEOS_WEB_EXECUTABLE_V1, SIMPLEOS_WEB_CONFIGURED_BIND_IPV4_V1)
+        expect(_listener_policy_has_v1(web, CapabilityKind.NetBindIpv4(
+            address: 0u32, port: 8080u16))).to_equal(false)
+        expect(_listener_policy_has_v1(web, CapabilityKind.NetBindIpv4(
+            address: SIMPLEOS_WEB_CONFIGURED_BIND_IPV4_V1,
+            port: 5433u16))).to_equal(false)
+        expect(_listener_policy_has_v1(web, CapabilityKind.NetListen(
+            port: 5433u16))).to_equal(false)
+
+    it("allows DBD configured loopback 5433 and denies wildcard authority"):
+        val dbd = dbd_launch_grants_v1(SIMPLEOS_DBD_EXECUTABLE_V1)
+        expect(_listener_policy_has_v1(dbd, CapabilityKind.NetBindIpv4(
+            address: SIMPLEOS_DBD_CONFIGURED_BIND_IPV4_V1,
+            port: 5433u16))).to_equal(true)
+        expect(_listener_policy_has_v1(dbd, CapabilityKind.NetListen(
+            port: 5433u16))).to_equal(true)
+        expect(_listener_policy_has_v1(dbd, CapabilityKind.NetBindIpv4(
+            address: 0u32, port: 5433u16))).to_equal(false)
+        expect(_listener_policy_has_v1(dbd, CapabilityKind.NetBindIpv4(
+            address: SIMPLEOS_DBD_CONFIGURED_BIND_IPV4_V1,
+            port: 8080u16))).to_equal(false)
+        expect(_listener_policy_has_v1(dbd, CapabilityKind.NetListen(
+            port: 8080u16))).to_equal(false)

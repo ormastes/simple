@@ -115,20 +115,35 @@ fn adreno_msm_gpu_present() -> bool:
     else:
         stdout.trim() != ""
 
-describe("board Vulkan Adreno submit/readback (hardware-gated)"):
+describe "board Vulkan Adreno submit/readback (hardware-gated)":
     # TODO(hw-gated): write a turnip-comparison adapter mirroring cmdstream_adapter_gen12.spl before this spec can prove anything against a counterpart — see doc/08_tracking/bug/board_vulkan_cross_arch_boundary_only_x86_64_proven_2026-08-11.md
-    skip_if(fn(): not adreno_msm_gpu_present(), "No Adreno (msm) GPU present on this host — no QEMU device model exists for Adreno and no board is present, see doc/08_tracking/bug/board_vulkan_cross_arch_boundary_only_x86_64_proven_2026-08-11.md")(
-        "builds a well-formed Adreno minimal submission on real silicon",
-        fn():
-            step("build the minimal PKT4/PKT7 submission via the real encoder")
-            val result = adreno_minimal_submission()
-            assert_true(result.is_ok())
-            val dwords = result.unwrap()
-            assert_true(dwords.len() > 0)
+    it "builds a well-formed Adreno minimal submission on real silicon":
+        # @req REQ-SSPEC-SYSTEM REQ-BOARD-VULKAN-SUBMIT-ADRENO
+        # @capture(bit_table)
+        step("probe for a real Adreno (msm-bound) GPU and skip honestly when absent")
+        if not adreno_msm_gpu_present():
+            return "skip: No Adreno (msm) GPU present on this host — no QEMU device model exists for Adreno and no board is present, see doc/08_tracking/bug/board_vulkan_cross_arch_boundary_only_x86_64_proven_2026-08-11.md"
+        step("build the minimal PKT4/PKT7 submission via the real encoder")
+        val result = adreno_minimal_submission()
+        assert_true(result.is_ok())
+        val dwords = result.unwrap()
+        assert_true(dwords.len() > 0)
 
-            step("confirm the stream is well-formed: at least the register-write and NOP packets are present")
-            assert_true(dwords.len() >= 3)
+        step("confirm the stream is well-formed: at least the register-write and NOP packets are present")
+        assert_true(dwords.len() >= 3)
 
-            step("honest limitation: no turnip-comparison adapter exists yet, so this only proves the encoder ran on real hardware, not that it matches an independent reference")
-            assert_true(true)
-    )
+        step("re-walk the stream on real silicon: header-declared lengths must land exactly on the stream end")
+        var i: i64 = 0
+        var packets: i64 = 0
+        while i < dwords.len():
+            val header = dwords[i]
+            val type_tag = (header >> 28) & 0xF
+            var count: i64 = 0
+            if type_tag == 4:
+                count = pkt4_decode_count(header)
+            else:
+                count = pkt7_decode_count(header)
+            i = i + 1 + count
+            packets = packets + 1
+        assert_equal(i, dwords.len())  # oracle: header-declared counts sum exactly to the emitted stream length
+        assert_equal(packets, 3)  # oracle: the minimal submission is exactly three packets (write, CP_NOP, submit)

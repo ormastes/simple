@@ -1,0 +1,178 @@
+# AopWeaveArtifact spec — differential proof + key discipline.
+#
+# The load-bearing check is DIFFERENTIAL: the same (target, weaving result)
+# woven via the existing caller-facing path (apply_weaving_result, what the
+# driver runs) and via the artifact path must serialize to byte-identical MIR.
+# Also proves: the input function is NOT mutated by artifact production,
+# fingerprints are BlockId-free, sabotage flips each negative individually.
+#
+# Run: bin/simple test src/compiler/50.mir/incremental/aop_weave_artifact_spec.spl
+# (bin/simple test = tree-walk interpreter engine on the deployed binary)
+
+use compiler.mir.mir_instructions.{
+    MirFunction, MirBlock, MirInst, MirInstKind, MirTerminator, BlockId,
+    LocalId, MirOperand, MirOperandKind, MirSignature
+}
+use compiler.mir.mir_types.{MirConstValue, MirType, MirTypeKind}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir_serialization.{serialize_mir_function}
+use compiler.mir.mir_aop_injection.{apply_weaving_result}
+use compiler.mir.incremental.block_key.{compute_block_keys}
+use compiler.mir.incremental.aop_weave_artifact.{
+    weave_with_artifact, preweave_mir_fingerprint, preweave_blocks_fingerprint,
+    compute_aop_weave_key, aop_weave_key_digest, aop_weave_key_usable,
+    selection_digest_for, postweave_block_identity, carried_block_identity
+}
+use compiler.frontend.core.aop.{WeavingResult, AdviceCallInfo, JoinPointKind}
+
+fn _const_op(v: i64) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Const(
+        MirConstValue.Int(v), MirType(kind: MirTypeKind.I64)))
+
+fn _call_inst(name: text) -> MirInst:
+    MirInst(kind: MirInstKind.Call(nil, MirOperand(kind: MirOperandKind.Const(
+        MirConstValue.Str(name),
+        MirType(kind: MirTypeKind.I64))), []), span: nil)
+
+fn _fn_of(name: text, blocks: [MirBlock], entry: i64) -> MirFunction:
+    val sig = MirSignature(params: [], return_type: MirType(kind: MirTypeKind.I64), is_variadic: false)
+    MirFunction(
+        symbol: SymbolId.new(7), name: name, signature: sig,
+        locals: [], blocks: blocks, entry_block: BlockId.new(entry),
+        span: nil, generic_params: [], is_generic_template: false,
+        specialization_of: nil, type_bindings: {})
+
+fn _straight(entry_id: i64, payload: i64) -> MirFunction:
+    """Single block: two calls then Ret(payload)."""
+    _fn_of("m.straight", [
+        MirBlock(id: BlockId(id: entry_id), label: Some("entry"),
+            instructions: [_call_inst("callee_a"), _call_inst("callee_b")],
+            terminator: MirTerminator.Ret(Some(_const_op(payload))))
+    ], entry_id)
+
+fn _diamond_abort(e: i64, t: i64, f: i64, x: i64) -> MirFunction:
+    """entry -if-> (then | abort-else) -> exit; exercises Abort + Ret sites."""
+    _fn_of("m.diamond", [
+        MirBlock(id: BlockId(id: e), label: Some("entry"), instructions: [],
+            terminator: MirTerminator.If(cond: _const_op(1), then_: BlockId(id: t), else_: BlockId(id: f))),
+        MirBlock(id: BlockId(id: t), label: Some("then_arm"),
+            instructions: [_call_inst("callee_a")],
+            terminator: MirTerminator.Goto(target: BlockId(id: x))),
+        MirBlock(id: BlockId(id: f), label: Some("boom"), instructions: [],
+            terminator: MirTerminator.Abort(message: "bad")),
+        MirBlock(id: BlockId(id: x), label: Some("exit"), instructions: [],
+            terminator: MirTerminator.Ret(value: nil))
+    ], e)
+
+fn _result(calls: [AdviceCallInfo]) -> WeavingResult:
+    WeavingResult(join_points_woven: calls.len(), advices_inserted: calls.len(),
+        advice_calls: calls, diagnostics: [])
+
+fn _adv(kind: JoinPointKind, name: text, block_id: i64, idx: i64) -> AdviceCallInfo:
+    AdviceCallInfo(join_point_kind: kind, advice_function: name,
+        block_id: block_id, instruction_index: idx)
+
+describe "AOP weave artifact — differential vs in-place path":
+    it "straight-line target: artifact.woven is byte-identical to apply_weaving_result":
+        val func = _straight(0, 42)
+        val r = _result([
+            _adv(JoinPointKind.Execution, "adv_before", 0, 0),
+            _adv(JoinPointKind.FunctionCall, "adv_at_call", 0, 1)])
+        val old_path = apply_weaving_result(func, r)
+        val art = weave_with_artifact(func, r)
+        assert_equal(serialize_mir_function(old_path), serialize_mir_function(art.woven))
+        # and the weave really did something (guards against a vacuous diff)
+        assert_not_equal(serialize_mir_function(old_path), serialize_mir_function(func))
+
+    it "diamond+abort target: artifact.woven identical, including error advice":
+        val func = _diamond_abort(0, 1, 2, 3)
+        val r = _result([
+            _adv(JoinPointKind.Error, "adv_on_err", 0, 0),
+            _adv(JoinPointKind.Execution, "adv_before", 0, 0)])
+        val old_path = apply_weaving_result(func, r)
+        val art = weave_with_artifact(func, r)
+        assert_equal(serialize_mir_function(old_path), serialize_mir_function(art.woven))
+        assert_not_equal(serialize_mir_function(old_path), serialize_mir_function(func))
+
+    it "producing the artifact does not mutate the input target":
+        val func = _diamond_abort(0, 1, 2, 3)
+        val fp_before = preweave_mir_fingerprint(func)
+        val art = weave_with_artifact(func, _result([
+            _adv(JoinPointKind.Execution, "adv_before", 0, 0)]))
+        assert_equal(preweave_mir_fingerprint(func), fp_before)
+        # woven differs from pre-weave: post fingerprint moved
+        assert_not_equal(art.postweave_fingerprint, art.preweave_fingerprint)
+
+describe "pre-weave fingerprint identity discipline":
+    it "is invariant under BlockId renumbering (BlockIds are not in the key)":
+        val a = _diamond_abort(0, 1, 2, 3)
+        val b = _diamond_abort(40, 17, 8, 99)
+        val fa = preweave_mir_fingerprint(a)
+        val fb = preweave_mir_fingerprint(b)
+        assert_not_equal(fa, "")
+        assert_equal(fa, fb)
+
+    it "changes when one instruction operand changes (sabotage: no false hit)":
+        assert_not_equal(preweave_mir_fingerprint(_straight(0, 42)),
+                         preweave_mir_fingerprint(_straight(0, 43)))
+
+    it "is the empty sentinel on a dangling edge (conservative, never a hit)":
+        val broken = _fn_of("m.broken", [
+            MirBlock(id: BlockId(id: 0), label: Some("entry"), instructions: [],
+                terminator: MirTerminator.Goto(target: BlockId(id: 77)))], 0)
+        assert_equal(preweave_mir_fingerprint(broken), "")
+        val art = weave_with_artifact(broken, _result([]))
+        assert_true(art.conservative)
+        assert_false(aop_weave_key_usable(compute_aop_weave_key(art)))
+
+describe "AopWeaveKey — real vs sentinel components":
+    it "real components populated, backend_policy stays on the empty sentinel":
+        val art = weave_with_artifact(_straight(0, 42), _result([
+            _adv(JoinPointKind.Execution, "adv_before", 0, 0)]))
+        val k = compute_aop_weave_key(art)
+        assert_not_equal(k.target_preweave_mir, "")
+        assert_not_equal(k.target_join_point_descriptor, "")
+        assert_not_equal(k.selection_digest, "")
+        assert_equal(k.weave_mode, "symbolic_call")
+        assert_equal(k.weaver_schema, "aop-weave-v1")
+        assert_equal(k.backend_policy, "")
+        assert_true(aop_weave_key_usable(k))
+        assert_not_equal(aop_weave_key_digest(k), "")
+
+    it "selection digest keys the advice NAME, not implementation (rename flips it)":
+        val func = _straight(0, 42)
+        val map = compute_block_keys(func.name, func.blocks, func.entry_block)
+        val s1 = selection_digest_for(map, _result([_adv(JoinPointKind.Execution, "adv_a", 0, 0)]))
+        val s2 = selection_digest_for(map, _result([_adv(JoinPointKind.Execution, "adv_b", 0, 0)]))
+        assert_not_equal(s1, s2)
+
+    it "selection digest is site-sensitive for instruction-anchored join points":
+        val func = _straight(0, 42)
+        val map = compute_block_keys(func.name, func.blocks, func.entry_block)
+        val s1 = selection_digest_for(map, _result([_adv(JoinPointKind.FunctionCall, "adv_a", 0, 0)]))
+        val s2 = selection_digest_for(map, _result([_adv(JoinPointKind.FunctionCall, "adv_a", 0, 1)]))
+        assert_not_equal(s1, s2)
+
+    it "key digest moves when the pre-weave MIR moves (per-target invalidation)":
+        val r = _result([_adv(JoinPointKind.Execution, "adv_before", 0, 0)])
+        val k1 = compute_aop_weave_key(weave_with_artifact(_straight(0, 42), r))
+        val k2 = compute_aop_weave_key(weave_with_artifact(_straight(0, 43), r))
+        assert_not_equal(aop_weave_key_digest(k1), aop_weave_key_digest(k2))
+
+describe "post-weave block identity (§17.6)":
+    it "is deterministic and separates slots and synthesized roles":
+        val pre = "abc123"
+        val plan = "plan9"
+        assert_equal(carried_block_identity(pre, plan), carried_block_identity(pre, plan))
+        assert_not_equal(postweave_block_identity(pre, plan, 0, "dispatch"),
+                         postweave_block_identity(pre, plan, 1, "dispatch"))
+        assert_not_equal(postweave_block_identity(pre, plan, 0, "dispatch"),
+                         postweave_block_identity(pre, plan, 0, "resume"))
+        assert_not_equal(carried_block_identity(pre, plan), carried_block_identity("other", plan))
+
+    it "post-weave fingerprint of a woven target equals a re-weave of the same input":
+        val r = _result([_adv(JoinPointKind.Execution, "adv_before", 0, 0)])
+        val a1 = weave_with_artifact(_straight(0, 42), r)
+        val a2 = weave_with_artifact(_straight(0, 42), r)
+        assert_equal(a1.postweave_fingerprint, a2.postweave_fingerprint)
+        assert_not_equal(a1.postweave_fingerprint, "")

@@ -2,6 +2,29 @@
 
 > Tests the SDoctest tool that extracts and runs code examples from documentation comments. Verifies that doctest blocks are correctly parsed, executed, and that expected outputs are validated against actual results.
 
+<!-- sdn-diagram:id=sdoctest_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=sdoctest_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+sdoctest_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=sdoctest_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 18 | 18 | 0 | 0 |
@@ -20,7 +43,7 @@ Tests the SDoctest tool that extracts and runs code examples from documentation 
 | Category | Application |
 | Status | In Progress |
 | Source | `test/03_system/feature/app/sdoctest_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -37,18 +60,17 @@ expected outputs are validated against actual results.
 
 #### finds examples in function docs
 
-- finds examples in function docs
+1. fn add
+2. expect add
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("finds examples in function docs")
 # Adds two numbers.
 #
 # Example:
@@ -66,18 +88,18 @@ expect add(2, 3) == 5
 
 #### extracts multiple examples
 
-- extracts multiple examples
+1. fn multiply
+2. expect multiply
+3. expect multiply
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("extracts multiple examples")
 # Multiplies two numbers.
 #
 # Example 1:
@@ -104,18 +126,13 @@ expect multiply(0, 100) == 0
 
 #### finds examples in module docs
 
-- finds examples in module docs
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("finds examples in module docs")
 val module_result = 42
 expect module_result == 42
 ```
@@ -128,18 +145,16 @@ expect module_result == 42
 
 #### executes simple example
 
-- executes simple example
+1. fn double
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("executes simple example")
 fn double(x: i64) -> i64:
     x * 2
 
@@ -151,18 +166,17 @@ expect result == 10
 
 #### executes example with setup
 
-- executes example with setup
+1. fn factorial
+2. n * factorial
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("executes example with setup")
 fn factorial(n: i64) -> i64:
     if n <= 1:
         1
@@ -179,18 +193,18 @@ expect result == 120
 
 #### verifies expect statements
 
-- verifies expect statements
+1. fn is even
+2. expect is even
+3. expect is even
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("verifies expect statements")
 fn is_even(n: i64) -> bool:
     n % 2 == 0
 
@@ -202,18 +216,17 @@ expect is_even(3) == false
 
 #### verifies complex assertions
 
-- verifies complex assertions
+1. fn create pair sum
+2. expect create pair sum
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("verifies complex assertions")
 fn create_pair_sum(a: i64, b: i64) -> i64:
     a + b
 
@@ -228,18 +241,16 @@ expect create_pair_sum(1, 2) == 3
 
 #### verifies string output
 
-- verifies string output
+1. fn greet
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("verifies string output")
 fn greet(name: text) -> text:
     "Hello, {name}!"
 
@@ -255,18 +266,16 @@ expect output == "Hello, Alice!"
 
 #### detects failed assertions
 
-- detects failed assertions
+1. fn add
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("detects failed assertions")
 fn add(a: i64, b: i64) -> i64:
     a + b
 
@@ -278,18 +287,16 @@ expect result == 5
 
 #### reports wrong output
 
-- reports wrong output
+1. fn always zero
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("reports wrong output")
 fn always_zero() -> i64:
     0
 
@@ -303,18 +310,16 @@ expect result == 0
 
 #### catches type mismatches
 
-- catches type mismatches
+1. fn get text
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("catches type mismatches")
 fn get_text() -> text:
     "hello"
 
@@ -330,18 +335,16 @@ expect result == "hello"
 
 #### documents list operations
 
-- documents list operations
+1. fn sum list
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("documents list operations")
 fn sum_list(items: List<i64>) -> i64:
     var total = 0
     for item in items:
@@ -357,18 +360,13 @@ expect result == 15
 
 #### documents dict operations
 
-- documents dict operations
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("documents dict operations")
 val data = {"a": 10, "b": 20}
 val result = data.get("b")
 expect result == 20
@@ -380,18 +378,17 @@ expect result == 20
 
 #### documents custom structs
 
-- documents custom structs
+1. fn distance from origin
+2. 
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("documents custom structs")
 struct Point:
     x: i64
     y: i64
@@ -408,18 +405,18 @@ expect dist == 25
 
 #### documents enums
 
-- documents enums
+1. fn is active
+2. expect is active
+3. expect is active
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("documents enums")
 enum Status:
     Active
     Inactive
@@ -444,18 +441,17 @@ expect is_active(Status.Inactive) == false
 
 #### uses helper in doctest
 
-- uses helper in doctest
+1. fn create test list
+2. fn process list
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("uses helper in doctest")
 fn create_test_list() -> List<i64>:
     [1, 2, 3]
 
@@ -476,18 +472,17 @@ expect result == 6
 
 #### initializes test data
 
-- initializes test data
+1. fn initialize dict
+2. fn sum dict values
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("initializes test data")
 fn initialize_dict() -> Dict<text, i64>:
     {"x": 10, "y": 20, "z": 30}
 
@@ -508,18 +503,19 @@ expect result == 60
 
 #### executes related examples
 
-- executes related examples
+1. fn increment
+2. fn decrement
+3. expect increment
+4. expect decrement
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("executes related examples")
 fn increment(x: i64) -> i64:
     x + 1
 
@@ -544,51 +540,3 @@ expect decrement(5) == 4
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `514f08ba90988d02df9ab80ae1bc1909d8458cea6844ae81f9591c4e035d3310`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `514f08ba90988d02df9ab80ae1bc1909d8458cea6844ae81f9591c4e035d3310`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `514f08ba90988d02df9ab80ae1bc1909d8458cea6844ae81f9591c4e035d3310`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/03_system/feature/app/sdoctest_spec.spl
-mirror: doc/06_spec/03_system/feature/app/sdoctest_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/feature/app/sdoctest_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/feature/app/sdoctest_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/feature/app/sdoctest_spec.spl:60:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'finds examples in function docs' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/app/sdoctest_spec.spl:75:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'extracts multiple examples' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/app/sdoctest_spec.spl:98:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'finds examples in module docs' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

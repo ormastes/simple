@@ -1,6 +1,30 @@
 # P256 Ecdhe Handshake Secret Specification
 
-> Tests covering P-256 ephemeral pubkeys are 65-byte uncompressed SEC1 points, P-256 ECDHE produces a symmetric 32-byte shared X, tls13_compute_handshake_secrets fed with P-256 shared X, tls13_traffic_keys over P-256-derived handshake-traffic secrets.
+> 1. sc push
+
+<!-- sdn-diagram:id=p256_ecdhe_handshake_secret_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=p256_ecdhe_handshake_secret_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+p256_ecdhe_handshake_secret_spec -> std
+p256_ecdhe_handshake_secret_spec -> os
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=p256_ecdhe_handshake_secret_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -17,23 +41,17 @@
 
 #### client pub is 65 bytes
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- client pub is 65 bytes
+1. sc push
    - Expected: pub_c.len().to_u64() equals `65u64`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("client pub is 65 bytes")
 # Inline build of client scalar 0x31..0x50 (32 bytes BE).
 var sc: [u8] = []
 var i: u64 = 0u64
@@ -48,19 +66,17 @@ expect(pub_c.len().to_u64()).to_equal(65u64)
 
 #### server pub is 65 bytes
 
-- server pub is 65 bytes
+1. sc push
    - Expected: pub_s.len().to_u64() equals `65u64`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("server pub is 65 bytes")
 # Inline build of server scalar 0x91..0xb0 (32 bytes BE).
 var sc: [u8] = []
 var i: u64 = 0u64
@@ -77,19 +93,18 @@ expect(pub_s.len().to_u64()).to_equal(65u64)
 
 #### client_priv * server_pub yields 32 bytes
 
-- client_priv * server_pub yields 32 bytes
+1. sc c push
+2. sc s push
    - Expected: sh_c.len().to_u64() equals `32u64`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("client_priv * server_pub yields 32 bytes")
 var sc_c: [u8] = []
 var sc_s: [u8] = []
 var i: u64 = 0u64
@@ -106,19 +121,18 @@ expect(sh_c.len().to_u64()).to_equal(32u64)
 
 #### server_priv * client_pub yields 32 bytes
 
-- server_priv * client_pub yields 32 bytes
+1. sc c push
+2. sc s push
    - Expected: sh_s.len().to_u64() equals `32u64`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("server_priv * client_pub yields 32 bytes")
 var sc_c: [u8] = []
 var sc_s: [u8] = []
 var i: u64 = 0u64
@@ -135,19 +149,19 @@ expect(sh_s.len().to_u64()).to_equal(32u64)
 
 #### client and server agree byte-for-byte on shared X
 
-- client and server agree byte-for-byte on shared X
+1. sc c push
+2. sc s push
+3. var equal: bool = sh c len
    - Expected: equal is true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("client and server agree byte-for-byte on shared X")
 var sc_c: [u8] = []
 var sc_s: [u8] = []
 var i: u64 = 0u64
@@ -176,7 +190,11 @@ expect(equal).to_equal(true)
 
 #### yields 32-byte handshake_secret + 32-byte hs traffic secrets
 
-- yields 32-byte handshake_secret + 32-byte hs traffic secrets
+1. sc c push
+2. sc s push
+3. seed push
+4. var t = transcript new
+5. t = transcript add
    - Expected: secrets.handshake_secret.len().to_u64() equals `32u64`
    - Expected: secrets.client_hs_traffic.len().to_u64() equals `32u64`
    - Expected: secrets.server_hs_traffic.len().to_u64() equals `32u64`
@@ -185,12 +203,10 @@ expect(equal).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 23 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("yields 32-byte handshake_secret + 32-byte hs traffic secrets")
 var sc_c: [u8] = []
 var sc_s: [u8] = []
 var i: u64 = 0u64
@@ -218,19 +234,24 @@ expect(secrets.server_hs_traffic.len().to_u64()).to_equal(32u64)
 
 #### client and server derive byte-identical handshake_secret
 
-- client and server derive byte-identical handshake_secret
+1. sc c push
+2. sc s push
+3. seed push
+4. var t1 = transcript new
+5. t1 = transcript add
+6. var t2 = transcript new
+7. t2 = transcript add
+8. var equal: bool = secrets c handshake secret len
    - Expected: equal is true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 31 lines folded for reproduction.
+Runnable source: 29 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("client and server derive byte-identical handshake_secret")
 var sc_c: [u8] = []
 var sc_s: [u8] = []
 var i: u64 = 0u64
@@ -266,19 +287,24 @@ expect(equal).to_equal(true)
 
 #### client and server derive byte-identical client_hs_traffic
 
-- client and server derive byte-identical client_hs_traffic
+1. sc c push
+2. sc s push
+3. seed push
+4. var t1 = transcript new
+5. t1 = transcript add
+6. var t2 = transcript new
+7. t2 = transcript add
+8. var equal: bool = secrets c client hs traffic len
    - Expected: equal is true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 31 lines folded for reproduction.
+Runnable source: 29 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("client and server derive byte-identical client_hs_traffic")
 var sc_c: [u8] = []
 var sc_s: [u8] = []
 var i: u64 = 0u64
@@ -314,19 +340,24 @@ expect(equal).to_equal(true)
 
 #### client and server derive byte-identical server_hs_traffic
 
-- client and server derive byte-identical server_hs_traffic
+1. sc c push
+2. sc s push
+3. seed push
+4. var t1 = transcript new
+5. t1 = transcript add
+6. var t2 = transcript new
+7. t2 = transcript add
+8. var equal: bool = secrets c server hs traffic len
    - Expected: equal is true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 31 lines folded for reproduction.
+Runnable source: 29 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("client and server derive byte-identical server_hs_traffic")
 var sc_c: [u8] = []
 var sc_s: [u8] = []
 var i: u64 = 0u64
@@ -364,7 +395,11 @@ expect(equal).to_equal(true)
 
 #### client AES-128 key is 16 bytes and IV is 12 bytes
 
-- client AES-128 key is 16 bytes and IV is 12 bytes
+1. sc c push
+2. sc s push
+3. seed push
+4. var t = transcript new
+5. t = transcript add
    - Expected: tk.key.len().to_u64() equals `16u64`
    - Expected: tk.iv.len().to_u64() equals `12u64`
 
@@ -372,12 +407,10 @@ expect(equal).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("client AES-128 key is 16 bytes and IV is 12 bytes")
 var sc_c: [u8] = []
 var sc_s: [u8] = []
 var i: u64 = 0u64
@@ -404,7 +437,11 @@ expect(tk.iv.len().to_u64()).to_equal(12u64)
 
 #### server AES-128 key is 16 bytes and IV is 12 bytes
 
-- server AES-128 key is 16 bytes and IV is 12 bytes
+1. sc c push
+2. sc s push
+3. seed push
+4. var t = transcript new
+5. t = transcript add
    - Expected: tk.key.len().to_u64() equals `16u64`
    - Expected: tk.iv.len().to_u64() equals `12u64`
 
@@ -412,12 +449,10 @@ expect(tk.iv.len().to_u64()).to_equal(12u64)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("server AES-128 key is 16 bytes and IV is 12 bytes")
 var sc_c: [u8] = []
 var sc_s: [u8] = []
 var i: u64 = 0u64
@@ -449,12 +484,12 @@ expect(tk.iv.len().to_u64()).to_equal(12u64)
 | Category | Hardware & OS |
 | Status | Active |
 | Source | `test/01_unit/os/tls13/p256_ecdhe_handshake_secret_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering P-256 ephemeral pubkeys are 65-byte uncompressed SEC1 points, P-256 ECDHE produces a symmetric 32-byte shared X, tls13_compute_handshake_secrets fed with P-256 shared X, tls13_traffic_keys over P-256-derived handshake-traffic secrets.
+Tests covering:
 - P-256 ephemeral pubkeys are 65-byte uncompressed SEC1 points
 - P-256 ECDHE produces a symmetric 32-byte shared X
 - tls13_compute_handshake_secrets fed with P-256 shared X
@@ -472,51 +507,3 @@ Tests covering P-256 ephemeral pubkeys are 65-byte uncompressed SEC1 points, P-2
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-UNIT`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `61c45e265691ecf7da98ff6fe26143c5770b2b620b098d702ddb6e2769bf3192`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `61c45e265691ecf7da98ff6fe26143c5770b2b620b098d702ddb6e2769bf3192`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `61c45e265691ecf7da98ff6fe26143c5770b2b620b098d702ddb6e2769bf3192`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/01_unit/os/tls13/p256_ecdhe_handshake_secret_spec.spl
-mirror: doc/06_spec/01_unit/os/tls13/p256_ecdhe_handshake_secret_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/os/tls13/p256_ecdhe_handshake_secret_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/os/tls13/p256_ecdhe_handshake_secret_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/os/tls13/p256_ecdhe_handshake_secret_spec.spl:64:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'client pub is 65 bytes' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/os/tls13/p256_ecdhe_handshake_secret_spec.spl:76:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'server pub is 65 bytes' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/os/tls13/p256_ecdhe_handshake_secret_spec.spl:94:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'client_priv * server_pub yields 32 bytes' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

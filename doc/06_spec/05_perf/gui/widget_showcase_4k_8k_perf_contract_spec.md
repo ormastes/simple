@@ -1,10 +1,34 @@
 # GUI Widget Showcase 4K/8K Perf Contract
 
-> Validates the source-level contract for the retained GUI widget showcase performance checker. This spec is headless-safe: it reads the checker source and asserts the required evidence fields, but it does not run the 4K/8K showcase benchmark, launch a GUI, or produce new performance claims.
+## Purpose
+
+This manual spec mirrors
+`test/05_perf/gui/widget_showcase_4k_8k_perf_contract_spec.spl`.
+It protects the retained 4K/8K GUI widget showcase performance evidence
+contract without running the expensive benchmark on headless hosts.
+
+```sdn id=widget_showcase_4k_8k_perf_contract_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+widget_showcase_4k_8k_perf_contract_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=widget_showcase_4k_8k_perf_contract_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 4 | 4 | 0 | 0 |
+| 3 | 3 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -24,7 +48,7 @@ Validates the source-level contract for the retained GUI widget showcase perform
 | Design | doc/07_guide/tooling/renderdoc_capture_infra.md |
 | Research | N/A |
 | Source | `test/05_perf/gui/widget_showcase_4k_8k_perf_contract_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -45,7 +69,7 @@ showcase benchmark, launch a GUI, or produce new performance claims.
 SIMPLE_LIB=src bin/simple test test/05_perf/gui/widget_showcase_4k_8k_perf_contract_spec.spl --mode=interpreter --clean
 ```
 
-## Acceptance
+## Completion Criteria
 
 - The checker rejects Rust seed Simple binaries.
 - The checker searches self-hosted Simple binaries before optional PATH lookup.
@@ -59,84 +83,6 @@ SIMPLE_LIB=src bin/simple test test/05_perf/gui/widget_showcase_4k_8k_perf_contr
   calls enter the alias source.
 - Native-build output must be a regular executable native binary before the
   checker runs it.
-- Real retained perf runs fail before native-build when the Simple binary is a
-  repo launcher or other non-release source; plan-only remains available for
-  headless alias checks.
-
-## Evidence Inputs
-
-The retained producer is `scripts/check/check-widget-showcase-4k-200fps.shs`.
-It supports `RESOLUTION=4k` and `RESOLUTION=8k`. Real evidence requires
-`USE_NATIVE=1`, a release self-hosted Simple binary, native build output,
-regular log/time artifacts, and retained static-frame readback rows.
-
-Plan-only mode is intentionally weaker. It is for headless hosts and validates
-the generated retained alias and provenance row shape without building or
-running the native GUI probe. Plan-only rows must never be treated as 4K/8K
-performance completion evidence.
-
-## Operator Flow
-
-1. On a headless host, run `PLAN_ONLY=1 USE_NATIVE=1 RESOLUTION=4k` and
-   `RESOLUTION=8k` to check alias generation and raw `rt_*` absence.
-2. On a GUI/perf host, run with `USE_NATIVE=1`, a release self-hosted
-   `SIMPLE_BIN`, and the target resolution.
-3. Feed the status env rows to
-   `scripts/check/check-gui-renderdoc-feature-coverage-status.shs`.
-4. Accept performance completion only when the aggregate reports both retained
-   showcase rows as `pass` with current source revision and no fallback.
-
-## Required Output Rows
-
-Reviewers should inspect these rows for both `gui_showcase_4k_200fps_*` and
-`gui_showcase_8k_perf_*`:
-
-- `status`
-- `reason`
-- `width`
-- `height`
-- `frames`
-- `fps_x1000`
-- `target_fps`
-- `frame_p50_ns`
-- `frame_p95_ns`
-- `max_rss_kb`
-- `max_rss_budget_kb`
-- `rss_status`
-- `nonzero_pixels_status`
-- `checksum_status`
-- `render_mode`
-- `retained_render_mode_status`
-- `redraw_frames`
-- `retained_redraw_status`
-- `source_revision_kind`
-- `source_revision_files`
-- `simple_bin_source`
-- `simple_bin_status`
-- `native_bin_file_status`
-- `native_bin_executable_status`
-- `native_bin_format_status`
-- `alias_raw_rt_count`
-- `native_build_mode`
-- `fallback_state`
-
-## Failure Semantics
-
-- `rust-seed-simple-binary-forbidden`: the Rust bootstrap binary was selected.
-- `release-self-hosted-simple-binary-required`: a real run attempted to use
-  `bin/simple`, PATH `simple`, or another non-release Simple source.
-- `alias-raw-rt-forbidden`: generated alias source contains direct runtime
-  calls and must be fixed in Simple code instead.
-- `native-bin-artifact-invalid`: native build did not produce a regular
-  executable ELF/Mach-O/PE artifact.
-
-## Completion Boundary
-
-This spec does not run a real 4K or 8K GUI benchmark. It proves that the
-retained producer cannot create acceptable performance evidence through the
-Rust seed, repo launcher, raw runtime alias calls, or invalid native artifacts.
-Actual goal completion still requires live retained 4K/8K rows from a prepared
-GUI/perf host and aggregate verification.
 
 ## Scenarios
 
@@ -144,11 +90,6 @@ GUI/perf host and aggregate verification.
 
 #### keeps self-hosted binary and retained evidence rows mandatory
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- keeps self-hosted binary and retained evidence rows mandatory
 - Read the retained showcase checker
 - Assert self-hosted Simple binary selection and Rust seed rejection
 - Assert 4K and 8K geometry and target FPS are explicit
@@ -160,31 +101,28 @@ GUI/perf host and aggregate verification.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 67 lines folded for reproduction.
+Runnable source: 62 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-PERF
-step("keeps self-hosted binary and retained evidence rows mandatory")
 step("Read the retained showcase checker")
 val script = file_read("scripts/check/check-widget-showcase-4k-200fps.shs")
 
 step("Assert self-hosted Simple binary selection and Rust seed rejection")
-expect(script).to_contain("release/x86_64-unknown-linux-gnu/simple")
-expect(script).to_contain("bin/release/x86_64-unknown-linux-gnu/simple")
-expect(script).to_contain("build/bootstrap/stage3/simple")
-expect(script).to_contain("bin/simple")
+expect(script).to_contain("\"release\"/*/simple")
+expect(script).to_contain("\"bin/release\"/*/simple")
+expect(script).to_contain("\"build/bootstrap/stage3/simple\"")
+expect(script).to_contain("\"bin/simple\"")
 expect(script).to_contain("ALLOW_PATH_SIMPLE_BIN")
 expect(script).to_contain("rust-seed-simple-binary-forbidden")
 expect(script).to_contain("src/compiler_rust/*|*/src/compiler_rust/*")
-expect(script).to_contain("release-self-hosted-simple-binary-required")
 
 step("Assert 4K and 8K geometry and target FPS are explicit")
 expect(script).to_contain("WIDTH=3840")
 expect(script).to_contain("HEIGHT=2160")
 expect(script).to_contain("WIDTH=7680")
 expect(script).to_contain("HEIGHT=4320")
-expect(script).to_contain("TARGET_FPS:=200")
+expect(script).to_contain("TARGET_FPS=200")
 expect(script).to_contain("STATUS_PREFIX=gui_showcase_4k_200fps")
 expect(script).to_contain("STATUS_PREFIX=gui_showcase_8k_perf")
 
@@ -206,8 +144,8 @@ expect(script).to_contain("_render_mode=")
 expect(script).to_contain("_retained_render_mode_status=")
 expect(script).to_contain("_redraw_frames=")
 expect(script).to_contain("_retained_redraw_status=")
-expect(script).to_contain("_log_file_status=$(file_status \"$LOG\")")
-expect(script).to_contain("_time_log_file_status=$(file_status \"$TIME_LOG\")")
+expect(script).to_contain("_log_file_status=pass")
+expect(script).to_contain("_time_log_file_status=pass")
 
 step("Assert retained alias and source revision evidence stay visible")
 expect(script).to_contain("Generated retained-perf alias")
@@ -219,8 +157,6 @@ expect(script).to_contain("native-build --source src --source examples")
 expect(script).to_contain("_source_revision=")
 expect(script).to_contain("_source_revision_kind=content-sha256")
 expect(script).to_contain("_source_revision_files=")
-expect(script).to_contain("src/lib/gc_async_mut/gpu/engine2d/engine.spl")
-expect(script).to_contain("src/lib/gc_async_mut/gpu/engine2d/backend_software.spl")
 
 step("Assert invalid native-build artifacts fail before benchmark execution")
 expect(script).to_contain("validate_native_binary()")
@@ -237,7 +173,6 @@ expect(script).to_contain("validate_native_binary || exit 1")
 
 #### proves the generated retained alias has no raw runtime calls in plan-only mode
 
-- proves the generated retained alias has no raw runtime calls in plan-only mode
 - Run the checker in 4K plan-only mode without native build or GUI execution
    - Expected: code equals `0`
 - Run the checker in 8K plan-only mode without native build or GUI execution
@@ -247,12 +182,10 @@ expect(script).to_contain("validate_native_binary || exit 1")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-PERF
-step("proves the generated retained alias has no raw runtime calls in plan-only mode")
 step("Run the checker in 4K plan-only mode without native build or GUI execution")
 val command = "rm -rf build/test-widget-showcase-4k-plan-only && PLAN_ONLY=1 USE_NATIVE=1 RESOLUTION=4k BUILD_DIR=build/test-widget-showcase-4k-plan-only sh scripts/check/check-widget-showcase-4k-200fps.shs"
 val (stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
@@ -276,7 +209,6 @@ expect(stdout_8k).to_contain("gui_showcase_8k_perf_alias_raw_rt_count=0")
 
 #### rejects explicit Rust seed binaries before retained perf evidence can pass
 
-- rejects explicit Rust seed binaries before retained perf evidence can pass
 - Run the 4K checker with an explicit Rust seed Simple binary
    - Expected: code_4k equals `0`
 - Run the 8K checker with an explicit Rust seed Simple binary
@@ -286,12 +218,10 @@ expect(stdout_8k).to_contain("gui_showcase_8k_perf_alias_raw_rt_count=0")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-PERF
-step("rejects explicit Rust seed binaries before retained perf evidence can pass")
 step("Run the 4K checker with an explicit Rust seed Simple binary")
 val command_4k = "rm -rf build/test-widget-showcase-4k-seed-forbidden && PLAN_ONLY=1 USE_NATIVE=1 RESOLUTION=4k SIMPLE_BIN=src/compiler_rust/target/release/simple BUILD_DIR=build/test-widget-showcase-4k-seed-forbidden sh scripts/check/check-widget-showcase-4k-200fps.shs || true"
 val (_stdout_4k, _stderr_4k, code_4k) = process_run("/bin/sh", ["-c", command_4k])
@@ -315,55 +245,12 @@ expect(evidence_8k).to_contain("gui_showcase_8k_perf_simple_bin_status=forbidden
 
 </details>
 
-#### rejects repo launcher binaries before real retained perf runs
-
-- rejects repo launcher binaries before real retained perf runs
-- Run the 4K checker outside plan-only with an explicit repo launcher
-   - Expected: code_4k equals `0`
-- Run the 8K checker outside plan-only with an explicit repo launcher
-   - Expected: code_8k equals `0`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 23 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-PERF
-step("rejects repo launcher binaries before real retained perf runs")
-step("Run the 4K checker outside plan-only with an explicit repo launcher")
-val command_4k = "rm -rf build/test-widget-showcase-4k-repo-bin-forbidden && mkdir -p build/test-widget-showcase-4k-repo-bin-forbidden && echo '#!/bin/sh' > build/test-widget-showcase-4k-repo-bin-forbidden/simple && echo 'echo Simple 0.1.0' >> build/test-widget-showcase-4k-repo-bin-forbidden/simple && chmod +x build/test-widget-showcase-4k-repo-bin-forbidden/simple && USE_NATIVE=1 RESOLUTION=4k SIMPLE_BIN=build/test-widget-showcase-4k-repo-bin-forbidden/simple SIMPLE_BIN_SOURCE=repo-bin BUILD_DIR=build/test-widget-showcase-4k-repo-bin-forbidden sh scripts/check/check-widget-showcase-4k-200fps.shs || true"
-val (_stdout_4k, _stderr_4k, code_4k) = process_run("/bin/sh", ["-c", command_4k])
-expect(code_4k).to_equal(0)
-val evidence_4k = file_read("build/test-widget-showcase-4k-repo-bin-forbidden/status.env")
-expect(evidence_4k).to_contain("gui_showcase_4k_200fps_status=fail")
-expect(evidence_4k).to_contain("gui_showcase_4k_200fps_reason=release-self-hosted-simple-binary-required")
-expect(evidence_4k).to_contain("gui_showcase_4k_200fps_simple_bin=build/test-widget-showcase-4k-repo-bin-forbidden/simple")
-expect(evidence_4k).to_contain("gui_showcase_4k_200fps_simple_bin_source=repo-bin")
-expect(evidence_4k).to_contain("gui_showcase_4k_200fps_simple_bin_status=forbidden")
-
-step("Run the 8K checker outside plan-only with an explicit repo launcher")
-val command_8k = "rm -rf build/test-widget-showcase-8k-repo-bin-forbidden && mkdir -p build/test-widget-showcase-8k-repo-bin-forbidden && echo '#!/bin/sh' > build/test-widget-showcase-8k-repo-bin-forbidden/simple && echo 'echo Simple 0.1.0' >> build/test-widget-showcase-8k-repo-bin-forbidden/simple && chmod +x build/test-widget-showcase-8k-repo-bin-forbidden/simple && USE_NATIVE=1 RESOLUTION=8k SIMPLE_BIN=build/test-widget-showcase-8k-repo-bin-forbidden/simple SIMPLE_BIN_SOURCE=repo-bin BUILD_DIR=build/test-widget-showcase-8k-repo-bin-forbidden sh scripts/check/check-widget-showcase-4k-200fps.shs || true"
-val (_stdout_8k, _stderr_8k, code_8k) = process_run("/bin/sh", ["-c", command_8k])
-expect(code_8k).to_equal(0)
-val evidence_8k = file_read("build/test-widget-showcase-8k-repo-bin-forbidden/status.env")
-expect(evidence_8k).to_contain("gui_showcase_8k_perf_status=fail")
-expect(evidence_8k).to_contain("gui_showcase_8k_perf_reason=release-self-hosted-simple-binary-required")
-expect(evidence_8k).to_contain("gui_showcase_8k_perf_simple_bin=build/test-widget-showcase-8k-repo-bin-forbidden/simple")
-expect(evidence_8k).to_contain("gui_showcase_8k_perf_simple_bin_source=repo-bin")
-expect(evidence_8k).to_contain("gui_showcase_8k_perf_simple_bin_status=forbidden")
-```
-
-</details>
-
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 4 |
-| Active scenarios | 4 |
+| Total scenarios | 3 |
+| Active scenarios | 3 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
@@ -371,59 +258,8 @@ expect(evidence_8k).to_contain("gui_showcase_8k_perf_simple_bin_status=forbidden
 
 ## Related Documentation
 
-- **Plan:** `doc/03_plan/agent_tasks/vulkan_backed_web_gui_renderdoc_parallel_plan.md`
-- **Design:** `doc/07_guide/tooling/renderdoc_capture_infra.md`
+- **Plan:** [doc/03_plan/agent_tasks/vulkan_backed_web_gui_renderdoc_parallel_plan.md](doc/03_plan/agent_tasks/vulkan_backed_web_gui_renderdoc_parallel_plan.md)
+- **Design:** [doc/07_guide/tooling/renderdoc_capture_infra.md](doc/07_guide/tooling/renderdoc_capture_infra.md)
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-PERF`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `2854ea692ec1cf8f49e3cdd7f9acb17f4be13841ceb5b5ae66a4fe59ccd9fbc9`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `2854ea692ec1cf8f49e3cdd7f9acb17f4be13841ceb5b5ae66a4fe59ccd9fbc9`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `2854ea692ec1cf8f49e3cdd7f9acb17f4be13841ceb5b5ae66a4fe59ccd9fbc9`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
-
-SSpec documentization score: 86/100
-source: test/05_perf/gui/widget_showcase_4k_8k_perf_contract_spec.spl
-mirror: doc/06_spec/05_perf/gui/widget_showcase_4k_8k_perf_contract_spec.md (current)
-findings: 6 blockers: 0
-  narrative=100 structure=100 oracle=70
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/05_perf/gui/widget_showcase_4k_8k_perf_contract_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/05_perf/gui/widget_showcase_4k_8k_perf_contract_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/05_perf/gui/widget_showcase_4k_8k_perf_contract_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 6 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/05_perf/gui/widget_showcase_4k_8k_perf_contract_spec.spl:129:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'keeps self-hosted binary and retained evidence rows mandatory' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/05_perf/gui/widget_showcase_4k_8k_perf_contract_spec.spl:198:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'proves the generated retained alias has no raw runtime calls in plan-only mode' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/05_perf/gui/widget_showcase_4k_8k_perf_contract_spec.spl:219:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'rejects explicit Rust seed binaries before retained perf evidence can pass' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

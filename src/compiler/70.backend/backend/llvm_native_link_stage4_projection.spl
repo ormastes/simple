@@ -16,6 +16,7 @@ use compiler.backend.backend.llvm_target.{LlvmTargetConfig}
 use compiler.backend.backend.llvm_backend_tools.{compile_ir_to_object, extract_symbols_nm, llc_available}
 use compiler.backend.backend.llvm_capability.{find_archive_portable, find_nm_portable, find_objcopy_portable, find_objdump_portable}
 use compiler.backend.backend.backend_types.{CodegenTarget, OptimizationLevel}
+use compiler.backend.backend.runtime_compiler.{find_runtime_source_dir}
 use compiler.backend.backend.runtime_compiler.{compile_runtime_objects, cleanup_runtime_objects, find_c_compiler, hosted_c_compiler_plan, _get_temp_dir, _obj_ext, _is_windows, _is_mingw, _is_msvc_cc}
 use compiler.backend.linker.linker_wrapper.{link_to_native, NativeLinkConfig, hosted_native_link_arch_supported, hosted_native_link_unsupported_arch_error}
 use compiler.backend.backend.stage4_symbol_closure.{stage4_compiler_backfill_archive_file, stage4_compiler_backfill_object_format, stage4_derive_compiler_backfill_manifest, stage4_compiler_backfill_localization_symbols, stage4_validate_compiler_backfill_symbol_envelope, stage4_compiler_backfill_symbol_table_fingerprint, stage4_validate_compiler_backfill_provider_disjoint, stage4_projection_localization_symbols, stage4_validate_projection_symbol_contract, stage4_runtime_native_archive_file, stage4_runtime_native_object_format, stage4_runtime_native_localization_symbols, stage4_validate_runtime_native_core_symbol_contract, stage4_runtime_legacy_compat_archive_file, stage4_runtime_legacy_compat_object_format, stage4_runtime_legacy_compat_localization_symbols, stage4_validate_runtime_legacy_compat_symbol_contract, stage4_contracts_provider_archive_file, stage4_contracts_provider_object_format, stage4_validate_contracts_provider_symbol_contract, stage4_process_provider_archive_file, stage4_process_provider_object_format, stage4_validate_process_provider_symbol_contract, stage4_dynload_provider_archive_file, stage4_dynload_provider_object_format, stage4_font_provider_archive_file, stage4_font_provider_object_format, stage4_memtrack_provider_archive_file, stage4_memtrack_provider_object_format, stage4_time_provider_archive_file, stage4_time_provider_object_format, stage4_fork_provider_archive_file, stage4_fork_provider_object_format, stage4_windows_c_object_uses_msvc_abi, stage4_runtime_provider_object_matches, stage4_forbidden_archive_sections, stage4_requested_from_nm_output, stage4_resolve_requested_archive_owners, stage4_link_profile_fingerprint_input, stage4_validate_candidate_archive_inputs_for_platform, stage4_validate_dynload_provider_symbol_contract, stage4_validate_font_provider_symbol_contract, stage4_validate_memtrack_provider_symbol_contract, stage4_validate_time_provider_symbol_contract, stage4_validate_fork_provider_symbol_contract}
@@ -51,6 +52,40 @@ fn llvm_configured_external_link_objects() -> Result<[text], text>:
         if not providers.contains(provider):
             providers = providers.push(provider)
     Ok(providers)
+
+fn llvm_user_objects_require_sealed_hal(user_objects: [text]) -> Result<bool, text>:
+    if user_objects.len() == 0: return Ok(false)
+    val nm = find_nm_portable()
+    if nm == "": return Err("rt(hal) archive selection requires llvm-nm or nm")
+    var args: [text] = ["-g"]
+    for object in user_objects: args = args.push(object)
+    val (stdout, stderr, code) = process_run(nm, args)
+    if code != 0: return Err("rt(hal) marker scan failed: " + stderr.trim())
+    Ok(stdout.contains("__simple_rt_hal_sealed_required_v1"))
+
+fn llvm_auto_sealed_hal_archive(user_objects: [text]) -> Result<text, text>:
+    val required = match llvm_user_objects_require_sealed_hal(user_objects):
+        case Ok(value): value
+        case Err(err): return Err(err)
+    if not required: return Ok("")
+    val runtime_dir = find_runtime_source_dir()
+    if runtime_dir == "":
+        return Err("Critical/Verified rt(hal) could not locate the repository runtime source owner")
+    val suffix = "/src/runtime"
+    if not runtime_dir.ends_with(suffix):
+        return Err("Critical/Verified rt(hal) resolved a non-canonical runtime source path: " + runtime_dir)
+    val project_root = runtime_dir.substring(0, runtime_dir.len() - suffix.len())
+    val archive = project_root + "/build/lib/libsimple_hal_provider_sealed_v1.a"
+    if not file_exists(archive) or file_size_raw(archive) <= 0:
+        val builder = project_root + "/scripts/build/build-hal-provider-sealed-facade-v1.shs"
+        if not file_exists(builder):
+            return Err("Critical/Verified rt(hal) requires the sealed provider builder: " + builder)
+        val (_, build_error, build_code) = process_run("sh", [builder, archive])
+        if build_code != 0:
+            return Err("automatic sealed rt(hal) archive build failed: " + build_error.trim())
+    if not file_exists(archive) or file_size_raw(archive) <= 0:
+        return Err("automatic sealed rt(hal) archive is missing or empty: " + archive)
+    Ok(archive)
 
 fn llvm_external_provider_rpath_flags(providers: [text]) -> [text]:
     val os = host_os()
@@ -360,4 +395,3 @@ fn llvm_stage4_project_selected_archives(candidate_labels: [text], candidate_pat
         if not remove_file_if_exists(path):
             return llvm_stage4_projection_failure(stage_dir, "Stage4 selected-archive temporary cleanup failed")
     Ok((capsule_path, stage_dir))
-

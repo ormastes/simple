@@ -2,6 +2,29 @@
 
 > Simple provides two complementary isolation models for secure code execution:
 
+<!-- sdn-diagram:id=sandboxing_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=sandboxing_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+sandboxing_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=sandboxing_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 14 | 14 | 0 | 0 |
@@ -21,7 +44,7 @@ Simple provides two complementary isolation models for secure code execution:
 | Category | Language Features |
 | Status | Runtime Complete (#916-919), Environment Planned (#920-923) |
 | Source | `test/03_system/feature/usage/sandboxing_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -66,8 +89,6 @@ simple script.spl --read-write /app/data
 
 Process execution for sandbox testing:
 ```simple
-use std.spec.step
-
 import sys.process
 
 # Run command with timeout
@@ -85,22 +106,13 @@ print(result.stdout)
 
 #### limits CPU time for long-running scripts
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- limits CPU time for long-running scripts
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("limits CPU time for long-running scripts")
 # **Given** a script that runs indefinitely
 # **When** executed with `--time-limit 5`
 # **Then** the script terminates after 5 seconds
@@ -118,18 +130,13 @@ expect true  # Time limit enforced by runtime
 
 #### limits memory allocation
 
-- limits memory allocation
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("limits memory allocation")
 # **Given** a script that allocates large amounts of memory
 # **When** executed with `--memory-limit 100M`
 # **Then** allocation fails when limit is reached
@@ -147,18 +154,13 @@ expect true  # Memory limit enforced by runtime
 
 #### limits file descriptors
 
-- limits file descriptors
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("limits file descriptors")
 # **Given** a script that opens many files
 # **When** executed with `--fd-limit 10`
 # **Then** file open fails after limit is reached
@@ -176,18 +178,13 @@ expect true  # FD limit enforced by runtime
 
 #### limits thread creation
 
-- limits thread creation
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("limits thread creation")
 # **Given** a script that creates many threads
 # **When** executed with `--thread-limit 4`
 # **Then** thread creation fails after limit
@@ -207,18 +204,13 @@ expect true  # Thread limit enforced by runtime
 
 #### blocks all network access with --no-network
 
-- blocks all network access with --no-network
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("blocks all network access with --no-network")
 # **Given** a script that attempts network requests
 # **When** executed with `--no-network`
 # **Then** all network operations fail
@@ -236,18 +228,13 @@ expect true  # Network blocking enforced by sandbox
 
 #### allows only specified domains with --network-allow
 
-- allows only specified domains with --network-allow
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("allows only specified domains with --network-allow")
 # **Given** a script that connects to multiple domains
 # **When** executed with `--network-allow api.github.com`
 # **Then** only connections to api.github.com succeed
@@ -266,18 +253,13 @@ expect true  # AllowList mode enforced
 
 #### blocks specified domains with --network-block
 
-- blocks specified domains with --network-block
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("blocks specified domains with --network-block")
 # **Given** a script that connects to various domains
 # **When** executed with `--network-block malicious.com`
 # **Then** connections to malicious.com are blocked
@@ -298,18 +280,13 @@ expect true  # BlockList mode enforced
 
 #### restricts to read-only paths
 
-- restricts to read-only paths
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("restricts to read-only paths")
 # **Given** a script that attempts to write files
 # **When** executed with `--read-only /tmp,/usr/lib`
 # **Then** reads succeed but writes fail
@@ -329,18 +306,13 @@ expect true  # Read-only mode enforced
 
 #### allows read-write to specific paths
 
-- allows read-write to specific paths
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("allows read-write to specific paths")
 # **Given** a script that reads and writes files
 # **When** executed with `--read-write /app/data`
 # **Then** only /app/data is writable
@@ -359,18 +331,13 @@ expect true  # Restricted write mode enforced
 
 #### uses overlay filesystem for isolation
 
-- uses overlay filesystem for isolation
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("uses overlay filesystem for isolation")
 # **Given** sandbox configured with overlay mode
 # **When** script writes to filesystem
 # **Then** changes are visible in sandbox but not persisted
@@ -387,18 +354,13 @@ expect true  # Overlay mode provides isolation
 
 #### applies multiple restrictions simultaneously
 
-- applies multiple restrictions simultaneously
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("applies multiple restrictions simultaneously")
 # **Given** a script with combined sandbox flags
 # **When** executed with time, memory, and network limits
 # **Then** all limits are enforced together
@@ -418,18 +380,13 @@ expect true
 
 #### provides secure defaults with --sandbox
 
-- provides secure defaults with --sandbox
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("provides secure defaults with --sandbox")
 # **Given** the `--sandbox` flag without specific limits
 # **When** a script is executed
 # **Then** sensible default limits are applied
@@ -449,18 +406,13 @@ expect true
 
 #### creates isolated virtual environments
 
-- creates isolated virtual environments
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("creates isolated virtual environments")
 # **Given** a project directory
 # **When** running `simple env create`
 # **Then** creates isolated dependency environment
@@ -482,18 +434,13 @@ expect true
 
 #### supports lock files for reproducibility
 
-- supports lock files for reproducibility
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("supports lock files for reproducibility")
 # **Given** a project with dependencies
 # **When** running `simple lock`
 # **Then** creates simple.lock with exact versions
@@ -524,51 +471,3 @@ expect true
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `f61ed7a75f2b1b5602044bbdbc64d50b1c1620df8b77c4b8686e3cacd48834a5`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `f61ed7a75f2b1b5602044bbdbc64d50b1c1620df8b77c4b8686e3cacd48834a5`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `f61ed7a75f2b1b5602044bbdbc64d50b1c1620df8b77c4b8686e3cacd48834a5`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/03_system/feature/usage/sandboxing_spec.spl
-mirror: doc/06_spec/03_system/feature/usage/sandboxing_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/feature/usage/sandboxing_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/feature/usage/sandboxing_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/feature/usage/sandboxing_spec.spl:94:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'limits CPU time for long-running scripts' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/usage/sandboxing_spec.spl:109:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'limits memory allocation' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/usage/sandboxing_spec.spl:124:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'limits file descriptors' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

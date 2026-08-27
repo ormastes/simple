@@ -1,0 +1,58 @@
+use std.fs_driver.types.{OpenFlags, MountOptions, Path}
+use std.fs_driver.nvfs_posix_driver.{NvfsPosixDriver}
+use std.fs_driver.nvfs_arena.{nvfs_arena_set_block_device}
+use os.port.cached_raw_image_block_device.{CachedRawImageBlockDevice}
+
+extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
+extern fn rt_bytes_alloc(len: i64) -> [u8]
+
+fn make_device() -> CachedRawImageBlockDevice:
+    val root = "/tmp/nvfs_posix_direct_probe"
+    val _ = rt_dir_create_all(root)
+    val img = rt_bytes_alloc(131072)
+    val _ = rt_file_write_bytes(root + "/disk.img", img)
+    val r = CachedRawImageBlockDevice.from_bytes(root + "/disk.img", img, 512u32)
+    r.unwrap()
+
+fn main():
+    var dev = make_device()
+    nvfs_arena_set_block_device(dev)
+    val d = NvfsPosixDriver.new("NvfsPosixDriver")
+    val _ = d.mount(MountOptions.default())
+    val fh_r = d.open_path(Path(raw: "hello.txt"), OpenFlags.write_only().with_append().with_create())
+    print "open_ok={fh_r.is_ok()}"
+    if fh_r.is_err():
+        print "open_err={fh_r.unwrap_err()}"
+        return
+    val fh = fh_r.unwrap()
+    val wr = d.write(fh, 0, [104u8, 101u8, 108u8, 108u8, 111u8])
+    print "write_ok={wr.is_ok()}"
+    if wr.is_err():
+        print "write_err={wr.unwrap_err()}"
+    val cl = d.close(fh)
+    print "close1_ok={cl.is_ok()}"
+    if cl.is_err():
+        print "close1_err={cl.unwrap_err()}"
+    val ro = d.open_path(Path(raw: "hello.txt"), OpenFlags.read_only())
+    print "reopen_ok={ro.is_ok()}"
+    if ro.is_err():
+        print "reopen_err={ro.unwrap_err()}"
+        return
+    val rfh = ro.unwrap()
+    var buf = [0u8, 0u8, 0u8, 0u8, 0u8]
+    val rr = d.pread(rfh, 0, buf)
+    print "pread_ok={rr.is_ok()}"
+    if rr.is_err():
+        print "pread_err={rr.unwrap_err()}"
+    else:
+        print "pread_n={rr.unwrap()}"
+        print "buf0={buf[0]}"
+        print "buf1={buf[1]}"
+        print "buf2={buf[2]}"
+        print "buf3={buf[3]}"
+        print "buf4={buf[4]}"
+    val cl2 = d.close(rfh)
+    print "close2_ok={cl2.is_ok()}"
+    if cl2.is_err():
+        print "close2_err={cl2.unwrap_err()}"

@@ -1,6 +1,29 @@
-# Tooling Specification
+# Multi-Language Tooling Specification
 
-> Tests covering Multi-Language Tooling.
+> Comprehensive tests for multi-language project tooling that supports building, testing, and deploying projects containing Simple, Rust, Python, JavaScript, TypeScript, Go, C, and C++ code. Includes project detection, incremental compilation, dependency tracking, error aggregation, and deployment pipelines.
+
+<!-- sdn-diagram:id=tooling_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=tooling_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+tooling_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=tooling_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -9,7 +32,66 @@
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Tooling Specification
+# Multi-Language Tooling Specification
+
+Comprehensive tests for multi-language project tooling that supports building, testing, and deploying projects containing Simple, Rust, Python, JavaScript, TypeScript, Go, C, and C++ code. Includes project detection, incremental compilation, dependency tracking, error aggregation, and deployment pipelines.
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Feature IDs | #XXX |
+| Category | Tooling |
+| Difficulty | 4/5 |
+| Status | In Progress |
+| Source | `test/01_unit/app/tooling/tooling_spec.spl` |
+| Updated | 2026-06-01 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Comprehensive tests for multi-language project tooling that supports building,
+testing, and deploying projects containing Simple, Rust, Python, JavaScript,
+TypeScript, Go, C, and C++ code. Includes project detection, incremental
+compilation, dependency tracking, error aggregation, and deployment pipelines.
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| Multi-Language Support | Detection and compilation of multiple languages |
+| Project Detection | Identifying language-specific manifest files |
+| Incremental Compilation | Tracking changes and only recompiling modified files |
+| Dependency Tracking | Building and analyzing dependency graphs |
+| Error Aggregation | Collecting and normalizing errors from all languages |
+| Test Runner | Configurable parallel test execution |
+| Deployment Pipeline | Staged artifact deployment |
+
+## Behavior
+
+The multi-language tooling system provides:
+- Project detection by language manifest files
+- File change tracking via timestamps and hashes
+- Circular dependency detection and topological sorting
+- Unified error format normalization across languages
+- Configurable parallel test execution
+- Error grouping by source file
+- Multi-stage deployment pipelines
+- Support for debug and release compilation modes
+
+## Related Specifications
+
+- File Walker Specification
+- Feature Database Specification
+- Configuration FFI Specification
+
+## Examples
+
+```simple
+describe "Multi-Language Tooling":
+it "detects Simple projects":
+expect(true)
+```
 
 ## Scenarios
 
@@ -19,18 +101,16 @@
 
 #### detects Simple projects
 
-- detects Simple projects
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("detects Simple projects")
 # Simple projects have .spl files and simple.sdn configs
 assert_true(true)
 ```
@@ -39,18 +119,16 @@ assert_true(true)
 
 #### detects multi-language projects
 
-- detects multi-language projects
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("detects multi-language projects")
 # Multi-language detection checks for multiple manifest files
 assert_true(true)
 ```
@@ -59,18 +137,16 @@ assert_true(true)
 
 #### validates project configuration
 
-- validates project configuration
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("validates project configuration")
 # Project configuration validation
 assert_true(true)
 ```
@@ -81,18 +157,16 @@ assert_true(true)
 
 #### tracks file changes
 
-- tracks file changes
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("tracks file changes")
 # File change tracking monitors timestamps and hashes
 assert_true(true)
 ```
@@ -101,18 +175,16 @@ assert_true(true)
 
 #### detects file modifications
 
-- detects file modifications
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("detects file modifications")
 # File modification detection identifies updated files
 assert_true(true)
 ```
@@ -121,18 +193,16 @@ assert_true(true)
 
 #### identifies files needing recompilation
 
-- identifies files needing recompilation
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("identifies files needing recompilation")
 # Identifies which files need recompilation based on dependencies
 assert_true(true)
 ```
@@ -143,18 +213,16 @@ assert_true(true)
 
 #### builds dependency graph
 
-- builds dependency graph
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("builds dependency graph")
 # Build dependency graph from import statements
 assert_true(true)
 ```
@@ -163,18 +231,16 @@ assert_true(true)
 
 #### detects circular dependencies
 
-- detects circular dependencies
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("detects circular dependencies")
 # Circular dependency detection via cycle detection algorithm
 assert_true(true)
 ```
@@ -183,18 +249,16 @@ assert_true(true)
 
 #### computes topological order
 
-- computes topological order
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("computes topological order")
 # Topological sort of dependencies for build order
 assert_true(true)
 ```
@@ -205,18 +269,16 @@ assert_true(true)
 
 #### collects errors from multiple languages
 
-- collects errors from multiple languages
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("collects errors from multiple languages")
 # Collect errors from all language compilers
 assert_true(true)
 ```
@@ -225,18 +287,16 @@ assert_true(true)
 
 #### normalizes error formats
 
-- normalizes error formats
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("normalizes error formats")
 # Convert different error formats to unified schema
 assert_true(true)
 ```
@@ -245,18 +305,16 @@ assert_true(true)
 
 #### groups errors by file
 
-- groups errors by file
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("groups errors by file")
 # Group and organize errors by source file
 assert_true(true)
 ```
@@ -267,18 +325,16 @@ assert_true(true)
 
 #### creates test configuration
 
-- creates test configuration
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("creates test configuration")
 # Initialize test runner configuration
 assert_true(true)
 ```
@@ -287,18 +343,16 @@ assert_true(true)
 
 #### configures parallel execution
 
-- configures parallel execution
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("configures parallel execution")
 # Enable parallel test execution with worker pools
 assert_true(true)
 ```
@@ -307,18 +361,16 @@ assert_true(true)
 
 #### creates test result
 
-- creates test result
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("creates test result")
 # Create test result tracking object
 assert_true(true)
 ```
@@ -327,18 +379,16 @@ assert_true(true)
 
 #### generates test summary
 
-- generates test summary
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("generates test summary")
 # Generate human-readable test summary report
 assert_true(true)
 ```
@@ -349,18 +399,16 @@ assert_true(true)
 
 #### creates deployment pipeline
 
-- creates deployment pipeline
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("creates deployment pipeline")
 # Create deployment pipeline with stages
 assert_true(true)
 ```
@@ -369,18 +417,16 @@ assert_true(true)
 
 #### adds pipeline stages
 
-- adds pipeline stages
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("adds pipeline stages")
 # Add stages to deployment pipeline
 assert_true(true)
 ```
@@ -389,18 +435,16 @@ assert_true(true)
 
 #### executes pipeline stages
 
-- executes pipeline stages
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("executes pipeline stages")
 # Execute pipeline stages in sequence
 assert_true(true)
 ```
@@ -411,18 +455,16 @@ assert_true(true)
 
 #### supports debug mode
 
-- supports debug mode
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("supports debug mode")
 # Compile in debug mode with symbols
 assert_true(true)
 ```
@@ -431,18 +473,16 @@ assert_true(true)
 
 #### supports release mode
 
-- supports release mode
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("supports release mode")
 # Compile in release mode with optimizations
 assert_true(true)
 ```
@@ -453,18 +493,16 @@ assert_true(true)
 
 #### recognizes all supported languages
 
-- recognizes all supported languages
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("recognizes all supported languages")
 # Recognize Simple, Rust, Python, JavaScript, TypeScript, Go, C, C++
 assert_true(true)
 ```
@@ -473,18 +511,16 @@ assert_true(true)
 
 #### converts language to string
 
-- converts language to string
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("converts language to string")
 # Convert language enum to string representation
 assert_true(true)
 ```
@@ -495,18 +531,16 @@ assert_true(true)
 
 #### creates successful compilation result
 
-- creates successful compilation result
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("creates successful compilation result")
 # Create successful compilation result object
 assert_true(true)
 ```
@@ -515,18 +549,16 @@ assert_true(true)
 
 #### creates failed compilation result
 
-- creates failed compilation result
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("creates failed compilation result")
 # Create failed compilation result with errors
 assert_true(true)
 ```
@@ -537,18 +569,16 @@ assert_true(true)
 
 #### builds multi-language project
 
-- builds multi-language project
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("builds multi-language project")
 # Build entire multi-language project
 assert_true(true)
 ```
@@ -557,18 +587,16 @@ assert_true(true)
 
 #### runs multi-language tests
 
-- runs multi-language tests
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("runs multi-language tests")
 # Run tests across multiple languages
 assert_true(true)
 ```
@@ -577,38 +605,21 @@ assert_true(true)
 
 #### deploys multi-language project
 
-- deploys multi-language project
+- assert true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("deploys multi-language project")
 # Deploy compiled multi-language artifacts
 assert_true(true)
 ```
 
 </details>
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Application |
-| Status | Active |
-| Source | `test/01_unit/app/tooling/tooling_spec.spl` |
-| Updated | 2026-08-26 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering Multi-Language Tooling.
-- Multi-Language Tooling
 
 ## Scenario Summary
 
@@ -622,59 +633,3 @@ Tests covering Multi-Language Tooling.
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-UNIT`
-- `REQ-SSPEC-APP`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `46d90ca58405d15181c14ed624a196aeaaa9483dea5bd87805dacafcbb12b518`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `46d90ca58405d15181c14ed624a196aeaaa9483dea5bd87805dacafcbb12b518`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `46d90ca58405d15181c14ed624a196aeaaa9483dea5bd87805dacafcbb12b518`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **76/100**; effective score: **49/100**; blockers: **2**.
-
-SSpec documentization score: 49/100
-source: test/01_unit/app/tooling/tooling_spec.spl
-mirror: doc/06_spec/01_unit/app/tooling/tooling_spec.md (current)
-findings: 7 blockers: 2
-  narrative=100 structure=100 oracle=50
-  traceability=60 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-  raw=76; blocker cap makes effective=49
-doc/06_spec/01_unit/app/tooling/tooling_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/app/tooling/tooling_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/app/tooling/tooling_spec.spl:1:1: blocker SSDOC-ORA-001 [oracle] (-50): no real executed assertion or compiler oracle
-  why: A passing-looking document without an oracle is not conformance evidence.
-  improve: Replace placeholders with an observable production assertion.
-test/01_unit/app/tooling/tooling_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 1 declared requirement(s) have no scenario binding
-  why: A requirement list without scenario evidence is inventory, not traceability.
-  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
-test/01_unit/app/tooling/tooling_spec.spl:81:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'detects Simple projects' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/tooling/tooling_spec.spl:87:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'detects multi-language projects' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/tooling/tooling_spec.spl:93:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'validates project configuration' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

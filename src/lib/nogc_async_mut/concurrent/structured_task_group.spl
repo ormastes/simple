@@ -1,0 +1,282 @@
+# Hosted task adapter for the common structured owner/task lifecycle.
+#
+# The worker contract is deliberately closed over three scalar-only operations.
+# Arbitrary function values are not accepted because their transitive closure
+# environments are not yet proven share-nothing by the compiler.
+
+use std.common.structural.parallel_commit.{
+    STRUCTURED_TASK_WIRE_WORD_COUNT_V1,
+    OwnerSnapshotV1,
+    ParallelResultKind,
+    StructuredSpawnReceiptV1,
+    StructuredTaskErrorCodeV1,
+    StructuredTaskGroupV1,
+    StructuredTaskSpecV1,
+    StructuredTaskStateV1,
+    StructuredTaskWireResultV1,
+    StructuredWaitReceiptV1,
+    structured_task_error_reason,
+    structured_task_state_to_u8,
+    structured_task_wire_failure,
+    structured_task_wire_from_words,
+    structured_task_wire_success,
+    structured_task_wire_words
+}
+use std.concurrent.channel.{
+    channel_close_by_id,
+    channel_free_by_id,
+    channel_new,
+    channel_recv_i64_by_id,
+    channel_try_send_i64_by_id
+}
+use std.concurrent.multicore_green.{MulticoreGreenHandle, multicore_green_spawn}
+
+enum StructuredScalarWorker:
+    ReturnInput
+    AddFrozenToken
+    ReportFailure
+
+struct StructuredMapReceiptV1:
+    accepted: bool
+    spawns: [StructuredSpawnReceiptV1]
+    reason: text
+
+fn structured_runtime_spawn_rejected(reason: text) -> StructuredSpawnReceiptV1:
+    StructuredSpawnReceiptV1(accepted: false, task_id: 0,
+        lease_token: 0, reason: reason)
+
+fn structured_scalar_worker_apply(worker: StructuredScalarWorker,
+                                  frozen_input_token: i64,
+                                  input: i64) -> i64:
+    match worker:
+        case StructuredScalarWorker.ReturnInput: input
+        case StructuredScalarWorker.AddFrozenToken: input + frozen_input_token
+        case StructuredScalarWorker.ReportFailure: 0
+
+fn structured_runtime_send_wire(result_channel_id: i64,
+                                wire: StructuredTaskWireResultV1) -> bool:
+    """Send one fixed-width wire record using only the typed scalar ABI."""
+    val words = structured_task_wire_words(wire)
+    var i = 0
+    while i < words.len():
+        if not channel_try_send_i64_by_id(result_channel_id, words[i]):
+            return false
+        i = i + 1
+    true
+
+fn structured_runtime_child(result_channel_id: i64,
+                            snapshot_revision: i64,
+                            frozen_input_token: i64,
+                            input: i64,
+                            task_id: i64,
+                            sequence: i64,
+                            write_region: i64,
+                            kind: ParallelResultKind,
+                            deterministic_key_token: i64,
+                            worker: StructuredScalarWorker) -> i64:
+    """Run one capability-free scalar worker and publish a status envelope."""
+    val payload_token = structured_scalar_worker_apply(worker,
+        frozen_input_token, input)
+    if payload_token <= 0:
+        val failure = structured_task_wire_failure(snapshot_revision, task_id,
+            sequence, write_region, kind, deterministic_key_token,
+            StructuredTaskErrorCodeV1.WorkerReportedFailure)
+        if structured_runtime_send_wire(result_channel_id, failure):
+            return 1
+        return 0
+    val success = structured_task_wire_success(snapshot_revision, task_id,
+        sequence, write_region, kind, payload_token, deterministic_key_token)
+    if structured_runtime_send_wire(result_channel_id, success):
+        return 1
+    0
+
+class RuntimeStructuredTaskGroupV1:
+    lifecycle: StructuredTaskGroupV1
+    handles: [MulticoreGreenHandle]
+    result_channel_ids: [i64]
+    task_ids: [i64]
+    lease_tokens: [i64]
+    joined: [bool]
+    runtime_pool_spawns: i64
+    inline_spawns: i64
+
+    static fn create(snapshot: OwnerSnapshotV1, capacity: i64,
+                     retain_failure_notifications: bool) -> RuntimeStructuredTaskGroupV1:
+        RuntimeStructuredTaskGroupV1(
+            lifecycle: StructuredTaskGroupV1.create(snapshot, capacity,
+                retain_failure_notifications),
+            handles: [], result_channel_ids: [], task_ids: [], lease_tokens: [],
+            joined: [], runtime_pool_spawns: 0, inline_spawns: 0)
+
+    fn snapshot() -> OwnerSnapshotV1:
+        self.lifecycle.snapshot
+
+    fn reserved_count() -> i64:
+        self.lifecycle.reserved_count()
+
+    fn remaining_capacity() -> i64:
+        self.lifecycle.remaining_capacity()
+
+    fn used_runtime_pool_count() -> i64:
+        self.runtime_pool_spawns
+
+    fn ran_inline_count() -> i64:
+        self.inline_spawns
+
+    fn lifecycle_state() -> StructuredTaskGroupV1:
+        self.lifecycle
+
+    me spawn(input: i64, write_region: i64, kind: ParallelResultKind,
+             deterministic_key: text,
+             worker: StructuredScalarWorker) -> StructuredSpawnReceiptV1:
+        """Reserve and spawn one child with scalar-only immutable captures."""
+        if not self.lifecycle.can_reserve(1):
+            return structured_runtime_spawn_rejected(
+                "task-group-capacity-exhausted")
+        val output = channel_new()
+        if output.id() < 0:
+            return structured_runtime_spawn_rejected(
+                "result-channel-allocation-failed")
+        var lifecycle = self.lifecycle
+        val receipt = lifecycle.reserve(write_region, kind, deterministic_key)
+        self.lifecycle = lifecycle
+        if not receipt.accepted:
+            channel_close_by_id(output.id())
+            channel_free_by_id(output.id())
+            return receipt
+        val spec_value = self.lifecycle.task_spec(receipt.task_id)
+        if spec_value == nil:
+            var missing_lifecycle = self.lifecycle
+            missing_lifecycle.fail_task(receipt.task_id, receipt.lease_token,
+                StructuredTaskErrorCodeV1.InvalidResultWire,
+                "reserved-task-spec-missing")
+            self.lifecycle = missing_lifecycle
+            channel_close_by_id(output.id())
+            channel_free_by_id(output.id())
+            return structured_runtime_spawn_rejected(
+                "reserved-task-spec-missing")
+        val spec = spec_value as StructuredTaskSpecV1
+        val snapshot = self.lifecycle.snapshot
+        # Materialize every closure capture as a scalar. In particular, do not
+        # capture the Channel class or the snapshot/spec structs transitively.
+        val result_channel_id = output.id()
+        val snapshot_revision = snapshot.revision
+        val frozen_input_token = snapshot.frozen_input_token
+        val task_id = spec.task_id
+        val sequence = spec.sequence
+        val task_write_region = spec.write_region
+        val task_kind = spec.kind
+        val deterministic_key_token = spec.deterministic_key_token
+        val task_worker = worker
+        val handle = multicore_green_spawn(\:
+            structured_runtime_child(result_channel_id, snapshot_revision,
+                frozen_input_token, input, task_id, sequence,
+                task_write_region, task_kind, deterministic_key_token,
+                task_worker))
+        self.handles.push(handle)
+        self.result_channel_ids.push(result_channel_id)
+        self.task_ids.push(receipt.task_id)
+        self.lease_tokens.push(receipt.lease_token)
+        self.joined.push(false)
+        if handle.used_runtime_pool():
+            self.runtime_pool_spawns = self.runtime_pool_spawns + 1
+        else:
+            self.inline_spawns = self.inline_spawns + 1
+        receipt
+
+    me map(inputs: [i64], write_regions: [i64], kind: ParallelResultKind,
+           deterministic_key_prefix: text,
+           worker: StructuredScalarWorker) -> StructuredMapReceiptV1:
+        """Atomically preflight a bounded map, then reserve/spawn each child."""
+        if inputs.len() != write_regions.len():
+            return StructuredMapReceiptV1(accepted: false, spawns: [],
+                reason: "map-input-region-count-mismatch")
+        if inputs.len() == 0:
+            return StructuredMapReceiptV1(accepted: false, spawns: [],
+                reason: "empty-map")
+        if deterministic_key_prefix.len() == 0:
+            return StructuredMapReceiptV1(accepted: false, spawns: [],
+                reason: "invalid-deterministic-key-prefix")
+        if not self.lifecycle.can_reserve(inputs.len()):
+            return StructuredMapReceiptV1(accepted: false, spawns: [],
+                reason: "task-group-capacity-exhausted")
+        for write_region in write_regions:
+            if write_region <= 0:
+                return StructuredMapReceiptV1(accepted: false, spawns: [],
+                    reason: "invalid-task-spec")
+        var spawns: [StructuredSpawnReceiptV1] = []
+        var i = 0
+        while i < inputs.len():
+            val receipt = self.spawn(inputs[i], write_regions[i], kind,
+                deterministic_key_prefix + "-" + i.to_string(), worker)
+            if not receipt.accepted:
+                self.cancel_all()
+                self.join_all()
+                return StructuredMapReceiptV1(accepted: false,
+                    spawns: spawns, reason: receipt.reason)
+            spawns.push(receipt)
+            i = i + 1
+        StructuredMapReceiptV1(accepted: true, spawns: spawns, reason: "")
+
+    me cancel_task(task_id: i64) -> bool:
+        """Logically cancel one task by revoking its publication lease."""
+        var lifecycle = self.lifecycle
+        val cancelled = lifecycle.cancel_task(task_id)
+        self.lifecycle = lifecycle
+        cancelled
+
+    me cancel_all() -> i64:
+        """Logically cancel all live tasks; join_all still drains handles."""
+        var lifecycle = self.lifecycle
+        val cancelled = lifecycle.cancel_all()
+        self.lifecycle = lifecycle
+        cancelled
+
+    me join_all() -> StructuredWaitReceiptV1:
+        """Join children, decode complete scalar frames, and release channels."""
+        var i = 0
+        while i < self.handles.len():
+            if not self.joined[i]:
+                val child_status = self.handles[i].join()
+                var lifecycle = self.lifecycle
+                val state = lifecycle.task_state(self.task_ids[i])
+                if structured_task_state_to_u8(state) == 0:
+                    if child_status > 0:
+                        var words: [i64] = []
+                        var word_index = 0
+                        while word_index < STRUCTURED_TASK_WIRE_WORD_COUNT_V1:
+                            words.push(channel_recv_i64_by_id(
+                                self.result_channel_ids[i]))
+                            word_index = word_index + 1
+                        val wire_value = structured_task_wire_from_words(words)
+                        if wire_value == nil:
+                            lifecycle.fail_task(self.task_ids[i],
+                                self.lease_tokens[i],
+                                StructuredTaskErrorCodeV1.InvalidResultWire,
+                                structured_task_error_reason(
+                                    StructuredTaskErrorCodeV1.InvalidResultWire))
+                        else:
+                            lifecycle.publish_wire_result(self.task_ids[i],
+                                self.lease_tokens[i],
+                                wire_value as StructuredTaskWireResultV1)
+                    else:
+                        lifecycle.fail_task(self.task_ids[i],
+                            self.lease_tokens[i],
+                            StructuredTaskErrorCodeV1.ResultTransportFailure,
+                            structured_task_error_reason(
+                                StructuredTaskErrorCodeV1.ResultTransportFailure))
+                self.lifecycle = lifecycle
+                channel_close_by_id(self.result_channel_ids[i])
+                channel_free_by_id(self.result_channel_ids[i])
+                self.joined[i] = true
+            i = i + 1
+        self.lifecycle.wait_all()
+
+    me wait_all() -> StructuredWaitReceiptV1:
+        """Blocking wait alias for the structured runtime join barrier."""
+        self.join_all()
+
+export StructuredScalarWorker, StructuredMapReceiptV1
+export RuntimeStructuredTaskGroupV1
+export structured_scalar_worker_apply, structured_runtime_send_wire
+export structured_runtime_child

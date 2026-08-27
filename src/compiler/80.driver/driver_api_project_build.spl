@@ -7,25 +7,17 @@
 
 use compiler.driver.driver_api_types (_combine_driver_api_process_error)
 use compiler.common.driver_core_types (CompileOptions, CompileMode, CompileResult, driver_core_compile_options_default, compileoptions_normalize_mir_optimization, driver_output_format_native)
-use compiler.driver.driver.{compiler_driver_create, compiler_driver_run_compile}
+use compiler.driver.{compiler_driver_create, compiler_driver_run_compile}
 use lazy compiler.mir.mir_instructions (MirModule)
-# HOISTED (2026-08-21): `HeaderGenerator` and `get_shared_lib_flags` were
-# FUNCTION-LOCAL `use` lines inside `generate_headers` / `aot_shared_library`.
-# The parser DISCARDS function-local `use` outright
-# (10.frontend/core/parser_stmts.spl -> parse_use_stmt_inline returns a bare
-# `pass`), so neither name was ever bound and both bodies were one HIR lowering
-# away from `unresolved name`. `use lazy` keeps this tier's stated intent of not
-# paying the header_gen import chain eagerly -- an import the parser throws away
-# is not "lazy", it is absent.
 use lazy compiler.tools.header_gen.mod_ (HeaderGenerator)
-use lazy compiler.tools.header_gen.shared_lib_flags (get_shared_lib_flags)
-use compiler.tools.header_gen.shared_lib_flags (SharedLibFlags)
-use std.io_runtime.{process_run}
+use compiler.tools.header_gen.shared_lib_flags (get_shared_lib_flags, SharedLibFlags)
 
+extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_file_delete(path: text) -> bool
 extern fn rt_dir_create(path: text, recursive: bool) -> bool
 extern fn rt_path_join(a: text, b: text) -> text
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 
 fn _project_build_compile(options: CompileOptions) -> CompileResult:
     val driver = compiler_driver_create(options)
@@ -117,7 +109,7 @@ pub fn aot_shared_library(path: text, output: text) -> CompileResult:
             source_args.push("-o")
             source_args.push(source_obj)
 
-            val (src_out, src_err, src_code) = process_run("c++", source_args)
+            val (src_out, src_err, src_code) = rt_process_run("c++", source_args)
             if src_code != 0:
                 rt_file_delete(cpp_output)
                 return CompileResult.CodegenError(_combine_driver_api_process_error("C++ object compilation failed", src_out, src_err))
@@ -138,7 +130,7 @@ pub fn aot_shared_library(path: text, output: text) -> CompileResult:
             runtime_args.push("-o")
             runtime_args.push(runtime_obj)
 
-            val (rt_out, rt_err, rt_code) = process_run("cc", runtime_args)
+            val (rt_out, rt_err, rt_code) = rt_process_run("cc", runtime_args)
             if rt_code != 0:
                 rt_file_delete(cpp_output)
                 rt_file_delete(source_obj)
@@ -154,7 +146,7 @@ pub fn aot_shared_library(path: text, output: text) -> CompileResult:
             link_args.push("-o")
             link_args.push(output)
 
-            val (link_out, link_err, link_code) = process_run("c++", link_args)
+            val (link_out, link_err, link_code) = rt_process_run("c++", link_args)
             rt_file_delete(cpp_output)
             rt_file_delete(source_obj)
             rt_file_delete(runtime_obj)

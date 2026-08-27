@@ -18,7 +18,6 @@
 #   val state = parse_state_info("{\"mode\":\"NORMAL\",\"title\":\"App\"}")?
 
 use std.nogc_sync_mut.ui_test.types.{ElementInfo, UIStateInfo}
-use std.nogc_sync_mut.mcp_sdk.core.json.{extract_field as extract_json_field}
 
 # ============================================================================
 # Field Extraction Helpers
@@ -26,7 +25,47 @@ use std.nogc_sync_mut.mcp_sdk.core.json.{extract_field as extract_json_field}
 
 # @tag(json=json, field=field)
 pub fn extract_field(json: text, field: text) -> text:
-    extract_json_field(json=json, key=field)
+    """Extract a string value from JSON by field name.
+
+    Searches for "field":"value" pattern and extracts the value.
+    Returns empty string if field not found.
+
+    Args:
+        json: JSON string to search
+        field: Field name to extract
+
+    Returns:
+        Field value as text, or empty string if not found
+    """
+    var search = "\"{field}\":"
+    var idx = json.index_of(search)
+    if idx == nil:
+        return ""
+    var after_key = idx + search.length()
+    var rest = json.substring(after_key)
+    var trimmed = rest.trim_start()
+    if trimmed.length() == 0:
+        return ""
+    var first_char = trimmed.substring(0, 1)
+    if first_char == "\"":
+        # String value - find closing quote
+        var value_start = 1
+        var value_rest = trimmed.substring(value_start)
+        var end_quote = value_rest.index_of("\"")
+        if end_quote == nil:
+            return ""
+        var value = value_rest.substring(0, end_quote)
+        return value
+    # Non-string value (number, bool, null) - read until comma, }, or ]
+    var val_parts: [text] = []
+    var i = 0
+    while i < trimmed.length():
+        var ch = trimmed.substring(i, i + 1)
+        if ch == "," or ch == "}" or ch == "]":
+            return val_parts.join("").trim()
+        val_parts.push(ch)
+        i = i + 1
+    val_parts.join("").trim()
 
 # @tag(json=json, field=field)
 pub fn extract_bool_field(json: text, field: text) -> bool:
@@ -129,19 +168,18 @@ pub fn parse_props(json: text) -> [(text, text)]:
     var remaining = inner_trimmed
     while remaining.length() > 0:
         # Find key
-        # index_of returns a plain i64 with -1 for not-found, not an Option.
         var key_start = remaining.index_of("\"")
-        if key_start < 0:
+        if key_start == nil:
             return props
         var after_key_start = remaining.substring(key_start + 1)
         var key_end = after_key_start.index_of("\"")
-        if key_end < 0:
+        if key_end == nil:
             return props
         var key = after_key_start.substring(0, key_end)
         # Find value after colon
         var after_key = after_key_start.substring(key_end + 1)
         var colon_idx = after_key.index_of(":")
-        if colon_idx < 0:
+        if colon_idx == nil:
             return props
         var after_colon = after_key.substring(colon_idx + 1)
         var trimmed_val = after_colon.trim_start()
@@ -149,13 +187,13 @@ pub fn parse_props(json: text) -> [(text, text)]:
         if val_first == "\"":
             var val_content = trimmed_val.substring(1)
             var val_end = val_content.index_of("\"")
-            if val_end < 0:
+            if val_end == nil:
                 return props
             var value = val_content.substring(0, val_end)
             props.append((key, value))
             var after_val = val_content.substring(val_end + 1)
             var comma_idx = after_val.index_of(",")
-            if comma_idx < 0:
+            if comma_idx == nil:
                 return props
             remaining = after_val.substring(comma_idx + 1)
         else:
@@ -217,7 +255,7 @@ pub fn parse_element_info(json: text) -> Result<ElementInfo, text>:
     var props_search = "\"props\":"
     var props_idx = trimmed.index_of(props_search)
     var props: [(text, text)] = []
-    if props_idx >= 0:
+    if props_idx != nil:
         var after_props = trimmed.substring(props_idx + props_search.length())
         var props_trimmed = after_props.trim_start()
         var props_first = props_trimmed.substring(0, 1)

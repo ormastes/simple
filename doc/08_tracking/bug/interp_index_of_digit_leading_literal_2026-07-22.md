@@ -1,7 +1,6 @@
 # Bug: flat `i64?` optional lane collides with tagged-value scheme (seed JIT) — payload 3 reads as nil
 
-Status: OPEN (P1)
-Status re-verified 2026-08-17 by source inspection (triage shard 01).
+Status: OPEN — root-caused 2026-07-22; architectural fix required
 Observed: 2026-07-22 (as "index_of digit-leading literal" — that was a red herring, twice)
 Severity: P1 — silently wrong values in production tooling paths (JIT `run` on
 seed-engine binaries, which includes the currently deployed bin/release binary)

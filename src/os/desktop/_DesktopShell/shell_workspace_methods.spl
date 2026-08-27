@@ -188,6 +188,7 @@ impl DesktopShell:
             val screen_w = self.compositor.screen_width
             val screen_h = self.compositor.screen_height
             self.compositor.destroy_window(self.taskbar_id)
+            self._drop_baremetal_web_cache(self.taskbar_id.to_i64())
             self.taskbar_id = self.compositor.create_window_with_tree(
                 "Taskbar",
                 0, screen_h - TASKBAR_HEIGHT,
@@ -230,6 +231,7 @@ impl DesktopShell:
         if not self.launcher_visible:
             return
         self.compositor.destroy_window(self.launcher_id)
+        self._drop_baremetal_web_cache(self.launcher_id.to_i64())
         self.launcher_id = 0
         self.launcher_visible = false
 
@@ -527,36 +529,10 @@ impl DesktopShell:
                 log_info("[desktop] " + "[shell] Created web window {web_wid} for port {action.src_port}: url='{action.content}'")
             "destroy_window":
                 val process_id = self.wm.window_owner_process_id(action.window_id)
-                val closed_had_focus = (
-                    self.wm.focused_window() == action.window_id
-                )
-                val destroy_result = apply_wm_action_to_compositor(
-                    self.compositor, action
-                )
-                if not destroy_result.applied:
-                    if action.src_port > 0 and self.wm.initialized:
-                        self.wm.send_status_reply(
-                            action.src_port, WM_STATUS_ERROR.value
-                        )
-                    log_warn(
-                        "[desktop] [shell] compositor rejected destroy " +
-                        "window={action.window_id}"
-                    )
-                    return
-                self.compositor = destroy_result.compositor
+                self.compositor = apply_wm_action_to_compositor(self.compositor, action).compositor
                 self.wm.remove_owner(action.window_id)
                 if process_id > 0:
                     launcher_note_window_closed(process_id)
-                # Destruction is one owner-authoritative focus transition:
-                # Compositor.destroy_window selects its next visible surface,
-                # while remove_owner selects the matching service focus-stack
-                # fallback used by remote input routing. Tell that surviving
-                # owner it now has keyboard focus; otherwise it keeps an idle
-                # client-side focus state even though input is routed to it.
-                if closed_had_focus:
-                    val fallback_window_id = self.wm.focused_window()
-                    if fallback_window_id > 0u64:
-                        self.wm.send_focus_changed(fallback_window_id, true)
                 if action.src_port > 0 and self.wm.initialized:
                     self.wm.send_status_reply(action.src_port, 0)
                 log_info("[desktop] " + "[shell] Destroyed window {action.window_id}")
@@ -589,7 +565,22 @@ impl DesktopShell:
                 if action.src_port > 0 and self.wm.initialized:
                     self.wm.send_status_reply(action.src_port, 0)
             "update_tree":
-                self.compositor = apply_wm_action_to_compositor(self.compositor, action).compositor
+                val prior_index = self.compositor.surface_index(action.window_id)
+                val was_web = (
+                    prior_index >= 0 and
+                    self.compositor.surfaces[prior_index].content_kind ==
+                        WM_CONTENT_KIND_WEB_DOCUMENT
+                )
+                val tree_result = apply_wm_action_to_compositor(
+                    self.compositor, action
+                )
+                self.compositor = tree_result.compositor
+                if tree_result.applied and was_web:
+                    val next_index = self.compositor.surface_index(action.window_id)
+                    if (next_index < 0 or
+                        self.compositor.surfaces[next_index].content_kind !=
+                            WM_CONTENT_KIND_WEB_DOCUMENT):
+                        self._drop_baremetal_web_cache(action.window_id.to_i64())
                 if action.src_port > 0 and self.wm.initialized:
                     self.wm.send_status_reply(action.src_port, 0)
                 log_info("[desktop] " + "[shell] Applied tree update for window {action.window_id}")

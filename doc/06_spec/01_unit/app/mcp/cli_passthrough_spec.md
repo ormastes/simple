@@ -1,6 +1,30 @@
-# cli_passthrough_spec
+# Cli Passthrough Specification
 
-> Purpose: Prove that cli_passthrough: feature_gen.
+> <details>
+
+<!-- sdn-diagram:id=cli_passthrough_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=cli_passthrough_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+cli_passthrough_spec -> std
+cli_passthrough_spec -> app
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=cli_passthrough_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -9,23 +33,7 @@
 <details>
 <summary>Full Scenario Manual</summary>
 
-# cli_passthrough_spec
-
-Purpose: Prove that cli_passthrough: feature_gen.
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Application |
-| Status | Active |
-| Source | `test/01_unit/app/mcp/cli_passthrough_spec.spl` |
-| Updated | 2026-08-26 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Purpose and audience
-Purpose: Prove that cli_passthrough: feature_gen.
-Audience: compiler and tooling engineers who maintain this spec.
+# Cli Passthrough Specification
 
 ## Scenarios
 
@@ -33,26 +41,13 @@ Audience: compiler and tooling engineers who maintain this spec.
 
 #### does not append a name arg when name is provided
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- does not append a name arg when name is provided
-- Verify: does not append a name arg when name is provided
-   - Expected: has_name_val is false
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("does not append a name arg when name is provided")
-step("Verify: does not append a name arg when name is provided")
-# @req: REQ-APP-MCP-001
 val args = _append_cli_args_for_name("", "{\"name\":\"MyFeature\"}", "simple_feature_gen")
 val has_name_val = args.contains("MyFeature")
 expect(has_name_val).to_equal(false)
@@ -62,21 +57,13 @@ expect(has_name_val).to_equal(false)
 
 #### builds empty args list for feature_gen with no props
 
-- builds empty args list for feature_gen with no props
-- Verify: builds empty args list for feature_gen with no props
-   - Expected: args equals ``
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("builds empty args list for feature_gen with no props")
-step("Verify: builds empty args list for feature_gen with no props")
 val args = _append_cli_args_for_name("", "{}", "simple_feature_gen")
 expect(args).to_equal("")
 ```
@@ -87,21 +74,13 @@ expect(args).to_equal("")
 
 #### does not append a name arg when name is provided
 
-- does not append a name arg when name is provided
-- Verify: does not append a name arg when name is provided
-   - Expected: has_name_val is false
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("does not append a name arg when name is provided")
-step("Verify: does not append a name arg when name is provided")
 val args = _append_cli_args_for_name("", "{\"name\":\"MyTask\"}", "simple_task_gen")
 val has_name_val = args.contains("MyTask")
 expect(has_name_val).to_equal(false)
@@ -111,21 +90,13 @@ expect(has_name_val).to_equal(false)
 
 #### builds empty args list for task_gen with no props
 
-- builds empty args list for task_gen with no props
-- Verify: builds empty args list for task_gen with no props
-   - Expected: args equals ``
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("builds empty args list for task_gen with no props")
-step("Verify: builds empty args list for task_gen with no props")
 val args = _append_cli_args_for_name("", "{}", "simple_task_gen")
 expect(args).to_equal("")
 ```
@@ -136,21 +107,13 @@ expect(args).to_equal("")
 
 #### appends path value positionally for spec_gen
 
-- appends path value positionally for spec_gen
-- Verify: appends path value positionally for spec_gen
-   - Expected: args contains `src/foo/bar.spl`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("appends path value positionally for spec_gen")
-step("Verify: appends path value positionally for spec_gen")
 val args = _append_cli_args_for_name("", "{\"path\":\"src/foo/bar.spl\"}", "simple_spec_gen")
 expect(args.contains("src/foo/bar.spl")).to_equal(true)
 ```
@@ -161,21 +124,13 @@ expect(args.contains("src/foo/bar.spl")).to_equal(true)
 
 #### keeps outer timeout above requested per-test timeout
 
-- keeps outer timeout above requested per-test timeout
-- Verify: keeps outer timeout above requested per-test timeout
-   - Expected: _effective_cli_timeout_s("simple_test", body, 120) equals `270`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("keeps outer timeout above requested per-test timeout")
-step("Verify: keeps outer timeout above requested per-test timeout")
 val body = "{\"timeout\":\"240\"}"
 expect(_effective_cli_timeout_s("simple_test", body, 120)).to_equal(270)
 ```
@@ -184,21 +139,13 @@ expect(_effective_cli_timeout_s("simple_test", body, 120)).to_equal(270)
 
 #### keeps default outer timeout when requested timeout is lower
 
-- keeps default outer timeout when requested timeout is lower
-- Verify: keeps default outer timeout when requested timeout is lower
-   - Expected: _effective_cli_timeout_s("simple_test", body, 120) equals `120`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("keeps default outer timeout when requested timeout is lower")
-step("Verify: keeps default outer timeout when requested timeout is lower")
 val body = "{\"timeout\":\"30\"}"
 expect(_effective_cli_timeout_s("simple_test", body, 120)).to_equal(120)
 ```
@@ -207,21 +154,13 @@ expect(_effective_cli_timeout_s("simple_test", body, 120)).to_equal(120)
 
 #### ignores nonnumeric simple_test timeout values
 
-- ignores nonnumeric simple_test timeout values
-- Verify: ignores nonnumeric simple_test timeout values
-   - Expected: cmd does not contain `60;rm`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("ignores nonnumeric simple_test timeout values")
-step("Verify: ignores nonnumeric simple_test timeout values")
 val cmd = _append_cli_args_for_name("timeout 120 bin/simple test", "{\"timeout\":\"60;rm -rf /\",\"path\":\"test/unit/foo.spl\"}", "simple_test")
 expect(cmd).to_contain("test/unit/foo.spl")
 expect(cmd).to_contain("--timeout 60")
@@ -232,20 +171,13 @@ expect(cmd.contains("60;rm")).to_equal(false)
 
 #### preserves numeric simple_test timeout values
 
-- preserves numeric simple_test timeout values
-- Verify: preserves numeric simple_test timeout values
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("preserves numeric simple_test timeout values")
-step("Verify: preserves numeric simple_test timeout values")
 val cmd = _append_cli_args_for_name("timeout 270 bin/simple test", "{\"timeout\":\"240\",\"path\":\"test/unit/foo.spl\"}", "simple_test")
 expect(cmd).to_contain("--timeout 240")
 ```
@@ -254,26 +186,36 @@ expect(cmd).to_contain("--timeout 240")
 
 #### ignores oversized simple_test timeout values
 
-- ignores oversized simple_test timeout values
-- Verify: ignores oversized simple_test timeout values
-   - Expected: _effective_cli_timeout_s("simple_test", body, 120) equals `120`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("ignores oversized simple_test timeout values")
-step("Verify: ignores oversized simple_test timeout values")
 val body = "{\"timeout\":\"999999999999999999999999999999999999999999\"}"
 expect(_effective_cli_timeout_s("simple_test", body, 120)).to_equal(120)
 ```
 
 </details>
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Application |
+| Status | Active |
+| Source | `test/01_unit/app/mcp/cli_passthrough_spec.spl` |
+| Updated | 2026-06-01 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Tests covering:
+- cli_passthrough: feature_gen
+- cli_passthrough: task_gen
+- cli_passthrough: spec_gen still passes path
+- cli_passthrough: simple_test timeout handling
 
 ## Scenario Summary
 
@@ -287,55 +229,3 @@ expect(_effective_cli_timeout_s("simple_test", body, 120)).to_equal(120)
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-APP`
-- `REQ-APP-MCP-001`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `0cdb22d11f761a8f581ed7cfd81135e19ed9a007a2d3bd0452d8bb38b4e83aa5`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `0cdb22d11f761a8f581ed7cfd81135e19ed9a007a2d3bd0452d8bb38b4e83aa5`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `0cdb22d11f761a8f581ed7cfd81135e19ed9a007a2d3bd0452d8bb38b4e83aa5`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
-
-SSpec documentization score: 86/100
-source: test/01_unit/app/mcp/cli_passthrough_spec.spl
-mirror: doc/06_spec/01_unit/app/mcp/cli_passthrough_spec.md (current)
-findings: 6 blockers: 0
-  narrative=100 structure=100 oracle=70
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/app/mcp/cli_passthrough_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/app/mcp/cli_passthrough_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/app/mcp/cli_passthrough_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 3 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/01_unit/app/mcp/cli_passthrough_spec.spl:32:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'does not append a name arg when name is provided' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/mcp/cli_passthrough_spec.spl:41:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'builds empty args list for feature_gen with no props' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/mcp/cli_passthrough_spec.spl:49:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'does not append a name arg when name is provided' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

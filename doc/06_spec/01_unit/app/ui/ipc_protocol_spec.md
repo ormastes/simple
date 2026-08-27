@@ -1,10 +1,34 @@
 # Ipc Protocol Specification
 
-> Tests covering IPC Protocol, parse_ipc_message, build_ipc_render, build_ipc_dialog, build_ipc_notification, window lifecycle messages, build_ipc_request_http, extract_json_field, escape_ipc_json.
+> <details>
+
+<!-- sdn-diagram:id=ipc_protocol_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=ipc_protocol_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+ipc_protocol_spec -> app
+ipc_protocol_spec -> common
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=ipc_protocol_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 22 | 22 | 0 | 0 |
+| 20 | 20 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -19,19 +43,13 @@
 
 #### parses keypress events
 
-- parses keypress events
-   - Expected: event != nil is true
-
-
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("parses keypress events")
 val event = parse_ipc_message("{\"type\":\"keypress\",\"key\":\"j\"}")
 expect(event != nil).to_equal(true)
 ```
@@ -40,19 +58,13 @@ expect(event != nil).to_equal(true)
 
 #### parses action events
 
-- parses action events
-   - Expected: event != nil is true
-
-
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("parses action events")
 val event = parse_ipc_message("{\"type\":\"action\",\"name\":\"save\"}")
 expect(event != nil).to_equal(true)
 ```
@@ -61,20 +73,18 @@ expect(event != nil).to_equal(true)
 
 #### parses window scoped keypress events as Simple actions
 
-- parses window scoped keypress events as Simple actions
+1. UIEvent Action
    - Expected: name equals `win:terminal:keypress:Enter`
    - Expected: false is true
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("parses window scoped keypress events as Simple actions")
 val event = parse_ipc_message("{\"type\":\"keypress\",\"windowId\":\"terminal\",\"key\":\"Enter\"}")
 match event:
     UIEvent.Action(name) =>
@@ -87,20 +97,18 @@ match event:
 
 #### parses window scoped action events as Simple actions
 
-- parses window scoped action events as Simple actions
+1. UIEvent Action
    - Expected: name equals `win:terminal:action:close`
    - Expected: false is true
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("parses window scoped action events as Simple actions")
 val event = parse_ipc_message("{\"type\":\"action\",\"windowId\":\"terminal\",\"name\":\"close\"}")
 match event:
     UIEvent.Action(name) =>
@@ -113,21 +121,19 @@ match event:
 
 #### parses Tauri input envelopes as Simple input changes
 
-- parses Tauri input envelopes as Simple input changes
+1. UIEvent InputChange
    - Expected: target_id equals `name`
    - Expected: value equals `Ada`
    - Expected: false is true
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("parses Tauri input envelopes as Simple input changes")
 val event = parse_ipc_message("{\"type\":\"input\",\"target\":\"tauri\",\"surface_id\":\"main\",\"event_type\":\"input\",\"target_id\":\"name\",\"value\":\"Ada\"}")
 match event:
     UIEvent.InputChange(target_id, value) =>
@@ -141,19 +147,13 @@ match event:
 
 #### parses resize events
 
-- parses resize events
-   - Expected: event != nil is true
-
-
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("parses resize events")
 val event = parse_ipc_message("{\"type\":\"resize\",\"width\":\"800\",\"height\":\"600\"}")
 expect(event != nil).to_equal(true)
 ```
@@ -162,19 +162,13 @@ expect(event != nil).to_equal(true)
 
 #### parses quit events
 
-- parses quit events
-   - Expected: event != nil is true
-
-
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("parses quit events")
 val event = parse_ipc_message("{\"type\":\"quit\"}")
 expect(event != nil).to_equal(true)
 ```
@@ -183,28 +177,22 @@ expect(event != nil).to_equal(true)
 
 #### returns nil for unknown messages
 
-- returns nil for unknown messages
-   - Expected: event equals `nil`
-
-
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("returns nil for unknown messages")
 val event = parse_ipc_message("{\"type\":\"unknown\"}")
-expect(event).to_equal(nil)
+expect(event == nil).to_equal(true)
 ```
 
 </details>
 
 #### parses fetch results with headers
 
-- parses fetch results with headers
+1. UIEvent FetchResult
    - Expected: request_id equals `fetch-3`
    - Expected: url equals `https://example.com/data`
    - Expected: status equals `200`
@@ -214,14 +202,12 @@ expect(event).to_equal(nil)
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("parses fetch results with headers")
 val event = parse_ipc_message("{\"type\":\"fetch_result\",\"requestId\":\"fetch-3\",\"url\":\"https://example.com/data\",\"status\":\"200\",\"headers\":\"Content-Type: text/plain\\nSet-Cookie: sid=abc\",\"body\":\"alpha\",\"error\":\"\"}")
 match event:
     UIEvent.FetchResult(request_id, url, status, headers, body, error) =>
@@ -237,74 +223,17 @@ match event:
 
 </details>
 
-#### parses a real Electron dialog.showOpenDialog result into a file_dialog_result Action
-
-- parses a real Electron dialog.showOpenDialog result into a file_dialog_result Action
-   - Expected: name equals `file_dialog_result:/tmp/a.spl`
-   - Expected: false is true
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 8 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-APP
-step("parses a real Electron dialog.showOpenDialog result into a file_dialog_result Action")
-val event = parse_ipc_message("{\"type\":\"fileDialogResult\",\"canceled\":false,\"paths\":\"/tmp/a.spl\"}")
-match event:
-    UIEvent.Action(name) =>
-        expect(name).to_equal("file_dialog_result:/tmp/a.spl")
-    _ =>
-        expect(false).to_equal(true)
-```
-
-</details>
-
-#### parses a canceled file dialog result as an empty selection
-
-- parses a canceled file dialog result as an empty selection
-   - Expected: name equals `file_dialog_result:`
-   - Expected: false is true
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 8 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-APP
-step("parses a canceled file dialog result as an empty selection")
-val event = parse_ipc_message("{\"type\":\"fileDialogResult\",\"canceled\":true,\"paths\":\"\"}")
-match event:
-    UIEvent.Action(name) =>
-        expect(name).to_equal("file_dialog_result:")
-    _ =>
-        expect(false).to_equal(true)
-```
-
-</details>
-
 ### build_ipc_render
 
 #### builds a render message
 
-- builds a render message
-
-
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("builds a render message")
 val msg = build_ipc_render("<div>hello</div>")
 expect(msg).to_contain("render")
 expect(msg).to_contain("hello")
@@ -316,18 +245,13 @@ expect(msg).to_contain("hello")
 
 #### builds a dialog message
 
-- builds a dialog message
-
-
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("builds a dialog message")
 val msg = build_ipc_dialog("info", "Title", "Body text")
 expect(msg).to_contain("dialog")
 expect(msg).to_contain("Title")
@@ -340,18 +264,13 @@ expect(msg).to_contain("Body text")
 
 #### builds a notification message
 
-- builds a notification message
-
-
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("builds a notification message")
 val msg = build_ipc_notification("Alert", "Something happened")
 expect(msg).to_contain("notification")
 expect(msg).to_contain("Alert")
@@ -363,63 +282,38 @@ expect(msg).to_contain("Alert")
 
 #### escapes open window fields with html/css content
 
-- escapes open window fields with html/css content
-
-
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("escapes open window fields with html/css content")
-val msg = build_ipc_open_window(
-    "win\"1",
-    "A < B",
-    "<style>.x{}</style><img class=\"simple-picture\">",
-    1,
-    2,
-    300,
-    200,
-    "theme-css-token=alpha",
-    "data-wm-accent=\"blue\" data-wm-theme=\"obsidian\""
-)
+val msg = build_ipc_open_window("win\"1", "A < B", "<style>.x{}</style><img class=\"simple-picture\">", 1, 2, 300, 200)
 
 expect(msg).to_contain("\"type\":\"openWindow\"")
 expect(msg).to_contain("\"windowId\":\"win\\\"1\"")
 expect(msg).to_contain("\"title\":\"A < B\"")
 expect(msg).to_contain("\\\"simple-picture\\\"")
 expect(msg).to_contain("\"x\":1")
-expect(msg).to_contain("theme-css-token=alpha")
-expect(msg).to_contain("data-wm-accent")
-expect(msg).to_contain("data-wm-theme")
 ```
 
 </details>
 
-#### escapes render window envelope fields
-
-- escapes render window envelope fields
-
+#### escapes render and close window ids
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("escapes render window envelope fields")
-val render = build_ipc_render_window("win\"2", "<b>body</b>", "theme-root-css=ok", "data-wm-accent=\"green\"")
+val render = build_ipc_render_window("win\"2", "<b>body</b>")
 val close = build_ipc_close_window("win\"2")
 
 expect(render).to_contain("\"windowId\":\"win\\\"2\"")
 expect(render).to_contain("<b>body</b>")
-expect(render).to_contain("theme-root-css=ok")
-expect(render).to_contain("data-wm-accent")
 expect(close).to_contain("\"windowId\":\"win\\\"2\"")
 ```
 
@@ -429,18 +323,13 @@ expect(close).to_contain("\"windowId\":\"win\\\"2\"")
 
 #### builds a GET fetch request without body fields
 
-- builds a GET fetch request without body fields
-
-
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("builds a GET fetch request without body fields")
 val msg = build_ipc_request_fetch("https://example.com", "req-1")
 expect(msg).to_contain("\"type\":\"request_fetch\"")
 expect(msg).to_contain("\"url\":\"https://example.com\"")
@@ -452,18 +341,13 @@ expect(msg).to_contain("\"method\":\"GET\"")
 
 #### builds a POST fetch request with body and content type
 
-- builds a POST fetch request with body and content type
-
-
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("builds a POST fetch request with body and content type")
 val msg = build_ipc_request_http("https://example.com/submit", "req-2", "POST", "Cookie: sid=abc", "q=cat", "application/x-www-form-urlencoded")
 expect(msg).to_contain("\"method\":\"POST\"")
 expect(msg).to_contain("\"headers\":\"Cookie: sid=abc\"")
@@ -477,20 +361,13 @@ expect(msg).to_contain("\"contentType\":\"application/x-www-form-urlencoded\"")
 
 #### extracts string fields
 
-- extracts string fields
-   - Expected: extract_json_field("{\"key\":\"value\"}", "key") equals `value`
-   - Expected: extract_json_field("{\"a\":\"1\",\"b\":\"2\"}", "b") equals `2`
-
-
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("extracts string fields")
 expect(extract_json_field("{\"key\":\"value\"}", "key")).to_equal("value")
 expect(extract_json_field("{\"a\":\"1\",\"b\":\"2\"}", "b")).to_equal("2")
 ```
@@ -499,19 +376,13 @@ expect(extract_json_field("{\"a\":\"1\",\"b\":\"2\"}", "b")).to_equal("2")
 
 #### returns empty for missing fields
 
-- returns empty for missing fields
-   - Expected: extract_json_field("{\"key\":\"value\"}", "missing") equals ``
-
-
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("returns empty for missing fields")
 expect(extract_json_field("{\"key\":\"value\"}", "missing")).to_equal("")
 ```
 
@@ -521,18 +392,13 @@ expect(extract_json_field("{\"key\":\"value\"}", "missing")).to_equal("")
 
 #### escapes special characters
 
-- escapes special characters
-
-
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("escapes special characters")
 val escaped = escape_ipc_json("hello\nworld")
 expect(escaped).to_contain("\\n")
 ```
@@ -541,18 +407,13 @@ expect(escaped).to_contain("\\n")
 
 #### escapes quotes
 
-- escapes quotes
-
-
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("escapes quotes")
 val escaped = escape_ipc_json("say \"hi\"")
 expect(escaped).to_contain("\\\"")
 ```
@@ -566,12 +427,12 @@ expect(escaped).to_contain("\\\"")
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/ui/ipc_protocol_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering IPC Protocol, parse_ipc_message, build_ipc_render, build_ipc_dialog, build_ipc_notification, window lifecycle messages, build_ipc_request_http, extract_json_field, escape_ipc_json.
+Tests covering:
 - IPC Protocol
 - parse_ipc_message
 - build_ipc_render
@@ -586,62 +447,11 @@ Tests covering IPC Protocol, parse_ipc_message, build_ipc_render, build_ipc_dial
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 22 |
-| Active scenarios | 22 |
+| Total scenarios | 20 |
+| Active scenarios | 20 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-APP`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `1c15be6776a00c173f79d230005bef0a109b78cb40b4f94347f7696fec18989b`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `1c15be6776a00c173f79d230005bef0a109b78cb40b4f94347f7696fec18989b`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `1c15be6776a00c173f79d230005bef0a109b78cb40b4f94347f7696fec18989b`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **90/100**; effective score: **90/100**; blockers: **0**.
-
-SSpec documentization score: 90/100
-source: test/01_unit/app/ui/ipc_protocol_spec.spl
-mirror: doc/06_spec/01_unit/app/ui/ipc_protocol_spec.md (current)
-findings: 6 blockers: 0
-  narrative=100 structure=100 oracle=90
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/app/ui/ipc_protocol_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/app/ui/ipc_protocol_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/app/ui/ipc_protocol_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-10): 1 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/01_unit/app/ui/ipc_protocol_spec.spl:23:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'parses keypress events' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/ui/ipc_protocol_spec.spl:29:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'parses action events' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/ui/ipc_protocol_spec.spl:35:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'parses window scoped keypress events as Simple actions' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

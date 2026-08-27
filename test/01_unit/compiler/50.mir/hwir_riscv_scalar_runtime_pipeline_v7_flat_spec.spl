@@ -1,0 +1,62 @@
+use std.spec.*
+use compiler.mir.hwir.types.{CoreConfig}
+use compiler.mir.hwir.riscv_lsu_config.{LsuConfig}
+use compiler.mir.hwir.riscv_scalar_runtime_pipeline_v7_flat.{
+    strict_riscv_scalar_runtime_pipeline_v7_flat_direct}
+use compiler.mir.hwir.riscv_scalar_runtime_class_router_v7.{
+    strict_riscv_scalar_runtime_class_router_v7}
+use compiler.mir.hwir.host_evaluator.{HwHostInput, evaluate_strict_comb_hwir}
+
+fn v7_rv32im() -> CoreConfig:
+    CoreConfig.rv32im()
+
+fn v7_rv64im() -> CoreConfig:
+    CoreConfig.rv64im()
+
+fn v7_router_inputs(class_code: i64) -> [HwHostInput]:
+    [HwHostInput.bits("uop_valid", 1), HwHostInput.bits("decode_legal", 1),
+        HwHostInput.bits("illegal_valid", 0), HwHostInput.bits("decoded_execution_class", class_code),
+        HwHostInput.bits("alu_ready", 1), HwHostInput.bits("control_ready", 1),
+        HwHostInput.bits("system_ready", 1), HwHostInput.bits("illegal_ready", 1),
+        HwHostInput.bits("pending_ready", 1), HwHostInput.bits("pending_busy", 0),
+        HwHostInput.bits("sticky_fault", 0)]
+
+describe "flattened runtime scalar pipeline v7":
+    it "routes class four to the one M tag while retaining LSU and FENCE tags":
+        val router = strict_riscv_scalar_runtime_class_router_v7("runtime_v7_router", v7_rv64im()).unwrap()
+        for route in [(3, 1), (4, 2), (7, 4)]:
+            val result = evaluate_strict_comb_hwir(router, v7_router_inputs(route[0])).unwrap()
+            expect(result.value_of("pending_dispatch_valid").unwrap()).to_equal(1)
+            expect(result.value_of("pending_dispatch_tag").unwrap()).to_equal(route[1])
+        expect(router.shape_diagnostic()).to_equal("")
+
+    it "owns one flat unified M child in the frozen direct twenty-child graph":
+        val pipeline = strict_riscv_scalar_runtime_pipeline_v7_flat_direct(
+            "runtime_v7_flat", v7_rv64im(), LsuConfig.rv64_product_default()).unwrap()
+        expect(pipeline.local_diagnostic()).to_equal("")
+        expect(pipeline.diagnostic()).to_equal("")
+        expect(pipeline.top_ports.len()).to_equal(61)
+        expect(pipeline.router.entity_name).to_equal("runtime_v7_flat_router")
+        expect(pipeline.muldiv.entity_name).to_equal("runtime_v7_flat_muldiv")
+        expect(pipeline.muldiv.child_entity).to_equal("")
+        expect(pipeline.global_fault_gate.ports.any(_.name == "muldiv_fault" and _.direction == "in")).to_equal(true)
+
+    it "binds one tag-two M request completion readiness and fault contract":
+        val pipeline = strict_riscv_scalar_runtime_pipeline_v7_flat_direct(
+            "runtime_v7_edges", v7_rv32im(), LsuConfig.rv32_product_default()).unwrap()
+        for edge in [("pending", "muldiv_request_valid", "muldiv", "request_valid", 1),
+                ("pending", "muldiv_request_provider_tag", "muldiv", "request_provider_tag", 3),
+                ("muldiv", "request_accept", "pending", "muldiv_request_accept", 1),
+                ("muldiv", "completion_valid", "pending", "muldiv_completion_valid", 1),
+                ("pending", "muldiv_completion_ready", "muldiv", "completion_ready", 1),
+                ("muldiv", "provider_protocol_fault", "global_fault_gate", "muldiv_fault", 1)]:
+            expect(pipeline.bindings.any(_.source_owner == edge[0] and _.source_port == edge[1] and
+                _.destination_owner == edge[2] and _.destination_port == edge[3] and
+                _.bit_width == edge[4])).to_equal(true)
+        expect(pipeline.structural_sha256().len()).to_equal(64)
+        expect(pipeline.binding_list_sha256().len()).to_equal(64)
+
+    it "accepts only exact IM plans and rejects prior Zmmul scope":
+        expect(strict_riscv_scalar_runtime_pipeline_v7_flat_direct(
+            "runtime_v7_zmmul_rejected", CoreConfig.rv32i_zmmul(),
+            LsuConfig.rv32_product_default()).is_err()).to_equal(true)

@@ -1,0 +1,48 @@
+# codex-system-test
+# @req NFR-006
+"""Focused resource-bound and observable rejection contract for DebugServiceV1."""
+
+use std.spec.*
+use std.common.debug.contracts_v1.{
+    DebugSessionId, DebugRootOperationV1, DebugPerturbationV1,
+    DebugEvidenceArtifactV1, debug_policy_observe_only_v1,
+}
+use std.common.debug.service_v1.{DebugServiceV1, DebugServiceLimitsV1}
+
+fn limits() -> DebugServiceLimitsV1:
+    DebugServiceLimitsV1(
+        max_sessions: 1,
+        max_receipts: 2,
+        max_probes: 1,
+        max_action_stamps: 4,
+        max_evidence_artifacts: 1,
+        max_evidence_metadata_bytes: 64,
+    )
+
+fn session_or_fail(result: Result<DebugSessionId, text>) -> DebugSessionId:
+    match result:
+        case Ok(value): value
+        case Err(reason): fail("session rejected: {reason}")
+
+describe "DebugServiceV1 resource limits":
+    it "bounds sessions and receipts with observable rejection and eviction counters":
+        val service = DebugServiceV1.create_with_limits(limits())
+        val session_id = session_or_fail(service.open_session("build-one", debug_policy_observe_only_v1()))
+        match service.open_session("build-two", debug_policy_observe_only_v1()):
+            case Ok(_): fail("session beyond configured bound was accepted")
+            case Err(reason): expect(reason).to_equal("debug session capacity reached")
+        service.authorize(session_id, DebugRootOperationV1.Inspect, DebugPerturbationV1.Passive, "inspect.one")
+        expect(service.receipt_count()).to_equal(2)
+        val metrics = service.resource_metrics()
+        expect(metrics.session_rejections).to_equal(1)
+        expect(metrics.receipt_evictions).to_equal(1)
+
+    it "rejects oversized evidence before authorization and exposes the counter":
+        val service = DebugServiceV1.create_with_limits(limits())
+        val session_id = session_or_fail(service.open_session("build-evidence", debug_policy_observe_only_v1()))
+        val first = DebugEvidenceArtifactV1("a", "text/plain", "sha256:a", false, "restricted")
+        val second = DebugEvidenceArtifactV1("b", "text/plain", "sha256:b", false, "restricted")
+        match service.export_evidence(session_id, 1, [first, second]):
+            case Ok(_): fail("oversized evidence artifact list was accepted")
+            case Err(reason): expect(reason).to_equal("evidence artifact capacity exceeded")
+        expect(service.resource_metrics().evidence_rejections).to_equal(1)

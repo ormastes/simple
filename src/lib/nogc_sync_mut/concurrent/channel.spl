@@ -6,7 +6,7 @@
 # Channels enable safe communication between threads without shared memory.
 #
 # Channel Model:
-#   - Unbounded queue - no capacity limit (bounded channels not yet implemented)
+#   - Fixed-capacity queue - send reports back-pressure instead of growing
 #   - Multiple senders - any thread can send messages
 #   - Multiple receivers - any thread can receive messages
 #   - FIFO ordering - messages delivered in send order per sender
@@ -15,7 +15,7 @@
 #
 # Thread Safety:
 #   - All operations are atomic and thread-safe
-#   - Send never blocks (unbounded channel)
+#   - Send never blocks; capacity exhaustion returns false
 #   - Receive blocks until message available or channel closed
 #   - Close is idempotent - safe to call multiple times
 #
@@ -95,23 +95,16 @@
 #   - Pipeline: Chain channels for multi-stage processing
 #
 # Limitations:
-#   - No bounded channels yet - memory can grow unbounded
 #   - No select/multiplex - cannot wait on multiple channels
 #   - No timeout receive - use try_recv() loop with sleep
-#   - Channel handles not automatically closed - must call close() explicitly
+#   - Channel handles are explicit resources; owners close then free them
 
 # --- SFFI declarations ---
-@unsafe(reason: "raw runtime channel allocation ABI; contract: returned handle is runtime-owned", capabilities: [ffi])
 extern fn rt_channel_new() -> i64
-@unsafe(reason: "raw runtime channel send ABI; contract: one means admitted and zero means rejected", capabilities: [ffi])
-extern fn rt_channel_send(channel_id: i64, value: Any) -> i64
-@unsafe(reason: "raw runtime channel nonblocking receive ABI; contract: nil means no admitted message", capabilities: [ffi])
+extern fn rt_channel_send(channel_id: i64, value: Any)
 extern fn rt_channel_try_recv(channel_id: i64) -> Any?
-@unsafe(reason: "raw runtime channel blocking receive ABI; contract: nil means closed, timed out, or no admitted message", capabilities: [ffi])
 extern fn rt_channel_recv(channel_id: i64) -> Any?
-@unsafe(reason: "raw runtime channel close ABI; contract: close is idempotent", capabilities: [ffi])
 extern fn rt_channel_close(channel_id: i64)
-@unsafe(reason: "raw runtime channel state ABI; contract: one means closed and zero means open", capabilities: [ffi])
 extern fn rt_channel_is_closed(channel_id: i64) -> i64
 
 # --- Channel ---
@@ -124,53 +117,50 @@ class Channel:
     _id: i64  # Rust channel ID (opaque handle)
 
     # Sends a message to the channel (non-blocking).
-    # If channel is closed, send is silently ignored.
+    # If channel is closed or full, the value is rejected.
     # Thread-safe - multiple threads can send concurrently.
     # @tag:api
     fn send(value: Any):
-        unsafe(capabilities: [ffi]):
-            rt_channel_send(self._id, value)
+        rt_channel_send(self._id, value)
 
-    # Attempts to send a message; returns false if the runtime rejects it.
-    # Unlike send(), reports closed, full, disconnected, or untransferable data.
+    # Attempts to send a message; returns false if channel is closed or full.
+    # Unlike send(), reports closed/full instead of silently dropping.
     # Thread-safe - multiple threads can try_send concurrently.
     # @tag:api
     fn try_send(value: Any) -> bool:
-        val status = unsafe(capabilities: [ffi]):
+        val closed = rt_channel_is_closed(self._id) == 1
+        if closed:
+            false
+        else:
             rt_channel_send(self._id, value)
-        status == 1
+            true
 
     # Non-blocking receive - returns nil if no messages available.
     # Returns the oldest message in queue if present.
     # Thread-safe - multiple threads can try_recv concurrently.
     # @tag:api
     fn try_recv() -> Any?:
-        unsafe(capabilities: [ffi]):
-            rt_channel_try_recv(self._id)
+        rt_channel_try_recv(self._id)
 
     # Blocking receive - waits until message available.
     # Returns nil if channel is closed and empty.
     # Thread-safe - blocks current thread until message ready.
     # @tag:api
     fn recv() -> Any?:
-        unsafe(capabilities: [ffi]):
-            rt_channel_recv(self._id)
+        rt_channel_recv(self._id)
 
     # Closes the channel - no new sends accepted.
     # Existing buffered messages remain receivable.
     # Idempotent - safe to call multiple times.
     # @tag:api
     fn close():
-        unsafe(capabilities: [ffi]):
-            rt_channel_close(self._id)
+        rt_channel_close(self._id)
 
     # Checks if channel has been closed.
     # Returns true if close() was called, false otherwise.
     # @tag:api
     fn is_closed() -> bool:
-        val status = unsafe(capabilities: [ffi]):
-            rt_channel_is_closed(self._id)
-        status == 1
+        rt_channel_is_closed(self._id) == 1
 
     # Returns the internal channel ID (for debugging).
     # @tag:internal
@@ -179,19 +169,18 @@ class Channel:
 
 # --- API ---
 
-# Creates a new unbounded MPMC channel.
-# Channel has no capacity limit - grows as needed.
+# Creates a fixed-capacity MPMC channel.
+# Capacity is runtime-defined and never grows; send/try_send return false when
+# the fixed queue is full or closed.
 # Returns Channel handle for sending and receiving messages.
 # @tag:api
 fn channel_new() -> Channel:
-    val id = unsafe(capabilities: [ffi]):
-        rt_channel_new()
+    val id = rt_channel_new()
     Channel(_id: id)
 
 fn channel_new_id() -> i64:
     """Create a channel as an opaque scalar for native owner loops."""
-    unsafe(capabilities: [ffi]):
-        rt_channel_new()
+    rt_channel_new()
 
 # Wraps an existing channel ID into a Channel handle.
 # Use when passing channel references across thread boundaries
@@ -204,22 +193,16 @@ fn channel_from_id(id: i64) -> Channel:
 # Native worker loops use this when a blocking runtime call immediately
 # precedes send: it avoids keeping a class receiver live across that call.
 fn channel_send_by_id(id: i64, value: Any):
-    unsafe(capabilities: [ffi]):
-        rt_channel_send(id, value)
+    rt_channel_send(id, value)
 
 fn channel_send_i64_by_id(id: i64, value: i64):
-    unsafe(capabilities: [ffi]):
-        rt_channel_send(id, value)
+    rt_channel_send(id, value)
 
 fn channel_try_recv_by_id(id: i64) -> Any?:
-    unsafe(capabilities: [ffi]):
-        rt_channel_try_recv(id)
+    rt_channel_try_recv(id)
 
 fn channel_close_by_id(id: i64):
-    unsafe(capabilities: [ffi]):
-        rt_channel_close(id)
+    rt_channel_close(id)
 
 fn channel_is_closed_by_id(id: i64) -> bool:
-    val status = unsafe(capabilities: [ffi]):
-        rt_channel_is_closed(id)
-    status == 1
+    rt_channel_is_closed(id) == 1

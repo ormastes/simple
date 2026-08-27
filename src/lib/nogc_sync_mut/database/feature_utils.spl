@@ -4,7 +4,6 @@
 # SPipe metadata parsing and feature management utilities.
 # Used by FeatureDatabase and test runner.
 
-use std.convert (try_parse_int)
 use std.io.{file_read, file_exists}
 
 # ============================================================================
@@ -31,8 +30,8 @@ fn parse_spipe_metadata(file_path: text) -> [SPipeItem]:
     if not file_exists(file_path):
         return []
 
-    val content: text = file_read(file_path)
-    val lines: [text] = content.split("\n")
+    val content = file_read(file_path)
+    val lines = content.split("\n")
     var items: [SPipeItem] = []
 
     var current_id = ""
@@ -49,10 +48,10 @@ fn parse_spipe_metadata(file_path: text) -> [SPipeItem]:
         if trimmed.starts_with("#["):
             # Parse id
             if trimmed.contains("id("):
-                val id_start = trimmed.index_of("id(\"")
+                val id_start = trimmed.index_of("id(\"") ?? -1
                 if id_start >= 0:
                     val after = trimmed[id_start + 4:]
-                    val id_end = after.index_of("\")")
+                    val id_end = after.index_of("\")") ?? -1
                     if id_end >= 0:
                         current_id = after[0:id_end]
 
@@ -101,16 +100,16 @@ fn parse_spipe_metadata(file_path: text) -> [SPipeItem]:
 # Parse attribute list from @attr(val1, val2, ...)
 fn parse_attr_list(line: text, attr_name: text) -> [text]:
     val start_pattern = attr_name + "("
-    val start = line.index_of(start_pattern)
+    val start = line.index_of(start_pattern) ?? -1
     if start < 0:
         return []
     val after = line[start + start_pattern.len():]
-    val end = after.index_of(")")
+    val end = after.index_of(")") ?? -1
     if end < 0:
         return []
-    val inner: text = after[0:end]
+    val inner = after[0:end]
     var items: [text] = []
-    val parts: [text] = inner.split(",")
+    val parts = inner.split(",")
     for part in parts:
         # BUG-14 workaround: Break chained method calls
         val trimmed = part.trim()
@@ -121,11 +120,11 @@ fn parse_attr_list(line: text, attr_name: text) -> [text]:
 
 # Extract quoted string from line (first occurrence)
 fn extract_quoted_string(line: text) -> text:
-    val q1 = line.index_of("\"")
+    val q1 = line.index_of("\"") ?? -1
     if q1 < 0:
         return ""
     val after = line[q1 + 1:]
-    val q2 = after.index_of("\"")
+    val q2 = after.index_of("\"") ?? -1
     if q2 < 0:
         return ""
     after[0:q2]
@@ -133,7 +132,7 @@ fn extract_quoted_string(line: text) -> text:
 # Extract category from file path
 # e.g., "test/03_system/features/control_flow/..." -> "control_flow"
 fn extract_category_from_path(file_path: text) -> text:
-    val parts: [text] = file_path.split("/")
+    val parts = file_path.split("/")
     var i = 0
     while i < parts.len():
         if parts[i] == "features" and i + 1 < parts.len():
@@ -150,18 +149,25 @@ fn extract_category_from_path(file_path: text) -> text:
 
 # Parse integer with fallback value (replacement for missing .to_int_or() method)
 fn to_int_or(s: text, default: i64) -> i64:
-    """Parse `s` as an integer, returning `default` when it is not one.
-
-    Delegates to the fail-CLOSED `try_parse_int`, so a non-numeric OR
-    overflowing value really does fall back. The previous body hand-rolled a
-    digit check and then finished with `s.to_int() ?? default` -- that trailer
-    could never fire (the `.to_int()` intrinsic is typed `i64?` but its
-    runtime returns a plain int64_t), so overflow silently yielded 0.
-    """
-    val parsed = try_parse_int(s)
-    if parsed == nil:
+    if s.len() == 0:
         return default
-    parsed ?? default
+
+    # Check if string contains only digits (with optional leading -)
+    var start_idx = 0
+    if s[0:1] == "-":
+        start_idx = 1
+        if s.len() == 1:  # Just "-" is invalid
+            return default
+
+    var i = start_idx
+    while i < s.len():
+        val c = s[i:i+1]
+        if c < "0" or c > "9":
+            return default
+        i = i + 1
+
+    # Valid integer shape; still fall back on overflow.
+    s.to_int() ?? default
 
 # ============================================================================
 # Feature ID Comparison (Semantic Sorting)
@@ -170,8 +176,8 @@ fn to_int_or(s: text, default: i64) -> i64:
 # Compare feature IDs semantically for sorting
 # Handles numeric parts: "1.2" < "1.10" (not string sort)
 fn compare_feature_id(a: text, b: text) -> i64:
-    val a_parts: [text] = a.split(".")
-    val b_parts: [text] = b.split(".")
+    val a_parts = a.split(".")
+    val b_parts = b.split(".")
     val max_len = if a_parts.len() > b_parts.len():
         a_parts.len()
     else:

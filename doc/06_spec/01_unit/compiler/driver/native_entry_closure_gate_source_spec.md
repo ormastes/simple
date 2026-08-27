@@ -1,6 +1,6 @@
-# Native Entry Closure Gate Source Specification
+# Contract spec: test/01_unit/compiler/driver/native_entry_closure_gate_source_spec.spl
 
-> Tests covering native entry closure gate.
+> Audience: engineers owning the pinned repository sources. Purpose: keep the pinned observable
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -9,7 +9,47 @@
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Native Entry Closure Gate Source Specification
+# Contract spec: test/01_unit/compiler/driver/native_entry_closure_gate_source_spec.spl
+
+Audience: engineers owning the pinned repository sources. Purpose: keep the pinned observable
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Compiler |
+| Status | Active |
+| Source | `test/01_unit/compiler/driver/native_entry_closure_gate_source_spec.spl` |
+| Updated | 2026-08-27 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Purpose and Audience
+
+Audience: engineers owning the pinned repository sources. Purpose: keep the pinned observable
+contracts red-visible, so a regression in the owned code fails this spec
+instead of shipping silently.
+
+## Scope and Preconditions
+
+Precondition: the repository working tree holds the subject code under test.
+Each scenario exercises the subject and asserts its observable contract; no
+behavior outside the named subject is claimed.
+
+## Primary Workflow
+
+Run the scenarios; each one drives the subject through its pinned contract
+and asserts the expected observable outcome with an executed oracle.
+
+## Unsupported / Limitations
+
+Only the pinned contracts are asserted here; end-to-end and integration
+behavior of the surrounding system is covered by companion specs.
+
+## Verification and Recovery
+
+A red scenario names the contract that regressed. Recover by restoring the
+pinned behavior in the subject; verify with
+`bin/simple test test/01_unit/compiler/driver/native_entry_closure_gate_source_spec.spl` and a green Results line.
 
 ## Scenarios
 
@@ -70,14 +110,12 @@ expect(imports).to_contain("real.two")
 #### imports the concrete driver owner instead of the ambiguous facade
 
 - imports the concrete driver owner instead of the ambiguous facade
-   - Expected: source does not contain `use driver.*`
-   - Expected: source does not contain `use compiler.driver.{`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -87,8 +125,7 @@ val source = file_read("src/compiler/80.driver/main.spl")
 expect(source).to_contain(
     "use compiler.driver.driver.{compiler_driver_create, compiler_driver_run_compile}"
 )
-expect(source.contains("use driver.*")).to_equal(false)
-expect(source.contains("use compiler.driver.{")).to_equal(false)
+expect(source).to_not_contain("use driver.*")        expect(source).to_not_contain("use compiler.driver.{")
 ```
 
 </details>
@@ -96,7 +133,6 @@ expect(source.contains("use compiler.driver.{")).to_equal(false)
 #### reads parsed facade modules without optional value transport
 
 - reads parsed facade modules without optional value transport
-   - Expected: output does not contain `ctx.modules.get(name)`
 
 
 <details>
@@ -113,7 +149,7 @@ val output = file_read(
 expect(output).to_contain(
     "if ctx.modules.has(name) and driver_native_module_is_export_facade(ctx.mir_modules[name], ctx.modules[name]):"
 )
-expect(output.contains("ctx.modules.get(name)")).to_equal(false)
+expect(output).to_not_contain("ctx.modules.get(name)")
 ```
 
 </details>
@@ -156,21 +192,6 @@ expect(closure).to_not_contain("if self.ctx.errors.len() == 0:")
 
 </details>
 
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Compiler |
-| Status | Active |
-| Source | `test/01_unit/compiler/driver/native_entry_closure_gate_source_spec.spl` |
-| Updated | 2026-08-26 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering native entry closure gate.
-- native entry closure gate
-
 ## Scenario Summary
 
 | Metric | Count |
@@ -189,56 +210,42 @@ Tests covering native entry closure gate.
 
 Requirements covered by the scenarios in this manual:
 
-- `REQ-SSPEC-UNIT`
 - `REQ-SSPEC-COMPILER`
 <!-- sspec-maintain:traceability:end -->
 
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `8b68172926649edccfac89e5eb88721d3b5d850ef060ebc84e2edf3ade405784`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `b3d78a19a8d4440c0819895af85735b839462ac8fd05b13e76f94ac90da31a91`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `8b68172926649edccfac89e5eb88721d3b5d850ef060ebc84e2edf3ade405784`.
+Source SHA-256: `b3d78a19a8d4440c0819895af85735b839462ac8fd05b13e76f94ac90da31a91`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `8b68172926649edccfac89e5eb88721d3b5d850ef060ebc84e2edf3ade405784`  
+Source SHA-256: `b3d78a19a8d4440c0819895af85735b839462ac8fd05b13e76f94ac90da31a91`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **74/100**; effective score: **49/100**; blockers: **2**.
+Raw score: **93/100**; effective score: **93/100**; blockers: **0**.
 
-SSpec documentization score: 49/100
+SSpec documentization score: 93/100
 source: test/01_unit/compiler/driver/native_entry_closure_gate_source_spec.spl
 mirror: doc/06_spec/01_unit/compiler/driver/native_entry_closure_gate_source_spec.md (current)
-findings: 8 blockers: 2
-  narrative=100 structure=100 oracle=40
-  traceability=60 evidence=70 coverage=100 maintainability=70
+findings: 4 blockers: 0
+  narrative=100 structure=100 oracle=90
+  traceability=100 evidence=70 coverage=100 maintainability=100
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-  raw=74; blocker cap makes effective=49
-doc/06_spec/01_unit/compiler/driver/native_entry_closure_gate_source_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/compiler/driver/native_entry_closure_gate_source_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/compiler/driver/native_entry_closure_gate_source_spec.spl:1:1: blocker SSDOC-ORA-002 [oracle] (-50): scenario relies on source-text inspection as system evidence
-  why: Source presence or self-created arithmetic does not demonstrate production behavior.
-  improve: Observe runtime behavior or a stable generated artifact instead.
 test/01_unit/compiler/driver/native_entry_closure_gate_source_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-10): 1 unexplained numeric expected value(s)
   why: Reviewers need to know why a magic expected value is authoritative.
   improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/01_unit/compiler/driver/native_entry_closure_gate_source_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 1 declared requirement(s) have no scenario binding
-  why: A requirement list without scenario evidence is inventory, not traceability.
-  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
-test/01_unit/compiler/driver/native_entry_closure_gate_source_spec.spl:16:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'collects every export-use dependency from the driver facade' has no retained capture or evidence
+test/01_unit/compiler/driver/native_entry_closure_gate_source_spec.spl:48:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'collects every export-use dependency from the driver facade' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/compiler/driver/native_entry_closure_gate_source_spec.spl:25:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'skips lazy, commented, and docstring imports' has no retained capture or evidence
+test/01_unit/compiler/driver/native_entry_closure_gate_source_spec.spl:57:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'skips lazy, commented, and docstring imports' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/compiler/driver/native_entry_closure_gate_source_spec.spl:35:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'imports the concrete driver owner instead of the ambiguous facade' has no retained capture or evidence
+test/01_unit/compiler/driver/native_entry_closure_gate_source_spec.spl:67:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'imports the concrete driver owner instead of the ambiguous facade' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
 <!-- sspec-maintain:scorecard:end -->

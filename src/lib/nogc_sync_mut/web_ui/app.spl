@@ -11,7 +11,7 @@ use std.nogc_sync_mut.web_ui.event_bus.{EventBus}
 use std.nogc_sync_mut.web_ui.plugin.{Plugin, PluginRegistry}
 use std.nogc_sync_mut.web_ui.dom_backend.{EngineDomBackend}
 use common.web.logging.{Logger, LogLevel}
-use std.nogc_sync_mut.io.window_sffi.{window_ticks_ms}
+use std.nogc_sync_mut.sffi.window_abi.{sdl2_native_get_ticks_ms}
 
 # Application configuration.
 class AppConfig:
@@ -109,10 +109,9 @@ class WebUIApp:
         self.state = AppState.ShuttingDown
 
     # Main entry point — starts the event loop, blocks until quit.
-    me run() -> bool:
+    me run():
         self.state = AppState.Running
         self.running = true
-        var presentation_ok = true
 
         # Initialize all plugins
         self.plugin_registry.init_all(self.command_registry, self.event_bus)
@@ -127,13 +126,7 @@ class WebUIApp:
 
         # Main event loop
         while self.running:
-            val maybe_frame_start = window_ticks_ms()
-            if not maybe_frame_start.?:
-                self.logger.log(LogLevel.Error, "SDL2 frame clock unavailable")
-                presentation_ok = false
-                self.running = false
-                continue
-            val frame_start = maybe_frame_start.unwrap()
+            val frame_start = sdl2_native_get_ticks_ms()
 
             # Phase 1: Poll SDL2 events
             val events = self.input_bridge.poll()
@@ -143,38 +136,22 @@ class WebUIApp:
                 self.handle_event(event)
 
             # Phase 3: Render dirty windows and present
-            if not self.window_manager.present_all():
-                self.logger.log(LogLevel.Error, "WebUI presentation failed")
-                presentation_ok = false
-                self.running = false
+            self.window_manager.present_all()
 
             # Phase 4: Frame pacing (busy-wait to target FPS)
-            val maybe_now = window_ticks_ms()
-            if not maybe_now.?:
-                self.logger.log(LogLevel.Error, "SDL2 frame clock unavailable")
-                presentation_ok = false
-                self.running = false
-                continue
-            var now = maybe_now.unwrap()
+            var now = sdl2_native_get_ticks_ms()
             val elapsed = now - frame_start
             if elapsed < frame_ms:
                 # Busy wait for remaining frame budget
                 val target = frame_start + frame_ms
-                while self.running and now < target:
-                    val next_now = window_ticks_ms()
-                    if not next_now.?:
-                        self.logger.log(LogLevel.Error, "SDL2 frame clock unavailable")
-                        presentation_ok = false
-                        self.running = false
-                    else:
-                        now = next_now.unwrap()
+                while now < target:
+                    now = sdl2_native_get_ticks_ms()
 
         # Shutdown
         self.state = AppState.ShuttingDown
         self.plugin_registry.shutdown_all()
         self.window_manager.destroy_all()
         self.logger.log(LogLevel.Info, "WebUIApp shutdown complete")
-        presentation_ok
 
     # Handle a single WebUIEvent.
     me handle_event(event: WebUIEvent):
@@ -200,9 +177,6 @@ class WebUIApp:
 
             WebUIEvent.KeyUp(key_sym, modifiers):
                 self.event_bus.emit("keyup", "{key_sym}")
-
-            WebUIEvent.TextInput(value):
-                self.event_bus.emit("textinput", value)
 
             WebUIEvent.MouseMove(x, y):
                 pass_dn

@@ -1,6 +1,29 @@
 # Module Import New Submodule Specification
 
-> Tests covering Module Import - Compiled-In Package.
+> 1.  run and check
+
+<!-- sdn-diagram:id=module_import_new_submodule_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=module_import_new_submodule_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+module_import_new_submodule_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=module_import_new_submodule_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -19,19 +42,16 @@
 
 #### imports existing std.cli_output function via init
 
-- imports existing std.cli_output function via init
-   - Expected: _can_run is false
+1.  run and check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("imports existing std.cli_output function via init")
 if not _can_run:
     expect(_can_run).to_equal(false)
 else:
@@ -42,19 +62,16 @@ else:
 
 #### imports existing std.cli_output submodule directly
 
-- imports existing std.cli_output submodule directly
-   - Expected: _can_run is false
+1.  run and check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("imports existing std.cli_output submodule directly")
 if not _can_run:
     expect(_can_run).to_equal(false)
 else:
@@ -67,19 +84,16 @@ else:
 
 #### can load new spl file without parse errors (run directly)
 
-- can load new spl file without parse errors (run directly)
-   - Expected: _can_run is false
+1.  run setup probe direct and check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("can load new spl file without parse errors (run directly)")
 if not _can_run:
     expect(_can_run).to_equal(false)
 else:
@@ -90,19 +104,16 @@ else:
 
 #### can import function from new submodule via direct path
 
-- can import function from new submodule via direct path
-   - Expected: _can_run is false
+1.  run setup probe and check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("can import function from new submodule via direct path")
 if not _can_run:
     expect(_can_run).to_equal(false)
 else:
@@ -115,19 +126,16 @@ else:
 
 #### can import buffer_start via direct submodule path
 
-- can import buffer_start via direct submodule path
-   - Expected: _can_run is false
+1.  run and check known bug
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("can import buffer_start via direct submodule path")
 if not _can_run:
     expect(_can_run).to_equal(false)
 else:
@@ -138,19 +146,16 @@ else:
 
 #### can import log_print via direct submodule path
 
-- can import log_print via direct submodule path
-   - Expected: _can_run is false
+1.  run and check known bug
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("can import log_print via direct submodule path")
 if not _can_run:
     expect(_can_run).to_equal(false)
 else:
@@ -161,19 +166,16 @@ else:
 
 #### can import buffer functions via init reexport
 
-- can import buffer functions via init reexport
-   - Expected: _can_run is false
+1.  run and check known bug
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("can import buffer functions via init reexport")
 if not _can_run:
     expect(_can_run).to_equal(false)
 else:
@@ -186,19 +188,16 @@ else:
 
 #### can import from a completely new package via direct path
 
-- can import from a completely new package via direct path
-   - Expected: _can_run is false
+1.  run setup fresh and check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("can import from a completely new package via direct path")
 if not _can_run:
     expect(_can_run).to_equal(false)
 else:
@@ -209,19 +208,16 @@ else:
 
 #### can import from a completely new package via init
 
-- can import from a completely new package via init
-   - Expected: _can_run is false
+1.  run setup fresh and check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("can import from a completely new package via init")
 if not _can_run:
     expect(_can_run).to_equal(false)
 else:
@@ -234,19 +230,16 @@ else:
 
 #### buffer.spl is found by resolver (not module-not-found)
 
-- buffer.spl is found by resolver (not module-not-found)
-   - Expected: _can_run is false
+1.  run diag module loading
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("buffer.spl is found by resolver (not module-not-found)")
 if not _can_run:
     expect(_can_run).to_equal(false)
 else:
@@ -257,19 +250,16 @@ else:
 
 #### extern fn in module does not prevent function registration
 
-- extern fn in module does not prevent function registration
-   - Expected: _can_run is false
+1.  run setup probe extern and check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("extern fn in module does not prevent function registration")
 if not _can_run:
     expect(_can_run).to_equal(false)
 else:
@@ -285,12 +275,12 @@ else:
 | Category | Compiler |
 | Status | Active |
 | Source | `test/03_system/compiler/module_import/module_import_new_submodule_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering Module Import - Compiled-In Package.
+Tests covering:
 - Module Import - Compiled-In Package
 
 ## Scenario Summary
@@ -305,69 +295,3 @@ Tests covering Module Import - Compiled-In Package.
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `19f258337ab87aea6c58271cb0785ce744127fa895830aaa41752092518b5801`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `19f258337ab87aea6c58271cb0785ce744127fa895830aaa41752092518b5801`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `19f258337ab87aea6c58271cb0785ce744127fa895830aaa41752092518b5801`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **88/100**; effective score: **88/100**; blockers: **0**.
-
-SSpec documentization score: 88/100
-source: test/03_system/compiler/module_import/module_import_new_submodule_spec.spl
-mirror: doc/06_spec/03_system/compiler/module_import/module_import_new_submodule_spec.md (current)
-findings: 11 blockers: 0
-  narrative=100 structure=70 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/compiler/module_import/module_import_new_submodule_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/compiler/module_import/module_import_new_submodule_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/compiler/module_import/module_import_new_submodule_spec.spl:168:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'imports existing std.cli_output function via init' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/compiler/module_import/module_import_new_submodule_spec.spl:176:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'imports existing std.cli_output submodule directly' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/compiler/module_import/module_import_new_submodule_spec.spl:190:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'can load new spl file without parse errors (run directly)' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/03_system/compiler/module_import/module_import_new_submodule_spec.spl:190:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'can load new spl file without parse errors (run directly)' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/compiler/module_import/module_import_new_submodule_spec.spl:198:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'can import function from new submodule via direct path' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/03_system/compiler/module_import/module_import_new_submodule_spec.spl:212:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'can import buffer_start via direct submodule path' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/03_system/compiler/module_import/module_import_new_submodule_spec.spl:220:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'can import log_print via direct submodule path' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/03_system/compiler/module_import/module_import_new_submodule_spec.spl:228:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'can import buffer functions via init reexport' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/03_system/compiler/module_import/module_import_new_submodule_spec.spl:242:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'can import from a completely new package via direct path' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-<!-- sspec-maintain:scorecard:end -->

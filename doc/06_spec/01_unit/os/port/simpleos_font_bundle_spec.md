@@ -11,7 +11,7 @@
 
 # Simpleos Font Bundle Specification
 
-## Scenarios
+## Executable source
 
 ### SimpleOS font legal bundle
 

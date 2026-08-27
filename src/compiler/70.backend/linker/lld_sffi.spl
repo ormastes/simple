@@ -6,7 +6,7 @@
 #
 # Used by linker_wrapper.spl when target is SimpleOS (see Wave 3 CRT guard).
 
-use std.sffi.dynamic.{spl_dlsym_process_checked}
+use std.sffi.dynamic.{DynLib}
 
 # ============================================================================
 # Runtime SFFI primitives (same set llvm.spl / dyn_sffi.spl rely on)
@@ -16,7 +16,6 @@ extern fn rt_alloc(size: i64) -> i64
 extern fn rt_free(ptr: i64)
 extern fn rt_memset(dest: i64, value: i64, len: i64) -> i64
 extern fn rt_memcpy(dest: i64, src: i64, len: i64)
-@unsafe(reason: "nonnull raw store; linker allocation and relocation bounds are caller-owned", capabilities: [ffi, raw_ptr])
 extern fn rt_ptr_write_i64(addr: i64, offset: i64, value: i64)
 extern fn rt_cstring_to_text(ptr: i64) -> text
 # `spl_str_ptr` has no native-build implementation anywhere in the tree
@@ -40,12 +39,9 @@ class LldResult:
 # ============================================================================
 
 fn lld_elf_link(args: [text]) -> LldResult:
-    # Resolve the statically linked shim without treating a null provider
-    # handle as an ordinary dynamic-library authority.
-    var fptr: i64 = 0
-    val symbol_status = unsafe(capabilities: [ffi, raw_ptr]):
-        spl_dlsym_process_checked("simple_lld_elf_link", &mut fptr)
-    if symbol_status != 0 or fptr <= 0:
+    # Resolve shim symbol via self-handle dlsym.
+    val fptr = spl_dlsym(0, "simple_lld_elf_link")
+    if fptr == 0:
         return LldResult(
             exit_code: 127,
             stderr_text: "lld_sffi: symbol 'simple_lld_elf_link' not found; shim not linked into this binary",

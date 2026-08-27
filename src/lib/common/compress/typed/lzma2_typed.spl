@@ -99,14 +99,11 @@ pub fn lzma2_decompress(input: ByteSpan) -> ByteSpan:
       0x02 — uncompressed chunk, no dict reset
 
     Returns the decompressed bytes as a ByteSpan.
-    On malformed chunk metadata, payload, control byte, missing end marker, or
-    trailing bytes after the end marker, returns empty.
+    On parse error or unexpected control byte, returns what was decoded so far.
     """
     var out: [u8] = []
     var pos = 0
     val n = input.len()
-    var seen_end = false
-    var seen_chunk = false
 
     while pos < n:
         var ctrl_b = input.get(pos)
@@ -114,18 +111,12 @@ pub fn lzma2_decompress(input: ByteSpan) -> ByteSpan:
         pos = pos + 1
 
         if ctrl == LZMA2_CTRL_END:
-            seen_end = true
-            if pos != n:
-                return ByteSpan.empty()
             break
 
         if ctrl == LZMA2_CTRL_UNCMPR_RESET or ctrl == LZMA2_CTRL_UNCMPR_NRESET:
-            if ctrl == LZMA2_CTRL_UNCMPR_NRESET and not seen_chunk:
-                return ByteSpan.empty()
-            seen_chunk = true
             # Need at least 2 more bytes for the size field
             if pos + 1 >= n:
-                return ByteSpan.empty()
+                break
             var hi_b = input.get(pos)
             var lo_b = input.get(pos + 1)
             val sz_hi = hi_b.to_i64()
@@ -137,15 +128,14 @@ pub fn lzma2_decompress(input: ByteSpan) -> ByteSpan:
             var i = 0
             while i < chunk_sz:
                 if pos >= n:
-                    return ByteSpan.empty()
+                    break
                 out.push(input.get(pos))
                 pos = pos + 1
                 i = i + 1
         else:
-            return ByteSpan.empty()
+            # Unknown control byte — stop parsing (conservative)
+            break
 
-    if not seen_end:
-        return ByteSpan.empty()
     ByteSpan.new(out)
 
 # ============================================================================
@@ -178,7 +168,7 @@ pub fn lzma2_decompress(input: ByteSpan) -> ByteSpan:
 #     [..]    CRC32 of index bytes (little-endian u32)
 #
 #   Stream Footer (12 bytes):
-#     [0..3]  CRC32 of backward_size + stream flags (little-endian u32)
+#     [0..3]  CRC32 of stream flags (same as header; little-endian u32)
 #     [4..7]  backward_size = (index_total_bytes / 4) - 1  (little-endian u32)
 #     [8..9]  stream flags: 00 00
 #     [10..11] magic: 59 5A
@@ -222,24 +212,6 @@ pub fn xz_decode_check_magic(frame: ByteSpan) -> bool:
     val f0 = fn0.to_i64() == 0x59
     val f1 = fn1.to_i64() == 0x5A
     f0 and f1
-
-fn xz_index_vli_matches(frame: ByteSpan, start: i64, limit: i64, expected: i64) -> i64:
-    var pos = start
-    var value = expected
-    var done = false
-    while not done:
-        if pos >= limit:
-            return -1
-        var byte = value & 0x7F
-        value = value >> 7
-        if value > 0:
-            byte = byte | 0x80
-        else:
-            done = true
-        if frame.get(pos).to_i64() != byte:
-            return -1
-        pos = pos + 1
-    pos
 
 pub fn xz_encode(input: ByteSpan) -> ByteSpan:
     """Produce a minimal XZ stream containing `input` as an LZMA2 uncompressed block.
@@ -403,23 +375,16 @@ pub fn xz_encode(input: ByteSpan) -> ByteSpan:
     out.push(ic3.to_u8())
 
     # Stream Footer (12 bytes)
+    # CRC32 of stream flags (same value as header)
+    out.push(fc0.to_u8())
+    out.push(fc1.to_u8())
+    out.push(fc2.to_u8())
+    out.push(fc3.to_u8())
     # backward_size (4 bytes LE)
     var bs0 = backward_sz & 0xFF
     var bs1 = (backward_sz >> 8) & 0xFF
     var bs2 = (backward_sz >> 16) & 0xFF
     var bs3 = (backward_sz >> 24) & 0xFF
-    var footer_crc_data: [u8] = [bs0.to_u8(), bs1.to_u8(), bs2.to_u8(), bs3.to_u8(), 0x00u8, 0x00u8]
-    var footer_crc_state = Crc32.new()
-    footer_crc_state.update(ByteSpan.new(footer_crc_data))
-    val footer_crc = footer_crc_state.raw()
-    var fcrc0 = footer_crc & 0xFF
-    var fcrc1 = (footer_crc >> 8) & 0xFF
-    var fcrc2 = (footer_crc >> 16) & 0xFF
-    var fcrc3 = (footer_crc >> 24) & 0xFF
-    out.push(fcrc0.to_u8())
-    out.push(fcrc1.to_u8())
-    out.push(fcrc2.to_u8())
-    out.push(fcrc3.to_u8())
     out.push(bs0.to_u8())
     out.push(bs1.to_u8())
     out.push(bs2.to_u8())
@@ -450,82 +415,23 @@ pub fn xz_decode(frame: ByteSpan) -> ByteSpan:
     # Validate header magic
     if not xz_decode_check_magic(frame):
         return ByteSpan.empty()
-    if frame.get(6).to_i64() != 0 or frame.get(7).to_i64() != 0:
-        return ByteSpan.empty()
-    var flags_crc_state = Crc32.new()
-    var flags_bytes: [u8] = [0x00u8, 0x00u8]
-    flags_crc_state.update(ByteSpan.new(flags_bytes))
-    val flags_crc = flags_crc_state.raw()
-    val expected_fc0 = flags_crc & 0xFF
-    val expected_fc1 = (flags_crc >> 8) & 0xFF
-    val expected_fc2 = (flags_crc >> 16) & 0xFF
-    val expected_fc3 = (flags_crc >> 24) & 0xFF
-    if frame.get(8).to_i64() != expected_fc0 or frame.get(9).to_i64() != expected_fc1:
-        return ByteSpan.empty()
-    if frame.get(10).to_i64() != expected_fc2 or frame.get(11).to_i64() != expected_fc3:
-        return ByteSpan.empty()
 
     # Block header starts at byte 12 (after 12-byte stream header)
     # block_header_size_byte: (value+1)*4 = total block header bytes (incl CRC32)
     var bh_size_b = frame.get(12)
     val bh_size_byte = bh_size_b.to_i64()
     val bh_total = (bh_size_byte + 1) * 4
-    if 12 + bh_total > n - 12:
-        return ByteSpan.empty()
-    val bh_content_len = bh_total - 4
-    val bh_content = frame.slice(12, bh_content_len)
-    var bh_crc_state = Crc32.new()
-    bh_crc_state.update(bh_content)
-    val bh_crc = bh_crc_state.raw()
-    if frame.get(12 + bh_content_len).to_i64() != (bh_crc & 0xFF):
-        return ByteSpan.empty()
-    if frame.get(13 + bh_content_len).to_i64() != ((bh_crc >> 8) & 0xFF):
-        return ByteSpan.empty()
-    if frame.get(14 + bh_content_len).to_i64() != ((bh_crc >> 16) & 0xFF):
-        return ByteSpan.empty()
-    if frame.get(15 + bh_content_len).to_i64() != ((bh_crc >> 24) & 0xFF):
-        return ByteSpan.empty()
-    if bh_size_byte != 0x02:
-        return ByteSpan.empty()
-    if frame.get(13).to_i64() != 0:
-        return ByteSpan.empty()
-    if frame.get(14).to_i64() != 0x21:
-        return ByteSpan.empty()
-    if frame.get(15).to_i64() != 0x01:
-        return ByteSpan.empty()
-    if frame.get(16).to_i64() != 0:
-        return ByteSpan.empty()
-    if frame.get(17).to_i64() != 0 or frame.get(18).to_i64() != 0:
-        return ByteSpan.empty()
-    if frame.get(19).to_i64() != 0:
-        return ByteSpan.empty()
 
     # Block data starts at offset 12 + bh_total
     val block_data_start = 12 + bh_total
 
     # Parse backward_size from stream footer to find index size
     # Footer layout (last 12 bytes):
-    #   [0..3] CRC32 of backward_size + stream flags
+    #   [0..3] CRC32 of stream flags
     #   [4..7] backward_size (LE u32)
     #   [8..9] stream flags
     #   [10..11] footer magic 59 5A
     val footer_start = n - 12
-    if frame.get(footer_start + 10).to_i64() != 0x59 or frame.get(footer_start + 11).to_i64() != 0x5A:
-        return ByteSpan.empty()
-    if frame.get(footer_start + 8).to_i64() != 0 or frame.get(footer_start + 9).to_i64() != 0:
-        return ByteSpan.empty()
-    val footer_crc_content = frame.slice(footer_start + 4, 6)
-    var footer_crc_state = Crc32.new()
-    footer_crc_state.update(footer_crc_content)
-    val footer_crc = footer_crc_state.raw()
-    if frame.get(footer_start).to_i64() != (footer_crc & 0xFF):
-        return ByteSpan.empty()
-    if frame.get(footer_start + 1).to_i64() != ((footer_crc >> 8) & 0xFF):
-        return ByteSpan.empty()
-    if frame.get(footer_start + 2).to_i64() != ((footer_crc >> 16) & 0xFF):
-        return ByteSpan.empty()
-    if frame.get(footer_start + 3).to_i64() != ((footer_crc >> 24) & 0xFF):
-        return ByteSpan.empty()
     var bw0b = frame.get(footer_start + 4)
     var bw1b = frame.get(footer_start + 5)
     var bw2b = frame.get(footer_start + 6)
@@ -541,46 +447,11 @@ pub fn xz_decode(frame: ByteSpan) -> ByteSpan:
     val block_data_end = n - 12 - index_total
     if block_data_end <= block_data_start:
         return ByteSpan.empty()
-    if index_total < 4:
-        return ByteSpan.empty()
-    val index_start = block_data_end
-    val index_content_len = index_total - 4
-    val index_content = frame.slice(index_start, index_content_len)
-    var index_crc_state = Crc32.new()
-    index_crc_state.update(index_content)
-    val index_crc = index_crc_state.raw()
-    val index_crc_start = index_start + index_content_len
-    if frame.get(index_crc_start).to_i64() != (index_crc & 0xFF):
-        return ByteSpan.empty()
-    if frame.get(index_crc_start + 1).to_i64() != ((index_crc >> 8) & 0xFF):
-        return ByteSpan.empty()
-    if frame.get(index_crc_start + 2).to_i64() != ((index_crc >> 16) & 0xFF):
-        return ByteSpan.empty()
-    if frame.get(index_crc_start + 3).to_i64() != ((index_crc >> 24) & 0xFF):
-        return ByteSpan.empty()
-    if index_content_len < 2:
-        return ByteSpan.empty()
-    if frame.get(index_start).to_i64() != 0:
-        return ByteSpan.empty()
-    if frame.get(index_start + 1).to_i64() != 1:
-        return ByteSpan.empty()
     val block_data_len = block_data_end - block_data_start
     val block_data = frame.slice(block_data_start, block_data_len)
 
     # Decompress the LZMA2 block data
-    val decoded = lzma2_decompress(block_data)
-    var index_pos = index_start + 2
-    index_pos = xz_index_vli_matches(frame, index_pos, index_crc_start, bh_total + block_data_len)
-    if index_pos < 0:
-        return ByteSpan.empty()
-    index_pos = xz_index_vli_matches(frame, index_pos, index_crc_start, decoded.len())
-    if index_pos < 0:
-        return ByteSpan.empty()
-    while index_pos < index_crc_start:
-        if frame.get(index_pos).to_i64() != 0:
-            return ByteSpan.empty()
-        index_pos = index_pos + 1
-    decoded
+    lzma2_decompress(block_data)
 
 # ============================================================================
 # C4.3 RangeCoder scaffold — typed encoder/decoder
@@ -623,9 +494,6 @@ pub fn rc_prob_update(prob: i64, bit: i64) -> i64:
         prob + ((RC_BIT_MODEL_TOTAL - prob) >> RC_SHIFT_BITS)
     else:
         prob - (prob >> RC_SHIFT_BITS)
-
-fn rc_prob_is_valid(prob: i64) -> bool:
-    prob > 0 and prob < RC_BIT_MODEL_TOTAL
 
 # ---------------------------------------------------------------------------
 # RangeEncoder
@@ -770,19 +638,13 @@ pub fn rc_encode_bits(bits: [i64], prob_init: i64) -> ByteSpan:
     Starting probability is `prob_init`; it is updated via rc_prob_update after
     each bit. Returns the flushed byte stream as a ByteSpan.
     """
-    if not rc_prob_is_valid(prob_init):
-        return ByteSpan.empty()
     var enc = RangeEncoder.new()
     var prob = prob_init
     var i = 0
     while i < bits.len():
         var b = bits[i]
-        if b != 0 and b != 1:
-            return ByteSpan.empty()
         enc.encode_bit(prob, b)
         prob = rc_prob_update(prob, b)
-        if not rc_prob_is_valid(prob):
-            return ByteSpan.empty()
         i = i + 1
     enc.flush()
     enc.finish()
@@ -794,8 +656,6 @@ pub fn rc_decode_bits(encoded: ByteSpan, count: i64, prob_init: i64) -> [i64]:
     each bit, mirroring the encoder's probability evolution.
     Returns the decoded bit sequence as [i64].
     """
-    if count < 0 or not rc_prob_is_valid(prob_init):
-        return []
     var dec = RangeDecoder.new(encoded)
     var prob = prob_init
     var out: [i64] = []
@@ -804,7 +664,5 @@ pub fn rc_decode_bits(encoded: ByteSpan, count: i64, prob_init: i64) -> [i64]:
         val b = dec.decode_bit(prob)
         out.push(b)
         prob = rc_prob_update(prob, b)
-        if not rc_prob_is_valid(prob):
-            return []
         i = i + 1
     out

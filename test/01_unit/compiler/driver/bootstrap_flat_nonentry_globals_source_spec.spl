@@ -1,25 +1,19 @@
-# Purpose and audience: executable specification evidence for the owning engineering team.
-# @req REQ-SSPEC-COMPILER
-# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
-
-
-
-
-# @req REQ-SSPEC-COMPILER
-use std.spec.step
-
+# @req REQ-BOOT-STAGE-001
 extern fn rt_file_read_text(path: text) -> text
 
 describe "bootstrap flat non-entry module globals":
-    # @manual scenario evidence
     it "recovers the entry HIR and emits every lowered module's globals and initializer":
         # @req REQ-SSPEC-COMPILER
         step("recovers the entry HIR and emits every lowered module's globals and initializer")
         val driver = rt_file_read_text("src/compiler/80.driver/driver_bootstrap.spl") ?? ""
-        val pipeline = rt_file_read_text("src/compiler/80.driver/driver.spl") ?? ""
+        val hir_pipeline = rt_file_read_text("src/compiler/80.driver/driver_hir_pipeline_lowering.spl") ?? ""
+        val orchestration = rt_file_read_text("src/compiler/80.driver/driver_orchestration.spl") ?? ""
+        val source_pipeline = rt_file_read_text("src/compiler/80.driver/driver_source_pipeline_loading.spl") ?? ""
+        val aot_pipeline = rt_file_read_text("src/compiler/80.driver/driver_aot_pipeline.spl") ?? ""
         val globals = rt_file_read_text("src/compiler/50.mir/_MirLowering/bootstrap_globals.spl") ?? ""
         val lowering = rt_file_read_text("src/compiler/50.mir/_MirLowering/module_lowering.spl") ?? ""
         val hir_modules = rt_file_read_text("src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl") ?? ""
+        val hir_helpers = rt_file_read_text("src/compiler/20.hir/hir_lowering/_Items/lowering_helpers.spl") ?? ""
         val hir_items = rt_file_read_text("src/compiler/20.hir/hir_lowering/_Items/trait_impl_lowering.spl") ?? ""
         val llvm = rt_file_read_text("src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl") ?? ""
         val ssa = rt_file_read_text("src/compiler/60.mir_opt/mir_opt/var_reassign_ssa.spl") ?? ""
@@ -32,11 +26,11 @@ describe "bootstrap flat non-entry module globals":
         expect(pipeline).to_contain("name == bootstrap_entry_module_name(self.ctx)")
         expect(pipeline).to_contain("var phase_hir_modules: Dict<text, HirModule> = self.ctx.hir_modules")
         expect(pipeline).to_contain("phase_hir_modules[name] = hir_module")
-        expect(pipeline).to_contain("phase_ctx.bootstrap_entry_hir = phase_entry_hir")
+        expect(pipeline).to_contain("self.ctx.bootstrap_entry_hir = phase_entry_hir")
         expect(pipeline).to_contain("bootstrap_ctx.hir_modules = updated_hir_boot")
         expect(pipeline).to_contain("bootstrap_ctx.bootstrap_entry_hir = Some(bootstrap_entry_module)")
         expect(pipeline).to_contain("for module in self.ctx.modules.values():")
-        expect(pipeline).to_contain("val (analyzed_ctx, analyze_ok) = self.lower_and_check_impl()")
+        expect(pipeline).to_contain("val (analyzed_ctx, analyze_ok) = self.lower_and_check_routed_impl(streaming_route)")
         expect(pipeline).to_contain("self.ctx = analyzed_ctx")
         expect(pipeline).to_contain("driver_inputs = [native_entry_input]")
         expect(pipeline).to_contain("if bootstrap_flat_aot:")
@@ -74,7 +68,12 @@ describe "bootstrap flat non-entry module globals":
         expect(globals.contains("var _bootstrap_mir_modules: [MirModule]")).to_equal(false)
         expect(driver.contains("bootstrap_mir_module_at")).to_equal(false)
         expect(driver).to_contain("bootstrap_lower_extra_hir_module_to_mir_for_target(extra_hir, target_context)")
+        expect(driver).to_contain("if added < 0:")
+        expect(driver).to_contain("fatal MIR lowering rejected bootstrap closure module {extra_name}")
         expect(globals).to_contain("lowering.lower_runtime_module_initializers(hir_module, const_vals)")
+        expect(globals).to_contain("if bootstrap_reject_fatal_mir_errors(lowering):\n        return -1\n    lowering.lower_runtime_module_initializers(hir_module, const_vals, module_index)")
+        expect(globals).to_contain("lowering.lower_runtime_module_initializers(hir_module, const_vals, module_index)\n    # Dynamic initializer expressions lower after static registration and may\n    # fail independently; reject before an extern-only helper can return clean.\n    if bootstrap_reject_fatal_mir_errors(lowering):\n        return -1")
+        expect(globals).to_contain("val mir_fn = lowering.lower_function(hir_fn)\n            # Function-body lowering can also record fatal errors. Reject it\n            # before its partial MIR reaches the shared closure accumulator.\n            if bootstrap_reject_fatal_mir_errors(lowering):\n                return -1\n            bootstrap_mir_functions_add(qualified_fn_name, mir_fn, module_index)")
         expect(globals).to_contain("bootstrap_mir_modules_add(lowering.builder.module)")
         expect(lowering).to_contain(
             "bootstrap_mir_modules_add(self.builder.module)\n            return self.builder.module"
@@ -83,8 +82,10 @@ describe "bootstrap flat non-entry module globals":
         expect(hir_modules).to_contain("val parser_constants = module.constants.values()")
         expect(hir_modules).to_contain("self.lower_hir_const_decl(parser_constants[const_idx])")
         expect(hir_modules).to_contain("bootstrap_hir_modules_add(module.name, self.symbols.symbols.values(), flat_functions, flat_constants)")
+        expect(hir_helpers).to_contain("var _bootstrap_hir_module_functions: [[HirFunction]] = []")
+        expect(hir_helpers).to_contain("fn bootstrap_hir_module_functions_at(index: i64) -> [HirFunction]:")
         expect(globals).to_contain("fn bootstrap_lower_flat_hir_modules_to_mir_for_target(entry_module_name: text, target_context: MirTargetContext) -> MirModule:")
-        expect(hir_items).to_contain("me lower_hir_const_decl(const_: Const) -> HirConst:")
+        expect(hir_items).to_contain("me lower_hir_const_decl(const_: ParserConst) -> HirConst:")
         expect(llvm).to_contain("me global_static_key(symbol_id: i64) -> text:")
         expect(llvm).to_contain("me translate_function_with_ir_handle(name: text, body: MirBody, span: Span, module_index: i64, ir_handle: i64):")
         expect(llvm).to_contain("rt_string_builder_push(ir_handle, opening)")
@@ -98,10 +99,3 @@ describe "bootstrap flat non-entry module globals":
         expect(llvm.contains("_llvm_bootstrap_translation_module")).to_equal(false)
         expect(ssa).to_contain("fn ssa_cross_block_live_locals(blocks: [MirBlock], mir_locals: [MirLocal]) -> [i64]:")
         expect(ssa).to_contain("if blocks.len() < 2:\n        return []")
-
-    it "rejects fatal entry-flat function errors before accumulation":
-        # @req REQ-SSPEC-COMPILER
-        step("rejects fatal entry-flat function errors before accumulation")
-        val globals = rt_file_read_text("src/compiler/50.mir/_MirLowering/bootstrap_globals.spl") ?? ""
-
-        expect(globals).to_contain("val mir_fn = lowering.lower_function(hir_fn)\n        # Function-body errors are recorded after the pre-loop constants check.\n        # Reject them before partial MIR reaches the shared flat accumulator.\n        if bootstrap_reject_fatal_mir_errors(lowering):\n            rt_exit(1)\n        bootstrap_mir_functions_add(emitted_name, mir_fn, mir_module_index)")

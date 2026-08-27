@@ -9,16 +9,10 @@ use std.editor.services.md_document_decor.*
 use std.editor.services.md_wiki_index.*
 use std.editor.services.sdn_graph.*
 use std.editor.common.config.*
-use std.editor.common.types.{EditorViewport}
-use std.editor.buffer.buffer.{EditorBuffer}
 use std.editor.core.session.{EditSession}
 use std.editor.core.path_text.{editor_path_basename}
-use std.editor.render.block_model.{BlockModel, RenderBlock}
 use std.editor.view.diagnostics_panel.*
-use std.editor.view.file_tree.{FileTreeState}
 use std.editor.view.wiki_panel.*
-use std.editor.view.file_tree.*
-use std.editor.view.settings_view.*
 
 struct GuiBackendConfig:
     window_title: text
@@ -205,7 +199,7 @@ fn _gui_render_line_with_inlay_hints(buffer: EditorBuffer, row: i64) -> text:
                 if col == i:
                     html = html + "<span class=\"inlay-hint\" data-event=\"inlay-hint-click\" data-value=\"" + row.to_text() + "," + col.to_text() + "\" data-line=\"" + row.to_text() + "\" data-col=\"" + col.to_text() + "\">" + _gui_escape_html(hint.label) + "</span>"
         if i < line.len():
-            html = html + _gui_hover_char_span(row, i, line[i:i + 1])
+            html = html + _gui_hover_char_span(row, i, line.char_at(i))
         i = i + 1
     html
 
@@ -243,11 +237,11 @@ fn _gui_markdown_foldable_end_line(buffer: EditorBuffer, row: i64) -> i64:
 
 fn _gui_markdown_heading_level(line: text) -> i64:
     var i = 0
-    while i < line.len() and line[i:i + 1] == "#":
+    while i < line.len() and line.char_at(i) == "#":
         i = i + 1
     if i == 0 or i > 6:
         return 0
-    if i < line.len() and line[i:i + 1] == " ":
+    if i < line.len() and line.char_at(i) == " ":
         return i
     0
 
@@ -363,12 +357,12 @@ fn gui_render_settings_html(view: SettingsViewState, config: EditorConfig) -> te
         html = html + "<div class=\"setting-item" + selected_class + "\">"
         html = html + "<div class=\"setting-label\">" + _gui_escape_html(setting.label) + "</div>"
         html = html + "<div class=\"setting-description\">" + _gui_escape_html(setting.description) + "</div>"
-        if setting.value_type == "bool":
+        if setting.setting_type == "bool":
             val checked = if current_value == "true" then " checked" else: ""
             html = html + "<input type=\"checkbox\"" + checked + " data-key=\"" + _gui_escape_html(setting.key) + "\">"
-        elif setting.value_type == "i64":
+        elif setting.setting_type == "i64":
             html = html + "<input type=\"number\" value=\"" + _gui_escape_html(current_value) + "\" data-key=\"" + _gui_escape_html(setting.key) + "\">"
-        elif setting.value_type == "enum":
+        elif setting.setting_type == "enum":
             html = html + "<select data-key=\"" + _gui_escape_html(setting.key) + "\">"
             var oi = 0
             while oi < setting.enum_options.len():
@@ -386,34 +380,22 @@ fn gui_render_settings_html(view: SettingsViewState, config: EditorConfig) -> te
     html
 
 fn _gui_escape_html(s: text) -> text:
-    # slice() is byte-indexed, but char_at() is character-indexed -- on
-    # non-ASCII input the two walk different position spaces, so this must
-    # use slice(i, i+1) (NOT char_at(i)) to stay aligned with the
-    # byte-length loop bound below. Accumulating one raw byte at a time
-    # (the old `result = result + ch`) also shreds multi-byte UTF-8
-    # characters in the source text into separate U+FFFD replacement
-    # characters. The escaped bytes (< > & ") are all single ASCII bytes,
-    # so byte-stepping to find them is safe; copy whole runs via slice()
-    # between them instead of rebuilding byte-by-byte.
     var result = ""
-    var seg_start = 0
     var i = 0
     while i < s.len():
-        val ch = s.slice(i, i + 1)
+        val ch = s.char_at(i)
         if ch == "<":
-            result = result + s.slice(seg_start, i) + "&lt;"
-            seg_start = i + 1
+            result = result + "&lt;"
         elif ch == ">":
-            result = result + s.slice(seg_start, i) + "&gt;"
-            seg_start = i + 1
+            result = result + "&gt;"
         elif ch == "&":
-            result = result + s.slice(seg_start, i) + "&amp;"
-            seg_start = i + 1
+            result = result + "&amp;"
         elif ch == "\"":
-            result = result + s.slice(seg_start, i) + "&quot;"
-            seg_start = i + 1
+            result = result + "&quot;"
+        else:
+            result = result + ch
         i = i + 1
-    result + s.slice(seg_start, s.len())
+    result
 
 fn _gui_render_callout_block(block: RenderBlock) -> text:
     val info = _gui_parse_callout_marker(block.rendered_lines)
@@ -468,7 +450,7 @@ fn _gui_render_inline_markdown_media(line: text) -> text:
             return html
         html = html + _gui_escape_html(line.slice(pos, img_start))
         val close_label = _gui_find_char(line, "]", img_start + 2)
-        if close_label < 0 or close_label + 1 >= line.len() or line[close_label + 1:close_label + 1 + 1] != "(":
+        if close_label < 0 or close_label + 1 >= line.len() or line.char_at(close_label + 1) != "(":
             html = html + _gui_escape_html(line.slice(img_start, img_start + 2))
             pos = img_start + 2
             continue
@@ -563,24 +545,20 @@ fn _gui_parse_task_item(item: text) -> tuple:
     (false, false, item)
 
 fn _gui_split_table_row(line: text) -> [text]:
-    # See _gui_escape_html above: char_at() is character-indexed while
-    # slice()/len() are byte-indexed, so this must use slice(i, i+1) (NOT
-    # char_at(i)) to stay aligned with the byte-length loop bound below.
-    # Byte-stepping to find the ASCII "|" delimiter is then safe, and each
-    # cell is copied via slice() rather than rebuilt one raw byte at a
-    # time, so multi-byte UTF-8 cell content survives intact.
     var cells: [text] = []
-    var seg_start = 0
+    var current = ""
     var i = 0
     while i < line.len():
-        val ch = line.slice(i, i + 1)
+        val ch = line.char_at(i)
         if ch == "|":
-            val cell = line.slice(seg_start, i).trim()
+            val cell = current.trim()
             if cells.len() > 0 or cell != "":
                 cells.push(cell)
-            seg_start = i + 1
+            current = ""
+        else:
+            current = current + ch
         i = i + 1
-    val tail = line.slice(seg_start, line.len()).trim()
+    val tail = current.trim()
     if tail != "":
         cells.push(tail)
     cells
@@ -592,7 +570,7 @@ fn _gui_is_table_separator(line: text) -> bool:
     var has_dash = false
     var i = 0
     while i < trimmed.len():
-        val ch = trimmed[i:i + 1]
+        val ch = trimmed.char_at(i)
         if ch == "-":
             has_dash = true
         elif ch != "|" and ch != ":" and ch != " ":
@@ -614,7 +592,7 @@ fn _gui_parse_embed_marker(lines: [text]) -> tuple:
             return ("note", raw, raw)
     if trimmed.starts_with("!["):
         val close_label = _gui_find_char(trimmed, "]", 2)
-        if close_label > 1 and close_label + 1 < trimmed.len() and trimmed[close_label + 1:close_label + 1 + 1] == "(":
+        if close_label > 1 and close_label + 1 < trimmed.len() and trimmed.char_at(close_label + 1) == "(":
             val close_target = _gui_find_char(trimmed, ")", close_label + 2)
             if close_target > close_label:
                 val label = trimmed.slice(2, close_label)
@@ -638,8 +616,8 @@ fn _gui_parse_callout_marker(lines: [text]) -> tuple:
                 folded = marker.ends_with("-")
                 ctype = marker.slice(0, marker.len() - 1).to_lower()
             var title_start = close + 1
-            if title_start < trimmed.len() and (trimmed[title_start:title_start + 1] == "+" or trimmed[title_start:title_start + 1] == "-"):
-                folded = trimmed[title_start:title_start + 1] == "-"
+            if title_start < trimmed.len() and (trimmed.char_at(title_start) == "+" or trimmed.char_at(title_start) == "-"):
+                folded = trimmed.char_at(title_start) == "-"
                 title_start = title_start + 1
             title = trimmed.slice(title_start, trimmed.len()).trim()
     (ctype, title, folded)
@@ -656,7 +634,7 @@ fn _gui_strip_blockquote_prefix(line: text) -> text:
 fn _gui_find_char(s: text, needle: text, start: i64) -> i64:
     var i = start
     while i < s.len():
-        if s[i:i + 1] == needle:
+        if s.char_at(i) == needle:
             return i
         i = i + 1
     -1
@@ -674,7 +652,7 @@ fn _gui_escape_attr_token(value: text) -> text:
     var i = 0
     val lower = value.to_lower()
     while i < lower.len():
-        val ch = lower[i:i + 1]
+        val ch = lower.char_at(i)
         if (ch >= "a" and ch <= "z") or (ch >= "0" and ch <= "9") or ch == "-":
             out = out + ch
         i = i + 1
@@ -699,7 +677,7 @@ fn _gui_render_line_with_semantic_tokens(buffer: EditorBuffer, row: i64, line: t
                 html = html + "<span class=\"" + cls + "\">"
                 open = true
             active_class = cls
-        html = html + _gui_hover_char_span(row, i, line[i:i + 1])
+        html = html + _gui_hover_char_span(row, i, line.char_at(i))
         i = i + 1
     if open:
         html = html + "</span>"
@@ -709,10 +687,10 @@ fn _gui_render_markdown_link_targets(row: i64, line: text) -> text:
     var html = ""
     var i = 0
     while i < line.len():
-        if i + 1 < line.len() and line[i:i + 1] == "[" and line[i + 1:i + 1 + 1] == "[":
+        if i + 1 < line.len() and line.char_at(i) == "[" and line.char_at(i + 1) == "[":
             var end_wiki = i + 2
             while end_wiki + 1 < line.len():
-                if line[end_wiki:end_wiki + 1] == "]" and line[end_wiki + 1:end_wiki + 1 + 1] == "]":
+                if line.char_at(end_wiki) == "]" and line.char_at(end_wiki + 1) == "]":
                     val raw_wiki = line.slice(i + 2, end_wiki)
                     val label_wiki = line.slice(i, end_wiki + 2)
                     html = html + _gui_link_span(row, i, raw_wiki, label_wiki)
@@ -722,13 +700,13 @@ fn _gui_render_markdown_link_targets(row: i64, line: text) -> text:
                     end_wiki = end_wiki + 1
             if i >= line.len():
                 return html
-        elif line[i:i + 1] == "[":
+        elif line.char_at(i) == "[":
             var close_label = i + 1
             while close_label < line.len():
-                if close_label + 1 < line.len() and line[close_label:close_label + 1] == "]" and line[close_label + 1:close_label + 1 + 1] == "(":
+                if close_label + 1 < line.len() and line.char_at(close_label) == "]" and line.char_at(close_label + 1) == "(":
                     var close_target = close_label + 2
                     while close_target < line.len():
-                        if line[close_target:close_target + 1] == ")":
+                        if line.char_at(close_target) == ")":
                             val raw_target = line.slice(close_label + 2, close_target)
                             val label = line.slice(i, close_target + 1)
                             html = html + _gui_link_span(row, i, raw_target, label)
@@ -740,7 +718,7 @@ fn _gui_render_markdown_link_targets(row: i64, line: text) -> text:
                 else:
                     close_label = close_label + 1
         if i < line.len():
-            html = html + _gui_hover_char_span(row, i, line[i:i + 1])
+            html = html + _gui_hover_char_span(row, i, line.char_at(i))
             i = i + 1
     html
 
@@ -751,7 +729,7 @@ fn _gui_render_hover_target_span_range(row: i64, line: text, start_col: i64, end
     var html = ""
     var i = start_col
     while i < end_col and i < line.len():
-        html = html + _gui_hover_char_span(row, i, line[i:i + 1])
+        html = html + _gui_hover_char_span(row, i, line.char_at(i))
         i = i + 1
     html
 
@@ -772,7 +750,7 @@ fn _gui_render_line_with_cursor_and_hover_targets(row: i64, line: text, cursor_c
         if i == safe_col:
             html = html + "<span class=\"cursor\" data-cursor=\"true\"></span>"
         if i < line.len():
-            html = html + _gui_hover_char_span(row, i, line[i:i + 1])
+            html = html + _gui_hover_char_span(row, i, line.char_at(i))
         i = i + 1
     html
 
@@ -792,7 +770,7 @@ fn _gui_diagnostic_gutter_class(icon: text) -> text:
 
 fn _gui_heading_level(content: text) -> i64:
     var level = 0
-    while level < content.len() and content[level:level + 1] == "#":
+    while level < content.len() and content.char_at(level) == "#":
         level = level + 1
     if level > 6:
         level = 6

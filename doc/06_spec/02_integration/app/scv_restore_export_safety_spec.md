@@ -1,10 +1,33 @@
 # Scv Restore Export Safety Specification
 
-> Tests covering the scv subprocess actually ran, scv restore and export safety.
+> <details>
+
+<!-- sdn-diagram:id=scv_restore_export_safety_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=scv_restore_export_safety_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+scv_restore_export_safety_spec -> app
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=scv_restore_export_safety_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 6 | 6 | 0 | 0 |
+| 5 | 5 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -13,53 +36,18 @@
 
 ## Scenarios
 
-### the scv subprocess actually ran
-
-#### launches the scv CLI and gets real output back
-
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- launches the scv CLI and gets real output back
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 8 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-INTEGRATION
-step("launches the scv CLI and gets real output back")
-val out = _run_restore_export_safety_script("set -eu\nREPO=$(pwd)\nTMP=$(mktemp -d /tmp/scv-ran-guard.XXXXXX)\ncd \"$TMP\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" init\n")
-# exit=0 proves the wrapper/binary actually executed the program
-expect(out).to_contain("exit=0")
-# and stdout was non-empty -- the helper's envelope alone is not output
-assert_false(out == "")
-assert_false(out == "\nexit=0\n")
-```
-
-</details>
-
 ### scv restore and export safety
 
 #### rejects corrupt chunks before restore or export writes bytes
 
-- rejects corrupt chunks before restore or export writes bytes
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("rejects corrupt chunks before restore or export writes bytes")
-val script = "set -eu\nREPO=$(pwd)\nTMP=$(mktemp -d /tmp/scv-corrupt-chunk-restore-export.XXXXXX)\nprintf 'base\\n' > \"$TMP/a.txt\"\ncd \"$TMP\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nBASE_OUT=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot)\nBASE_OP=$(cat .scv/HEAD_OP)\nBASE_COMMIT=$(printf '%s\\n' \"$BASE_OUT\" | awk '{print $2}')\nBASE_TREE=$(grep '^tree: ' \".scv/objects/commits/$BASE_COMMIT.sdn\" | awk '{print $2}')\nBASE_CHUNK=$(awk -F'|' 'NR==1 {print $3}' \".scv/objects/trees/$BASE_TREE.sdn\")\nprintf 'head\\n' > a.txt\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot >/dev/null\nprintf 'evil\\n' > \".scv/objects/chunks/$BASE_CHUNK.blob\"\nset +e\nRESTORE=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" restore-op \"$BASE_OP\")\nRESTORE_CODE=$?\nEXPORT=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" export-tree out)\nEXPORT_CODE=$?\nset -e\nprintf '%s\\nrestore_code=%s\\n%s\\nexport_code=%s\\nfile=%s\\n' \"$RESTORE\" \"$RESTORE_CODE\" \"$EXPORT\" \"$EXPORT_CODE\" \"$(cat a.txt | tr '\\n' '|')\"\ntest \"$RESTORE_CODE\" -ne 0\ntest \"$EXPORT_CODE\" -ne 0\ntest \"$(cat a.txt)\" = \"head\"\n"
+val script = "set -eu\nREPO=$(pwd)\nTMP=$(mktemp -d /tmp/scv-corrupt-chunk-restore-export.XXXXXX)\nprintf 'base\\n' > \"$TMP/a.txt\"\ncd \"$TMP\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nBASE_OUT=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot)\nBASE_OP=$(cat .scv/HEAD_OP)\nBASE_COMMIT=$(printf '%s\\n' \"$BASE_OUT\" | awk '{print $2}')\nBASE_TREE=$(grep '^tree: ' \".scv/objects/commits/$BASE_COMMIT.sdn\" | awk '{print $2}')\nBASE_CHUNK=$(awk -F'|' 'NR==1 {print $3}' \".scv/objects/trees/$BASE_TREE.sdn\")\nprintf 'head\\n' > a.txt\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot >/dev/null\nprintf 'evil\\n' > \".scv/objects/chunks/$BASE_CHUNK.blob\"\nset +e\nRESTORE=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" restore-op \"$BASE_OP\")\nRESTORE_CODE=$?\nEXPORT=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" export-tree out)\nEXPORT_CODE=$?\nset -e\nprintf '%s\\nrestore_code=%s\\n%s\\nexport_code=%s\\nfile=%s\\n' \"$RESTORE\" \"$RESTORE_CODE\" \"$EXPORT\" \"$EXPORT_CODE\" \"$(cat a.txt | tr '\\n' '|')\"\ntest \"$RESTORE_CODE\" -ne 0\ntest \"$EXPORT_CODE\" -ne 0\ntest \"$(cat a.txt)\" = \"head\"\n"
 val out = _run_restore_export_safety_script(script)
 expect(out).to_contain("ERROR corrupt chunk: sha256_")
 expect(out).to_contain("restore_code=1")
@@ -71,19 +59,14 @@ expect(out).to_contain("file=head|")
 
 #### rejects chunk size mismatches before restore or export writes bytes
 
-- rejects chunk size mismatches before restore or export writes bytes
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("rejects chunk size mismatches before restore or export writes bytes")
-val script = "set -eu\nREPO=$(pwd)\nTMP=$(mktemp -d /tmp/scv-size-chunk-restore-export.XXXXXX)\nprintf 'base\\n' > \"$TMP/a.txt\"\ncd \"$TMP\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nBASE_OUT=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot)\nBASE_OP=$(cat .scv/HEAD_OP)\nBASE_COMMIT=$(printf '%s\\n' \"$BASE_OUT\" | awk '{print $2}')\nBASE_TREE=$(grep '^tree: ' \".scv/objects/commits/$BASE_COMMIT.sdn\" | awk '{print $2}')\nBASE_CHUNK=$(awk -F'|' 'NR==1 {print $3}' \".scv/objects/trees/$BASE_TREE.sdn\")\nprintf 'head\\n' > a.txt\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot >/dev/null\nprintf 'longer\\n' > \".scv/objects/chunks/$BASE_CHUNK.blob\"\nset +e\nRESTORE=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" restore-op \"$BASE_OP\")\nRESTORE_CODE=$?\nEXPORT=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" export-tree out)\nEXPORT_CODE=$?\nset -e\nprintf '%s\\nrestore_code=%s\\n%s\\nexport_code=%s\\nfile=%s\\n' \"$RESTORE\" \"$RESTORE_CODE\" \"$EXPORT\" \"$EXPORT_CODE\" \"$(cat a.txt | tr '\\n' '|')\"\ntest \"$RESTORE_CODE\" -ne 0\ntest \"$EXPORT_CODE\" -ne 0\ntest \"$(cat a.txt)\" = \"head\"\n"
+val script = "set -eu\nREPO=$(pwd)\nTMP=$(mktemp -d /tmp/scv-size-chunk-restore-export.XXXXXX)\nprintf 'base\\n' > \"$TMP/a.txt\"\ncd \"$TMP\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nBASE_OUT=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot)\nBASE_OP=$(cat .scv/HEAD_OP)\nBASE_COMMIT=$(printf '%s\\n' \"$BASE_OUT\" | awk '{print $2}')\nBASE_TREE=$(grep '^tree: ' \".scv/objects/commits/$BASE_COMMIT.sdn\" | awk '{print $2}')\nBASE_CHUNK=$(awk -F'|' 'NR==1 {print $3}' \".scv/objects/trees/$BASE_TREE.sdn\")\nprintf 'head\\n' > a.txt\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot >/dev/null\nprintf 'longer\\n' > \".scv/objects/chunks/$BASE_CHUNK.blob\"\nset +e\nRESTORE=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" restore-op \"$BASE_OP\")\nRESTORE_CODE=$?\nEXPORT=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" export-tree out)\nEXPORT_CODE=$?\nset -e\nprintf '%s\\nrestore_code=%s\\n%s\\nexport_code=%s\\nfile=%s\\n' \"$RESTORE\" \"$RESTORE_CODE\" \"$EXPORT\" \"$EXPORT_CODE\" \"$(cat a.txt | tr '\\n' '|')\"\ntest \"$RESTORE_CODE\" -ne 0\ntest \"$EXPORT_CODE\" -ne 0\ntest \"$(cat a.txt)\" = \"head\"\n"
 val out = _run_restore_export_safety_script(script)
 expect(out).to_contain("ERROR chunk size mismatch: sha256_")
 expect(out).to_contain("restore_code=1")
@@ -95,19 +78,14 @@ expect(out).to_contain("file=head|")
 
 #### rejects duplicate tree paths before restore export or manifest writes
 
-- rejects duplicate tree paths before restore export or manifest writes
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("rejects duplicate tree paths before restore export or manifest writes")
-val script = "set -eu\nREPO=$(pwd)\nTMP=$(mktemp -d /tmp/scv-duplicate-tree-path.XXXXXX)\nprintf 'base\\n' > \"$TMP/a.txt\"\ncd \"$TMP\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nBASE_OUT=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot)\nBASE_OP=$(cat .scv/HEAD_OP)\nBASE_COMMIT=$(printf '%s\\n' \"$BASE_OUT\" | awk '{print $2}')\nBASE_TREE=$(grep '^tree: ' \".scv/objects/commits/$BASE_COMMIT.sdn\" | awk '{print $2}')\ncat \".scv/objects/trees/$BASE_TREE.sdn\" >> \".scv/objects/trees/$BASE_TREE.sdn\"\nprintf 'head\\n' > a.txt\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot >/dev/null\nset +e\nRESTORE=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" restore-op \"$BASE_OP\")\nRESTORE_CODE=$?\nEXPORT=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" export-tree out)\nEXPORT_CODE=$?\nMANIFEST=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" export-manifest export.sdn)\nMANIFEST_CODE=$?\nFSCK=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" fsck)\nFSCK_CODE=$?\nset -e\nprintf '%s\\nrestore_code=%s\\n%s\\nexport_code=%s\\n%s\\nmanifest_code=%s\\n%s\\nfsck_code=%s\\nfile=%s\\n' \"$RESTORE\" \"$RESTORE_CODE\" \"$EXPORT\" \"$EXPORT_CODE\" \"$MANIFEST\" \"$MANIFEST_CODE\" \"$FSCK\" \"$FSCK_CODE\" \"$(cat a.txt | tr '\\n' '|')\"\ntest \"$RESTORE_CODE\" -ne 0\ntest \"$EXPORT_CODE\" -ne 0\ntest \"$MANIFEST_CODE\" -ne 0\ntest \"$FSCK_CODE\" -ne 0\ntest \"$(cat a.txt)\" = \"head\"\ntest ! -e export.sdn\n"
+val script = "set -eu\nREPO=$(pwd)\nTMP=$(mktemp -d /tmp/scv-duplicate-tree-path.XXXXXX)\nprintf 'base\\n' > \"$TMP/a.txt\"\ncd \"$TMP\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nBASE_OUT=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot)\nBASE_OP=$(cat .scv/HEAD_OP)\nBASE_COMMIT=$(printf '%s\\n' \"$BASE_OUT\" | awk '{print $2}')\nBASE_TREE=$(grep '^tree: ' \".scv/objects/commits/$BASE_COMMIT.sdn\" | awk '{print $2}')\ncat \".scv/objects/trees/$BASE_TREE.sdn\" >> \".scv/objects/trees/$BASE_TREE.sdn\"\nprintf 'head\\n' > a.txt\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot >/dev/null\nset +e\nRESTORE=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" restore-op \"$BASE_OP\")\nRESTORE_CODE=$?\nEXPORT=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" export-tree out)\nEXPORT_CODE=$?\nMANIFEST=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" export-manifest export.sdn)\nMANIFEST_CODE=$?\nFSCK=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" fsck)\nFSCK_CODE=$?\nset -e\nprintf '%s\\nrestore_code=%s\\n%s\\nexport_code=%s\\n%s\\nmanifest_code=%s\\n%s\\nfsck_code=%s\\nfile=%s\\n' \"$RESTORE\" \"$RESTORE_CODE\" \"$EXPORT\" \"$EXPORT_CODE\" \"$MANIFEST\" \"$MANIFEST_CODE\" \"$FSCK\" \"$FSCK_CODE\" \"$(cat a.txt | tr '\\n' '|')\"\ntest \"$RESTORE_CODE\" -ne 0\ntest \"$EXPORT_CODE\" -ne 0\ntest \"$MANIFEST_CODE\" -ne 0\ntest \"$FSCK_CODE\" -ne 0\ntest \"$(cat a.txt)\" = \"head\"\ntest ! -e export.sdn\n"
 val out = _run_restore_export_safety_script(script)
 expect(out).to_contain("ERROR duplicate tree path: a.txt")
 expect(out).to_contain("restore_code=1")
@@ -122,19 +100,14 @@ expect(out).to_contain("file=head|")
 
 #### rejects tree rows with extra fields before restore export or manifest writes
 
-- rejects tree rows with extra fields before restore export or manifest writes
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("rejects tree rows with extra fields before restore export or manifest writes")
-val script = "set -eu\nREPO=$(pwd)\nTMP=$(mktemp -d /tmp/scv-extra-tree-field.XXXXXX)\nprintf 'base\\n' > \"$TMP/a.txt\"\ncd \"$TMP\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nBASE_OUT=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot)\nBASE_OP=$(cat .scv/HEAD_OP)\nBASE_COMMIT=$(printf '%s\\n' \"$BASE_OUT\" | awk '{print $2}')\nBASE_TREE=$(grep '^tree: ' \".scv/objects/commits/$BASE_COMMIT.sdn\" | awk '{print $2}')\nsed '1s/$/|extra/' \".scv/objects/trees/$BASE_TREE.sdn\" > tree.tmp\nmv tree.tmp \".scv/objects/trees/$BASE_TREE.sdn\"\nprintf 'head\\n' > a.txt\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot >/dev/null\nset +e\nRESTORE=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" restore-op \"$BASE_OP\")\nRESTORE_CODE=$?\nEXPORT=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" export-tree out)\nEXPORT_CODE=$?\nMANIFEST=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" export-manifest export.sdn)\nMANIFEST_CODE=$?\nFSCK=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" fsck)\nFSCK_CODE=$?\nset -e\nprintf '%s\\nrestore_code=%s\\n%s\\nexport_code=%s\\n%s\\nmanifest_code=%s\\n%s\\nfsck_code=%s\\nfile=%s\\n' \"$RESTORE\" \"$RESTORE_CODE\" \"$EXPORT\" \"$EXPORT_CODE\" \"$MANIFEST\" \"$MANIFEST_CODE\" \"$FSCK\" \"$FSCK_CODE\" \"$(cat a.txt | tr '\\n' '|')\"\ntest \"$RESTORE_CODE\" -ne 0\ntest \"$EXPORT_CODE\" -ne 0\ntest \"$MANIFEST_CODE\" -ne 0\ntest \"$FSCK_CODE\" -ne 0\ntest \"$(cat a.txt)\" = \"head\"\ntest ! -e export.sdn\n"
+val script = "set -eu\nREPO=$(pwd)\nTMP=$(mktemp -d /tmp/scv-extra-tree-field.XXXXXX)\nprintf 'base\\n' > \"$TMP/a.txt\"\ncd \"$TMP\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nBASE_OUT=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot)\nBASE_OP=$(cat .scv/HEAD_OP)\nBASE_COMMIT=$(printf '%s\\n' \"$BASE_OUT\" | awk '{print $2}')\nBASE_TREE=$(grep '^tree: ' \".scv/objects/commits/$BASE_COMMIT.sdn\" | awk '{print $2}')\nsed '1s/$/|extra/' \".scv/objects/trees/$BASE_TREE.sdn\" > tree.tmp\nmv tree.tmp \".scv/objects/trees/$BASE_TREE.sdn\"\nprintf 'head\\n' > a.txt\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot >/dev/null\nset +e\nRESTORE=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" restore-op \"$BASE_OP\")\nRESTORE_CODE=$?\nEXPORT=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" export-tree out)\nEXPORT_CODE=$?\nMANIFEST=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" export-manifest export.sdn)\nMANIFEST_CODE=$?\nFSCK=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" fsck)\nFSCK_CODE=$?\nset -e\nprintf '%s\\nrestore_code=%s\\n%s\\nexport_code=%s\\n%s\\nmanifest_code=%s\\n%s\\nfsck_code=%s\\nfile=%s\\n' \"$RESTORE\" \"$RESTORE_CODE\" \"$EXPORT\" \"$EXPORT_CODE\" \"$MANIFEST\" \"$MANIFEST_CODE\" \"$FSCK\" \"$FSCK_CODE\" \"$(cat a.txt | tr '\\n' '|')\"\ntest \"$RESTORE_CODE\" -ne 0\ntest \"$EXPORT_CODE\" -ne 0\ntest \"$MANIFEST_CODE\" -ne 0\ntest \"$FSCK_CODE\" -ne 0\ntest \"$(cat a.txt)\" = \"head\"\ntest ! -e export.sdn\n"
 val out = _run_restore_export_safety_script(script)
 expect(out).to_contain("ERROR bad tree entry")
 expect(out).to_contain("restore_code=1")
@@ -149,19 +122,14 @@ expect(out).to_contain("file=head|")
 
 #### rejects reserved metadata paths before restore export or manifest writes
 
-- rejects reserved metadata paths before restore export or manifest writes
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("rejects reserved metadata paths before restore export or manifest writes")
-val script = "set -eu\nREPO=$(pwd)\nTMP=$(mktemp -d /tmp/scv-reserved-tree-path.XXXXXX)\nprintf 'base\\n' > \"$TMP/a.txt\"\ncd \"$TMP\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nBASE_OUT=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot)\nBASE_OP=$(cat .scv/HEAD_OP)\nBASE_COMMIT=$(printf '%s\\n' \"$BASE_OUT\" | awk '{print $2}')\nBASE_TREE=$(grep '^tree: ' \".scv/objects/commits/$BASE_COMMIT.sdn\" | awk '{print $2}')\nTREE_LINE=$(head -n 1 \".scv/objects/trees/$BASE_TREE.sdn\")\nTREE_REST=$(printf '%s\\n' \"$TREE_LINE\" | cut -d '|' -f2-)\nprintf '.scv/HEAD_OP|%s\\n' \"$TREE_REST\" > tree.tmp\nmv tree.tmp \".scv/objects/trees/$BASE_TREE.sdn\"\nprintf 'head\\n' > a.txt\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot >/dev/null\nHEAD_BEFORE=$(cat .scv/HEAD_OP)\nset +e\nRESTORE=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" restore-op \"$BASE_OP\")\nRESTORE_CODE=$?\nEXPORT=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" export-tree out)\nEXPORT_CODE=$?\nMANIFEST=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" export-manifest export.sdn)\nMANIFEST_CODE=$?\nFSCK=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" fsck)\nFSCK_CODE=$?\nset -e\nHEAD_AFTER=$(cat .scv/HEAD_OP)\nprintf '%s\\nrestore_code=%s\\n%s\\nexport_code=%s\\n%s\\nmanifest_code=%s\\n%s\\nfsck_code=%s\\nhead_same=%s\\nfile=%s\\n' \"$RESTORE\" \"$RESTORE_CODE\" \"$EXPORT\" \"$EXPORT_CODE\" \"$MANIFEST\" \"$MANIFEST_CODE\" \"$FSCK\" \"$FSCK_CODE\" \"$([ \"$HEAD_BEFORE\" = \"$HEAD_AFTER\" ] && printf yes || printf no)\" \"$(cat a.txt | tr '\\n' '|')\"\ntest \"$RESTORE_CODE\" -ne 0\ntest \"$EXPORT_CODE\" -ne 0\ntest \"$MANIFEST_CODE\" -ne 0\ntest \"$FSCK_CODE\" -ne 0\ntest \"$HEAD_BEFORE\" = \"$HEAD_AFTER\"\ntest \"$(cat a.txt)\" = \"head\"\ntest ! -e export.sdn\n"
+val script = "set -eu\nREPO=$(pwd)\nTMP=$(mktemp -d /tmp/scv-reserved-tree-path.XXXXXX)\nprintf 'base\\n' > \"$TMP/a.txt\"\ncd \"$TMP\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nBASE_OUT=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot)\nBASE_OP=$(cat .scv/HEAD_OP)\nBASE_COMMIT=$(printf '%s\\n' \"$BASE_OUT\" | awk '{print $2}')\nBASE_TREE=$(grep '^tree: ' \".scv/objects/commits/$BASE_COMMIT.sdn\" | awk '{print $2}')\nTREE_LINE=$(head -n 1 \".scv/objects/trees/$BASE_TREE.sdn\")\nTREE_REST=$(printf '%s\\n' \"$TREE_LINE\" | cut -d '|' -f2-)\nprintf '.scv/HEAD_OP|%s\\n' \"$TREE_REST\" > tree.tmp\nmv tree.tmp \".scv/objects/trees/$BASE_TREE.sdn\"\nprintf 'head\\n' > a.txt\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot >/dev/null\nHEAD_BEFORE=$(cat .scv/HEAD_OP)\nset +e\nRESTORE=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" restore-op \"$BASE_OP\")\nRESTORE_CODE=$?\nEXPORT=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" export-tree out)\nEXPORT_CODE=$?\nMANIFEST=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" export-manifest export.sdn)\nMANIFEST_CODE=$?\nFSCK=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" fsck)\nFSCK_CODE=$?\nset -e\nHEAD_AFTER=$(cat .scv/HEAD_OP)\nprintf '%s\\nrestore_code=%s\\n%s\\nexport_code=%s\\n%s\\nmanifest_code=%s\\n%s\\nfsck_code=%s\\nhead_same=%s\\nfile=%s\\n' \"$RESTORE\" \"$RESTORE_CODE\" \"$EXPORT\" \"$EXPORT_CODE\" \"$MANIFEST\" \"$MANIFEST_CODE\" \"$FSCK\" \"$FSCK_CODE\" \"$([ \"$HEAD_BEFORE\" = \"$HEAD_AFTER\" ] && printf yes || printf no)\" \"$(cat a.txt | tr '\\n' '|')\"\ntest \"$RESTORE_CODE\" -ne 0\ntest \"$EXPORT_CODE\" -ne 0\ntest \"$MANIFEST_CODE\" -ne 0\ntest \"$FSCK_CODE\" -ne 0\ntest \"$HEAD_BEFORE\" = \"$HEAD_AFTER\"\ntest \"$(cat a.txt)\" = \"head\"\ntest ! -e export.sdn\n"
 val out = _run_restore_export_safety_script(script)
 expect(out).to_contain("ERROR unsafe tree path: .scv/HEAD_OP")
 expect(out).to_contain("restore_code=1")
@@ -182,72 +150,23 @@ expect(out).to_contain("file=head|")
 | Category | Application |
 | Status | Active |
 | Source | `test/02_integration/app/scv_restore_export_safety_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering the scv subprocess actually ran, scv restore and export safety.
-- the scv subprocess actually ran
+Tests covering:
 - scv restore and export safety
 
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
+| Total scenarios | 5 |
+| Active scenarios | 5 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-INTEGRATION`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `3458a1157e14aae7de3835a9056a7718004bd38271503e102bccf4aa829a234f`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `3458a1157e14aae7de3835a9056a7718004bd38271503e102bccf4aa829a234f`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `3458a1157e14aae7de3835a9056a7718004bd38271503e102bccf4aa829a234f`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/02_integration/app/scv_restore_export_safety_spec.spl
-mirror: doc/06_spec/02_integration/app/scv_restore_export_safety_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/02_integration/app/scv_restore_export_safety_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/02_integration/app/scv_restore_export_safety_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/02_integration/app/scv_restore_export_safety_spec.spl:27:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'launches the scv CLI and gets real output back' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/02_integration/app/scv_restore_export_safety_spec.spl:38:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'rejects corrupt chunks before restore or export writes bytes' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/02_integration/app/scv_restore_export_safety_spec.spl:48:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'rejects chunk size mismatches before restore or export writes bytes' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

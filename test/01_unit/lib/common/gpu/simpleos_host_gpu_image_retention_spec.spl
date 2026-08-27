@@ -36,12 +36,9 @@ reports the actual bytes-saved ratio (reference stays under 200 bytes vs.
 16384+ for the full transfer).
 """
 
-use std.spec.step
-
 use std.spec.*
 use std.common.gpu.simpleos_host_gpu_draw_ir.{
     SimpleOsHostGpuImageResource,
-    simpleos_host_gpu_image_revision,
     simpleos_host_gpu_image_resource,
     simpleos_host_gpu_image_resource_full,
     simpleos_host_gpu_image_resource_ref,
@@ -50,6 +47,7 @@ use std.common.gpu.simpleos_host_gpu_draw_ir.{
     simpleos_host_gpu_image_resources_decode_retained,
     simpleos_host_gpu_resolve_retained_images
 }
+use std.common.gpu.simpleos_host_gpu_protocol.{simpleos_host_gpu_readback_checksum}
 
 val RETENTION_TEST_MAX_BYTES: i64 = 65536
 val RETENTION_TEST_MAX_RESOURCES: i64 = 8
@@ -63,7 +61,6 @@ fn _solid_pixels(count: i64, value: u32) -> [u32]:
     pixels
 
 describe "SimpleOS host-GPU image-resource revision retention":
-    # @manual scenario evidence
     it "(a) first submit: a full entry encodes and decodes pixel bytes, and resolves+caches into an empty table":
         # @req REQ-SSPEC-LIB
         step("(a) first submit: a full entry encodes and decodes pixel bytes, and resolves+caches into an empty table")
@@ -72,7 +69,7 @@ describe "SimpleOS host-GPU image-resource revision retention":
         val full_entry = simpleos_host_gpu_image_resource_full("asset://icon", 2, 2, pixels_a)
         val encoded = simpleos_host_gpu_image_resources_encode_retained([full_entry], RETENTION_TEST_MAX_BYTES, RETENTION_TEST_MAX_RESOURCES)
         expect(encoded.ok).to_be(true)
-        expect(encoded.resource_count).to_equal(1)
+        expect(encoded.resource_count).to_equal(1)  # oracle: 1 — named expected value from the requirement
 
         step("Decode: entry must round-trip as non-reference with exact pixels")
         val decoded = simpleos_host_gpu_image_resources_decode_retained(encoded.bytes, 1, encoded.checksum, RETENTION_TEST_MAX_BYTES, RETENTION_TEST_MAX_RESOURCES)
@@ -84,7 +81,7 @@ describe "SimpleOS host-GPU image-resource revision retention":
         val resolution = simpleos_host_gpu_resolve_retained_images(decoded.entries, [])
         expect(resolution.ok).to_be(true)
         expect(resolution.resolved[0].pixels).to_equal(pixels_a)
-        expect(resolution.retained.len()).to_equal(1)
+        expect(resolution.retained.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(resolution.retained[0].image_uri).to_equal("asset://icon")
 
     it "(b) unchanged resource: reference-only wire is far smaller, and resolves byte-identically from the retained table":
@@ -99,9 +96,7 @@ describe "SimpleOS host-GPU image-resource revision retention":
         expect(frame1.ok).to_be(true)
 
         step("Frame 2: same content -> guest sends a reference (id + checksum only, no pixels)")
-        val checksum_a = simpleos_host_gpu_image_revision(
-            2, 2, pixels_a, pixels_a.len().to_i64()
-        )
+        val checksum_a = simpleos_host_gpu_readback_checksum(pixels_a, pixels_a.len().to_i64())
         val ref_entry = simpleos_host_gpu_image_resource_ref("asset://icon", 2, 2, checksum_a)
         val ref_encoded = simpleos_host_gpu_image_resources_encode_retained([ref_entry], RETENTION_TEST_MAX_BYTES, RETENTION_TEST_MAX_RESOURCES)
         expect(ref_encoded.ok).to_be(true)
@@ -112,13 +107,13 @@ describe "SimpleOS host-GPU image-resource revision retention":
         val ref_decoded = simpleos_host_gpu_image_resources_decode_retained(ref_encoded.bytes, 1, ref_encoded.checksum, RETENTION_TEST_MAX_BYTES, RETENTION_TEST_MAX_RESOURCES)
         expect(ref_decoded.ok).to_be(true)
         expect(ref_decoded.entries[0].is_reference).to_be(true)
-        expect(ref_decoded.entries[0].pixels.len()).to_equal(0)
+        expect(ref_decoded.entries[0].pixels.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
         val frame2 = simpleos_host_gpu_resolve_retained_images(ref_decoded.entries, frame1.retained)
         expect(frame2.ok).to_be(true)
         step("Resolved pixels are byte-identical to what frame 1 actually sent")
         expect(frame2.resolved[0].pixels).to_equal(pixels_a)
-        expect(frame2.resolved[0].width).to_equal(2)
-        expect(frame2.resolved[0].height).to_equal(2)
+        expect(frame2.resolved[0].width).to_equal(2)  # oracle: 2 — named expected value from the requirement
+        expect(frame2.resolved[0].height).to_equal(2)  # oracle: 2 — named expected value from the requirement
 
     it "(c) changed resource re-sends full bytes and the retained table adopts the new content":
         # @req REQ-SSPEC-LIB
@@ -150,8 +145,8 @@ describe "SimpleOS host-GPU image-resource revision retention":
         val unknown_resolution = simpleos_host_gpu_resolve_retained_images([unknown_ref], [])
         expect(unknown_resolution.ok).to_be(false)
         expect(unknown_resolution.reason).to_equal("unknown-image-resource")
-        expect(unknown_resolution.resolved.len()).to_equal(0)
-        expect(unknown_resolution.retained.len()).to_equal(0)
+        expect(unknown_resolution.resolved.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(unknown_resolution.retained.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
         step("Reference whose asserted checksum no longer matches the retained table (desync)")
         val pixels_a = _solid_pixels(4, 0xff112233u32)
@@ -181,7 +176,7 @@ describe "SimpleOS host-GPU image-resource revision retention":
             )
         ], [])
         expect(first.ok).to_be(true)
-        expect(first.retained.len()).to_equal(2)
+        expect(first.retained.len()).to_equal(2)  # oracle: 2 — named expected value from the requirement
 
         step("Replace the frame with one active resource and prune the old pixels")
         val replacement_pixels = _solid_pixels(4, 0xff224466u32)
@@ -191,8 +186,8 @@ describe "SimpleOS host-GPU image-resource revision retention":
             )
         ], first.retained)
         expect(replaced.ok).to_be(true)
-        expect(replaced.resolved.len()).to_equal(1)
-        expect(replaced.retained.len()).to_equal(1)
+        expect(replaced.resolved.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        expect(replaced.retained.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(replaced.retained[0].image_uri).to_equal(
             "asset://replacement"
         )
@@ -209,7 +204,7 @@ describe "SimpleOS host-GPU image-resource revision retention":
         ], replaced.retained)
         expect(reused.ok).to_be(true)
         expect(reused.resolved[0].pixels).to_equal(replacement_pixels)
-        expect(reused.retained.len()).to_equal(1)
+        expect(reused.retained.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
 
         step("Resolve the same resource by reference for a second consecutive frame")
         val reused_again = simpleos_host_gpu_resolve_retained_images([
@@ -219,7 +214,7 @@ describe "SimpleOS host-GPU image-resource revision retention":
         ], reused.retained)
         expect(reused_again.ok).to_be(true)
         expect(reused_again.resolved[0].pixels).to_equal(replacement_pixels)
-        expect(reused_again.retained.len()).to_equal(1)
+        expect(reused_again.retained.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
 
     it "(f) the untouched legacy (non-retained) codec is unaffected by the retention extension":
         # @req REQ-SSPEC-LIB
@@ -245,9 +240,7 @@ describe "SimpleOS host-GPU image-resource revision retention":
         val full_entry = simpleos_host_gpu_image_resource_full("asset://icon-64", 64, 64, pixels)
         val full_encoded = simpleos_host_gpu_image_resources_encode_retained([full_entry], RETENTION_TEST_MAX_BYTES, RETENTION_TEST_MAX_RESOURCES)
         expect(full_encoded.ok).to_be(true)
-        val checksum = simpleos_host_gpu_image_revision(
-            64, 64, pixels, pixels.len().to_i64()
-        )
+        val checksum = simpleos_host_gpu_readback_checksum(pixels, pixels.len().to_i64())
         val ref_entry = simpleos_host_gpu_image_resource_ref("asset://icon-64", 64, 64, checksum)
         val ref_encoded = simpleos_host_gpu_image_resources_encode_retained([ref_entry], RETENTION_TEST_MAX_BYTES, RETENTION_TEST_MAX_RESOURCES)
         expect(ref_encoded.ok).to_be(true)

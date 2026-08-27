@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 44 | 44 | 0 | 0 |
+| 22 | 22 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -229,10 +229,15 @@ expect(err).to_equal("not initialized")
    - Expected: s.session_mode equals `headless`
 
 
+- Verify: create with different modes stores correct mode
+   - Expected: s1.session_mode equals `default`
+   - Expected: s2.session_mode equals `strict`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -312,21 +317,22 @@ step("clear_count stays at 0 when not initialized")
 var s = VulkanSessionBackend.create("default")
 s.clear(0, 0, 0, 255)
 s.clear(255, 255, 255, 255)
-expect(s.clear_count).to_equal(0)
+expect(s.clear_count).to_equal(0)  # oracle: pinned constant asserted by this scenario
 ```
 
 </details>
 
 #### rect_count stays at 0 when not initialized
 
-- rect_count stays at 0 when not initialized
+- var s = VulkanSessionBackend create
+- s draw rect
    - Expected: s.rect_count equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -421,7 +427,7 @@ expect(b.host_buf).to_equal([0x11223344u32])
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -915,7 +921,7 @@ else:
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 40 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1164,6 +1170,10 @@ else:
 - clear to distinct color is deterministic across two inits
    - Expected: pixel_at_d(p1, 0, 0, 4) equals `pixel_at_d(p2, 0, 0, 4)`
    - Expected: pixel_at_d(p1, 3, 3, 4) equals `pixel_at_d(p2, 3, 3, 4)`
+- b1 shutdown
+- b2 shutdown
+- assert not equal
+- b1 shutdown
 
 
 <details>
@@ -1294,7 +1304,7 @@ expect(b.completion_unknown).to_be(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 34 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1520,8 +1530,8 @@ Tests covering Vulkan 2D drawing lane — SPIR-V parity evidence, Vulkan 2D draw
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 44 |
-| Active scenarios | 44 |
+| Total scenarios | 22 |
+| Active scenarios | 22 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

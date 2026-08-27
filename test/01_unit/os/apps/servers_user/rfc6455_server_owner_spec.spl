@@ -18,7 +18,10 @@ fn _upgrade(extra: text) -> text:
         "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n" + extra + "\r\n"
 
 fn _masked_frame(first: u8, payload: [u8]) -> [u8]:
-    val mask: [u8] = [0x37u8, 0xFAu8, 0x21u8, 0x3Du8]
+    _masked_frame_with_mask(first, payload,
+        [0x37u8, 0xFAu8, 0x21u8, 0x3Du8])
+
+fn _masked_frame_with_mask(first: u8, payload: [u8], mask: [u8]) -> [u8]:
     var frame: [u8] = [first]
     if payload.len() < 126u64:
         frame.push(0x80u8 | payload.len().to_u8())
@@ -141,6 +144,21 @@ describe "bounded pure-Simple RFC 6455 server prerequisite":
         expect(events.len()).to_equal(1)
         expect(events[0].kind).to_equal(Rfc6455ServerEventKind.TextMessage)
         expect(events[0].payload).to_equal(text_to_bytes_pure("hello"))
+        expect(owner.retained_wire_bytes()).to_equal(0u64)
+
+    it "unmasks every byte across repeated four-byte mask cycles":
+        var owner = Rfc6455ServerConnectionOwner.create()
+        var payload: [u8] = []
+        var index: u64 = 0u64
+        while index < 257u64:
+            payload.push(((index * 29u64 + 7u64) & 255u64).to_u8())
+            index = index + 1u64
+        val wire = _masked_frame_with_mask(0x82u8, payload,
+            [0x00u8, 0xFFu8, 0xA5u8, 0x5Au8])
+        val events = owner.append_tail(wire)
+        expect(events.len()).to_equal(1)
+        expect(events[0].kind).to_equal(Rfc6455ServerEventKind.BinaryMessage)
+        expect(events[0].payload).to_equal(payload)
         expect(owner.retained_wire_bytes()).to_equal(0u64)
 
     it "assembles fragmentation while allowing interleaved ping":

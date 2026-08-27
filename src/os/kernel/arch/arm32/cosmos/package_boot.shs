@@ -428,6 +428,24 @@ receipt_value() {
     ' "$_pb_receipt"
 }
 
+admit_package_simple() {
+    _pb_simple="${SIMPLE_BINARY:-}"
+    [ -n "$_pb_simple" ] ||
+        fail "SIMPLE_BINARY must name an admitted deployed Stage-4 compiler"
+    BOOTSTRAP_STAGE3_FACADE_PATH="$ROOT/scripts/check/lib/bootstrap-stage3-provenance.shs"
+    STAGE4_PROVENANCE_HELPER_PATH="$ROOT/scripts/check/lib/stage4-candidate-provenance.shs"
+    export BOOTSTRAP_STAGE3_FACADE_PATH STAGE4_PROVENANCE_HELPER_PATH
+    . "$BOOTSTRAP_STAGE3_FACADE_PATH"
+    . "$STAGE4_PROVENANCE_HELPER_PATH"
+    _pb_simple="$(bootstrap_stage3_canonical_file "$_pb_simple")" ||
+        fail "Pure Simple compiler path is not canonical"
+    case "$_pb_simple" in *compiler_rust*) fail "Rust seed is forbidden" ;; esac
+    stage4_verify_candidate_provenance "${_pb_simple}.provenance.env" \
+        "$_pb_simple" "$ROOT" || fail "Pure Simple compiler provenance is not admitted"
+    SIMPLE_BINARY="$_pb_simple"
+    export SIMPLE_BINARY
+}
+
 manifest_hash() {
     _pb_key="$1"
     _pb_manifest="$2"
@@ -487,6 +505,35 @@ validate_manifest() (
             fail "manifest missing tool.$_pb_tool.version"
         manifest_hash "tool.$_pb_tool.sha256" "$_pb_manifest" >/dev/null
     done
+    _pb_simple="$(receipt_value tool.simple.path "$_pb_manifest")" ||
+        fail "manifest missing tool.simple.path"
+    [ "$(canonical_path "$_pb_simple")" = "$_pb_simple" ] &&
+        [ -x "$_pb_simple" ] || fail "manifest Simple compiler is unavailable"
+    [ "$(cosmos_sha256_file "$_pb_simple")" = \
+        "$(manifest_hash tool.simple.sha256 "$_pb_manifest")" ] ||
+        fail "manifest Simple compiler hash mismatch"
+    [ -n "$(receipt_value tool.simple.version "$_pb_manifest")" ] ||
+        fail "manifest Simple compiler version is empty"
+    _pb_simple_provenance="$(
+        receipt_value tool.simple.provenance.path "$_pb_manifest"
+    )" || fail "manifest missing Simple compiler provenance path"
+    [ "$_pb_simple_provenance" = "${_pb_simple}.provenance.env" ] ||
+        fail "manifest Simple provenance is not adjacent to its compiler"
+    [ "$(canonical_path "$_pb_simple_provenance")" = "$_pb_simple_provenance" ] ||
+        fail "manifest Simple provenance path is not canonical"
+    [ "$(cosmos_sha256_file "$_pb_simple_provenance")" = \
+        "$(manifest_hash tool.simple.provenance.sha256 "$_pb_manifest")" ] ||
+        fail "manifest Simple provenance hash mismatch"
+    BOOTSTRAP_STAGE3_FACADE_PATH="$ROOT/scripts/check/lib/bootstrap-stage3-provenance.shs"
+    STAGE4_PROVENANCE_HELPER_PATH="$ROOT/scripts/check/lib/stage4-candidate-provenance.shs"
+    export BOOTSTRAP_STAGE3_FACADE_PATH STAGE4_PROVENANCE_HELPER_PATH
+    . "$BOOTSTRAP_STAGE3_FACADE_PATH"
+    . "$STAGE4_PROVENANCE_HELPER_PATH"
+    stage4_verify_candidate_provenance "$_pb_simple_provenance" \
+        "$_pb_simple" "$ROOT" || fail "manifest Simple provenance is not admitted"
+    manifest_hash object.fsbl.sha256 "$_pb_manifest" >/dev/null
+    [ "$(receipt_value object.fsbl.target "$_pb_manifest")" = \
+        armv7-unknown-none-eabihf ] || fail "manifest FSBL object target mismatch"
     for _pb_artifact in fsbl bitstream firmware firmware.receipt boot; do
         _pb_path="$(receipt_value "$_pb_artifact.path" "$_pb_manifest")" ||
             fail "manifest missing $_pb_artifact.path"
@@ -499,6 +546,7 @@ validate_manifest() (
     done
     manifest_hash firmware.source.sha256 "$_pb_manifest" >/dev/null
     manifest_hash firmware.load.sha256 "$_pb_manifest" >/dev/null
+    manifest_hash firmware.object.manifest.sha256 "$_pb_manifest" >/dev/null
     manifest_hash bootgen.metadata.sha256 "$_pb_manifest" >/dev/null
     [ "$(receipt_value bitstream.sha256 "$_pb_manifest")" = "$BITSTREAM_EXPECTED_SHA" ] ||
         fail "manifest bitstream is not the approved profile artifact"
@@ -528,6 +576,8 @@ write_manifest() {
     _pb_metadata="$3"
     _pb_bootgen_version="$4"
     _pb_bootgen_sha="$5"
+    _pb_object_path="$6"
+    _pb_object_snapshot="$7"
     {
         echo "format=cosmos-zynq-boot-v3"
         echo "board=cosmos-plus-openssd"
@@ -558,10 +608,15 @@ write_manifest() {
         printf 'firmware.receipt.path=%s\nfirmware.receipt.sha256=%s\n' \
             "$_pb_receipt_path" \
             "$(cosmos_sha256_file "$_pb_receipt_snapshot")"
+        printf 'firmware.objects.path=%s\nfirmware.objects.sha256=%s\n' \
+            "$_pb_object_path" \
+            "$(cosmos_sha256_file "$_pb_object_snapshot")"
         printf 'firmware.source.sha256=%s\n' \
             "$(receipt_value source.sha256 "$_pb_receipt_snapshot")"
         printf 'firmware.load.sha256=%s\n' \
             "$(receipt_value elf.load.sha256 "$_pb_receipt_snapshot")"
+        printf 'firmware.object.manifest.sha256=%s\n' \
+            "$(receipt_value object.manifest.sha256 "$_pb_receipt_snapshot")"
         printf 'tool.clang.version=%s\n' \
             "$(receipt_value tool.clang.version "$_pb_receipt_snapshot")"
         printf 'tool.clang.sha256=%s\n' \
@@ -570,6 +625,20 @@ write_manifest() {
             "$(receipt_value tool.lld.version "$_pb_receipt_snapshot")"
         printf 'tool.lld.sha256=%s\n' \
             "$(receipt_value tool.lld.sha256 "$_pb_receipt_snapshot")"
+        printf 'tool.simple.path=%s\n' \
+            "$(receipt_value tool.simple.path "$_pb_receipt_snapshot")"
+        printf 'tool.simple.version=%s\n' \
+            "$(receipt_value tool.simple.version "$_pb_receipt_snapshot")"
+        printf 'tool.simple.sha256=%s\n' \
+            "$(receipt_value tool.simple.sha256 "$_pb_receipt_snapshot")"
+        printf 'tool.simple.provenance.path=%s\n' \
+            "$(receipt_value tool.simple.provenance.path "$_pb_receipt_snapshot")"
+        printf 'tool.simple.provenance.sha256=%s\n' \
+            "$(receipt_value tool.simple.provenance.sha256 "$_pb_receipt_snapshot")"
+        printf 'object.fsbl.sha256=%s\n' \
+            "$(receipt_value object.fsbl.sha256 "$_pb_receipt_snapshot")"
+        printf 'object.fsbl.target=%s\n' \
+            "$(receipt_value object.fsbl.target "$_pb_receipt_snapshot")"
         printf 'tool.bootgen.version=%s\n' "$_pb_bootgen_version"
         printf 'tool.bootgen.sha256=%s\n' "$_pb_bootgen_sha"
         printf 'boot.path=%s\nboot.sha256=%s\n' \
@@ -587,6 +656,9 @@ run_package() (
     _pb_elf="$3"
     _pb_output="$4"
     _pb_manifest="$_pb_output.manifest"
+    cosmos_admit_simple_toolchain \
+        "$ROOT" "${SIMPLE:-$ROOT/bin/simple}" "${SIMPLE_PROVENANCE:-}" ||
+        fail "package requires an admitted self-host compiler/provenance pair"
     validate_identity "$BOARD_SERIAL" board.serial
     validate_identity "$BOARD_REVISION" board.revision
     case "$BOOT_MODE" in
@@ -606,7 +678,9 @@ run_package() (
     _pb_bit_abs="$(canonical_path "$_pb_bitstream")"
     _pb_elf_abs="$(canonical_path "$_pb_elf")"
     _pb_receipt_abs="$_pb_elf_abs.receipt"
+    _pb_object_abs="$_pb_elf_abs.objects"
     require_file "$_pb_receipt_abs" firmware-receipt
+    require_file "$_pb_object_abs" firmware-object-manifest
     _pb_output_abs="$(canonical_path "$_pb_output")"
     _pb_manifest_abs="$(canonical_path "$_pb_manifest")"
 
@@ -616,8 +690,11 @@ run_package() (
     check_distinct "$_pb_bit_abs" "$_pb_elf_abs" bitstream
     check_distinct "$_pb_bit_abs" "$_pb_receipt_abs" bitstream
     check_distinct "$_pb_elf_abs" "$_pb_receipt_abs" firmware
+    check_distinct "$_pb_elf_abs" "$_pb_object_abs" firmware
+    check_distinct "$_pb_receipt_abs" "$_pb_object_abs" firmware-receipt
     for _pb_input in \
-        "$_pb_fsbl_abs" "$_pb_bit_abs" "$_pb_elf_abs" "$_pb_receipt_abs"
+        "$_pb_fsbl_abs" "$_pb_bit_abs" "$_pb_elf_abs" \
+        "$_pb_receipt_abs" "$_pb_object_abs"
     do
         check_distinct "$_pb_output_abs" "$_pb_input" output
         check_distinct "$_pb_manifest_abs" "$_pb_input" manifest
@@ -633,15 +710,19 @@ run_package() (
     _pb_bit_snap="$_pb_snap_dir/$PROFILE_BITSTREAM_MEMBER"
     _pb_elf_snap="$_pb_snap_dir/firmware.elf"
     _pb_receipt_snap="$_pb_snap_dir/firmware.elf.receipt"
+    _pb_object_snap="$_pb_snap_dir/firmware.elf.objects"
     snapshot_file "$_pb_fsbl_abs" "$_pb_fsbl_snap" FSBL
     snapshot_file "$_pb_bit_abs" "$_pb_bit_snap" bitstream
     snapshot_file "$_pb_elf_abs" "$_pb_elf_snap" firmware
     snapshot_file "$_pb_receipt_abs" "$_pb_receipt_snap" firmware-receipt
+    snapshot_file "$_pb_object_abs" "$_pb_object_snap" \
+        firmware-object-manifest
 
     _pb_fsbl_sha="$(cosmos_sha256_file "$_pb_fsbl_snap")"
     _pb_bit_sha="$(cosmos_sha256_file "$_pb_bit_snap")"
     _pb_elf_sha="$(cosmos_sha256_file "$_pb_elf_snap")"
     _pb_receipt_sha="$(cosmos_sha256_file "$_pb_receipt_snap")"
+    _pb_object_sha="$(cosmos_sha256_file "$_pb_object_snap")"
 
     _pb_fsbl_meta="$_pb_tmp_dir/fsbl.loads"
     validate_fsbl "$_pb_fsbl_snap" "$_pb_fsbl_meta"
@@ -650,9 +731,25 @@ run_package() (
         fail "firmware PT_LOAD policy failed"
     validate_profile_firmware "$_pb_elf_snap"
     _pb_expected_receipt="$_pb_tmp_dir/expected.receipt"
+    COSMOS_SIMPLE_COMPILER="$(receipt_value tool.simple.path "$_pb_receipt_snap")"
+    COSMOS_SIMPLE_COMPILER_VERSION="$(receipt_value tool.simple.version "$_pb_receipt_snap")"
+    COSMOS_SIMPLE_COMPILER_SHA256="$(receipt_value tool.simple.sha256 "$_pb_receipt_snap")"
+    COSMOS_SIMPLE_COMPILER_PROVENANCE="$(
+        receipt_value tool.simple.provenance.path "$_pb_receipt_snap"
+    )"
+    COSMOS_SIMPLE_COMPILER_PROVENANCE_SHA256="$(
+        receipt_value tool.simple.provenance.sha256 "$_pb_receipt_snap"
+    )"
+    COSMOS_SIMPLE_FSBL_OBJECT_SHA256="$(
+        receipt_value object.fsbl.sha256 "$_pb_receipt_snap"
+    )"
+    export COSMOS_SIMPLE_COMPILER COSMOS_SIMPLE_COMPILER_VERSION \
+        COSMOS_SIMPLE_COMPILER_SHA256 COSMOS_SIMPLE_COMPILER_PROVENANCE \
+        COSMOS_SIMPLE_COMPILER_PROVENANCE_SHA256 \
+        COSMOS_SIMPLE_FSBL_OBJECT_SHA256
     cosmos_write_receipt "$SCRIPT_DIR" silicon "$PROFILE_NAME" \
         "$PROFILE_SELECTOR" "$_pb_elf_snap" "$_pb_loads" \
-        "$_pb_expected_receipt" ||
+        "$_pb_expected_receipt" "" "$_pb_object_snap" ||
         fail "cannot reconstruct firmware receipt"
     cmp -s "$_pb_receipt_snap" "$_pb_expected_receipt" ||
         fail "firmware receipt does not match ELF, sources, layout, and profile"
@@ -697,12 +794,15 @@ run_package() (
     verify_snapshot bitstream "$_pb_bit_snap" "$_pb_bit_sha"
     verify_snapshot firmware "$_pb_elf_snap" "$_pb_elf_sha"
     verify_snapshot firmware-receipt "$_pb_receipt_snap" "$_pb_receipt_sha"
+    verify_snapshot firmware-object-manifest "$_pb_object_snap" \
+        "$_pb_object_sha"
 
     write_manifest "$_pb_manifest_tmp" \
         "$_pb_fsbl_abs" "$_pb_bit_abs" "$_pb_elf_abs" "$_pb_receipt_abs" \
         "$_pb_fsbl_snap" "$_pb_bit_snap" "$_pb_elf_snap" \
         "$_pb_receipt_snap" "$_pb_output_abs" "$_pb_bin" "$_pb_metadata" \
-        "$_pb_bootgen_version" "$_pb_bootgen_sha"
+        "$_pb_bootgen_version" "$_pb_bootgen_sha" \
+        "$_pb_object_abs" "$_pb_object_snap"
     mv "$_pb_bin" "$_pb_output_abs"
     mv "$_pb_manifest_tmp" "$_pb_manifest_abs"
     if ! validate_manifest "$_pb_manifest_abs"; then
@@ -760,6 +860,7 @@ expect_rejected() {
 }
 
 run_self_test() {
+    admit_package_simple
     _pb_test_dir="$(mktemp -d "${TMPDIR:-/tmp}/cosmos-package-self-test.XXXXXX")"
     cleanup_test() { rm -rf "$_pb_test_dir"; }
     trap cleanup_test EXIT HUP INT TERM
@@ -854,9 +955,17 @@ EOF
     _pb_sources="$_pb_test_dir/sources.manifest"
     cosmos_write_source_manifest "$SCRIPT_DIR" "$_pb_sources" ||
         fail "self-test could not capture source closure"
-    for _pb_source in cosmos_ftl_nfc_backend.c cosmos_ftl_nfc_backend.h \
-        cosmos_nvme_ftl_media.c cosmos_nvme_ftl_media.h \
-        cosmos_storage.c cosmos_storage.h
+    [ "$(wc -l < "$_pb_sources" | tr -d ' ')" = 65 ] ||
+        fail "source closure must contain exactly 65 audited inputs"
+    for _pb_source in \
+        cosmos_nfc_policy.h cosmos_nfc_policy.spl \
+        cosmos_ftl_nfc_backend_policy.h cosmos_ftl_nfc_backend_policy.spl \
+        cosmos_ftl_policy.h cosmos_ftl_policy.spl \
+        cosmos_nvme_media_policy.h cosmos_nvme_media_policy.spl \
+        cosmos_nvme_admin_policy.h cosmos_nvme_admin_policy.spl \
+        cosmos_nvme_pcie_adapter_policy.h cosmos_nvme_pcie_adapter_policy.spl \
+        cosmos_pcie_residual_policy.h cosmos_pcie_residual_policy.spl \
+        cosmos_storage_policy.h cosmos_storage_policy.spl
     do
         grep -Eq "  $_pb_source$" "$_pb_sources" ||
             fail "source closure omits $_pb_source"
@@ -869,8 +978,10 @@ EOF
         sh "$SCRIPT_DIR/build.shs" >/dev/null
     _pb_firmware="$_pb_build_out/simpleos_cosmos_openssd_silicon.elf"
     _pb_receipt="$_pb_firmware.receipt"
-    [ -s "$_pb_firmware" ] && [ -s "$_pb_receipt" ] ||
-        fail "self-test build did not emit ELF and receipt"
+    _pb_objects="$_pb_firmware.objects"
+    [ -s "$_pb_firmware" ] && [ -s "$_pb_receipt" ] && \
+        [ -s "$_pb_objects" ] ||
+        fail "self-test build did not emit ELF, receipt, and object manifest"
     grep -Fxq "format=$COSMOS_RECEIPT_FORMAT" "$_pb_receipt" ||
         fail "self-test receipt schema mismatch"
     grep -Fxq "profile.name=$PROFILE_NAME" "$_pb_receipt" ||
@@ -879,6 +990,10 @@ EOF
         fail "self-test receipt lacks source hash"
     grep -Eq '^elf.load.sha256=[0-9a-f]{64}$' "$_pb_receipt" ||
         fail "self-test receipt lacks load hash"
+    grep -Fxq 'object.file.count=50' "$_pb_receipt" ||
+        fail "self-test receipt lacks exact 50-object closure"
+    grep -Fxq "object.manifest.sha256=$(cosmos_sha256_file "$_pb_objects")" \
+        "$_pb_receipt" || fail "self-test receipt/object binding mismatch"
     grep -Eq '^tool.clang.version=.+$' "$_pb_receipt" ||
         fail "self-test receipt lacks clang version"
     grep -Eq '^tool.lld.version=.+$' "$_pb_receipt" ||
@@ -903,6 +1018,8 @@ EOF
         "$_pb_manifest" || fail "manifest firmware hash mismatch"
     grep -Fxq "firmware.receipt.sha256=$(cosmos_sha256_file "$_pb_receipt")" \
         "$_pb_manifest" || fail "manifest receipt hash mismatch"
+    grep -Fxq "firmware.objects.sha256=$(cosmos_sha256_file "$_pb_objects")" \
+        "$_pb_manifest" || fail "manifest object hash mismatch"
     grep -Fxq "profile.bitstream.sha256=$PROFILE_BITSTREAM_SHA256" \
         "$_pb_manifest" || fail "manifest official bitstream identity mismatch"
     grep -Fxq "board.serial=$BOARD_SERIAL" "$_pb_manifest" ||
@@ -946,6 +1063,7 @@ EOF
     _pb_unsafe="$_pb_test_dir/unsafe-segment.elf"
     cp "$_pb_firmware" "$_pb_unsafe"
     cp "$_pb_receipt" "$_pb_unsafe.receipt"
+    cp "$_pb_objects" "$_pb_unsafe.objects"
     printf '\000\000\040\000' |
         dd of="$_pb_unsafe" bs=1 seek=24 conv=notrunc 2>/dev/null
     printf '\000\000\040\000\000\000\040\000' |
@@ -957,10 +1075,21 @@ EOF
     _pb_mutated="$_pb_test_dir/mutated.elf"
     cp "$_pb_firmware" "$_pb_mutated"
     cp "$_pb_receipt" "$_pb_mutated.receipt"
+    cp "$_pb_objects" "$_pb_mutated.objects"
     printf '\000' >> "$_pb_mutated"
     expect_rejected mutated-firmware "$_pb_test_dir/mutated.bin" \
         "$_pb_fsbl" "$_pb_bitstream" "$_pb_mutated" \
         "$_pb_test_dir/mutated.bin"
+
+    _pb_object_mutated="$_pb_test_dir/object-mutated.elf"
+    cp "$_pb_firmware" "$_pb_object_mutated"
+    cp "$_pb_receipt" "$_pb_object_mutated.receipt"
+    cp "$_pb_objects" "$_pb_object_mutated.objects"
+    printf '0' >>"$_pb_object_mutated.objects"
+    expect_rejected mutated-object-manifest \
+        "$_pb_test_dir/object-mutated.bin" \
+        "$_pb_fsbl" "$_pb_bitstream" "$_pb_object_mutated" \
+        "$_pb_test_dir/object-mutated.bin"
 
     _pb_original_sha="$(cosmos_sha256_file "$_pb_firmware")"
     if (run_package "$_pb_fsbl" "$_pb_bitstream" "$_pb_firmware" \

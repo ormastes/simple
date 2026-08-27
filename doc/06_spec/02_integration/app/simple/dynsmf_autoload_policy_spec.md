@@ -77,7 +77,7 @@ startup evidence.
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -106,7 +106,7 @@ expect(session.evidence[2].reason).to_equal("artifact_missing_file")
 
 </details>
 
-#### demand-load policy: default startup loads nothing and queues nothing
+#### autoloads all six default stdlib-like dynSMF entries for startup
 
 - demand-load policy: default startup loads nothing and queues nothing
    - Expected: session.loaded.len() equals `0`
@@ -114,7 +114,7 @@ expect(session.evidence[2].reason).to_equal("artifact_missing_file")
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -150,26 +150,24 @@ Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("skip-all startup policy still yields an empty demand-load startup session")
 val by_arg = dynsmf_startup_session_from_values(["--no-dynsmf"], "", "", "integration-no-arg")
 expect(by_arg.loaded.len()).to_equal(0)
-expect(by_arg.policy.source).to_equal("arg:--no-dynsmf")
-expect(by_arg.evidence.len()).to_equal(0)
+expect(by_arg.evidence.len()).to_equal(6)
+expect(by_arg.evidence[0].action).to_equal("skip")
+expect(by_arg.evidence[0].policy_source).to_equal("arg:--no-dynsmf")
 
 val by_env = dynsmf_startup_session_from_values([], "0", "", "integration-no-env")
 expect(by_env.loaded.len()).to_equal(0)
-expect(by_env.policy.source).to_equal("env:SIMPLE_DYNSMF")
-expect(by_env.evidence.len()).to_equal(0)
+expect(by_env.evidence[5].action).to_equal("skip")
+expect(by_env.evidence[5].policy_source).to_equal("env:SIMPLE_DYNSMF")
 ```
 
 </details>
 
-#### honors per-id disable policy on an explicit autoload manifest
+#### honors per-id startup disable policy while loading other libraries
 
-- honors per-id disable policy on an explicit autoload manifest
-   - Expected: session.loaded.len() equals `0`
-   - Expected: saw_skip is true
+1. var session = dynsmf startup session from values
+   - Expected: build.2 equals `0`
 
 
 <details>
@@ -219,7 +217,8 @@ expect(plain_out).to_equal("")
 val (out, err, code) = run_app_root_dynsmf(["--dynsmf-status"])
 expect(code).to_equal(0)
 expect(out).to_contain("dynsmf session=app-root")
-expect(out).to_contain("loaded=0")
+expect(out).to_contain("loaded=6")
+expect(out).to_contain("tui_renderer:load:default:loaded:smf_dlopen")
 ```
 
 </details>
@@ -243,6 +242,8 @@ val (out, err, code) = run_app_root_dynsmf(["--no-dynsmf", "--dynsmf-status"])
 expect(code).to_equal(0)
 expect(out).to_contain("policy=arg:--no-dynsmf")
 expect(out).to_contain("loaded=0")
+expect(out).to_contain("skipped=6")
+expect(out).to_contain("file_io:skip:arg:--no-dynsmf:skipped:disabled")
 ```
 
 </details>
@@ -260,10 +261,10 @@ expect(out).to_contain("loaded=0")
 
 ## Related Documentation
 
-- **Requirements:** `doc/02_requirements/nfr/low_dependency_ui_dynsmf.md`
-- **Plan:** `doc/03_plan/sys_test/low_dependency_ui_dynsmf_dynsmf_session.md`
-- **Design:** `doc/05_design/low_dependency_ui_dynsmf.md`
-- **Research:** `doc/01_research/local/low_dependency_ui_dynsmf.md`
+- **Requirements:** [doc/02_requirements/nfr/low_dependency_ui_dynsmf.md](doc/02_requirements/nfr/low_dependency_ui_dynsmf.md)
+- **Plan:** [doc/03_plan/sys_test/low_dependency_ui_dynsmf_dynsmf_session.md](doc/03_plan/sys_test/low_dependency_ui_dynsmf_dynsmf_session.md)
+- **Design:** [doc/05_design/low_dependency_ui_dynsmf.md](doc/05_design/low_dependency_ui_dynsmf.md)
+- **Research:** [doc/01_research/local/low_dependency_ui_dynsmf.md](doc/01_research/local/low_dependency_ui_dynsmf.md)
 
 
 </details>

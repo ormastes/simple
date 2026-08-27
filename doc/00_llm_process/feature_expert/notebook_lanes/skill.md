@@ -326,13 +326,13 @@ K5/K6 are both now landed; no remaining gap in this plan's own execution.
 - Landed: `src/lib/nogc_sync_mut/notebook/{session_manager,executor,types,ipynb,
   snb_sdn,magics,lane_locks,remote_exec,local_exec,lsp_bridge,vulkan_exec,
   cuda_exec}.spl` (K1-K6/L1/H2/P1/K2); `src/app/simple_lab/{export_sdoctest,main,
-  lab_server}.spl` (L1/L2/L3); `tools/jupyter/kernel_wrapper.py`
+  lab_executor,lab_server}.spl` (L1/L2/L3); `tools/jupyter/kernel_wrapper.py`
   (Python ZMQ transport, P0); `tools/jupyter/labextension/` (CM6 grammar, X1)
   with generator `scripts/gen_cm6_grammar.mjs`. K2's shared `local_exec.spl`
-  is wired directly into Simple Lab — both `main.spl` and `lab_server.spl`
-  construct `LocalExecFactory` from `std.nogc_sync_mut.notebook.local_exec`;
-  there is no separate Lab-local executor file. L4 (protocol contract) has
-  landed, 4/5, with one filed gap (see the L4 entry above).
+  has landed but is NOT yet wired into Simple Lab — `main.spl` and
+  `lab_server.spl` both still construct `lab_executor.spl`'s
+  `LabLocalExecFactory`; retiring it is still open. Not yet landed: L4
+  (protocol contract).
 
 ## Known Constraints
 

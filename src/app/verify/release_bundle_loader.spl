@@ -24,11 +24,15 @@ use compiler.common.assurance.formal_delivery_gates.{FormalDeliveryGateV1,
     formal_delivery_manifest_hash_v1, FormalDeliveryReceiptFileV1}
 use app.verify.release_signature.{verify_release_bundle_ed25519_v1,
     verify_release_bundle_ed25519_v2}
+export use app.verify.release_signer_policy.{ApprovedReleaseSignerPolicyV2,
+    ApprovedReleaseSignerPolicyV3, parse_release_signers_sdn_v2,
+    parse_release_signers_sdn_v3,
+    release_signer_policy_authority_diagnostic_v3,
+    resolve_repository_release_signer_policy_v3}
 
 const FV2_RELEASE_BUNDLE_SCHEMA_V1 = "simple.formal.release-bundle.v1"
 const FV2_RELEASE_BUNDLE_SCHEMA_V2 = "simple.formal.release-bundle.v2"
 const FV2_RELEASE_SIGNERS_SCHEMA_V1 = "simple.formal.release-signers.v1"
-const FV2_RELEASE_SIGNERS_SCHEMA_V2 = "simple.formal.release-signers.v2"
 
 pub struct LoadedReleaseBundleV1:
     evidence: VerifiedReleaseEvidenceV1
@@ -65,23 +69,6 @@ pub struct LoadedReleaseAdmissionV2:
         self.signed_bundle_decision.admitted and
             self.delivery_decision.accepted_state and
             self.delivery_decision.release_ready and self.diagnostic == ""
-
-# The V2 signer policy is a separate schema because an unbound V1 allow-list
-# cannot authorize a policy-bound V2 release.  `policy_hash` is the canonical
-# ResolvedAssurancePolicyV2 identity, not a profile-name alias.
-pub struct ApprovedReleaseSignerPolicyV2:
-    policy_hash: text
-    signers: [ApprovedReleaseSignerV1]
-
-fn fv2_policy_hash_v2_valid(value: text) -> bool:
-    # PolicyV2 deliberately preserves the APOLV2 identity format from the
-    # frozen assurance resolver. It is not a raw cryptographic receipt hash.
-    if not value.starts_with("APOLV2-") or value.len() == "APOLV2-".len():
-        return false
-    for index in "APOLV2-".len()..value.len():
-        val code = value.char_code_at(index)
-        if code < 48 or code > 57: return false
-    true
 
 pub fn required_release_receipt_hashes_v1(
     gates: [FormalDeliveryGateEvidenceV1]
@@ -659,44 +646,6 @@ pub fn parse_release_signers_sdn_v1(source: text) -> Result<[ApprovedReleaseSign
                         case _:
                             Err("FV2-E-RELEASE-POLICY: signers must be an array")
 
-pub fn parse_release_signers_sdn_v2(
-    source: text
-) -> Result<ApprovedReleaseSignerPolicyV2, text>:
-    match parse_with_issues(source):
-        case Err(message): Err("FV2-E-RELEASE-POLICY-PARSE-V2: " + message)
-        case Ok((value, issues)):
-            if not issues.is_empty():
-                return Err("FV2-E-RELEASE-POLICY-V2: duplicate fields are forbidden")
-            val fields = fv2_loader_dict_v1(value,
-                ["schema", "policy_hash", "signers"], "policy_v2")?
-            val schema = fv2_loader_text_v1(fields, "schema", "policy_v2")?
-            if schema != FV2_RELEASE_SIGNERS_SCHEMA_V2:
-                return Err("FV2-E-RELEASE-POLICY-V2: unsupported signer policy schema")
-            val policy_hash = fv2_loader_text_v1(fields, "policy_hash", "policy_v2")?
-            if not fv2_policy_hash_v2_valid(policy_hash):
-                return Err("FV2-E-RELEASE-POLICY-V2: policy_hash must be canonical APOLV2 identity")
-            match fields["signers"]:
-                case Array(values):
-                    if values.is_empty():
-                        return Err("FV2-E-RELEASE-POLICY-V2: signer policy is empty")
-                    var signers: [ApprovedReleaseSignerV1] = []
-                    for value in values:
-                        val signer_fields = fv2_loader_dict_v1(value,
-                            ["signer_id", "public_key_hash"], "signer_v2")?
-                        val signer_id = fv2_loader_text_v1(signer_fields,
-                            "signer_id", "signer_v2")?
-                        val public_hash = fv2_loader_text_v1(signer_fields,
-                            "public_key_hash", "signer_v2")?
-                        if not sha256_lower_hex_valid(public_hash):
-                            return Err("FV2-E-RELEASE-POLICY-V2: signer public_key_hash must be canonical SHA-256")
-                        for existing in signers:
-                            if existing.signer_id == signer_id or existing.public_key_hash == public_hash:
-                                return Err("FV2-E-RELEASE-POLICY-V2: signer identity and public key identity must both be unique")
-                        signers.push(ApprovedReleaseSignerV1(signer_id, public_hash))
-                    Ok(ApprovedReleaseSignerPolicyV2(policy_hash, signers))
-                case _:
-                    Err("FV2-E-RELEASE-POLICY-V2: signers must be an array")
-
 pub fn admit_loaded_release_bundle_v1(
     loaded: LoadedReleaseBundleV1,
     approved_signers: [ApprovedReleaseSignerV1]
@@ -723,16 +672,31 @@ pub fn admit_loaded_release_bundle_v2(
     loaded: LoadedReleaseBundleV2,
     signer_policy: ApprovedReleaseSignerPolicyV2
 ) -> SignedVerifiedReleaseBundleDecisionV2:
-    val policy_hash = loaded.evidence.policy.policy_hash()
-    if signer_policy.policy_hash != policy_hash:
+    # APOLV2 is retained solely as a compatibility identity. Its bounded
+    # arithmetic hash cannot grant release authority, even to direct callers.
+    val rejected = validate_signed_verified_release_bundle_v2(
+        SignedVerifiedReleaseBundleV2(loaded.evidence, loaded.payload_hash,
+            loaded.signer_id, verify_release_bundle_ed25519_v2(
+                loaded.evidence, ApprovedReleaseSignerV1("", ""),
+                loaded.public_key, loaded.signature)), [])
+    SignedVerifiedReleaseBundleDecisionV2(false,
+        rejected.release_decision, "",
+        "FV2-E-RELEASE-POLICY-STALE-V2: legacy APOLV2 signer policy cannot authorize V2 release; migrate to simple.formal.release-signers.v3")
+
+pub fn admit_loaded_release_bundle_v3(
+    loaded: LoadedReleaseBundleV2,
+    signer_policy: ApprovedReleaseSignerPolicyV3
+) -> SignedVerifiedReleaseBundleDecisionV2:
+    val authority_diagnostic = release_signer_policy_authority_diagnostic_v3(
+        loaded.evidence.policy, signer_policy)
+    if authority_diagnostic != "":
         val rejected = validate_signed_verified_release_bundle_v2(
             SignedVerifiedReleaseBundleV2(loaded.evidence, loaded.payload_hash,
                 loaded.signer_id, verify_release_bundle_ed25519_v2(
                     loaded.evidence, ApprovedReleaseSignerV1("", ""),
                     loaded.public_key, loaded.signature)), [])
         return SignedVerifiedReleaseBundleDecisionV2(false,
-            rejected.release_decision, "",
-            "FV2-E-RELEASE-BUNDLE-POLICY-V2: signer policy is not bound to the exact V2 assurance policy")
+            rejected.release_decision, "", authority_diagnostic)
     var matching: [ApprovedReleaseSignerV1] = []
     for signer in signer_policy.signers:
         if signer.signer_id == loaded.signer_id: matching.push(signer)
@@ -744,12 +708,16 @@ pub fn admit_loaded_release_bundle_v2(
                     loaded.public_key, loaded.signature)), signer_policy.signers)
         return SignedVerifiedReleaseBundleDecisionV2(false,
             rejected.release_decision, "",
-            "FV2-E-RELEASE-BUNDLE-POLICY-V2: signer identity is not uniquely approved")
-    val verification = verify_release_bundle_ed25519_v2(loaded.evidence,
-        matching[0], loaded.public_key, loaded.signature)
-    validate_signed_verified_release_bundle_v2(SignedVerifiedReleaseBundleV2(
-        loaded.evidence, loaded.payload_hash, loaded.signer_id, verification),
-        signer_policy.signers)
+            "FV2-E-RELEASE-BUNDLE-POLICY-V3: signer identity is not uniquely approved")
+    # A public value cannot prove fixed-path ownership. Keep V2 release
+    # deny-all until a non-forgeable resolver-owned execution interface exists.
+    val rejected = validate_signed_verified_release_bundle_v2(
+        SignedVerifiedReleaseBundleV2(loaded.evidence, loaded.payload_hash,
+            loaded.signer_id, verify_release_bundle_ed25519_v2(
+                loaded.evidence, ApprovedReleaseSignerV1("", ""),
+                loaded.public_key, loaded.signature)), signer_policy.signers)
+    SignedVerifiedReleaseBundleDecisionV2(false,
+        rejected.release_decision, "", "FV2-E-RELEASE-SIGNER-POLICY-EXECUTION-AUTHORITY-V3: public signer-policy values cannot prove fixed-path owner authority")
 
 pub fn validate_release_artifact_identity_v1(
     evidence: VerifiedReleaseEvidenceV1,
@@ -792,6 +760,28 @@ pub fn admit_loaded_release_delivery_v2(
     val signed = admit_loaded_release_bundle_v2(loaded, signer_policy)
     # Gate ordering and receipt materialization are unchanged evidence rules;
     # their signed manifest is nested in the policy-bound V2 payload.
+    val delivery = evaluate_formal_delivery_gates_v2(gates, Some(signed))
+    val expected_manifest = formal_delivery_manifest_hash_v1(gates)
+    val receipt_diagnostic = fv2_validate_materialized_receipts_v2(gates,
+        materialized_receipts)
+    val diagnostic = if receipt_diagnostic != "":
+        receipt_diagnostic
+    elif claimed_manifest != expected_manifest:
+        "FV2-E-RELEASE-DELIVERY-BINDING-V2: signed evidence does not bind the exact delivery gates"
+    elif not signed.admitted:
+        signed.diagnostic
+    else:
+        ""
+    LoadedReleaseAdmissionV2(signed, delivery, diagnostic)
+
+pub fn admit_loaded_release_delivery_v3(
+    loaded: LoadedReleaseBundleV2,
+    signer_policy: ApprovedReleaseSignerPolicyV3,
+    materialized_receipts: [FormalDeliveryReceiptFileV1]
+) -> LoadedReleaseAdmissionV2:
+    val gates = loaded.delivery_gates
+    val claimed_manifest = loaded.evidence.evidence.delivery_gate_manifest_hash
+    val signed = admit_loaded_release_bundle_v3(loaded, signer_policy)
     val delivery = evaluate_formal_delivery_gates_v2(gates, Some(signed))
     val expected_manifest = formal_delivery_manifest_hash_v1(gates)
     val receipt_diagnostic = fv2_validate_materialized_receipts_v2(gates,

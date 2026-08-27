@@ -10,7 +10,7 @@
 # - Resilient: Work with partial/broken code
 # - Thread-safe: Multiple queries can run concurrently
 
-import compiler.common.dependency.symbol.{DepSymbolTable}
+import compiler.common.dependency.symbol.{SymbolTable}
 import compiler.frontend.treesitter_types.{ParseError}
 # Local LSP edit type (no lib.common.report.emitter.lsp module exists)
 struct LspTextEdit:
@@ -30,7 +30,7 @@ class CompilerQueryContext:
     cached_asts: Dict<text, AST>
 
     # Cached symbol tables (file path -> symbol table)
-    cached_symbols: Dict<text, DepSymbolTable>
+    cached_symbols: Dict<text, SymbolTable>
 
     # Cached type inference results (file path -> type map)
     cached_types: Dict<text, TypeMap>
@@ -108,7 +108,7 @@ class CompilerQueryContext:
     # --- QuerySymbol Resolution ---
 
     # Get symbol table for a file
-    me get_symbol_table(file_path: text) -> Result<DepSymbolTable, Error>:
+    me get_symbol_table(file_path: text) -> Result<SymbolTable, Error>:
         # Check cache
         if self.is_cache_valid(file_path) and self.cached_symbols.contains(file_path):
             return Ok(self.cached_symbols[file_path])
@@ -162,15 +162,15 @@ class CompilerQueryContext:
     fn find_references(file_path: text, symbol: QuerySymbol) -> [Location]:
         # Determine which files to search based on symbol kind
         val candidate_files = match symbol.kind:
-            case QuerySymbolKind.Variable, QuerySymbolKind.Parameter:
+            case SymbolKind.Variable, SymbolKind.Parameter:
                 # Variables are file-scoped, only search current file
                 [file_path]
 
-            case QuerySymbolKind.Function, QuerySymbolKind.Method:
+            case SymbolKind.Function, SymbolKind.Method:
                 # Functions can be imported, search importing files
                 find_files_that_might_import(file_path, self.project_root)
 
-            case QuerySymbolKind.Class, QuerySymbolKind.Struct, QuerySymbolKind.Enum, QuerySymbolKind.Trait:
+            case SymbolKind.Class, SymbolKind.Struct, SymbolKind.Enum, SymbolKind.Trait:
                 # Types can be used widely, search all files
                 find_source_files(self.project_root)
 
@@ -193,13 +193,13 @@ class CompilerQueryContext:
 
     fn find_references_v2(file_path: text, symbol: QuerySymbolV2) -> [Location]:
         val candidate_files = match symbol.kind:
-            case QuerySymbolKind.Variable, QuerySymbolKind.Parameter:
+            case SymbolKind.Variable, SymbolKind.Parameter:
                 [file_path]
 
-            case QuerySymbolKind.Function, QuerySymbolKind.Method:
+            case SymbolKind.Function, SymbolKind.Method:
                 find_files_that_might_import(file_path, self.project_root)
 
-            case QuerySymbolKind.Class, QuerySymbolKind.Struct, QuerySymbolKind.Enum, QuerySymbolKind.Trait:
+            case SymbolKind.Class, SymbolKind.Struct, SymbolKind.Enum, SymbolKind.Trait:
                 find_source_files(self.project_root)
 
             case _:
@@ -463,7 +463,7 @@ class CompilerQueryContext:
                 value
             None:
                 return nil
-        if symbol.kind != QuerySymbolKind.Function and symbol.kind != QuerySymbolKind.Method:
+        if symbol.kind != SymbolKind.Function and symbol.kind != SymbolKind.Method:
             return nil
 
         # Build parameter info from type signature
@@ -556,7 +556,7 @@ class CompilerQueryContext:
                 value
             None:
                 return []
-        if symbol.kind != QuerySymbolKind.Function and symbol.kind != QuerySymbolKind.Method:
+        if symbol.kind != SymbolKind.Function and symbol.kind != SymbolKind.Method:
             return []
 
         [CallHierarchyItem(
@@ -580,7 +580,7 @@ class CompilerQueryContext:
                         # Each reference is a potential call site
                         val caller = CallHierarchyItem(
                             name: file,
-                            kind: QuerySymbolKind.Function,
+                            kind: SymbolKind.Function,
                             location: ref_loc,
                             detail: nil
                         )
@@ -609,7 +609,7 @@ class CompilerQueryContext:
 
         var outgoing: [CallHierarchyOutgoingCall] = []
         for sym in all_symbols:
-            if sym.kind == QuerySymbolKind.Function or sym.kind == QuerySymbolKind.Method:
+            if sym.kind == SymbolKind.Function or sym.kind == SymbolKind.Method:
                 val refs = find_symbol_references(table, sym.name)
                 for ref_loc in refs:
                     # Check if reference is within the item's function body
@@ -638,7 +638,7 @@ class CompilerQueryContext:
             None:
                 return []
         match symbol.kind:
-            case QuerySymbolKind.Class | QuerySymbolKind.Struct | QuerySymbolKind.Enum | QuerySymbolKind.Trait:
+            case SymbolKind.Class | SymbolKind.Struct | SymbolKind.Enum | SymbolKind.Trait:
                 [TypeHierarchyItem(
                     name: symbol.name,
                     kind: symbol.kind,
@@ -663,7 +663,7 @@ class CompilerQueryContext:
                         Ok(table):
                             val symbols = extract_all_symbols_v2(table)
                             for sym in symbols:
-                                if sym.kind == QuerySymbolKind.Trait:
+                                if sym.kind == SymbolKind.Trait:
                                     supertypes.push(TypeHierarchyItem(
                                         name: sym.name,
                                         kind: sym.kind,
@@ -690,9 +690,9 @@ class CompilerQueryContext:
                         Ok(table):
                             val symbols = extract_all_symbols_v2(table)
                             for sym in symbols:
-                                if (sym.kind == QuerySymbolKind.Class or
-                                    sym.kind == QuerySymbolKind.Struct or
-                                    sym.kind == QuerySymbolKind.Enum):
+                                if (sym.kind == SymbolKind.Class or
+                                    sym.kind == SymbolKind.Struct or
+                                    sym.kind == SymbolKind.Enum):
                                     subtypes.push(TypeHierarchyItem(
                                         name: sym.name,
                                         kind: sym.kind,
@@ -724,16 +724,16 @@ class CompilerQueryContext:
 
         for sym in symbols:
             val token_type = match sym.kind:
-                case QuerySymbolKind.Function | QuerySymbolKind.Method: SemanticTokenType.Function
-                case QuerySymbolKind.Class: SemanticTokenType.Class
-                case QuerySymbolKind.Struct: SemanticTokenType.Struct
-                case QuerySymbolKind.Enum: SemanticTokenType.Enum
-                case QuerySymbolKind.Trait: SemanticTokenType.Type
-                case QuerySymbolKind.Variable: SemanticTokenType.Variable
-                case QuerySymbolKind.Parameter: SemanticTokenType.Parameter
-                case QuerySymbolKind.Field: SemanticTokenType.Property
-                case QuerySymbolKind.EnumVariant: SemanticTokenType.EnumMember
-                case QuerySymbolKind.Module: SemanticTokenType.Namespace
+                case SymbolKind.Function | SymbolKind.Method: SemanticTokenType.Function
+                case SymbolKind.Class: SemanticTokenType.Class
+                case SymbolKind.Struct: SemanticTokenType.Struct
+                case SymbolKind.Enum: SemanticTokenType.Enum
+                case SymbolKind.Trait: SemanticTokenType.Type
+                case SymbolKind.Variable: SemanticTokenType.Variable
+                case SymbolKind.Parameter: SemanticTokenType.Parameter
+                case SymbolKind.Field: SemanticTokenType.Property
+                case SymbolKind.EnumVariant: SemanticTokenType.EnumMember
+                case SymbolKind.Module: SemanticTokenType.Namespace
                 case _: SemanticTokenType.Variable
 
             val delta_line = sym.location.start.line - prev_line
@@ -786,7 +786,7 @@ class CompilerQueryContext:
         var hints: [InlayHint] = []
         for sym in symbols:
             # Only emit type hints for variables with inferred types
-            if sym.kind == QuerySymbolKind.Variable:
+            if sym.kind == SymbolKind.Variable:
                 match sym.type_info:
                     Some(type_info):
                         val line = sym.location.start.line

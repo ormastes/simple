@@ -10,7 +10,12 @@ bin/simple build                  # Prints bootstrap HELP and exits (~0.02s) —
                                   # every run (82 .spl opens, 0 .smf). Bootstrap only DEPLOYS a
                                   # compiler. See .claude/rules/commands.md
 bin/simple test                   # Run all tests (or: test path/to/spec.spl)
-scripts/setup/setup.shs && bin/simple build bootstrap  # Full bootstrap
+scripts/setup/setup.shs && bin/simple build bootstrap  # NOT the sanctioned bootstrap.
+   # `build bootstrap` is a SEPARATE seed-side Rust reimplementation of a 3-stage
+   # self-compilation check (misc_commands.rs:341 handle_bootstrap). It does not run
+   # scripts/bootstrap/bootstrap-from-scratch.sh, has no receipt gate, no planner
+   # admission, and no Stage 4 / full-CLI relink. The sanctioned bootstrap is the
+   # script — see .claude/rules/bootstrap.md and doc/07_guide/tooling/bootstrap_options.md.
 ```
 
 ## FreeBSD QEMU Bootstrap Check
@@ -34,12 +39,8 @@ bin/simple run src/app/test/freebsd_qemu_setup.spl --download --quick
 ```
 
 ## Critical Rules
-- **jj** for VCS — commit only session-owned paths on a unique `work/*` branch
-  in a unique linked worktree. Fetch GitHub before session creation and again
-  before protected integration.
-- **NEVER author on protected refs or the main worktree.** Push only the owned
-  work branch for review; the integration authority updates `main` or
-  `release/*` by exact-revision compare-and-swap.
+- **jj** for VCS — commit: `jj commit -m "msg"` / preferred wrapper flow: `sj bookmark set main -r @- && sj git push --bookmark main`
+- **NEVER create branches** — work directly on `main`
 - **ALL code in `.spl`/`.shs`** — no Python/Bash (except 3 bootstrap scripts)
 - **NO inheritance** — use composition, traits, mixins. **Generics:** `<>` not `[]`
 - **NEVER skip** failing tests without approval. **NEVER convert TODO to NOTE** — implement or delete
@@ -54,7 +55,7 @@ bin/simple run src/app/test/freebsd_qemu_setup.spl --download --quick
 - External paths: `src/compiler_rust/vendor/**`, `src/runtime/vendor/**`, `src/runtime/miniaudio.h`, `src/runtime/stb_image.h`, `src/runtime/stb_truetype.h`.
 
 ## Detailed Rules & Reference
-- **Rules:** `.claude/rules/` — `language.md`, `testing.md`, `bootstrap.md`, `commands.md`, `structure.md`, `code-style.md`, `vcs.md`, `board-runnable.md`
+- **Rules:** `.claude/rules/` — `language.md`, `testing.md`, `bootstrap.md`, `commands.md`, `structure.md`, `code-style.md`, `vcs.md`
 - **Skills:** `.claude/skills/` — invoke `/skill-name`; Codex development uses `$sp_dev` for the SPipe dev entrypoint
 - **Agents:** `.claude/agents/` — `code`, `test`, `debug`, `explore`, `docs`, `vcs`, `infra`, `build`, `ml`
 - **Memory refs:** `.claude/memory/ref_*.md` — architecture, coding, SFFI, stdlib, CUDA, etc.

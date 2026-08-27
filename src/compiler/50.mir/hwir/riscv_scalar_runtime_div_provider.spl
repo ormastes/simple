@@ -1,0 +1,253 @@
+# Flat, plan-bound sequential DIV/REM provider used as a V7 construction
+# precursor.  It deliberately has no pipeline/router binding.  The two
+# restoring geometries are copied into this owner as renamed typed nodes: a
+# 32-bit engine is always present and RV64 adds a distinct 64-bit engine.
+
+use compiler.mir.hwir.bit_vector_constant.{HwBitVectorConstant}
+use compiler.mir.hwir.types.{CoreConfig, HwBitExtractOp, HwCombOp, HwConstant,
+    HwFixedSliceOp, HwNodeId, HwOrigin, HwPort, HwSelectOp, HwSignal}
+use compiler.mir.hwir.sequential.{HwSeqAssignment, HwSeqGuard,
+    HwSeqOutputBinding, HwSeqRule, HwSeqValue, HwSequentialModuleDef,
+    HwSequentialPlan, HwStateRegister}
+use compiler.mir.hwir.riscv_scalar_runtime_div_admission.{
+    strict_riscv_scalar_runtime_div_admission}
+use compiler.mir.hwir.riscv_scalar_runtime_div_normalizer.{
+    strict_riscv_scalar_runtime_div_normalizer}
+use compiler.mir.hwir.riscv_scalar_runtime_restoring_divider_datapath.{
+    strict_riscv_scalar_runtime_restoring_divider_datapath}
+use lib.hardware.riscv_common.isa.scalar_database.{RiscvScalarDecoderPlan}
+
+fn div_provider_row_width(count: i32) -> i32:
+    var width = 1; var capacity = 2
+    while capacity <= count:
+        width = width + 1; capacity = capacity * 2
+    width
+
+fn div_provider_completion_rows(x: i32) -> [(text, i32)]:
+    [("privilege", 2), ("original_instruction", 32), ("canonical_instruction", 32),
+        ("instruction_length_bytes", 3), ("pc_before", x), ("pc_after", x),
+        ("rd", 5), ("rd_write", 1), ("rd_value", x), ("memory_address", x),
+        ("memory_read_mask", 32), ("memory_write_mask", 32),
+        ("memory_read_data", x), ("memory_write_data", x),
+        ("execute_trap_valid", 1), ("execute_trap_cause", x),
+        ("execute_trap_tval", x), ("memory_trap_valid", 1),
+        ("memory_trap_cause", x), ("memory_trap_tval", x),
+        ("redirect_valid", 1), ("redirect_target", x),
+        ("provider_event_id", 64), ("decode_event_id", 64), ("illegal_valid", 1)]
+
+fn div_provider_ports(x: i32, row_width: i32) -> [HwPort]:
+    var result = [HwPort.input("clk", "Bits", 1), HwPort.input("rst", "Bits", 1),
+        HwPort.input("request_valid", "Bits", 1), HwPort.input("request_provider_tag", "Bits", 3),
+        HwPort.input("decode_legal", "Bits", 1), HwPort.input("decoded_row_index", "Bits", row_width),
+        HwPort.input("decoded_execution_class", "Bits", 3), HwPort.input("decoded_memory_effect", "Bits", 3),
+        HwPort.input("decoded_semantic_opcode", "Bits", 6),
+        HwPort.input("decoded_declared_operand_width_is_32", "Bits", 1),
+        HwPort.input("canonical_instruction", "Bits", 32), HwPort.input("original_instruction", "Bits", 32),
+        HwPort.input("instruction_length_bytes", "Bits", 3), HwPort.input("instruction_rd_field", "Bits", 5),
+        HwPort.input("instruction_rs1_field", "Bits", 5), HwPort.input("instruction_rs2_field", "Bits", 5),
+        HwPort.input("rs1_value", "Bits", x), HwPort.input("rs2_value", "Bits", x),
+        HwPort.input("pc_before", "Bits", x), HwPort.input("fallthrough_pc", "Bits", x),
+        HwPort.input("privilege", "Bits", 2), HwPort.input("provider_event_id", "Bits", 64),
+        HwPort.input("decode_event_id", "Bits", 64), HwPort.input("lineage_valid", "Bits", 1),
+        HwPort.input("illegal_valid", "Bits", 1), HwPort.input("completion_ready", "Bits", 1),
+        HwPort.output("request_ready", "Bits", 1), HwPort.output("request_accept", "Bits", 1),
+        HwPort.output("completion_valid", "Bits", 1), HwPort.output("completion_provider_tag", "Bits", 3),
+        HwPort.output("provider_protocol_fault", "Bits", 1)]
+    for row in div_provider_completion_rows(x): result.push(HwPort.output("completion_" + row[0], "Bits", row[1]))
+    result
+
+fn div_provider_registers(x: i32) -> [HwStateRegister]:
+    var result = [HwStateRegister(name: "busy_reg", bit_width: 1, clock_domain: "default", reset_value: 0),
+        HwStateRegister(name: "full_reg", bit_width: 1, clock_domain: "default", reset_value: 0),
+        HwStateRegister(name: "fault_reg", bit_width: 1, clock_domain: "default", reset_value: 0),
+        HwStateRegister(name: "word_reg", bit_width: 1, clock_domain: "default", reset_value: 0)]
+    for prefix in if x == 64: ["d64", "d32"] else: ["d32"]:
+        val width = if prefix == "d64": 64 else: 32; val rem = width + 1
+        val count_width = if width == 64: 7 else: 6
+        for field in [("dividend_reg", width), ("divisor_reg", rem), ("remainder_reg", rem),
+            ("quotient_reg", width), ("original_dividend_reg", width), ("result_negate_reg", 1),
+            ("remainder_negate_reg", 1), ("select_remainder_reg", 1), ("special_reg", 2),
+            ("word_result_mode_reg", 1), ("count_reg", count_width)]:
+            result.push(HwStateRegister(name: prefix + "_" + field[0], bit_width: field[1], clock_domain: "default", reset_value: 0))
+    for row in div_provider_completion_rows(x): result.push(HwStateRegister(name: "completion_" + row[0] + "_reg", bit_width: row[1], clock_domain: "default", reset_value: 0))
+    result
+
+fn div_provider_clear_completion(x: i32) -> [HwSeqAssignment]:
+    var result = [HwSeqAssignment(destination: "full_reg", value: HwSeqValue.zero(1))]
+    for row in div_provider_completion_rows(x): result.push(HwSeqAssignment(destination: "completion_" + row[0] + "_reg", value: HwSeqValue.zero(row[1])))
+    result
+
+fn div_provider_external(name: text) -> bool:
+    name == "rs1_value" or name == "rs2_value" or name == "canonical_instruction" or
+        name == "decoded_row_index" or name == "decoded_semantic_opcode" or
+        name == "decoded_declared_operand_width_is_32"
+
+fn div_provider_name(prefix: text, name: text) -> text:
+    if name == "rs1_value": return "effective_rs1"
+    if name == "rs2_value": return "effective_rs2"
+    if div_provider_external(name): name else: prefix + "_" + name
+
+fn div_provider_datapath_name(prefix: text, name: text) -> text:
+    if name == "select_remainder": return prefix + "_select_remainder_reg"
+    if name == "word_result_mode": return prefix + "_word_result_mode_reg"
+    prefix + "_" + name
+
+fn div_provider_clone_normalizer(prefix: text, normalizer, signals: [HwSignal],
+    constants: [HwBitVectorConstant], ops: [HwCombOp], selects: [HwSelectOp],
+    extracts: [HwBitExtractOp]) -> ():
+    for signal in normalizer.signals: signals.push(HwSignal.comb(div_provider_name(prefix, signal.name), "Bits", signal.bit_width))
+    for constant in normalizer.constants: constants.push(HwBitVectorConstant.binary(div_provider_name(prefix, constant.name), constant.bit_width, constant.canonical_bits))
+    for op in normalizer.comb_ops:
+        ops.push(HwCombOp(op: op.op, result: div_provider_name(prefix, op.result), lhs: div_provider_name(prefix, op.lhs), rhs: if op.rhs == "": "" else: div_provider_name(prefix, op.rhs), bit_width: op.bit_width))
+    for op in normalizer.select_ops:
+        selects.push(HwSelectOp.mux(div_provider_name(prefix, op.result), div_provider_name(prefix, op.condition), div_provider_name(prefix, op.when_true), div_provider_name(prefix, op.when_false), op.bit_width))
+    for op in normalizer.bit_extract_ops:
+        extracts.push(HwBitExtractOp.fixed(div_provider_name(prefix, op.result), div_provider_name(prefix, op.source), op.bit_index))
+
+fn div_provider_clone_datapath(prefix: text, datapath, signals: [HwSignal],
+    constants: [HwBitVectorConstant], ops: [HwCombOp], selects: [HwSelectOp],
+    extracts: [HwBitExtractOp], slices: [HwFixedSliceOp]) -> ():
+    for signal in datapath.signals: signals.push(HwSignal.comb(div_provider_datapath_name(prefix, signal.name), "Bits", signal.bit_width))
+    for constant in datapath.constants: constants.push(HwBitVectorConstant.binary(div_provider_datapath_name(prefix, constant.name), constant.bit_width, constant.canonical_bits))
+    for op in datapath.comb_ops:
+        ops.push(HwCombOp(op: op.op, result: div_provider_datapath_name(prefix, op.result), lhs: div_provider_datapath_name(prefix, op.lhs), rhs: if op.rhs == "": "" else: div_provider_datapath_name(prefix, op.rhs), bit_width: op.bit_width))
+    for op in datapath.select_ops:
+        selects.push(HwSelectOp.mux(div_provider_datapath_name(prefix, op.result), div_provider_datapath_name(prefix, op.condition), div_provider_datapath_name(prefix, op.when_true), div_provider_datapath_name(prefix, op.when_false), op.bit_width))
+    for op in datapath.bit_extract_ops: extracts.push(HwBitExtractOp.fixed(div_provider_datapath_name(prefix, op.result), div_provider_datapath_name(prefix, op.source), op.bit_index))
+    for op in datapath.fixed_slice_ops: slices.push(HwFixedSliceOp.fixed(div_provider_datapath_name(prefix, op.result), div_provider_datapath_name(prefix, op.source), op.high_bit, op.low_bit))
+
+pub fn strict_riscv_scalar_runtime_div_provider(module_name: text, config: CoreConfig,
+    plan: RiscvScalarDecoderPlan) -> Result<HwSequentialModuleDef, text>:
+    if module_name == "": return Err("HWIR-E-RISCV-RUNTIME-DIV-ID: runtime DIV/REM provider requires a module name")
+    val config_error = config.diagnostic(); if config_error != "": return Err(config_error)
+    val plan_error = plan.diagnostic(); if plan_error != "": return Err(plan_error)
+    val admission = strict_riscv_scalar_runtime_div_admission(config, plan)?
+    val x = config.xlen; val row_width = div_provider_row_width(plan.entries.len())
+    var constants = [HwConstant.bits("zero1", 1, 0), HwConstant.bits("one1", 1, 1),
+        HwConstant.bits("zero3", 3, 0), HwConstant.bits("zero5", 5, 0), HwConstant.bits("zero32", 32, 0),
+        HwConstant.bits("zero_xlen", x, 0), HwConstant.bits("tag_muldiv", 3, 2),
+        HwConstant.bits("class_muldiv", 3, 4), HwConstant.bits("length4", 3, 4),
+        HwConstant.bits("four_xlen", x, 4)]
+    var bit_constants: [HwBitVectorConstant] = []
+    var signals = [HwSignal.comb("tag_ok", "Bits", 1), HwSignal.comb("idle_a", "Bits", 1), HwSignal.comb("idle_b", "Bits", 1),
+        HwSignal.comb("idle_pre", "Bits", 1), HwSignal.comb("not_fault", "Bits", 1), HwSignal.comb("idle", "Bits", 1),
+        HwSignal.comb("request_handshake", "Bits", 1), HwSignal.comb("class_ok", "Bits", 1), HwSignal.comb("effect_ok", "Bits", 1),
+        HwSignal.comb("length_ok", "Bits", 1), HwSignal.comb("raw_ok", "Bits", 1), HwSignal.comb("events_ok", "Bits", 1),
+        HwSignal.comb("fallthrough_expected", "Bits", x), HwSignal.comb("fallthrough_ok", "Bits", 1), HwSignal.comb("legal_ok", "Bits", 1),
+        HwSignal.comb("rd_shift", "Bits", 32), HwSignal.comb("rs1_shift", "Bits", 32), HwSignal.comb("rs2_shift", "Bits", 32),
+        HwSignal.comb("canonical_rd", "Bits", 5), HwSignal.comb("canonical_rs1", "Bits", 5), HwSignal.comb("canonical_rs2", "Bits", 5),
+        HwSignal.comb("rd_ok", "Bits", 1), HwSignal.comb("rs1_ok", "Bits", 1), HwSignal.comb("rs2_ok", "Bits", 1),
+        HwSignal.comb("fields_a", "Bits", 1), HwSignal.comb("fields_ok", "Bits", 1), HwSignal.comb("base_a", "Bits", 1),
+        HwSignal.comb("base_b", "Bits", 1), HwSignal.comb("base_c", "Bits", 1), HwSignal.comb("base_d", "Bits", 1),
+        HwSignal.comb("base_pre", "Bits", 1), HwSignal.comb("base_mid", "Bits", 1), HwSignal.comb("base_core", "Bits", 1),
+        HwSignal.comb("base_tail", "Bits", 1), HwSignal.comb("base_ok", "Bits", 1),
+        HwSignal.comb("selected_any", "Bits", 1), HwSignal.comb("admission_ok", "Bits", 1), HwSignal.comb("selection_missing", "Bits", 1),
+        HwSignal.comb("fault_any", "Bits", 1), HwSignal.comb("rd_nonzero", "Bits", 1), HwSignal.comb("rs1_nonzero", "Bits", 1),
+        HwSignal.comb("rs2_nonzero", "Bits", 1), HwSignal.comb("effective_rs1", "Bits", x), HwSignal.comb("effective_rs2", "Bits", x),
+        HwSignal.comb("architectural_result", "Bits", x),
+        # This is the only geometry selector captured into state.  It is
+        # derived from an exact admitted W row, never from the raw decoded
+        # width claim supplied with the request.
+        HwSignal.comb("selected_d32", "Bits", 1)]
+    var ops = [HwCombOp.binary("eq", "tag_ok", "request_provider_tag", "tag_muldiv", 3),
+        HwCombOp.binary("eq", "idle_a", "busy_reg", "zero1", 1), HwCombOp.binary("eq", "idle_b", "full_reg", "zero1", 1),
+        HwCombOp.binary("and", "idle_pre", "idle_a", "idle_b", 1), HwCombOp.binary("eq", "not_fault", "fault_reg", "zero1", 1),
+        HwCombOp.binary("and", "idle", "idle_pre", "not_fault", 1), HwCombOp.binary("and", "request_handshake", "request_valid", "idle", 1),
+        HwCombOp.binary("eq", "class_ok", "decoded_execution_class", "class_muldiv", 3),
+        HwCombOp.binary("eq", "effect_ok", "decoded_memory_effect", "zero3", 3), HwCombOp.binary("eq", "length_ok", "instruction_length_bytes", "length4", 3),
+        HwCombOp.binary("eq", "raw_ok", "original_instruction", "canonical_instruction", 32),
+        HwCombOp.binary("eq", "events_ok", "provider_event_id", "decode_event_id", 64),
+        HwCombOp.binary("add", "fallthrough_expected", "pc_before", "four_xlen", x), HwCombOp.binary("eq", "fallthrough_ok", "fallthrough_pc", "fallthrough_expected", x),
+        HwCombOp.binary("eq", "legal_ok", "illegal_valid", "zero1", 1), HwCombOp.binary("shr", "rd_shift", "canonical_instruction", "zero32", 32),
+        HwCombOp.binary("shr", "rs1_shift", "canonical_instruction", "zero32", 32), HwCombOp.binary("shr", "rs2_shift", "canonical_instruction", "zero32", 32),
+        HwCombOp.unary("trunc", "canonical_rd", "rd_shift", 5), HwCombOp.unary("trunc", "canonical_rs1", "rs1_shift", 5), HwCombOp.unary("trunc", "canonical_rs2", "rs2_shift", 5),
+        HwCombOp.binary("eq", "rd_ok", "canonical_rd", "instruction_rd_field", 5), HwCombOp.binary("eq", "rs1_ok", "canonical_rs1", "instruction_rs1_field", 5),
+        HwCombOp.binary("eq", "rs2_ok", "canonical_rs2", "instruction_rs2_field", 5), HwCombOp.binary("and", "fields_a", "rd_ok", "rs1_ok", 1),
+        HwCombOp.binary("and", "fields_ok", "fields_a", "rs2_ok", 1), HwCombOp.binary("and", "base_a", "decode_legal", "class_ok", 1),
+        HwCombOp.binary("and", "base_b", "effect_ok", "length_ok", 1), HwCombOp.binary("and", "base_c", "raw_ok", "events_ok", 1),
+        HwCombOp.binary("and", "base_d", "lineage_valid", "legal_ok", 1), HwCombOp.binary("and", "base_pre", "base_a", "base_b", 1),
+        HwCombOp.binary("and", "base_mid", "base_c", "base_d", 1), HwCombOp.binary("and", "base_core", "base_pre", "base_mid", 1),
+        HwCombOp.binary("and", "base_tail", "fields_ok", "fallthrough_ok", 1), HwCombOp.binary("and", "base_ok", "base_core", "base_tail", 1),
+        HwCombOp.binary("ne", "rd_nonzero", "instruction_rd_field", "zero5", 5), HwCombOp.binary("ne", "rs1_nonzero", "canonical_rs1", "zero5", 5),
+        HwCombOp.binary("ne", "rs2_nonzero", "canonical_rs2", "zero5", 5)]
+    # Fixed shifts are constants because the strict graph has no implicit literal operands.
+    constants.push(HwConstant.bits("shift7", 32, 7)); constants.push(HwConstant.bits("shift15", 32, 15)); constants.push(HwConstant.bits("shift20", 32, 20))
+    ops[15] = HwCombOp.binary("shr", "rd_shift", "canonical_instruction", "shift7", 32)
+    ops[16] = HwCombOp.binary("shr", "rs1_shift", "canonical_instruction", "shift15", 32)
+    ops[17] = HwCombOp.binary("shr", "rs2_shift", "canonical_instruction", "shift20", 32)
+    var selects: [HwSelectOp] = [HwSelectOp.mux("effective_rs1", "rs1_nonzero", "rs1_value", "zero_xlen", x),
+        HwSelectOp.mux("effective_rs2", "rs2_nonzero", "rs2_value", "zero_xlen", x)]
+    var extracts: [HwBitExtractOp] = []; var slices: [HwFixedSliceOp] = []
+    val n32 = strict_riscv_scalar_runtime_div_normalizer(config, plan, 32)?
+    val d32 = strict_riscv_scalar_runtime_restoring_divider_datapath(config, 32)?
+    div_provider_clone_normalizer("d32", n32, signals, bit_constants, ops, selects, extracts)
+    div_provider_clone_datapath("d32", d32, signals, bit_constants, ops, selects, extracts, slices)
+    if x == 64:
+        val n64 = strict_riscv_scalar_runtime_div_normalizer(config, plan, 64)?
+        val d64 = strict_riscv_scalar_runtime_restoring_divider_datapath(config, 64)?
+        div_provider_clone_normalizer("d64", n64, signals, bit_constants, ops, selects, extracts)
+        div_provider_clone_datapath("d64", d64, signals, bit_constants, ops, selects, extracts, slices)
+        signals.push(HwSignal.comb("selected_geometry", "Bits", 1))
+        ops.push(HwCombOp.unary("passthrough", "selected_d32", "d32_row_matched", 1))
+        ops.push(HwCombOp.unary("passthrough", "selected_geometry", "selected_d32", 1))
+        selects.push(HwSelectOp.mux("architectural_result", "word_reg", "d32_architectural_result", "d64_architectural_result", x))
+    else:
+        signals.push(HwSignal.comb("selected_geometry", "Bits", 1))
+        ops.push(HwCombOp.unary("passthrough", "selected_d32", "d32_row_matched", 1))
+        ops.push(HwCombOp.unary("passthrough", "selected_geometry", "selected_d32", 1))
+        ops.push(HwCombOp.unary("passthrough", "architectural_result", "d32_architectural_result", x))
+    if x == 64:
+        # A W row must be accepted by the 32-bit normalizer; a non-W row by d64.
+        signals.push(HwSignal.comb("selected_or_word", "Bits", 1)); ops.push(HwCombOp.binary("or", "selected_or_word", "d64_row_matched", "d32_row_matched", 1)); ops.push(HwCombOp.unary("passthrough", "selected_any", "selected_or_word", 1))
+    else:
+        ops.push(HwCombOp.unary("passthrough", "selected_any", "d32_row_matched", 1))
+    ops.push(HwCombOp.binary("and", "admission_ok", "base_ok", "selected_any", 1))
+    ops.push(HwCombOp.binary("eq", "selection_missing", "admission_ok", "zero1", 1))
+    ops.push(HwCombOp.binary("and", "fault_any", "request_handshake", "selection_missing", 1))
+    var capture = [HwSeqAssignment(destination: "busy_reg", value: HwSeqValue.copy("one1", 1)),
+        HwSeqAssignment(destination: "word_reg", value: HwSeqValue.copy("selected_d32", 1))]
+    for prefix in if x == 64: ["d64", "d32"] else: ["d32"]:
+        val width = if prefix == "d64": 64 else: 32; val rem = width + 1; val count_width = if width == 64: 7 else: 6
+        for field in [("dividend_reg", "lhs_magnitude", width), ("divisor_reg", "rhs_magnitude", width),
+            ("remainder_reg", "zero_remainder", rem), ("quotient_reg", "zero_operand", width),
+            ("original_dividend_reg", "lhs_operand", width), ("result_negate_reg", "result_negate", 1),
+            ("remainder_negate_reg", "remainder_negate", 1), ("select_remainder_reg", "select_remainder", 1),
+            ("special_reg", "special_code", 2), ("word_result_mode_reg", "word_result_mode", 1),
+            ("count_reg", "zero_operand", count_width)]:
+            val source = if field[0] == "count_reg": "zero" + count_width.to_text() else: prefix + "_" + field[1]
+            if field[0] == "count_reg": constants.push(HwConstant.bits(source, count_width, 0))
+            if field[0] == "divisor_reg":
+                signals.push(HwSignal.comb(prefix + "_divisor_extended", "Bits", rem)); ops.push(HwCombOp.unary("zext", prefix + "_divisor_extended", prefix + "_rhs_magnitude", rem))
+                capture.push(HwSeqAssignment(destination: prefix + "_divisor_reg", value: HwSeqValue.copy(prefix + "_divisor_extended", rem)))
+            else: capture.push(HwSeqAssignment(destination: prefix + "_" + field[0], value: HwSeqValue.copy(source, field[2])))
+    for row in div_provider_completion_rows(x):
+        val source = if row[0] == "pc_after": "fallthrough_pc" elif row[0] == "rd": "instruction_rd_field" elif row[0] == "rd_write": "rd_nonzero" elif row[0] == "rd_value": "zero_xlen" elif row[0] == "provider_event_id" or row[0] == "decode_event_id" or row[0] == "privilege" or row[0] == "original_instruction" or row[0] == "canonical_instruction" or row[0] == "instruction_length_bytes" or row[0] == "pc_before" or row[0] == "illegal_valid": row[0] else: if row[1] == x: "zero_xlen" elif row[1] == 32: "zero32" else: "zero1"
+        capture.push(HwSeqAssignment(destination: "completion_" + row[0] + "_reg", value: HwSeqValue.copy(source, row[1])))
+    for prefix in if x == 64: ["d64", "d32"] else: ["d32"]:
+        val width = if prefix == "d64": 64 else: 32; val count_width = if width == 64: 7 else: 6
+        constants.push(HwConstant.bits(prefix + "_count_done", count_width, width))
+        signals.push(HwSignal.comb(prefix + "_count_done_value", "Bits", 1)); ops.push(HwCombOp.binary("eq", prefix + "_count_done_value", prefix + "_count_reg", prefix + "_count_done", count_width))
+    signals.push(HwSignal.comb("count_done", "Bits", 1))
+    if x == 64: selects.push(HwSelectOp.mux("count_done", "word_reg", "d32_count_done_value", "d64_count_done_value", 1))
+    else: ops.push(HwCombOp.unary("passthrough", "count_done", "d32_count_done_value", 1))
+    var iterate: [HwSeqAssignment] = []
+    for prefix in if x == 64: ["d64", "d32"] else: ["d32"]:
+        val width = if prefix == "d64": 64 else: 32; val rem = width + 1; val count_width = if width == 64: 7 else: 6
+        for field in [("remainder_reg", "remainder_next", rem), ("quotient_reg", "quotient_next", width), ("dividend_reg", "dividend_next", width)]: iterate.push(HwSeqAssignment(destination: prefix + "_" + field[0], value: HwSeqValue.copy(prefix + "_" + field[1], field[2])))
+        iterate.push(HwSeqAssignment(destination: prefix + "_count_reg", value: HwSeqValue.increment(prefix + "_count_reg", count_width)))
+    val idle = [HwSeqGuard.low("busy_reg"), HwSeqGuard.low("full_reg"), HwSeqGuard.low("fault_reg"), HwSeqGuard.high("tag_ok")]
+    val full = [HwSeqGuard.high("full_reg"), HwSeqGuard.low("fault_reg")]
+    var outputs = [HwSeqOutputBinding.all("request_ready", idle),
+        HwSeqOutputBinding.all("request_accept", [HwSeqGuard.high("request_valid"), HwSeqGuard.high("tag_ok"), HwSeqGuard.low("busy_reg"), HwSeqGuard.low("full_reg"), HwSeqGuard.low("fault_reg")]),
+        HwSeqOutputBinding.all("completion_valid", full), HwSeqOutputBinding.guarded("completion_provider_tag", "tag_muldiv", 3, full), HwSeqOutputBinding.direct("provider_protocol_fault", "fault_reg", 1)]
+    for row in div_provider_completion_rows(x): outputs.push(HwSeqOutputBinding.guarded("completion_" + row[0], "completion_" + row[0] + "_reg", row[1], full))
+    val rules = [HwSeqRule(name: "protocol_fault", guards: [HwSeqGuard.high("fault_any"), HwSeqGuard.high("tag_ok"), HwSeqGuard.low("fault_reg")], assignments: [HwSeqAssignment(destination: "fault_reg", value: HwSeqValue.copy("one1", 1)), HwSeqAssignment(destination: "busy_reg", value: HwSeqValue.zero(1)), HwSeqAssignment(destination: "full_reg", value: HwSeqValue.zero(1))]),
+        HwSeqRule(name: "completion_consume", guards: [HwSeqGuard.high("completion_ready"), HwSeqGuard.high("full_reg"), HwSeqGuard.low("fault_reg")], assignments: div_provider_clear_completion(x)),
+        HwSeqRule(name: "finish", guards: [HwSeqGuard.high("busy_reg"), HwSeqGuard.high("count_done"), HwSeqGuard.low("fault_reg")], assignments: [HwSeqAssignment(destination: "busy_reg", value: HwSeqValue.zero(1)), HwSeqAssignment(destination: "full_reg", value: HwSeqValue.copy("one1", 1)), HwSeqAssignment(destination: "completion_rd_value_reg", value: HwSeqValue.copy("architectural_result", x))]),
+        HwSeqRule(name: "iterate", guards: [HwSeqGuard.high("busy_reg"), HwSeqGuard.low("count_done"), HwSeqGuard.low("fault_reg")], assignments: iterate),
+        HwSeqRule(name: "request_capture", guards: [HwSeqGuard.high("request_handshake"), HwSeqGuard.high("tag_ok"), HwSeqGuard.high("base_ok"), HwSeqGuard.high("selected_any"), HwSeqGuard.low("busy_reg"), HwSeqGuard.low("full_reg"), HwSeqGuard.low("fault_reg")], assignments: capture)]
+    var origins = [HwOrigin(node_id: HwNodeId.child(module_name, "plan"), source_name: "riscv.scalar.runtime.divrem.flat/v7|" + admission.structural_sha256())]
+    for row in admission.rows: origins.push(HwOrigin(node_id: HwNodeId.child(module_name, "row." + row.id), source_name: row.id))
+    val module = HwSequentialModuleDef(node_id: HwNodeId.module_root(module_name), entity_name: module_name, config: config, origins: origins, ports: div_provider_ports(x, row_width), datapath_signals: signals, datapath_constants: constants, datapath_bit_vector_constants: bit_constants, datapath_comb_ops: ops, datapath_compare_ops: [], datapath_select_ops: selects, datapath_bit_extract_ops: extracts, datapath_fixed_slice_ops: slices, plan: HwSequentialPlan(owner_id: HwNodeId.child(module_name, "sequential"), registers: div_provider_registers(x), rules: rules, outputs: outputs, decoder_pins: []), child_entity: "", child_graph_sha256: "")
+    val diagnostic = module.diagnostic(); if diagnostic != "": return Err(diagnostic)
+    Ok(module)

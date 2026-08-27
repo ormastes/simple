@@ -1,8 +1,5 @@
 # Bug: composite type registries cross encoded tag ranges
 
-Status: FIXED
-Status re-verified 2026-08-17 by source inspection (triage shard 00).
-
 ## Status
 
 Source-fixed. A bounded current-source LLVM probe filled the union and tuple

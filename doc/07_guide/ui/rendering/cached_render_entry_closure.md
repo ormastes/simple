@@ -29,6 +29,24 @@ The result is executor-only. It does not prove presentation, physical scanout,
 Web/GUI/WM end-to-end throughput, or full-frame CPU 8K/80. Verify each changed
 gate once and stop after three distinct fix/verify cycles.
 
+## Fail-closed worker runtime selection
+
+The lightweight `native-build` wrapper no longer falls back implicitly to
+`bin/simple` or `src/compiler_rust/target/bootstrap/simple`. It considers only
+existing `SIMPLE_BINARY`, `SIMPLE_BIN`, and invoking-executable candidates, in
+that order, and rejects canonical Rust-seed paths. When no allowed candidate
+remains, preflight returns nonzero before `SIMPLE_BINARY` is exported or a
+worker process is spawned.
+
+This is source completion for the focused TODO686 selection criterion, not
+runtime admission. Explicit or invoking candidates still require independent
+path/hash/stage/provenance qualification. The only admitted local Stage 2 lacks
+`test`/`sspec-maintain`/`spipe-docgen`; the available full CLI is known-bad and
+unadmitted. Therefore the future-executable SSpec at
+`test/03_system/check/cached_render_entry_closure_runtime_selection_spec.spl`
+remains BLOCKED-RUNTIME and no Rust-seed result may promote it.
+Its verification status is therefore `TEST_BLOCKED`, not PASS.
+
 Canonical plan:
 `doc/03_plan/ui/perf/render_perf_replan_parallel_teams_2026-08-07.md`.
 Retained report:
@@ -38,6 +56,8 @@ Open blocker:
 
 Modern contract coverage:
 `test/03_system/check/cached_render_entry_closure_contract_spec.spl`, with its
-operator plan at `doc/03_plan/sys_test/cached_render_entry_closure.md`. TODO686
-owns the CLI fix, TODO687 owns native 8K evidence, and TODO688 owns admitted
-self-hosted SSpec, maintenance, and docgen evidence.
+focused runtime-selection companion under the same `test/03_system/check/`
+directory, and their operator plan at
+`doc/03_plan/sys_test/cached_render_entry_closure.md`. TODO686 owns the CLI fix,
+TODO687 owns native 8K evidence, and TODO688 owns admitted self-hosted SSpec,
+maintenance, and docgen evidence.

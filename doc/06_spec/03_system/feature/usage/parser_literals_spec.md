@@ -2,6 +2,29 @@
 
 > 42              # Integer
 
+<!-- sdn-diagram:id=parser_literals_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=parser_literals_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+parser_literals_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=parser_literals_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 55 | 55 | 0 | 0 |
@@ -21,7 +44,7 @@
 | Category | Infrastructure \| Parser |
 | Status | Implemented |
 | Source | `test/03_system/feature/usage/parser_literals_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Syntax
@@ -49,18 +72,13 @@ nil             # Nil value
 
 #### parses simple decimal
 
-- parses simple decimal
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses simple decimal")
 val x = 42
 expect x == 42
 ```
@@ -69,18 +87,13 @@ expect x == 42
 
 #### parses zero
 
-- parses zero
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses zero")
 val x = 0
 expect x == 0
 ```
@@ -89,18 +102,13 @@ expect x == 0
 
 #### parses with underscores
 
-- parses with underscores
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses with underscores")
 val x = 1_000_000
 expect x == 1000000
 ```
@@ -109,18 +117,13 @@ expect x == 1000000
 
 #### parses large numbers
 
-- parses large numbers
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses large numbers")
 val x = 9_223_372_036_854_775_807
 expect x > 0
 ```
@@ -131,18 +134,13 @@ expect x > 0
 
 #### parses hex with lowercase
 
-- parses hex with lowercase
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses hex with lowercase")
 val x = 0xff
 expect x == 255
 ```
@@ -151,18 +149,13 @@ expect x == 255
 
 #### parses hex with uppercase
 
-- parses hex with uppercase
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses hex with uppercase")
 val x = 0xFF
 expect x == 255
 ```
@@ -171,18 +164,13 @@ expect x == 255
 
 #### parses complex hex
 
-- parses complex hex
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses complex hex")
 val x = 0x1A2B
 expect x == 6699
 ```
@@ -193,18 +181,13 @@ expect x == 6699
 
 #### parses simple binary
 
-- parses simple binary
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses simple binary")
 val x = 0b1010
 expect x == 10
 ```
@@ -213,18 +196,13 @@ expect x == 10
 
 #### parses binary with underscores
 
-- parses binary with underscores
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses binary with underscores")
 val x = 0b1111_0000
 expect x == 240
 ```
@@ -233,18 +211,13 @@ expect x == 240
 
 #### parses single bit
 
-- parses single bit
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses single bit")
 val x = 0b1
 expect x == 1
 ```
@@ -255,18 +228,13 @@ expect x == 1
 
 #### parses octal
 
-- parses octal
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses octal")
 val x = 0o77
 expect x == 63
 ```
@@ -275,18 +243,13 @@ expect x == 63
 
 #### parses octal with zeros
 
-- parses octal with zeros
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses octal with zeros")
 val x = 0o755
 expect x == 493
 ```
@@ -299,18 +262,13 @@ expect x == 493
 
 #### parses decimal float
 
-- parses decimal float
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses decimal float")
 val x = 3.14
 expect x > 3.0
 expect x < 4.0
@@ -320,18 +278,13 @@ expect x < 4.0
 
 #### parses float with leading zero
 
-- parses float with leading zero
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses float with leading zero")
 val x = 0.5
 expect x == 0.5
 ```
@@ -340,18 +293,13 @@ expect x == 0.5
 
 #### parses whole number float
 
-- parses whole number float
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses whole number float")
 val x = 1.0
 expect x == 1.0
 ```
@@ -362,18 +310,13 @@ expect x == 1.0
 
 #### parses positive exponent
 
-- parses positive exponent
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses positive exponent")
 val x = 1.0e10
 expect x == 10000000000.0
 ```
@@ -382,18 +325,13 @@ expect x == 10000000000.0
 
 #### parses negative exponent
 
-- parses negative exponent
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses negative exponent")
 val x = 2.5e-3
 expect x < 0.003
 ```
@@ -402,18 +340,13 @@ expect x < 0.003
 
 #### parses uppercase E
 
-- parses uppercase E
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses uppercase E")
 val x = 1.5E5
 expect x == 150000.0
 ```
@@ -426,18 +359,13 @@ expect x == 150000.0
 
 #### parses simple string
 
-- parses simple string
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses simple string")
 val s = "hello"
 expect s == "hello"
 ```
@@ -446,18 +374,16 @@ expect s == "hello"
 
 #### parses escape sequences
 
-- parses escape sequences
+1. expect s contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses escape sequences")
 val s = "hello\nworld"
 expect s.contains("\n")
 ```
@@ -466,18 +392,16 @@ expect s.contains("\n")
 
 #### parses tab escape
 
-- parses tab escape
+1. expect s contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses tab escape")
 val s = "tab\there"
 expect s.contains("\t")
 ```
@@ -486,18 +410,13 @@ expect s.contains("\t")
 
 #### interpolates variables
 
-- interpolates variables
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("interpolates variables")
 val name = "Alice"
 val s = "hello {name}"
 expect s == "hello Alice"
@@ -507,18 +426,13 @@ expect s == "hello Alice"
 
 #### interpolates expressions
 
-- interpolates expressions
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("interpolates expressions")
 val x = 6
 val y = 7
 val s = "result: {x * y}"
@@ -529,18 +443,13 @@ expect s == "result: 42"
 
 #### escapes braces
 
-- escapes braces
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("escapes braces")
 val s = "literal {{braces}}"
 expect s == r"literal {braces}"
 ```
@@ -551,18 +460,13 @@ expect s == r"literal {braces}"
 
 #### parses raw string
 
-- parses raw string
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses raw string")
 val s = 'hello'
 expect s == "hello"
 ```
@@ -571,18 +475,16 @@ expect s == "hello"
 
 #### does not process escapes
 
-- does not process escapes
+1. expect s contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("does not process escapes")
 val s = 'hello\nworld'
 expect s.contains("\\n")
 ```
@@ -591,18 +493,13 @@ expect s.contains("\\n")
 
 #### does not interpolate
 
-- does not interpolate
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("does not interpolate")
 val s = '{name}'
 expect s == r"{name}"
 ```
@@ -613,18 +510,13 @@ expect s == r"{name}"
 
 #### parses r-prefix string
 
-- parses r-prefix string
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses r-prefix string")
 val s = r"hello"
 expect s == "hello"
 ```
@@ -633,18 +525,16 @@ expect s == "hello"
 
 #### keeps backslashes literal
 
-- keeps backslashes literal
+1. expect s contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("keeps backslashes literal")
 val s = r"hello\nworld"
 expect s.contains("\\n")
 ```
@@ -653,18 +543,13 @@ expect s.contains("\\n")
 
 #### keeps braces literal
 
-- keeps braces literal
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("keeps braces literal")
 val s = r"{name}"
 expect s == r"{name}"
 ```
@@ -675,18 +560,13 @@ expect s == r"{name}"
 
 #### parses triple-quoted
 
-- parses triple-quoted
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses triple-quoted")
 val s = """hello"""
 expect s == "hello"
 ```
@@ -695,18 +575,13 @@ expect s == "hello"
 
 #### preserves newlines
 
-- preserves newlines
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("preserves newlines")
 val s = """line1
 ```
 
@@ -714,18 +589,13 @@ val s = """line1
 
 #### does not interpolate by default
 
-- does not interpolate by default
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("does not interpolate by default")
 val s = """{name}"""
 expect s == r"{name}"
 ```
@@ -736,18 +606,13 @@ expect s == r"{name}"
 
 #### parses f-prefix triple-quoted
 
-- parses f-prefix triple-quoted
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses f-prefix triple-quoted")
 val s = f"""hello"""
 expect s == "hello"
 ```
@@ -756,18 +621,13 @@ expect s == "hello"
 
 #### interpolates in f-strings
 
-- interpolates in f-strings
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("interpolates in f-strings")
 val name = "world"
 val s = f"""hello {name}"""
 expect s == "hello world"
@@ -779,18 +639,13 @@ expect s == "hello world"
 
 #### parses true
 
-- parses true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses true")
 val x = true
 expect x == true
 ```
@@ -799,18 +654,13 @@ expect x == true
 
 #### parses false
 
-- parses false
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses false")
 val x = false
 expect x == false
 ```
@@ -819,18 +669,13 @@ expect x == false
 
 #### uses booleans in conditions
 
-- uses booleans in conditions
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("uses booleans in conditions")
 val condition = true
 if condition:
     expect true
@@ -844,18 +689,13 @@ else:
 
 #### parses nil
 
-- parses nil
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses nil")
 val x = nil
 expect x == nil
 ```
@@ -864,18 +704,13 @@ expect x == nil
 
 #### nil equals nil
 
-- nil equals nil
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("nil equals nil")
 expect nil == nil
 ```
 
@@ -885,18 +720,13 @@ expect nil == nil
 
 #### parses simple symbol
 
-- parses simple symbol
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses simple symbol")
 val s = :ok
 expect s == :ok
 ```
@@ -905,18 +735,13 @@ expect s == :ok
 
 #### parses symbol with underscore
 
-- parses symbol with underscore
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses symbol with underscore")
 val s = :error_code
 expect s == :error_code
 ```
@@ -925,18 +750,13 @@ expect s == :error_code
 
 #### symbols are comparable
 
-- symbols are comparable
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("symbols are comparable")
 expect :ok == :ok
 expect :ok != :error
 ```
@@ -949,18 +769,16 @@ expect :ok != :error
 
 #### parses array
 
-- parses array
+1. expect arr len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses array")
 val arr = [1, 2, 3]
 expect arr.len() == 3
 ```
@@ -969,18 +787,16 @@ expect arr.len() == 3
 
 #### parses empty array
 
-- parses empty array
+1. expect arr len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses empty array")
 val arr = []
 expect arr.len() == 0
 ```
@@ -989,18 +805,13 @@ expect arr.len() == 0
 
 #### parses nested array
 
-- parses nested array
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses nested array")
 val arr = [[1, 2], [3, 4]]
 expect arr[0][1] == 2
 ```
@@ -1011,18 +822,13 @@ expect arr[0][1] == 2
 
 #### parses tuple
 
-- parses tuple
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses tuple")
 val t = (1, 2, 3)
 expect t.0 == 1
 ```
@@ -1031,18 +837,13 @@ expect t.0 == 1
 
 #### parses unit tuple
 
-- parses unit tuple
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses unit tuple")
 val t = ()
 expect true  # Compiles successfully
 ```
@@ -1051,18 +852,13 @@ expect true  # Compiles successfully
 
 #### parses two-element tuple
 
-- parses two-element tuple
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses two-element tuple")
 val t = (42, "hello")
 expect t.0 == 42
 ```
@@ -1073,18 +869,13 @@ expect t.0 == 42
 
 #### parses dictionary
 
-- parses dictionary
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses dictionary")
 val d = {"a": 1, "b": 2}
 expect d["a"] == 1
 ```
@@ -1093,18 +884,16 @@ expect d["a"] == 1
 
 #### parses empty dictionary
 
-- parses empty dictionary
+1. expect d len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses empty dictionary")
 val d = {}
 expect d.len() == 0
 ```
@@ -1115,18 +904,13 @@ expect d.len() == 0
 
 #### parses negative integers
 
-- parses negative integers
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses negative integers")
 val x = -42
 expect x == -42
 ```
@@ -1135,18 +919,13 @@ expect x == -42
 
 #### parses negative floats
 
-- parses negative floats
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses negative floats")
 val x = -3.14
 expect x < 0.0
 ```
@@ -1155,18 +934,13 @@ expect x < 0.0
 
 #### parses very small float
 
-- parses very small float
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses very small float")
 val x = 0.000001
 expect x > 0.0
 ```
@@ -1175,18 +949,13 @@ expect x > 0.0
 
 #### parses integer with many underscores
 
-- parses integer with many underscores
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses integer with many underscores")
 val x = 1_2_3_4_5
 expect x == 12345
 ```
@@ -1205,51 +974,3 @@ expect x == 12345
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `a1db31e7da4f30232dec54927fe12ce742b95468bdcb48a1c0dd206c493c7009`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `a1db31e7da4f30232dec54927fe12ce742b95468bdcb48a1c0dd206c493c7009`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `a1db31e7da4f30232dec54927fe12ce742b95468bdcb48a1c0dd206c493c7009`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/03_system/feature/usage/parser_literals_spec.spl
-mirror: doc/06_spec/03_system/feature/usage/parser_literals_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/feature/usage/parser_literals_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/feature/usage/parser_literals_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/feature/usage/parser_literals_spec.spl:49:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'parses simple decimal' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/usage/parser_literals_spec.spl:55:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'parses zero' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/usage/parser_literals_spec.spl:61:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'parses with underscores' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

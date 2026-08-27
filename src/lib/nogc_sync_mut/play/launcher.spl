@@ -20,13 +20,13 @@ use std.play.types.*
 use std.play.xvfb.{wrap_cmd}
 
 extern fn rt_process_spawn_async(cmd: text, args: [text]) -> i64
-use std.io_runtime.{process_is_running}
+extern fn rt_process_is_running(pid: i64) -> bool
 extern fn rt_process_kill(pid: i64) -> bool
-use std.io_runtime.{process_run}
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 extern fn rt_file_read_text(path: text) -> text
 use std.io_runtime.{file_write}
 use std.io_runtime.{file_exists}
-use std.io_runtime.{mkdir_p}
+extern fn rt_mkdir_p(path: text) -> bool
 use std.io_runtime.{time_now_unix_micros}
 use std.io_runtime.{env_get}
 
@@ -35,9 +35,9 @@ use std.io_runtime.{env_get}
 val PLAY_ARTIFACTS_ROOT = "doc/08_tracking/test/play"
 
 fn launcher_artifacts_dir(session_id: text) -> text:
-    val ts = time_now_unix_micros()
+    val ts = rt_time_now_unix_micros()
     val path = "{PLAY_ARTIFACTS_ROOT}/{session_id}"
-    mkdir_p(path)
+    rt_mkdir_p(path)
     path
 
 # ============================================================================
@@ -59,9 +59,9 @@ fn extract_ws_url_from_text(log: text) -> text:
     no_tab
 
 fn poll_for_ws_url(stderr_path: text, timeout_ms: i64) -> text:
-    val deadline = time_now_unix_micros() + (timeout_ms * 1000)
-    while time_now_unix_micros() < deadline:
-        if file_exists(stderr_path):
+    val deadline = rt_time_now_unix_micros() + (timeout_ms * 1000)
+    while rt_time_now_unix_micros() < deadline:
+        if rt_file_exists(stderr_path):
             val contents = rt_file_read_text(stderr_path)
             val url = extract_ws_url_from_text(contents)
             if url != "": return url
@@ -72,7 +72,7 @@ fn poll_for_ws_url(stderr_path: text, timeout_ms: i64) -> text:
 # ============================================================================
 
 fn launcher_next_session_id() -> text:
-    val t = time_now_unix_micros()
+    val t = rt_time_now_unix_micros()
     "play-" + str(t)
 
 fn launcher_resolve_executable(opts: LaunchOptions) -> (text, [text]):
@@ -92,7 +92,7 @@ fn launcher_resolve_executable(opts: LaunchOptions) -> (text, [text]):
         return ("npx", ["electron", "."])
 
     val first = opts.args[0]
-    if file_exists(first + "/package.json"):
+    if rt_file_exists(first + "/package.json"):
         var args: [text] = ["electron"]
         for a in opts.args:
             args.push(a)
@@ -164,7 +164,7 @@ fn launcher_launch(opts: LaunchOptions) -> Result<PlaySession, PlayError>:
     val browser_ws = probe_browser_ws(ws_url)
     val final_ws = if browser_ws != "": browser_ws else: ws_url
 
-    val now = time_now_unix_micros()
+    val now = rt_time_now_unix_micros()
     val sess = PlaySession(
         id: sid,
         backend: BACKEND_CDP,
@@ -214,7 +214,7 @@ fn probe_browser_ws(ws_url: text) -> text:
     val rest = after_ws[1]
     val host_port = rest.split("/")[0]
     val url = "http://" + host_port + "/json/version"
-    val result = process_run("curl", ["-s", "--max-time", "5", url])
+    val result = rt_process_run("curl", ["-s", "--max-time", "5", url])
     if result.2 != 0: return ""
     val body = result.0
     val key = "\"webSocketDebuggerUrl\""
@@ -227,6 +227,6 @@ fn probe_browser_ws(ws_url: text) -> text:
     after_colon[1]
 
 fn launcher_kill(session: PlaySession) -> bool:
-    if session.pid > 0 and process_is_running(session.pid):
+    if session.pid > 0 and rt_process_is_running(session.pid):
         rt_process_kill(session.pid)
     true

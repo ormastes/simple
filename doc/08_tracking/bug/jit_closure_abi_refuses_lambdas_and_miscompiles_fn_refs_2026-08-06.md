@@ -40,6 +40,21 @@ different lowering path, emits no `ClosureCreate`, **passes the guard**, and the
 hits the exact ABI mismatch the guard exists to prevent. Result: a silent wrong
 answer. No diagnostic, no fallback, exit 0.
 
+### 2026-08-16 self-host bootstrap instance
+
+The pure-Simple Stage 3 compiler exposed a third concrete manifestation. MIR
+lowering passed an inline comparator to `array_sort_by` while ordering runtime
+module initializers. GDB stopped at RIP `0`: the caller had allocated and
+zero-filled the 16-byte closure object, `array_sort_by` loaded the code pointer
+from offset zero, and called the null target. The stack was
+`array_sort_by -> MirLowering.lower_runtime_module_initializers_named`.
+
+The bounded bootstrap containment replaces that one comparator use with a
+stable local insertion sort over `(span.start, symbol.id)`. This does not claim
+to repair the callable ABI; it removes a closure from a compiler authority path
+where fallback is unavailable. The Stage 3 bootstrap and the
+`hyphenated_module_init` native smoke remain the system gates.
+
 This matters because defect 2 is reached by the *obvious workaround* for defect 1.
 "Replace the lambda with a named fn" turns a **slow but correct** program into a
 **fast but wrong** one.

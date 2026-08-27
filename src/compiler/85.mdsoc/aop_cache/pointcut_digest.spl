@@ -1,0 +1,158 @@
+# Canonical digests for the AOP selection layer.
+#
+# Produces the three `aop_selection_key` fields that DO have a backing producer
+# once prerequisites 1, 2 and 7 land:
+#   normalized_query_digest  <- pointcut_normalized_query_digest
+#   matcher_schema_digest    <- pointcut_matcher_schema_digest
+#   pointcut_surface_digest  <- pointcut_selection_digest (per descriptor)
+#
+# It does NOT produce `visible_aspect_catalog_digest`, `candidate_partition_roots`,
+# `advice_interface_root` or `ordering_policy_digest`: those have no producer in
+# the tree, and per the C0 sentinel rule a fabricated digest is a false cache
+# hit waiting to happen. Callers must keep emitting the empty-seq sentinel for
+# them until their machinery exists.
+#
+# Encoding reuses the canonical encoder of the frozen protocol
+# (`compiler.driver.cache.action_key`) — field/str/nat/seq, length-prefixed and
+# domain-separated. No second copy of `canon_*` is defined here.
+
+use std.common.crypto.sha256.{sha256_text}
+use compiler.driver.cache.action_key.{canon_field, canon_nat, canon_seq, canon_str}
+use compiler.mdsoc.aop_index.join_point_descriptor.{JoinPointDescriptor}
+use compiler.mdsoc.aop_index.pointcut_query.{
+    PointcutQuery, SelectorReadSet,
+    POINTCUT_NORMALIZER_VERSION,
+    SELECTOR_ATTR, SELECTOR_EFFECT, SELECTOR_EXECUTION, SELECTOR_SIGNATURE, SELECTOR_WITHIN,
+    pointcut_query_read_set, selector_read_set_field_names
+}
+
+val AOP_SELECTION_DOMAIN: text = "simple/aop-selection/v2"
+val AOP_QUERY_DOMAIN: text = "simple/aop-normalized-query/v2"
+val AOP_MATCHER_SCHEMA_DOMAIN: text = "simple/aop-matcher-schema/v2"
+val AOP_DESCRIPTOR_DOMAIN: text = "simple/aop-join-point-descriptor/v2"
+
+# The empty-seq sentinel every unbacked digest field must carry (C0 §1).
+fn aop_empty_sentinel_digest() -> text:
+    """Digest of the empty canonical seq — the unbacked-field sentinel."""
+    sha256_text(canon_seq([]))
+
+fn pointcut_query_encode(query: PointcutQuery) -> text:
+    """Canonical encoding of a NORMALIZED query.
+
+    `raw` is deliberately excluded: two predicates that normalize to the same
+    query must digest identically regardless of how they were written.
+    """
+    var clause_items: [text] = []
+    for clause in query.clauses:
+        var lit_items: [text] = []
+        for lit in clause.literals:
+            var neg = 0
+            if lit.negated:
+                neg = 1
+            var fields: [text] = []
+            fields.push(canon_field("selector", canon_str(lit.atom.selector)))
+            fields.push(canon_field("argument", canon_str(lit.atom.argument)))
+            fields.push(canon_field("negated", canon_nat(neg)))
+            lit_items.push(canon_seq(fields))
+        clause_items.push(canon_seq(lit_items))
+    var inner: [text] = []
+    inner.push(canon_field("kind", canon_str(query.kind)))
+    inner.push(canon_field("normalizerVersion", canon_nat(POINTCUT_NORMALIZER_VERSION)))
+    inner.push(canon_field("clauses", canon_seq(clause_items)))
+    canon_field(AOP_QUERY_DOMAIN, canon_seq(inner))
+
+fn pointcut_normalized_query_digest(query: PointcutQuery) -> text:
+    """`aop_selection_key.normalized_query_digest`."""
+    sha256_text(pointcut_query_encode(query))
+
+fn pointcut_matcher_schema_digest() -> text:
+    """`aop_selection_key.matcher_schema_digest`.
+
+    The matcher's own contract: its selector vocabulary and its normalization
+    version. Bumping either changes every selection digest, which is correct —
+    a different matcher may select a different set.
+    """
+    var selectors: [text] = []
+    selectors.push(canon_str(SELECTOR_ATTR))
+    selectors.push(canon_str(SELECTOR_EFFECT))
+    selectors.push(canon_str(SELECTOR_EXECUTION))
+    selectors.push(canon_str(SELECTOR_SIGNATURE))
+    selectors.push(canon_str(SELECTOR_WITHIN))
+    var inner: [text] = []
+    inner.push(canon_field("selectors", canon_seq(selectors)))
+    inner.push(canon_field("normalizerVersion", canon_nat(POINTCUT_NORMALIZER_VERSION)))
+    inner.push(canon_field("globSemantics", canon_str("star-within-segment;doublestar-any")))
+    sha256_text(canon_field(AOP_MATCHER_SCHEMA_DOMAIN, canon_seq(inner)))
+
+fn join_point_descriptor_encode(desc: JoinPointDescriptor) -> text:
+    """Canonical encoding of a stable join-point descriptor.
+
+    No BlockId, no instruction index — both are LOCAL_STATE (C0 §5b).
+    """
+    var ops: [text] = []
+    for op in desc.kind_operands:
+        ops.push(canon_str(op))
+    var attrs: [text] = []
+    for a in desc.attributes:
+        attrs.push(canon_str(a))
+    var effs: [text] = []
+    for e in desc.effects:
+        effs.push(canon_str(e))
+    var inner: [text] = []
+    inner.push(canon_field("kindName", canon_str(desc.kind_name)))
+    inner.push(canon_field("kindOperands", canon_seq(ops)))
+    inner.push(canon_field("qualifiedName", canon_str(desc.qualified_name)))
+    inner.push(canon_field("owningScope", canon_str(desc.owning_scope)))
+    inner.push(canon_field("signature", canon_str(desc.signature)))
+    inner.push(canon_field("attributes", canon_seq(attrs)))
+    inner.push(canon_field("effects", canon_seq(effs)))
+    inner.push(canon_field("sameSiteOrdinal", canon_nat(desc.same_site_ordinal)))
+    canon_field(AOP_DESCRIPTOR_DOMAIN, canon_seq(inner))
+
+fn join_point_descriptor_digest(desc: JoinPointDescriptor) -> text:
+    """Stable content identity of a join point."""
+    sha256_text(join_point_descriptor_encode(desc))
+
+fn descriptor_projection_encode(desc: JoinPointDescriptor, rs: SelectorReadSet) -> text:
+    """Encode ONLY the descriptor fields inside the read set.
+
+    Fields outside the read set are not encoded at all — not even as an empty
+    placeholder keyed by their value — so changing them provably cannot move
+    the projection, and hence cannot move the selection digest.
+    """
+    var inner: [text] = []
+    if rs.qualified_name:
+        inner.push(canon_field("qualifiedName", canon_str(desc.qualified_name)))
+    if rs.owning_scope:
+        inner.push(canon_field("owningScope", canon_str(desc.owning_scope)))
+    if rs.signature:
+        inner.push(canon_field("signature", canon_str(desc.signature)))
+    if rs.attributes:
+        var attrs: [text] = []
+        for a in desc.attributes:
+            attrs.push(canon_str(a))
+        inner.push(canon_field("attributes", canon_seq(attrs)))
+    if rs.effects:
+        var effs: [text] = []
+        for e in desc.effects:
+            effs.push(canon_str(e))
+        inner.push(canon_field("effects", canon_seq(effs)))
+    canon_seq(inner)
+
+fn pointcut_selection_digest(query: PointcutQuery, desc: JoinPointDescriptor) -> text:
+    """Identity of "this query's verdict on this join point".
+
+    Inputs: the normalized query, the matcher schema, the read-set field list,
+    and the descriptor PROJECTED onto that read set. A descriptor field outside
+    the read set is not an input, so it cannot invalidate this digest.
+    """
+    val rs = pointcut_query_read_set(query)
+    var names: [text] = []
+    for n in selector_read_set_field_names(rs):
+        names.push(canon_str(n))
+    var inner: [text] = []
+    inner.push(canon_field("normalizedQuery", canon_str(pointcut_normalized_query_digest(query))))
+    inner.push(canon_field("matcherSchema", canon_str(pointcut_matcher_schema_digest())))
+    inner.push(canon_field("readSetFields", canon_seq(names)))
+    inner.push(canon_field("descriptorProjection", descriptor_projection_encode(desc, rs)))
+    sha256_text(canon_field(AOP_SELECTION_DOMAIN, canon_seq(inner)))

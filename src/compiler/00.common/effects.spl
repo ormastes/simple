@@ -17,21 +17,11 @@ for standalone effect inference that maps to EffectKind.Asynchronous / default.
    - Scan function calls (async calls -> function becomes async)
    - Repeat until no changes
 4. Validate `fn sync` annotations
-5. Propagate effects to HirFunction.effects
-
-   NOT WIRED. Step 5 has no implementation: effect_pass.spl, which was to do it,
-   was deleted on 2026-08-02 as unreachable dead code. HirFunction.effects keeps
-   the coarse annotation-derived seed written at HIR lowering and is never
-   refined. This module is therefore unused by the compiler today.
+5. Propagate effects to HirFunction.effects via effect_pass.spl
 """
 
 # Symbol type alias for function names
 type Symbol = text
-
-fn _effect_symbol_append_unique(items: [Symbol], sym: Symbol) -> [Symbol]:
-    if items.contains(sym):
-        return items
-    items + [sym]
 
 # ============================================================================
 # Effect Tag (lightweight, maps to HIR EffectKind.Asynchronous / default)
@@ -101,7 +91,7 @@ class EffectEnv:
     """
     effects: Dict<Symbol, EffectTag>
     builtins: Dict<text, EffectTag>
-    dirty: [Symbol]
+    dirty: Set<Symbol>
 
 impl EffectEnv:
     static fn new() -> EffectEnv:
@@ -109,7 +99,7 @@ impl EffectEnv:
         EffectEnv(
             effects: {},
             builtins: init_builtins(),
-            dirty: {}
+            dirty: Set.new()
         )
 
     fn get_effect(sym: Symbol) -> EffectTag:
@@ -121,19 +111,13 @@ impl EffectEnv:
         2. Built-ins (SFFI annotations)
         3. Default to Synchronous
         """
-        # NOTE: never use `.get()` on these dicts. Under native codegen an
-        # enum-valued `Dict.get()` HIT hands back a non-nil Option with a
-        # CORRUPT payload, so reading the tag segfaults; misses are correctly
-        # nil, which makes the bug invisible until a real effect is recorded.
-        # `contains_key` + index read decode correctly.
-        # See doc/07_guide/language/dict_native_pitfalls.md
         # Check local effects first
-        if self.effects.contains_key(sym):
-            return self.effects[sym]
+        if val Some(eff) = self.effects.get(sym):
+            return eff
 
         # Check builtins by function name
-        if self.builtins.contains_key(sym):
-            return self.builtins[sym]
+        if val Some(eff) = self.builtins.get(sym):
+            return eff
 
         # Default to Synchronous
         EffectTag.PureTag
@@ -148,7 +132,13 @@ impl EffectEnv:
 
         if old_eff != eff:
             self.effects[sym] = eff
-            self.dirty = _effect_symbol_append_unique(self.dirty, sym)
+            # Append-unique through the OWNING field. The previous
+            # `self.dirty = _effect_symbol_append_unique(self.dirty, sym)` kept
+            # the field's Arc live while the helper's parameter aliased it, so
+            # every newly-dirtied symbol deep-copied the whole dirty set:
+            # O(n) per mark, O(n^2) per fixed-point iteration. PERF-COW-002.
+            if not self.dirty.contains(sym):
+                self.dirty.push(sym)
 
     fn is_dirty() -> bool:
         """Check if any functions changed effect (for fixed-point check)"""
@@ -156,7 +146,7 @@ impl EffectEnv:
 
     me clear_dirty():
         """Clear dirty set (start new fixed-point iteration)"""
-        self.dirty = []
+        self.dirty.clear()
 
     fn iter_effects() -> [(Symbol, EffectTag)]:
         """Iterate over all inferred effects"""
@@ -310,9 +300,9 @@ Effect Inference Statistics:
 struct FunctionEffectInfo:
     """Lightweight function descriptor for effect inference.
 
-    Was used by the effect pass to collect function metadata before running
-    fixed-point inference. That pass (effect_pass.spl) was deleted on 2026-08-02
-    as unreachable dead code, so nothing populates this today.
+    Used by the effect pass to collect function metadata before
+    running fixed-point inference. Maps to real HirFunction data
+    via effect_pass.spl.
     """
     name: text
     is_async: bool
@@ -381,7 +371,7 @@ fn test_effect_env_basic():
     val env = EffectEnv.new()
 
     # Should have built-ins
-    assert env.builtins.keys().len() > 0
+    assert env.builtins.len() > 0
 
     # Check specific built-ins
     assert env.get_effect("http.get") == EffectTag.SuspendingTag

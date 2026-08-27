@@ -1,0 +1,119 @@
+# codex-impl
+# Allocation-free admission and deterministic commit rules for isolated rt(hal) lanes.
+
+use std.common.structural.hal_provider.contracts.*
+
+val HAL_DEFAULT_COMBINED_EVENT_LOG_BYTES: i64 = 4 * 1024 * 1024
+
+struct HalIsolationReceiptV1:
+    provider: HalProviderKind
+    invocation_id: i64
+    process_id: i64
+    sandbox_id: i64
+    inherited_writable_handles: i64
+    ambient_environment_entries: i64
+    shared_mutable_regions: i64
+    initialized: bool
+    sealed: bool
+
+fn hal_isolation_receipt_v1(provider: HalProviderKind, invocation_id: i64,
+                            process_id: i64, sandbox_id: i64,
+                            inherited_writable_handles: i64,
+                            ambient_environment_entries: i64,
+                            shared_mutable_regions: i64,
+                            initialized: bool, sealed: bool) -> HalIsolationReceiptV1:
+    HalIsolationReceiptV1(provider: provider, invocation_id: invocation_id,
+                          process_id: process_id, sandbox_id: sandbox_id,
+                          inherited_writable_handles: inherited_writable_handles,
+                          ambient_environment_entries: ambient_environment_entries,
+                          shared_mutable_regions: shared_mutable_regions,
+                          initialized: initialized, sealed: sealed)
+
+fn hal_isolation_receipt_v1_admitted(value: HalIsolationReceiptV1,
+                                     request: HalProviderRequestV1) -> bool:
+    hal_provider_request_v1_well_formed(request)
+        and value.invocation_id == request.invocation_id
+        and value.process_id > 0 and value.sandbox_id > 0
+        and value.inherited_writable_handles == 0
+        and value.ambient_environment_entries == 0
+        and value.shared_mutable_regions == 0
+        and value.initialized and value.sealed
+
+struct HalSealedStorageV1:
+    request_bytes: i64
+    result_bytes: i64
+    trace_operations: i64
+    trace_bytes: i64
+    diff_rows: i64
+    difference_report_bytes: i64
+    log_bytes: i64
+    allocation_count_after_seal: i64
+    sealed: bool
+
+fn hal_sealed_storage_v1(request_bytes: i64, result_bytes: i64,
+                         trace_operations: i64, trace_bytes: i64,
+                         diff_rows: i64, difference_report_bytes: i64,
+                         log_bytes: i64, allocation_count_after_seal: i64,
+                         sealed: bool) -> HalSealedStorageV1:
+    HalSealedStorageV1(request_bytes: request_bytes, result_bytes: result_bytes,
+                       trace_operations: trace_operations, trace_bytes: trace_bytes,
+                       diff_rows: diff_rows,
+                       difference_report_bytes: difference_report_bytes,
+                       log_bytes: log_bytes,
+                       allocation_count_after_seal: allocation_count_after_seal,
+                       sealed: sealed)
+
+fn hal_sealed_storage_v1_admits(value: HalSealedStorageV1,
+                                operation: HalOperationV1) -> bool:
+    hal_operation_v1_well_formed(operation)
+        and value.sealed and value.allocation_count_after_seal == 0
+        and value.request_bytes >= operation.capacity.request_bytes
+        and value.result_bytes >= operation.capacity.result_bytes
+        and value.trace_operations >= operation.capacity.trace_operations
+        and value.trace_bytes >= operation.capacity.trace_bytes
+        and value.diff_rows >= operation.capacity.diff_rows
+        and value.difference_report_bytes >= operation.capacity.difference_report_bytes
+        and value.log_bytes >= operation.capacity.log_bytes
+        and value.trace_bytes + value.log_bytes
+            <= HAL_DEFAULT_COMBINED_EVENT_LOG_BYTES
+
+fn hal_provider_kind_mask(value: HalProviderKind) -> i64:
+    1 << hal_provider_kind_to_i64(value)
+
+fn hal_execution_expected_mask(operation: HalOperationV1,
+                               mode: HalRunMode) -> i64:
+    if hal_run_mode_executes_all(mode):
+        return operation.providers_mask
+    hal_provider_kind_mask(operation.preferred_provider)
+
+fn hal_execution_receipt_admitted(operation: HalOperationV1,
+                                  request: HalProviderRequestV1,
+                                  isolation: HalIsolationReceiptV1,
+                                  result: HalProviderResultV1) -> bool:
+    hal_operation_v1_well_formed(operation)
+        and request.operation_id == operation.operation_id
+        and isolation.provider == result.provider
+        and isolation.invocation_id == result.invocation_id
+        and hal_isolation_receipt_v1_admitted(isolation, request)
+        and hal_provider_result_fits_operation(result, operation)
+        and (operation.providers_mask & hal_provider_kind_mask(result.provider)) != 0
+
+fn hal_execution_complete(expected_mask: i64, received_mask: i64) -> bool:
+    expected_mask > 0 and received_mask == expected_mask
+
+fn hal_execution_may_commit(mode: HalRunMode, complete: bool,
+                            all_equivalent: bool,
+                            preferred_result_ok: bool) -> bool:
+    if not complete or not preferred_result_ok:
+        return false
+    if all_equivalent:
+        return true
+    hal_run_mode_allows_preferred_commit_on_difference(mode)
+
+export HAL_DEFAULT_COMBINED_EVENT_LOG_BYTES
+export HalIsolationReceiptV1, HalSealedStorageV1
+export hal_isolation_receipt_v1, hal_isolation_receipt_v1_admitted
+export hal_sealed_storage_v1, hal_sealed_storage_v1_admits
+export hal_provider_kind_mask, hal_execution_expected_mask
+export hal_execution_receipt_admitted, hal_execution_complete
+export hal_execution_may_commit

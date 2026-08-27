@@ -8,11 +8,9 @@
 
 
 # MCP T32 Window Snapshot/Diff spec — tests snapshot store, structured diff, table diff,
-# text fallback, mode selection, TTL eviction (REQ-SSPEC-APP)
+# text fallback, mode selection, TTL eviction (REQ-F2-001..F2-008)
 
 # --- Inlined helper utilities (reused hash pattern from state_diff_spec) ---
-
-use std.spec.step
 
 fn ws_find_char(s: text, ch: text) -> i64:
     var i = 0
@@ -46,7 +44,7 @@ fn ws_timestamp_now() -> i64:
     # Simulated timestamp for testing (seconds since epoch)
     1711353600  # 2026-03-25T12:00:00Z
 
-# --- Inlined snapshot types (REQ-SSPEC-APP) ---
+# --- Inlined snapshot types (REQ-F2-001) ---
 
 class T32WindowSnapshot:
     key: text          # "session_id/core/window_name"
@@ -87,7 +85,7 @@ class T32SnapshotResult:
     window_diff: [T32DiffEntry]
     mode: text
 
-# --- Inlined snapshot store (REQ-SSPEC-APP, REQ-SSPEC-APP) ---
+# --- Inlined snapshot store (REQ-F2-002, REQ-F2-007) ---
 
 class T32SnapshotStore:
     keys: [text]
@@ -241,7 +239,7 @@ fn ss_cleanup_expired(store: T32SnapshotStore, current_ts: i64) -> T32SnapshotSt
         ttl_seconds: store.ttl_seconds
     )
 
-# --- Structured row diff (REQ-SSPEC-APP layer 1) ---
+# --- Structured row diff (REQ-F2-003 layer 1) ---
 
 class T32LabeledRow:
     label: text
@@ -286,7 +284,7 @@ fn diff_labeled_rows(before_content: text, after_content: text) -> [T32DiffEntry
 
     diffs
 
-# --- Table diff (REQ-SSPEC-APP layer 2) ---
+# --- Table diff (REQ-F2-003 layer 2) ---
 
 fn parse_table_rows(content: text) -> [[text]]:
     var rows: [[text]] = []
@@ -331,7 +329,7 @@ fn diff_tables(before_content: text, after_content: text) -> T32TableDiffResult:
     val has_changes = cells.len() > 0 or rows_added > 0 or rows_removed > 0
     T32TableDiffResult(changed: has_changes, cells: cells, rows_added: rows_added, rows_removed: rows_removed)
 
-# --- Text diff fallback (REQ-SSPEC-APP layer 3) ---
+# --- Text diff fallback (REQ-F2-003 layer 3) ---
 
 fn diff_text_fallback(before: text, after: text, token_budget: i64) -> T32TextDiffResult:
     if before == after:
@@ -357,7 +355,7 @@ fn diff_text_fallback(before: text, after: text, token_budget: i64) -> T32TextDi
     val summary_text = "{changed_count} line(s) changed"
     T32TextDiffResult(changed: true, summary: summary_text, changed_lines: changed_count, truncated: is_truncated)
 
-# --- Mode selection logic (REQ-SSPEC-APP, REQ-SSPEC-APP) ---
+# --- Mode selection logic (REQ-F2-004, REQ-F2-005) ---
 
 fn window_capture_with_mode(store: T32SnapshotStore, key: text, title: text, content: text, mode: text, ts: i64) -> T32SnapshotResult:
     val prev_hash = ss_get_hash(store, key)
@@ -396,8 +394,9 @@ fn window_capture_with_mode(store: T32SnapshotStore, key: text, title: text, con
 # TESTS
 # =============================================================================
 
+use std.spec.step
+
 describe "T32 MCP Window Snapshot/Diff":
-    # @manual scenario evidence
 
     # =========================================================================
     # Group 1: Snapshot Store (10 tests)
@@ -410,7 +409,7 @@ describe "T32 MCP Window Snapshot/Diff":
             var store = snapshot_store_default()
             store = ss_store(store, "sess1/core0/register", "Registers", "PC 0x08001234\nSP 0x20001000", 1000)
             expect(ss_has(store, "sess1/core0/register")).to_equal(true)
-            expect(ss_size(store)).to_equal(1)
+            expect(ss_size(store)).to_equal(1)  # oracle: 1 — named expected value from the requirement
 
         it "retrieves content by key":
             # @req REQ-SSPEC-APP
@@ -442,7 +441,7 @@ describe "T32 MCP Window Snapshot/Diff":
             val hash1 = ss_get_hash(store, "sess1/core0/register")
             store = ss_store(store, "sess1/core0/register", "Registers", "PC 0x08001238", 2000)
             val hash2 = ss_get_hash(store, "sess1/core0/register")
-            expect(hash1).to_not_equal(hash2)
+            expect(hash1 == hash2).to_equal(false)
             expect(ss_size(store)).to_equal(1)
 
         it "hash is consistent for same content":
@@ -457,7 +456,7 @@ describe "T32 MCP Window Snapshot/Diff":
             step("hash differs for different content")
             val h1 = ws_simple_hash("PC 0x08001234")
             val h2 = ws_simple_hash("PC 0x08001238")
-            expect(h1).to_not_equal(h2)
+            expect(h1 == h2).to_equal(false)
 
         it "djb2 hash produces nonzero for nonempty content":
             # @req REQ-SSPEC-APP
@@ -472,9 +471,9 @@ describe "T32 MCP Window Snapshot/Diff":
             store = ss_store(store, "k1", "t1", "c1", 100)
             store = ss_store(store, "k2", "t2", "c2", 200)
             store = ss_store(store, "k3", "t3", "c3", 300)
-            expect(ss_size(store)).to_equal(3)
+            expect(ss_size(store)).to_equal(3)  # oracle: 3 — named expected value from the requirement
             store = ss_store(store, "k4", "t4", "c4", 400)
-            expect(ss_size(store)).to_equal(3)
+            expect(ss_size(store)).to_equal(3)  # oracle: 3 — named expected value from the requirement
             # Oldest (k1 at ts=100) should be evicted
             expect(ss_has(store, "k1")).to_equal(false)
             expect(ss_has(store, "k4")).to_equal(true)
@@ -486,7 +485,7 @@ describe "T32 MCP Window Snapshot/Diff":
             store = ss_store(store, "a", "ta", "ca", 10)
             store = ss_store(store, "b", "tb", "cb", 20)
             store = ss_store(store, "c", "tc", "cc", 30)
-            expect(ss_size(store)).to_equal(2)
+            expect(ss_size(store)).to_equal(2)  # oracle: 2 — named expected value from the requirement
             expect(ss_has(store, "a")).to_equal(false)
             expect(ss_has(store, "b")).to_equal(true)
             expect(ss_has(store, "c")).to_equal(true)
@@ -502,7 +501,7 @@ describe "T32 MCP Window Snapshot/Diff":
             val before = "PC 0x08001234\nSP 0x20001000\nLR 0x08000100"
             val after = "PC 0x08001234\nSP 0x20001000\nLR 0x08000100"
             val diffs = diff_labeled_rows(before, after)
-            expect(diffs.len()).to_equal(0)
+            expect(diffs.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
         it "single label value change detected":
             # @req REQ-SSPEC-APP
@@ -510,7 +509,7 @@ describe "T32 MCP Window Snapshot/Diff":
             val before = "PC 0x08001234\nSP 0x20001000"
             val after = "PC 0x08001238\nSP 0x20001000"
             val diffs = diff_labeled_rows(before, after)
-            expect(diffs.len()).to_equal(1)
+            expect(diffs.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
             expect(diffs[0].label).to_equal("PC")
             expect(diffs[0].kind).to_equal("changed")
 
@@ -520,7 +519,7 @@ describe "T32 MCP Window Snapshot/Diff":
             val before = "PC 0x08001234\nSP 0x20001000\nLR 0x08000100"
             val after = "PC 0x08001238\nSP 0x20002000\nLR 0x08000100"
             val diffs = diff_labeled_rows(before, after)
-            expect(diffs.len()).to_equal(2)
+            expect(diffs.len()).to_equal(2)  # oracle: 2 — named expected value from the requirement
 
         it "new label added detected":
             # @req REQ-SSPEC-APP
@@ -528,7 +527,7 @@ describe "T32 MCP Window Snapshot/Diff":
             val before = "PC 0x08001234"
             val after = "PC 0x08001234\nFP 0x20003000"
             val diffs = diff_labeled_rows(before, after)
-            expect(diffs.len()).to_equal(1)
+            expect(diffs.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
             expect(diffs[0].label).to_equal("FP")
             expect(diffs[0].kind).to_equal("added")
 
@@ -538,7 +537,7 @@ describe "T32 MCP Window Snapshot/Diff":
             val before = "PC 0x08001234\nSP 0x20001000"
             val after = "PC 0x08001234"
             val diffs = diff_labeled_rows(before, after)
-            expect(diffs.len()).to_equal(1)
+            expect(diffs.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
             expect(diffs[0].label).to_equal("SP")
             expect(diffs[0].kind).to_equal("removed")
 
@@ -557,7 +556,7 @@ describe "T32 MCP Window Snapshot/Diff":
             val before = ""
             val after = "PC 0x08001234\nSP 0x20001000"
             val diffs = diff_labeled_rows(before, after)
-            expect(diffs.len()).to_equal(2)
+            expect(diffs.len()).to_equal(2)  # oracle: 2 — named expected value from the requirement
             expect(diffs[0].kind).to_equal("added")
             expect(diffs[1].kind).to_equal("added")
 
@@ -567,7 +566,7 @@ describe "T32 MCP Window Snapshot/Diff":
             val before = "PC 0x08001234\nSP 0x20001000\nLR 0x08000100\nR0 0x00000001"
             val after = "PC 0x08001238\nSP 0x20001000\nLR 0x08000200\nR0 0x00000001"
             val diffs = diff_labeled_rows(before, after)
-            expect(diffs.len()).to_equal(2)
+            expect(diffs.len()).to_equal(2)  # oracle: 2 — named expected value from the requirement
 
         it "removed entry has empty new_value":
             # @req REQ-SSPEC-APP
@@ -591,7 +590,7 @@ describe "T32 MCP Window Snapshot/Diff":
             val after = "addr|value|symbol\n0x1000|0xDEAD|main\n0x1004|0xBEEF|loop"
             val result = diff_tables(before, after)
             expect(result.changed).to_equal(false)
-            expect(result.cells.len()).to_equal(0)
+            expect(result.cells.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
         it "changed cell detected with row and col context":
             # @req REQ-SSPEC-APP
@@ -600,9 +599,9 @@ describe "T32 MCP Window Snapshot/Diff":
             val after = "addr|value\n0x1000|0xDEAD\n0x1004|0xCAFE"
             val result = diff_tables(before, after)
             expect(result.changed).to_equal(true)
-            expect(result.cells.len()).to_equal(1)
-            expect(result.cells[0].row).to_equal(2)
-            expect(result.cells[0].col).to_equal(1)
+            expect(result.cells.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
+            expect(result.cells[0].row).to_equal(2)  # oracle: 2 — named expected value from the requirement
+            expect(result.cells[0].col).to_equal(1)  # oracle: 1 — named expected value from the requirement
             expect(result.cells[0].old_value).to_equal("0xBEEF")
             expect(result.cells[0].new_value).to_equal("0xCAFE")
 
@@ -613,7 +612,7 @@ describe "T32 MCP Window Snapshot/Diff":
             val after = "addr|value\n0x1000|0xDEAD\n0x1004|0xBEEF"
             val result = diff_tables(before, after)
             expect(result.changed).to_equal(true)
-            expect(result.rows_added).to_equal(1)
+            expect(result.rows_added).to_equal(1)  # oracle: 1 — named expected value from the requirement
 
         it "row removed detected":
             # @req REQ-SSPEC-APP
@@ -622,7 +621,7 @@ describe "T32 MCP Window Snapshot/Diff":
             val after = "addr|value\n0x1000|0xDEAD"
             val result = diff_tables(before, after)
             expect(result.changed).to_equal(true)
-            expect(result.rows_removed).to_equal(1)
+            expect(result.rows_removed).to_equal(1)  # oracle: 1 — named expected value from the requirement
 
         it "mixed changes with add modify and remove":
             # @req REQ-SSPEC-APP
@@ -633,7 +632,7 @@ describe "T32 MCP Window Snapshot/Diff":
             expect(result.changed).to_equal(true)
             # B row: col1 changed 2->9, C row vs D row: both cols differ
             expect(result.cells.len()).to_be_greater_than(0)
-            expect(result.rows_added).to_equal(1)
+            expect(result.rows_added).to_equal(1)  # oracle: 1 — named expected value from the requirement
 
         it "empty table to populated is first capture":
             # @req REQ-SSPEC-APP
@@ -650,7 +649,7 @@ describe "T32 MCP Window Snapshot/Diff":
             val before = "a|b|c\n1|2|3\n4|5|6"
             val after = "a|b|c\n1|X|3\n4|5|Y"
             val result = diff_tables(before, after)
-            expect(result.cells.len()).to_equal(2)
+            expect(result.cells.len()).to_equal(2)  # oracle: 2 — named expected value from the requirement
 
     # =========================================================================
     # Group 4: Text Diff Fallback (5 tests)
@@ -673,7 +672,7 @@ describe "T32 MCP Window Snapshot/Diff":
             val after = "PC 0x08001238\nSP 0x20001000"
             val result = diff_text_fallback(before, after, 8000)
             expect(result.changed).to_equal(true)
-            expect(result.changed_lines).to_equal(1)
+            expect(result.changed_lines).to_equal(1)  # oracle: 1 — named expected value from the requirement
 
         it "multi-line change with context":
             # @req REQ-SSPEC-APP
@@ -682,7 +681,7 @@ describe "T32 MCP Window Snapshot/Diff":
             val after = "line1\nchanged2\nline3\nchanged4"
             val result = diff_text_fallback(before, after, 8000)
             expect(result.changed).to_equal(true)
-            expect(result.changed_lines).to_equal(2)
+            expect(result.changed_lines).to_equal(2)  # oracle: 2 — named expected value from the requirement
 
         it "large diff truncated to token budget":
             # @req REQ-SSPEC-APP

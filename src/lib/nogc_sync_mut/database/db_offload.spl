@@ -25,7 +25,9 @@ use std.web_db_offload.library.{
 }
 use std.web_db_offload.device_backend.{
     GpuWdbDeviceBackend,
+    GpuWdbDeviceReceipt,
     GpuWdbDeviceRunResult,
+    gpu_wdb_device_receipt_unavailable,
     gpu_wdb_run_device_batch
 }
 
@@ -147,22 +149,8 @@ fn db_gpu_batch_offload_execute_device_for_generation(mode: DbGpuMode,
                                                       started_us: i64,
                                                       finished_us: i64,
                                                       measured_device_time_us: i64,
-                                                      timing_source: text) -> DbGpuBatchDeviceOffloadExecution:
-    val registry = gpu_wdb_library_with_targets(backend.backend, backend.generation, backend.available_targets)
-    val execution = db_gpu_batch_offload_execute_for_generation(
-        mode,
-        batch_kind,
-        row_count,
-        bytes_per_row,
-        state,
-        registry,
-        backend.native_device_execution,
-        wal_generation_current,
-        expected_backend_generation,
-        cpu_fallback_available,
-        budget,
-        cpu_result_row_ids
-    )
+                                                      timing_source: text,
+                                                      device_receipt: GpuWdbDeviceReceipt) -> DbGpuBatchDeviceOffloadExecution:
     val plan = db_gpu_mode_plan(
         mode,
         row_count,
@@ -194,7 +182,23 @@ fn db_gpu_batch_offload_execute_device_for_generation(mode: DbGpuMode,
         started_us,
         finished_us,
         measured_device_time_us,
-        timing_source
+        timing_source,
+        device_receipt
+    )
+    val state_after =
+        if device_result.submission.accepted:
+            gpu_wdb_complete_submission(device_result.submission.state, device_result.submission)
+        else:
+            device_result.submission.state
+    val execution = DbGpuBatchOffloadExecution(
+        mode: mode,
+        batch_kind: batch_kind,
+        plan: plan,
+        submission: device_result.submission,
+        state_after: state_after,
+        result_row_ids: cpu_result_row_ids,
+        gpu_dispatched: device_result.submission.accepted,
+        cpu_authoritative: true
     )
     DbGpuBatchDeviceOffloadExecution(
         execution: execution,

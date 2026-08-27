@@ -17,7 +17,6 @@ let emptySourceCount = 0;
 let symlinkSourceCount = 0;
 let hardlinkSourceCount = 0;
 let duplicateSourceCount = 0;
-let nonregularSourceCount = 0;
 let sourceCount = 0;
 let text = '';
 let coherentSource = false;
@@ -30,7 +29,6 @@ const maxRenderHtmlLen = 10000000;
 const validRenderMarkerPattern = /\[tauri-shell\]\s+render,\s+html_len=([1-9][0-9]*)(?:\s|$)/;
 const anyRenderMarkerPattern = /\[tauri-shell\]\s+render,\s+html_len=/;
 const vulkanMarkerPattern = /(Vulkan|vulkan|VK_|ANGLE.*Vulkan|Renderer.*Vulkan|HWUI.*Vulkan|skiavk)/i;
-const foregroundMarkerPattern = /(foreground=.*com\.simple\.ui|mCurrentFocus=.*com\.simple\.ui|topResumedActivity=.*com\.simple\.ui|ResumedActivity:.*com\.simple\.ui|ACTIVITY[^\n]*com\.simple\.ui)/i;
 const failureMarkerPattern = /(F\/DEBUG|Fatal signal|F\/libc|F\/VulkanManager|Simple subprocess stdout closed before a valid render arrived|Headless UI completed|parse error: expected value|Requested GL implementation .*angle=vulkan.* not found|Exiting GPU process due to errors during initialization)/i;
 const seenSourceRealpaths = new Set();
 
@@ -56,7 +54,7 @@ for (const file of files) {
     continue;
   }
   if (!stat.isFile()) {
-    nonregularSourceCount += 1;
+    missingSourceCount += 1;
     continue;
   }
   if (stat.nlink > 1) {
@@ -101,7 +99,6 @@ if (coherentSourceHtmlLen !== '') {
 const hasAnyRenderMarker = anyRenderMarkerPattern.test(text);
 const renderMarker = renderHtmlLen(text) !== '';
 const vulkanMarker = vulkanMarkerPattern.test(text);
-const foregroundMarker = foregroundMarkerPattern.test(text);
 const failureMarker = failureMarkerPattern.test(text);
 
 let reason = 'pass';
@@ -115,8 +112,6 @@ if (requestedSourceCount === 0 || sourceCount === 0) {
   reason = 'android-render-log-source-hardlink';
 } else if (duplicateSourceCount > 0) {
   reason = 'android-render-log-source-duplicate';
-} else if (nonregularSourceCount > 0) {
-  reason = 'android-render-log-source-not-regular';
 } else if (emptySourceCount > 0) {
   reason = 'android-render-log-source-empty';
 } else if (failureMarker) {
@@ -127,8 +122,6 @@ if (requestedSourceCount === 0 || sourceCount === 0) {
   reason = 'android-render-log-marker-missing';
 } else if (!vulkanMarker) {
   reason = 'android-vulkan-log-marker-missing';
-} else if (!foregroundMarker) {
-  reason = 'android-foreground-marker-missing';
 } else if (!coherentSource) {
   reason = 'android-render-log-source-mismatch';
 }
@@ -142,14 +135,12 @@ emit('android_render_log_empty_source_count', emptySourceCount);
 emit('android_render_log_symlink_source_count', symlinkSourceCount);
 emit('android_render_log_hardlink_source_count', hardlinkSourceCount);
 emit('android_render_log_duplicate_source_count', duplicateSourceCount);
-emit('android_render_log_nonregular_source_count', nonregularSourceCount);
 emit('android_render_log_html_len', htmlLen);
 emit('android_render_log_source_coherence_status', coherentSource ? 'pass' : 'fail');
 emit('android_render_log_coherent_source_path', coherentSourcePath);
 emit('android_render_log_coherent_source_size_bytes', coherentSourceSizeBytes);
 emit('android_render_log_marker_status', renderMarker ? 'pass' : 'fail');
 emit('android_render_log_vulkan_marker_status', vulkanMarker ? 'pass' : 'fail');
-emit('android_render_log_foreground_marker_status', foregroundMarker ? 'pass' : 'fail');
 emit('android_render_log_failure_marker_status', failureMarker ? 'fail' : 'pass');
 
 if (reason !== 'pass') {

@@ -16,24 +16,24 @@
 
 use compiler.core.ast_expr.{
     EXPR_IDENT, EXPR_CALL, EXPR_METHOD_CALL, EXPR_BINARY, EXPR_UNARY,
-    EXPR_INDEX, EXPR_FIELD_ACCESS, EXPR_ARRAY_LIT, EXPR_IF, EXPR_MATCH,
+    EXPR_INDEX, EXPR_FIELD_ACCESS, EXPR_ARRAY_LIT, EXPR_IF, EXPR_IF_CHAIN, EXPR_MATCH,
     EXPR_FOR, EXPR_WHILE, EXPR_BLOCK, EXPR_RETURN, EXPR_LAMBDA,
     EXPR_ASSIGN, EXPR_COMPOUND_ASSIGN, EXPR_DICT_LIT, EXPR_STRUCT_LIT,
     EXPR_TUPLE, EXPR_SLICE, EXPR_NULL_COALESCE, EXPR_OPTIONAL_CHAIN,
     EXPR_CAST, EXPR_INTERPOLATED_STRING, EXPR_RANGE, EXPR_SPREAD,
     EXPR_DO_BLOCK, EXPR_LIST_COMP, EXPR_DICT_COMP,
     EXPR_PASS_TODO, EXPR_PASS_DO_NOTHING, EXPR_PASS_DN,
-    expr_get_tag, expr_get_str, expr_get_left, expr_get_right, expr_get_extra, expr_get_args, expr_get_stmts
+    expr_tag, expr_s_val, expr_left, expr_right, expr_extra, expr_args, expr_stmts
 }
 use compiler.frontend.core.ast_stmt.{
     STMT_EXPR, STMT_VAL_DECL, STMT_VAR_DECL, STMT_ASSIGN, STMT_RETURN,
-    STMT_IF, STMT_FOR, STMT_WHILE, STMT_MATCH, STMT_BLOCK,
+    STMT_IF, STMT_IF_CHAIN, STMT_FOR, STMT_WHILE, STMT_MATCH, STMT_BLOCK,
     STMT_COMPOUND_ASSIGN, STMT_LAZY_VAL_DECL,
-    stmt_get_tag, stmt_get_expr, stmt_get_name, stmt_get_body
+    stmt_tag, stmt_expr, stmt_name, stmt_body
 }
 use compiler.core.ast.{
     DECL_FN, DECL_EXTERN_FN, DECL_VAL, DECL_VAR, DECL_USE, DECL_LAZY_VAL,
-    decl_get_tag, decl_get_name, decl_get_param_names, decl_get_body, decl_get_imports
+    decl_tag, decl_name, decl_param_names, decl_body_stmts, decl_imports
 }
 
 # ============================================================================
@@ -66,12 +66,12 @@ fn check_unused_vars(decl_indices: [i64]) -> [UnusedVarWarning]:
 
     # Check function-level unused params and local vars
     for idx in decl_indices:
-        val tag = decl_get_tag(idx)
+        val tag = decl_tag[idx]
 
         if tag == DECL_FN:
-            val fn_name = decl_get_name(idx)
-            val params = decl_get_param_names(idx)
-            val body = decl_get_body(idx)
+            val fn_name = decl_name[idx]
+            val params = decl_param_names[idx]
+            val body = decl_body_stmts[idx]
 
             # Skip functions with pass markers (stubs)
             if body_has_pass_marker_uv(body):
@@ -174,16 +174,36 @@ fn collect_local_decls(stmts: [i64], locals: [text]):
     for s in stmts:
         if s < 0:
             continue
-        val tag = stmt_get_tag(s)
+        val tag = stmt_tag[s]
 
         if tag == STMT_VAL_DECL or tag == STMT_VAR_DECL or tag == STMT_LAZY_VAL_DECL:
-            val name = stmt_get_name(s)
+            val name = stmt_name[s]
             if name != "":
                 locals.push(name)
 
+        if tag == STMT_IF_CHAIN:
+            val chain_id = stmt_get_type(s)
+            var arm_id = flat_if_chain_first_arm_get(chain_id)
+            var remaining = flat_if_chain_arm_count_get(chain_id)
+            while arm_id >= 0 and remaining > 0:
+                # Value/pattern bindings are arm-local. Do not append them to
+                # the enclosing function-local list; only declarations in the
+                # selected arm body are ordinary lint candidates here.
+                var bi = 0
+                while bi < flat_if_arm_body_count_get(arm_id):
+                    collect_local_decls([flat_if_arm_body_at(arm_id, bi)], locals)
+                    bi = bi + 1
+                arm_id = flat_if_arm_next_get(arm_id)
+                remaining = remaining - 1
+            var ei = 0
+            while ei < flat_if_chain_else_stmt_count_get(chain_id):
+                collect_local_decls([flat_if_chain_else_stmt_at(chain_id, ei)], locals)
+                ei = ei + 1
+            continue
+
         # Recurse into nested blocks
         if tag == STMT_IF or tag == STMT_BLOCK or tag == STMT_FOR or tag == STMT_WHILE or tag == STMT_MATCH:
-            collect_local_decls(stmt_get_body(s), locals)
+            collect_local_decls(stmt_body[s], locals)
 
 # ============================================================================
 # UNUSED002: Unused Imports
@@ -198,9 +218,9 @@ fn check_unused_imports(decl_indices: [i64]) -> [UnusedVarWarning]:
     var import_sources: {text: text} = {}
 
     for idx in decl_indices:
-        if decl_get_tag(idx) == DECL_USE:
-            val mod_path = decl_get_name(idx)
-            val names = decl_get_imports(idx)
+        if decl_tag[idx] == DECL_USE:
+            val mod_path = decl_name[idx]
+            val names = decl_imports[idx]
             for name in names:
                 # Strip alias if present (name:alias)
                 val base = strip_import_alias(name)
@@ -213,11 +233,11 @@ fn check_unused_imports(decl_indices: [i64]) -> [UnusedVarWarning]:
     # Collect all identifier references across all declarations
     var refs: {text: bool} = {}
     for idx in decl_indices:
-        val tag = decl_get_tag(idx)
+        val tag = decl_tag[idx]
         if tag == DECL_FN:
-            collect_refs_in_stmts(decl_get_body(idx), refs)
+            collect_refs_in_stmts(decl_body_stmts[idx], refs)
         elif tag == DECL_VAL or tag == DECL_VAR or tag == DECL_LAZY_VAL:
-            val body = decl_get_body(idx)
+            val body = decl_body_stmts[idx]
             for s in body:
                 if s >= 0:
                     collect_refs_in_expr(s, refs)
@@ -244,15 +264,36 @@ fn collect_refs_in_stmts(stmts: [i64], refs: {text: bool}):
     for s in stmts:
         if s < 0:
             continue
-        val tag = stmt_get_tag(s)
+        val tag = stmt_tag[s]
+
+        if tag == STMT_IF_CHAIN:
+            val chain_id = stmt_get_type(s)
+            var arm_id = flat_if_chain_first_arm_get(chain_id)
+            var remaining = flat_if_chain_arm_count_get(chain_id)
+            while arm_id >= 0 and remaining > 0:
+                # A binding head declares names; it is not an evaluated read.
+                if flat_if_arm_kind_get(arm_id) == ARM_CONDITION:
+                    collect_refs_in_expr(flat_if_arm_head_get(arm_id), refs)
+                collect_refs_in_expr(flat_if_arm_init_get(arm_id), refs)
+                var bi = 0
+                while bi < flat_if_arm_body_count_get(arm_id):
+                    collect_refs_in_stmts([flat_if_arm_body_at(arm_id, bi)], refs)
+                    bi = bi + 1
+                arm_id = flat_if_arm_next_get(arm_id)
+                remaining = remaining - 1
+            var ei = 0
+            while ei < flat_if_chain_else_stmt_count_get(chain_id):
+                collect_refs_in_stmts([flat_if_chain_else_stmt_at(chain_id, ei)], refs)
+                ei = ei + 1
+            continue
 
         # Collect from expression
-        val e = stmt_get_expr(s)
+        val e = stmt_expr[s]
         if e >= 0:
             collect_refs_in_expr(e, refs)
 
         # Recurse into child statements
-        val children = stmt_get_body(s)
+        val children = stmt_body[s]
         collect_refs_in_stmts(children, refs)
 
 fn collect_refs_in_expr(e: i64, refs: {text: bool}):
@@ -260,29 +301,43 @@ fn collect_refs_in_expr(e: i64, refs: {text: bool}):
     if e < 0:
         return
 
-    val tag = expr_get_tag(e)
+    val tag = expr_tag[e]
+
+    if tag == EXPR_IF_CHAIN:
+        val chain_id = expr_get_extra(e)
+        var arm_id = flat_if_chain_first_arm_get(chain_id)
+        var remaining = flat_if_chain_arm_count_get(chain_id)
+        while arm_id >= 0 and remaining > 0:
+            if flat_if_arm_kind_get(arm_id) == ARM_CONDITION:
+                collect_refs_in_expr(flat_if_arm_head_get(arm_id), refs)
+            collect_refs_in_expr(flat_if_arm_init_get(arm_id), refs)
+            collect_refs_in_expr(flat_if_arm_then_expr_get(arm_id), refs)
+            arm_id = flat_if_arm_next_get(arm_id)
+            remaining = remaining - 1
+        collect_refs_in_expr(flat_if_chain_else_expr_get(chain_id), refs)
+        return
 
     if tag == EXPR_IDENT:
-        val name = expr_get_str(e)
+        val name = expr_s_val[e]
         if name != "":
             refs[name] = true
         return
 
     # Recurse into sub-expressions
-    collect_refs_in_expr(expr_get_left(e), refs)
-    collect_refs_in_expr(expr_get_right(e), refs)
-    collect_refs_in_expr(expr_get_extra(e), refs)
+    collect_refs_in_expr(expr_left[e], refs)
+    collect_refs_in_expr(expr_right[e], refs)
+    collect_refs_in_expr(expr_extra[e], refs)
 
-    for arg in expr_get_args(e):
+    for arg in expr_args[e]:
         collect_refs_in_expr(arg, refs)
 
-    for child_stmt in expr_get_stmts(e):
+    for child_stmt in expr_stmts[e]:
         if child_stmt >= 0:
-            val child_tag = stmt_get_tag(child_stmt)
-            val child_e = stmt_get_expr(child_stmt)
+            val child_tag = stmt_tag[child_stmt]
+            val child_e = stmt_expr[child_stmt]
             if child_e >= 0:
                 collect_refs_in_expr(child_e, refs)
-            collect_refs_in_stmts(stmt_get_body(child_stmt), refs)
+            collect_refs_in_stmts(stmt_body[child_stmt], refs)
 
 # ============================================================================
 # Pass Marker Detection (local copy to avoid circular imports)
@@ -293,11 +348,48 @@ fn body_has_pass_marker_uv(stmts: [i64]) -> bool:
     for s in stmts:
         if s < 0:
             continue
-        val e = stmt_get_expr(s)
+        val e = stmt_expr[s]
         if e >= 0:
-            val etag = expr_get_tag(e)
+            val etag = expr_tag[e]
             if etag == EXPR_PASS_TODO or etag == EXPR_PASS_DO_NOTHING or etag == EXPR_PASS_DN:
                 return true
+        if stmt_get_tag(s) == STMT_IF_CHAIN:
+            val chain_id = stmt_get_type(s)
+            var arm_id = flat_if_chain_first_arm_get(chain_id)
+            var remaining = flat_if_chain_arm_count_get(chain_id)
+            while arm_id >= 0 and remaining > 0:
+                if expr_has_pass_marker_uv(flat_if_arm_head_get(arm_id)) or expr_has_pass_marker_uv(flat_if_arm_init_get(arm_id)):
+                    return true
+                var bi = 0
+                while bi < flat_if_arm_body_count_get(arm_id):
+                    if body_has_pass_marker_uv([flat_if_arm_body_at(arm_id, bi)]): return true
+                    bi = bi + 1
+                arm_id = flat_if_arm_next_get(arm_id)
+                remaining = remaining - 1
+            var ei = 0
+            while ei < flat_if_chain_else_stmt_count_get(chain_id):
+                if body_has_pass_marker_uv([flat_if_chain_else_stmt_at(chain_id, ei)]): return true
+                ei = ei + 1
+    false
+
+fn expr_has_pass_marker_uv(e: i64) -> bool:
+    if e < 0: return false
+    val tag = expr_get_tag(e)
+    if tag == EXPR_PASS_TODO or tag == EXPR_PASS_DO_NOTHING or tag == EXPR_PASS_DN: return true
+    if tag == EXPR_IF_CHAIN:
+        val chain_id = expr_get_extra(e)
+        var arm_id = flat_if_chain_first_arm_get(chain_id)
+        var remaining = flat_if_chain_arm_count_get(chain_id)
+        while arm_id >= 0 and remaining > 0:
+            if expr_has_pass_marker_uv(flat_if_arm_head_get(arm_id)) or expr_has_pass_marker_uv(flat_if_arm_init_get(arm_id)) or expr_has_pass_marker_uv(flat_if_arm_then_expr_get(arm_id)): return true
+            arm_id = flat_if_arm_next_get(arm_id)
+            remaining = remaining - 1
+        return expr_has_pass_marker_uv(flat_if_chain_else_expr_get(chain_id))
+    if expr_has_pass_marker_uv(expr_get_left(e)) or expr_has_pass_marker_uv(expr_get_right(e)) or expr_has_pass_marker_uv(expr_get_extra(e)): return true
+    for arg in expr_get_args(e):
+        if expr_has_pass_marker_uv(arg): return true
+    for child in expr_get_stmts(e):
+        if body_has_pass_marker_uv([child]): return true
     false
 
 # ============================================================================

@@ -25,12 +25,7 @@ fn _contains(rect: WidgetRect, px: i32, py: i32) -> bool:
 # Topmost widget under (px, py): the LAST rect in draw order (deepest / latest
 # sibling) that contains the point. Mirrors window_scene's top-of-stack pick.
 fn widget_hit_test(root: WidgetNode, w: i32, h: i32, px: i32, py: i32) -> HitResult:
-    _hit_test_rects(compute_layout(root, 0, 0, w, h), px, py)
-
-# Same hit-test, over an already-computed layout. Lets callers that need to
-# hit-test the same tree more than once per event (e.g. press + click) share
-# one compute_layout() pass instead of recomputing it for each call.
-fn _hit_test_rects(rects: [WidgetRect], px: i32, py: i32) -> HitResult:
+    val rects = compute_layout(root, 0, 0, w, h)
     var best = ""
     for rect in rects:
         if _contains(rect, px, py):
@@ -56,14 +51,8 @@ fn _kind_of(id: text) -> text:
 # =========================================================================
 
 # Press feedback: mark the hit button pressed (for a "pressed" render frame).
-#
-# `layout`: an optional precomputed compute_layout() result. When the caller
-# already has one (e.g. dispatching press + click for the same pointer event),
-# pass it here to skip re-running layout. Left empty ("not provided"), this
-# computes its own layout exactly as before.
-fn widget_set_pressed(root: WidgetNode, w: i32, h: i32, px: i32, py: i32, layout: [WidgetRect] = []) -> text:
-    val rects = if layout.len() > 0: layout else: compute_layout(root, 0, 0, w, h)
-    val hit = _hit_test_rects(rects, px, py)
+fn widget_set_pressed(root: WidgetNode, w: i32, h: i32, px: i32, py: i32) -> text:
+    val hit = widget_hit_test(root, w, h, px, py)
     if hit.found and _kind_of(hit.id) == "button":
         WidgetNode(id: hit.id).set_prop("ui_pressed", "true")
         return hit.id
@@ -88,17 +77,11 @@ fn widget_dispatch_hover(root: WidgetNode, w: i32, h: i32, px: i32, py: i32) -> 
 
 # Click: toggle checkbox `checked`, focus text inputs (single-focus), return
 # the hit widget id (empty when nothing was hit).
-#
-# `layout`: optional precomputed compute_layout() result — see widget_set_pressed.
-fn widget_dispatch_click(root: WidgetNode, w: i32, h: i32, px: i32, py: i32, layout: [WidgetRect] = []) -> text:
-    val rects = if layout.len() > 0: layout else: compute_layout(root, 0, 0, w, h)
-    val hit = _hit_test_rects(rects, px, py)
+fn widget_dispatch_click(root: WidgetNode, w: i32, h: i32, px: i32, py: i32) -> text:
+    val hit = widget_hit_test(root, w, h, px, py)
     if not hit.found:
         return ""
     val kind = _kind_of(hit.id)
-    if kind == "button":
-        val node = WidgetNode(id: hit.id)
-        node.set_prop("ui_action_pending", "true")
     if kind == "checkbox":
         val node = WidgetNode(id: hit.id)
         var next = "true"
@@ -153,115 +136,6 @@ fn widget_dispatch_scroll(root: WidgetNode, w: i32, h: i32, px: i32, py: i32, dy
     node.set_prop("scroll_offset", "{offset}")
     target
 
-fn _scroll_max_offset(
-    node: WidgetNode, rects: [WidgetRect], scroll_y: i32, scroll_h: i32
-) -> i32:
-    var content_bottom = scroll_y
-    for id in node.collect_ids():
-        if id != node.id:
-            match find_rect(rects, id):
-                case Some(rect):
-                    if rect.y + rect.h > content_bottom:
-                        content_bottom = rect.y + rect.h
-                case _:
-                    pass
-    val maximum = (content_bottom - scroll_y) - scroll_h
-    if maximum > 0: maximum else: 0
-
-fn widget_scrollbar_pointer_down(
-    root: WidgetNode, w: i32, h: i32, px: i32, py: i32
-) -> text:
-    val target = widget_scroll_hit(root, w, h, px, py)
-    if target == "":
-        return ""
-    val rects = compute_layout(root, 0, 0, w, h)
-    val node = WidgetNode(id: target)
-    match find_rect(rects, target):
-        case Some(rect):
-            if px < rect.x + rect.w - 12:
-                return ""
-            val maximum = _scroll_max_offset(
-                node, rects, rect.y, rect.h
-            )
-            var thumb_h = if maximum > 0:
-                rect.h * rect.h / (rect.h + maximum)
-            else:
-                rect.h
-            if thumb_h < 12:
-                thumb_h = 12
-            val travel = rect.h - thumb_h
-            val offset = _prop_int_of(node, "scroll_offset")
-            val thumb_y = if maximum > 0:
-                rect.y + offset * travel / maximum
-            else:
-                rect.y
-            if py >= thumb_y and py < thumb_y + thumb_h:
-                node.set_prop("ui_scrollbar_dragging", "true")
-                node.set_prop("ui_scrollbar_drag_origin_y", "{py}")
-                node.set_prop(
-                    "ui_scrollbar_drag_origin_offset", "{offset}"
-                )
-            elif py < thumb_y:
-                var next = offset - rect.h
-                if next < 0:
-                    next = 0
-                node.set_prop("scroll_offset", "{next}")
-            else:
-                var next = offset + rect.h
-                if next > maximum:
-                    next = maximum
-                node.set_prop("scroll_offset", "{next}")
-            return target
-        case _:
-            return ""
-
-fn widget_scrollbar_pointer_move(
-    root: WidgetNode, w: i32, h: i32, py: i32
-) -> text:
-    val rects = compute_layout(root, 0, 0, w, h)
-    for id in root.collect_ids():
-        if id != "":
-            val node = WidgetNode(id: id)
-            if (node.kind_name() == "scroll" and
-                node.get_prop("ui_scrollbar_dragging") == "true"):
-                match find_rect(rects, id):
-                    case Some(rect):
-                        val maximum = _scroll_max_offset(
-                            node, rects, rect.y, rect.h
-                        )
-                        var thumb_h = if maximum > 0:
-                            rect.h * rect.h / (rect.h + maximum)
-                        else:
-                            rect.h
-                        if thumb_h < 12:
-                            thumb_h = 12
-                        val travel = rect.h - thumb_h
-                        if travel > 0:
-                            val origin_y = _prop_int_of(
-                                node, "ui_scrollbar_drag_origin_y"
-                            )
-                            val origin_offset = _prop_int_of(
-                                node, "ui_scrollbar_drag_origin_offset"
-                            )
-                            var next = origin_offset +
-                                (py - origin_y) * maximum / travel
-                            if next < 0:
-                                next = 0
-                            if next > maximum:
-                                next = maximum
-                            node.set_prop("scroll_offset", "{next}")
-                        return id
-                    case _:
-                        pass
-    ""
-
-fn widget_scrollbar_pointer_up(root: WidgetNode):
-    for id in root.collect_ids():
-        if id != "":
-            val node = WidgetNode(id: id)
-            if node.kind_name() == "scroll":
-                node.set_prop("ui_scrollbar_dragging", "false")
-
 # Number of Unicode characters in `s`. Counts via the char-based `char_at`,
 # which returns "" once the index passes the last character. Byte-based
 # `slice`/`len` cannot be used to split on a caret that counts characters.
@@ -312,46 +186,20 @@ fn widget_dispatch_key(focused_id: text, key: text):
     if focused_id == "":
         return
     val kind = _kind_of(focused_id)
-    if kind == "button":
-        if key == "enter" or key == " " or key == "space":
-            WidgetNode(id: focused_id).set_prop("ui_action_pending", "true")
-        return
     if kind != "input" and kind != "textfield":
         return
     val node = WidgetNode(id: focused_id)
     val value = node.get_prop("value")
-    val n = _nchars(value)
-    val caret = _caret_of(node, n)
-    if key == "left":
-        if caret > 0:
-            node.set_prop("caret", "{caret - 1}")
-        return
-    if key == "right":
-        if caret < n:
-            node.set_prop("caret", "{caret + 1}")
-        return
-    if key == "home":
-        node.set_prop("caret", "0")
-        return
-    if key == "end":
-        node.set_prop("caret", "{n}")
-        return
     if key == "backspace":
-        if caret > 0:
-            val cut = _char_slice(value, 0, caret - 1) + _char_slice(value, caret, n)
+        if value.len() > 0:
+            val cut = value.slice(0, value.len() - 1)
             node.set_prop("value", cut)
-            node.set_prop("caret", "{caret - 1}")
+            node.set_prop("caret", "{cut.len()}")
         return
-    if key == "delete":
-        if caret < n:
-            val cut = _char_slice(value, 0, caret) + _char_slice(value, caret + 1, n)
-            node.set_prop("value", cut)
-            node.set_prop("caret", "{caret}")
-        return
-    if _nchars(key) == 1:
-        val joined = _char_slice(value, 0, caret) + key + _char_slice(value, caret, n)
+    if key.len() == 1:
+        val joined = value + key
         node.set_prop("value", joined)
-        node.set_prop("caret", "{caret + 1}")
+        node.set_prop("caret", "{joined.len()}")
 
 fn _prop_int_of(node: WidgetNode, key: text) -> i32:
     val raw = node.get_prop(key)
@@ -359,46 +207,7 @@ fn _prop_int_of(node: WidgetNode, key: text) -> i32:
         return 0
     raw.to_int() ?? 0
 
-# =========================================================================
-# IME composition (CJK/accented input via a host input-method editor).
-# =========================================================================
-
-# Composition update: shows the in-progress preedit string WITHOUT touching
-# `value`/`caret` — the host IME can still cancel or keep revising it. Stored
-# as a `preedit` prop so a renderer can show it (e.g. underlined at the
-# caret) separately from the committed text.
-fn widget_dispatch_composition_update(focused_id: text, preedit: text):
-    if focused_id == "":
-        return
-    val kind = _kind_of(focused_id)
-    if kind != "input" and kind != "textfield":
-        return
-    WidgetNode(id: focused_id).set_prop("preedit", preedit)
-
-# Composition commit: inserts the full composed STRING at the caret
-# (char-indexed via _char_slice/_nchars, same as widget_dispatch_key's
-# single-char path but for a multi-char string) and clears any preedit —
-# the composition is done, so nothing is left showing as "in progress".
-fn widget_dispatch_composition_commit(focused_id: text, committed: text):
-    if focused_id == "":
-        return
-    val kind = _kind_of(focused_id)
-    if kind != "input" and kind != "textfield":
-        return
-    val node = WidgetNode(id: focused_id)
-    node.set_prop("preedit", "")
-    if committed == "":
-        return
-    val value = node.get_prop("value")
-    val n = _nchars(value)
-    val caret = _caret_of(node, n)
-    val joined = _char_slice(value, 0, caret) + committed + _char_slice(value, caret, n)
-    node.set_prop("value", joined)
-    node.set_prop("caret", "{caret + _nchars(committed)}")
-
 export HitResult, widget_hit_test, widget_scroll_hit
 export widget_set_pressed, widget_clear_pressed, widget_dispatch_hover
 export widget_dispatch_click, widget_dispatch_scroll, widget_dispatch_key
-export widget_scrollbar_pointer_down, widget_scrollbar_pointer_move
-export widget_scrollbar_pointer_up
 export widget_dispatch_composition_update, widget_dispatch_composition_commit

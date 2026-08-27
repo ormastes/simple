@@ -34,7 +34,7 @@ SPipe is a BDD (Behavior-Driven Development) testing framework for Simple, inspi
 ### Quick Start
 
 ```simple
-use std.spec
+use std.spec.*
 
 describe "Calculator":
     context "addition":
@@ -133,6 +133,12 @@ describe "Feature":
 
 Embed markdown documentation in test files using triple-quoted strings. The `simple spipe-docgen` command extracts these blocks and generates markdown documentation in `doc/06_spec/`.
 
+New or updated scenario specs use modern SSpec only:
+`use std.spec.*`, `describe`, `it`, `step`, `expect`, and built-in matchers.
+Use direct value assertions; do not add Given/When/Then helper flows,
+boolean-wrapper assertions, placeholder passes, or silent missing-evidence
+branches.
+
 Optional metadata fields `**Artifacts:**`, `**Screenshots:**`, `**TUI Captures:**`, and `**Logs:**` let a spec publish evidence links into the generated markdown. List multiple items inline with `;` or `,`, or place them on bullet lines directly below the field.
 UI-facing specs must capture visible state when practical: GUI screenshots or rendered-image captures go under `doc/06_spec/image/<spec-relative-path>/`; TUI text/ANSI captures, logs, JSON summaries, and other non-image artifacts go under `build/test-artifacts/<spec-relative-path>/`.
 Interactive GUI specs must also use actual GUI access when available. Prefer `ui_access_snapshot`, `ui_access_surface`, `ui_access_find`, `ui_access_act`, `ui_access_history`, `ui_access_observe`, `ui_access_state`, or adapter wrappers such as `simple play wm-text-*` and `play_wm_text_*` to locate a real surface, perform the action, and assert the resulting state. Screenshots prove visual evidence; they do not replace interaction coverage.
@@ -140,6 +146,14 @@ SGTTI evidence is test/debug-only. Production entrypoints must not import `std.u
 After adding or moving a UI-facing app feature spec, run `test/03_system/app/testing/feature/ui_sspec_evidence_audit_spec.spl`. That audit verifies the critical UI SSPEC lane has executable specs, mirrored generated manuals under `doc/06_spec/03_system/app/...`, and concrete UI evidence markers.
 The generated Evidence section renders a compact category summary plus per-category tables. Image paths in `**Screenshots:**` and `**TUI Captures:**` are embedded as Markdown images, and text TUI captures are embedded in details blocks when the file exists.
 For CI/publication, use `simple spipe-docgen ... --output doc/06_spec` so generated specification docs stay in the numbered documentation tree required by `FILE.md`. The `simple test --doc` flow writes summary pages to `doc/08_tracking/test/test-spec.md` and `doc/08_tracking/test/test-spec.html`, and also regenerates SPipe docs under `doc/06_spec/` for the specs that were executed. Evidence roots stay separate: screenshots under `doc/06_spec/image/` and non-image evidence under `build/test-artifacts/`.
+
+Evidence-producing scenarios persist a validated versioned manifest at
+`build/test-artifacts/<spec-relative-path>/evidence.sdn`. The manifest owns
+status, freshness, provenance, integrity, and artifact links. Generated
+manuals may embed bounded text, still, motion, inert HTML, and decoded
+protocol evidence, but they must preserve accessible summaries and must never
+derive `live-pass` from prose or an unvalidated artifact. See
+[`Evidence Showcase`](../app/spipe/evidence_showcase.md).
 
 ```simple
 """
@@ -388,8 +402,93 @@ simple test --tag slow           # Run only @slow tests
 simple test --tag integration    # Run only @integration tests
 ```
 
----
 
+### `@tag:in-development` — work that is expected to fail
+
+**Status (verified against `origin/main` @ `3ccf808f6f2`, 2026-08-23): the tag
+NAME and its policy are settled here; the runner enforcement is still landing in
+sibling lanes. Do not read the "Runner behaviour" table below as already-shipped
+behaviour — the "Verified today" column is the only part backed by code at
+origin.**
+
+An in-development test is one written *ahead of* the implementation it
+describes. It is a real, honest specification of behaviour that does not work
+yet. Marking it tells the suite: *this failure is known, intended, and owned* —
+so the whole-suite run stays a meaningful signal instead of a wall of noise that
+everyone learns to ignore.
+
+#### Marking a spec
+
+Add the tag as a plain comment line in the spec header, the same shape as the
+other `# @…` header directives:
+
+```simple
+# @tag:in-development
+# Tracks: doc/08_tracking/todo/... (or a bug record / plan row)
+
+describe "Widget reflow":
+    it "reflows on resize":
+        expect(reflow(box, 800)).to_equal(expected)   # fails until reflow lands
+```
+
+Every in-development spec MUST name what it is waiting on — a TODO id, bug
+record, or plan row — on the line after the tag. A tag with no owner and no
+tracking link is indistinguishable from a hidden regression, which is exactly
+what this tag must never become.
+
+#### What the tag guarantees
+
+| Guarantee | Meaning | Verified today |
+|---|---|---|
+| Expected to FAIL | A red result is the *normal* state; it is not an incident | policy only |
+| SKIPPED in whole-suite runs | `bin/simple test` with no path does not execute it, so it cannot turn the suite red | pending sibling lane |
+| COUNTED in the summary | The runner summary reports the in-development count, so the debt is visible, never invisible | pending sibling lane |
+| Listable | `simple test --tag in-development` selects exactly these specs | `--tag <name>` filtering itself exists (`src/compiler_rust/driver/src/cli/test_runner/args.rs:24`, forwarded at `execution.rs:923-925`); the `in-development` value is pending |
+
+Two things follow from "counted, not hidden": the count is a **debt figure that
+is supposed to go down**, and a suite whose in-development count is rising
+without matching tracking rows is a process failure, not a green run.
+
+Note that the pure-Simple runner (`src/app/test_runner_new/test_runner_single.spl`)
+parses exactly two header directives today — `# @di_test` and `# @exec_limit <N>`
+— and no `@tag:` directive at all. `@tag:qemu` is recognised only by the Rust
+seed's timeout-budget scanner (`execution.rs:95`). So until the sibling lanes
+land, writing `# @tag:in-development` documents intent but changes nothing at
+runtime: **the spec still runs and still fails.** Do not claim otherwise in a
+report.
+
+#### Promoting a spec when it starts passing
+
+1. Run it directly: `bin/simple test path/to/foo_spec.spl`.
+2. If it passes, **delete the `# @tag:in-development` line and the tracking
+   line** in the same commit as the implementation change that made it pass.
+3. Close the TODO / bug row it named.
+4. Never leave a passing spec tagged. A tag that no longer describes the spec is
+   the same failure mode as a stale ratchet baseline: it silently stops meaning
+   anything, and the count stops being a debt figure.
+
+#### What this tag must NOT be used for
+
+This is the whole point of the tag having a narrow definition. It is **not** a
+general mute button.
+
+- **Never** to silence a regression. If a spec used to pass and now fails, that
+  is a regression: fix it or revert. Tagging it converts a loud, actionable
+  failure into a line in a debt counter, and it will not come back.
+- **Never** to get a red suite green before a landing, or to make a deadline.
+- **Never** on a spec whose failure you have not diagnosed. "It fails and I
+  don't know why" is not in-development; it is an unfiled bug.
+- **Never** for environmental unavailability — no GPU, no board, no network.
+  That is `skip(name, reason)` / `pending(name)` (`src/lib/gc_async_mut/spec/__init__.spl:40-43`)
+  or the host-aware `skip:` / `blocked:` wording, not this tag.
+- **Never** as a substitute for deleting a spec that describes behaviour nobody
+  intends to build. Delete it.
+
+The distinction in one line: **in-development means the code is missing;
+everything else means the test or the environment is wrong.** Only the first is
+this tag's business.
+
+---
 ## Gherkin-Style Syntax
 
 Simple supports Gherkin-style BDD for system tests:
@@ -605,23 +704,6 @@ simple test --unit          # test/01_unit/
 simple test --integration   # test/02_integration/
 simple test --system        # test/03_system/
 simple test --all           # entire test/
-simple test --whole         # all specs/long tests + .spl and Markdown doctests
-```
-
-`--all` expands spec discovery. `--whole` is the release gate: it also runs
-comment-embedded `.spl` doctests and executable `simple`, `spl`, and
-`sdoctest` fences from the configured Markdown sources.
-
-Source doctests use the existing docstring form:
-
-```simple
-fn add_one(value: i64) -> i64:
-    """Add one.
-
-    sdoctest:
-        expect(add_one(1)).to_equal(2)
-    """
-    value + 1
 ```
 
 ### Advanced Test Layers (opt-in)
@@ -723,30 +805,6 @@ Available helpers: `skip_on_baremetal`, `only_on_baremetal`, `skip_on_remote`, `
 
 Default pattern: `test/**/*_spec.spl`
 
-Doctest discovery has two executable lanes:
-
-- Markdown fences use ` ```simple `, ` ```spl `, or ` ```sdoctest ` and may
-  carry supported modifiers such as `:skip`, `:should_fail`, `:init=...`, and
-  `:env=...`. The configured repository sweep comes from
-  `config/sdoctest.sdn`; an explicit `.md` target is scanned directly.
-- Simple source documentation uses closed, non-empty `#`, `##`, or `///`
-  fences, fenced blocks inside triple-quoted docstrings, or an indented
-  `sdoctest:` section inside a docstring. Spec/test source files are excluded
-  from this comment lane.
-
-Registration and execution share the same extractors. The test manifest stores
-only files with runnable, closed, non-empty blocks; modifier fences and source
-comments therefore cannot disappear because a separate counter recognizes a
-smaller syntax. Normal Markdown and comment-doctest runs rescan their configured
-or explicit inputs at the run event. Manifest-backed test discovery refreshes
-on its five-minute TTL and reuses unchanged entries by file size and mtime;
-`--refresh-manifest` forces an immediate scan after bulk edits or file moves.
-
-Use a prose fence such as ` ```text ` for illustrative code that must never
-run. Use `:skip` only when the example is intentionally registered but cannot
-run in the current environment. Unclosed or empty executable fences are not
-registered and an explicitly targeted file with no runnable block fails closed.
-
 ### Commands
 
 ```bash
@@ -757,36 +815,13 @@ simple test --seed 12345           # Deterministic order
 simple test --format json          # JSON output
 simple test --format doc           # Documentation format
 simple test --list                 # List tests
-simple test doc/path/guide.md      # Run one Markdown doctest file
-simple test --spl-doctest src/path/module.spl # Run source-comment doctests
-simple test --refresh-manifest     # Force manifest rescan
 simple test --only-slow            # Slow tests only
 simple test --screenshots          # Capture GUI screenshots
 simple test --refresh-screenshots  # Force recapture
 simple test --screenshot-output doc/06_spec/image/custom
 ```
 
-`--format json` is a machine-output contract: stdout contains one final object
-with `success`, `spec`, `spl_doctest`, and `sdoctest`; disabled lanes are
-`null`. Progress and diagnostics go to stderr. Wrapper failures use the same
-single-object envelope with `success=false`, `worker_exit_code`, and `error`.
-The pure-Simple implementation is source-reviewed but remains unqualified
-until the tracked Stage 4 parser timeout is fixed and the whole-stdout contract
-passes on the fresh candidate.
-
 ### Exit Codes
-
-For child-run wrappers, `simple test` treats the parsed BDD summary line
-(`N example(s), M failure(s)`) as authoritative when present. Some interpreter
-child paths can return a stale nonzero process code after printing
-`0 failures`; do not classify those as file failures unless no BDD summary was
-parsed.
-
-Subprocess interpreter children are wrapped after matcher and coverage
-preprocessing; fork children receive the same result wrapper before `fork()`.
-The wrapper prints the shared spec summary, rejects failed examples, and rejects
-a run where no examples executed. A raw child exit code without that result
-contract is not test evidence.
 
 | Code | Meaning |
 |------|---------|
@@ -1045,11 +1080,9 @@ bin/simple test test/03_system/gui/ui/shared_ui_contract_spec.spl --tag slow
 - Skip tests without marking `pending`
 - Over-verify mocks -- verify behavior, not call counts
 
-### Interpreter Mode
+### Interpreter Mode Limitation
 
-Interpreter mode executes supported `it` bodies and fails closed on red or
-zero-executed specs. Use native mode as additional coverage for syntax or
-runtime behavior that is not implemented by the interpreter.
+The interpreter mode test runner only verifies file loading. The `it` block bodies do not execute in interpreter mode. Use compiled mode for actual execution of test logic.
 
 ---
 

@@ -6,43 +6,12 @@
 use std.io_runtime
 use std.db.dbfs_engine.fts.tokenizer.{fts_tokenize, FtsToken}
 use std.db.dbfs_engine.fts.inverted_index.{FtsInvertedIndex, FtsPosting}
-use std.common.search.ranking.{bm25_score_default}
 
 # ── Search result ──────────────────────────────────────────────────────────────
 
 struct FtsSearchResult:
     doc_id: i64
     score: i64
-
-struct FtsBm25Explanation:
-    score_contract: text
-    term_frequency: i64
-    document_frequency: i64
-    document_length: i64
-    average_document_length_fixed: i64
-    document_count: i64
-    score_milli: i64
-
-fn fts_bm25_score_fixed(tf: i64, df: i64, doc_len: i64,
-                        avg_dl_fixed: i64, total_docs: i64) -> i64:
-    if tf <= 0 or df <= 0 or avg_dl_fixed <= 0 or total_docs <= 0:
-        return 0
-    val score = bm25_score_default([tf], [df], doc_len,
-                                   avg_dl_fixed, total_docs)
-    score.raw_value()
-
-fn fts_bm25_explain(tf: i64, df: i64, doc_len: i64,
-                    avg_dl_fixed: i64, total_docs: i64) -> FtsBm25Explanation:
-    FtsBm25Explanation(
-        score_contract: "bm25-fixed-v1",
-        term_frequency: tf,
-        document_frequency: df,
-        document_length: doc_len,
-        average_document_length_fixed: avg_dl_fixed,
-        document_count: total_docs,
-        score_milli: fts_bm25_score_fixed(tf, df, doc_len,
-                                         avg_dl_fixed, total_docs)
-    )
 
 # ── BM25 score (integer approximation) ────────────────────────────────────────
 #
@@ -55,20 +24,43 @@ fn fts_bm25_explain(tf: i64, df: i64, doc_len: i64,
 # score = idf * tf_component / 1000
 
 fn fts_bm25_score(tf: i64, df: i64, doc_len: i64, avg_dl: i64, total_docs: i64) -> i64:
-    if tf <= 0 or df <= 0 or avg_dl <= 0 or total_docs <= 0:
+    if tf == 0 or df == 0 or avg_dl == 0:
         return 0
-    fts_bm25_score_fixed(tf, df, doc_len, avg_dl * 1000000, total_docs)
 
-fn _fts_bm25_score_fixed(tf: i64, df: i64, doc_len: i64,
-                         avg_dl_fixed: i64, total_docs: i64) -> i64:
-    fts_bm25_score_fixed(tf, df, doc_len, avg_dl_fixed, total_docs)
+    # IDF: (N - df + 1) * 1000 / (df + 1)
+    val idf = (total_docs - df + 1) * 1000 / (df + 1)
+    if idf <= 0:
+        return 0
+
+    # k1 and b scaled by 1000
+    val k1 = 1200
+    val b = 750
+
+    # Normalized doc length: doc_len * 1000 / avg_dl
+    val norm_dl = doc_len * 1000 / avg_dl
+
+    # Denominator: tf * 1000 + k1 * (1000 - b + b * doc_len / avg_dl)
+    #            = tf * 1000 + k1 * (1000 - 750 + 750 * doc_len / avg_dl)
+    #            = tf * 1000 + k1 * (250 + norm_dl * 750 / 1000)
+    val len_factor = 250 + norm_dl * 750 / 1000
+    val denom = tf * 1000 + k1 * len_factor / 1000
+
+    if denom == 0:
+        return 0
+
+    # Numerator: tf * (k1 + 1000) = tf * 2200
+    val numer = tf * 2200
+
+    # score = idf * numer / denom
+    val sc = idf * numer / denom
+    sc
 
 # ── BM25 multi-term search ────────────────────────────────────────────────────
 
 fn fts_bm25_search(index: FtsInvertedIndex, query: text) -> [FtsSearchResult]:
     val tokens = fts_tokenize(query)
     val total_docs = index.doc_count()
-    val avg_dl_fixed = index.avg_doc_length_fixed()
+    val avg_dl = index.avg_doc_length()
 
     # Accumulate scores per doc_id
     var scores: Dict<text, i64> = {}
@@ -83,9 +75,8 @@ fn fts_bm25_search(index: FtsInvertedIndex, query: text) -> [FtsSearchResult]:
             val posting = postings[pi]
             val p_doc_id = posting.doc_id
             val doc_key = "{p_doc_id}"
-            val doc_len = index.doc_length(p_doc_id)
-            val sc = _fts_bm25_score_fixed(posting.term_freq, df, doc_len,
-                                           avg_dl_fixed, total_docs)
+            val doc_len = avg_dl  # approximate: use avg if exact not accessible
+            val sc = fts_bm25_score(posting.term_freq, df, doc_len, avg_dl, total_docs)
             if scores.contains_key(doc_key):
                 scores[doc_key] = scores[doc_key] + sc
             else:
@@ -107,10 +98,7 @@ fn fts_bm25_search(index: FtsInvertedIndex, query: text) -> [FtsSearchResult]:
     while si < results.len():
         val key_result = results[si as i32]
         var sj: i64 = si - 1
-        while (sj >= 0 and
-               (results[sj as i32].score < key_result.score or
-                (results[sj as i32].score == key_result.score and
-                 key_result.doc_id < results[sj as i32].doc_id))):
+        while sj >= 0 and results[sj as i32].score < key_result.score:
             results[(sj + 1) as i32] = results[sj as i32]
             sj = sj - 1
         results[(sj + 1) as i32] = key_result

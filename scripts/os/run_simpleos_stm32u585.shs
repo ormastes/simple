@@ -17,7 +17,7 @@ set -eu
 #   SIMPLEOS_SERIAL_LOG If set, capture serial to this file and verify it
 #   SIMPLEOS_SERIAL_SECONDS Capture duration when SIMPLEOS_SERIAL_LOG is set (default: 20)
 
-ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 
 SIMPLEOS_U585_ELF="${SIMPLEOS_U585_ELF:-${ROOT_DIR}/build/os/simpleos_stm32u585.elf}"
 FLASHER="${FLASHER:-st-flash}"
@@ -28,6 +28,7 @@ SERIAL_SECONDS="${SIMPLEOS_SERIAL_SECONDS:-20}"
 PROTECTION_MODE="${SIMPLEOS_PROTECTION_MODE:-enforce}"
 LINKER_SCRIPT="${ROOT_DIR}/src/compiler/70.backend/baremetal/cortex_m33/linker_stm32u585.ld"
 BOARD_DIR="${ROOT_DIR}/src/os/kernel/arch/cortex_m33"
+SIMPLE_BIN="${SIMPLE_BIN:-${ROOT_DIR}/bin/simple}"
 
 NO_BUILD=0
 BUILD_ONLY=0
@@ -51,11 +52,30 @@ if [ "$NO_BUILD" -eq 0 ]; then
     mkdir -p "$(dirname "$SIMPLEOS_U585_ELF")"
 
     SHIM_C="${BOARD_DIR}/cm33_shim.c"
+    POLICY_SOURCE="src/os/kernel/arch/cortex_m33/access_policy.spl"
+    POLICY_OBJ="${SIMPLEOS_U585_ELF%.elf}.access_policy.o"
+    SCALAR_POLICY_SOURCE="src/os/kernel/arch/cortex_m33/scalar_parser_fs_policy.spl"
+    SCALAR_POLICY_OBJ="${SIMPLEOS_U585_ELF%.elf}.scalar_parser_fs_policy.o"
 
     if [ ! -f "$SHIM_C" ]; then
         echo "[u585] ERROR: C shim not found: $SHIM_C" >&2
         exit 1
     fi
+
+    (cd "$ROOT_DIR" && "$SIMPLE_BIN" native-build --backend llvm \
+        --source src/os/kernel/arch/cortex_m33 \
+        --entry "$POLICY_SOURCE" --entry-closure \
+        --target thumbv8m.main-none-eabi --emit-object \
+        -o "$POLICY_OBJ")
+    sh "$ROOT_DIR/scripts/check/check-cortex-m-policy-object.shs" \
+        stm32u585 "$POLICY_OBJ"
+    (cd "$ROOT_DIR" && "$SIMPLE_BIN" native-build --backend llvm \
+        --source src/os/kernel/arch/cortex_m33 \
+        --entry "$SCALAR_POLICY_SOURCE" --entry-closure \
+        --target thumbv8m.main-none-eabi --emit-object \
+        -o "$SCALAR_POLICY_OBJ")
+    sh "$ROOT_DIR/scripts/check/check-cm33-scalar-parser-fs-object.shs" \
+        stm32u585 "$SCALAR_POLICY_OBJ"
 
     clang \
         --target=thumbv8m.main-none-eabihf \
@@ -68,6 +88,8 @@ if [ "$NO_BUILD" -eq 0 ]; then
         -T "$LINKER_SCRIPT" \
         -o "$SIMPLEOS_U585_ELF" \
         "$SHIM_C" \
+        "$POLICY_OBJ" \
+        "$SCALAR_POLICY_OBJ" \
         -fuse-ld=lld \
         2>&1
 

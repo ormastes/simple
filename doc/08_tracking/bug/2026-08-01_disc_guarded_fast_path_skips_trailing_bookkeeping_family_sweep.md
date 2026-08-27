@@ -1,8 +1,7 @@
 # Family sweep: disc-guarded fast paths that skip trailing bookkeeping
 
 Date: 2026-08-01
-Status: CLOSED (not reproducible)
-Status re-verified 2026-08-17 by source inspection (triage shard 00).
+Status: family enumerated and closed; one structural hardening landed
 Related: `064d40e5896` (the two originally proved instances)
 
 ## The defect shape

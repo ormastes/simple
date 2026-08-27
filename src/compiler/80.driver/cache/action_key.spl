@@ -21,7 +21,7 @@
 #   ORDERED — probe order is semantic there (mirrors plan §1.1).
 
 use std.common.crypto.sha256.{sha256_text}
-use std.common.crypto.types.{crypto_text_to_bytes as text_to_bytes}
+use std.common.crypto.types.{text_to_bytes}
 
 # ============================================================================
 # Structs (mirror Model.lean: Dep, ActionKey)
@@ -91,87 +91,36 @@ fn action_dep_le(a: ActionDep, b: ActionDep) -> bool:
         return action_key_text_le(a.iface_digest, b.iface_digest)
     false
 
-fn action_dep_lt(a: ActionDep, b: ActionDep) -> bool:
-    if action_key_text_lt(a.module_id, b.module_id):
-        return true
-    if a.module_id == b.module_id:
-        return action_key_text_lt(a.iface_digest, b.iface_digest)
-    false
-
-fn action_key_text_sift_down(mut items: [text], root_index: i64, heap_len: i64):
-    var root = root_index
-    while true:
-        val left = root * 2 + 1
-        if left >= heap_len:
-            return
-        var largest = root
-        if action_key_text_lt(items[largest], items[left]):
-            largest = left
-        val right = left + 1
-        if right < heap_len and action_key_text_lt(items[largest], items[right]):
-            largest = right
-        if largest == root:
-            return
-        val temporary = items[root]
-        items[root] = items[largest]
-        items[largest] = temporary
-        root = largest
-
-fn action_dep_sift_down(mut items: [ActionDep], root_index: i64, heap_len: i64):
-    var root = root_index
-    while true:
-        val left = root * 2 + 1
-        if left >= heap_len:
-            return
-        var largest = root
-        if action_dep_lt(items[largest], items[left]):
-            largest = left
-        val right = left + 1
-        if right < heap_len and action_dep_lt(items[largest], items[right]):
-            largest = right
-        if largest == root:
-            return
-        val temporary = items[root]
-        items[root] = items[largest]
-        items[largest] = temporary
-        root = largest
-
-# Canonically orders text exactly like Lean strLe/sortStrs. Equal text values
-# are observationally identical, so heapsort stability cannot change encoding.
+# Insertion sort (mirrors Lean insStr/sortStrs).
 fn action_key_sort_texts(items: [text]) -> [text]:
-    var out = items
-    if out.len() < 2:
-        return out
-    var start = out.len() / 2
-    while start > 0:
-        start = start - 1
-        action_key_text_sift_down(out, start, out.len())
-    var end = out.len()
-    while end > 1:
-        end = end - 1
-        val temporary = out[0]
-        out[0] = out[end]
-        out[end] = temporary
-        action_key_text_sift_down(out, 0, end)
+    var out: [text] = []
+    for item in items:
+        var placed = false
+        var next: [text] = []
+        for s in out:
+            if not placed and action_key_text_le(item, s):
+                next.push(item)
+                placed = true
+            next.push(s)
+        if not placed:
+            next.push(item)
+        out = next
     out
 
-# Canonically orders dependencies exactly like Lean depLe/sortDeps. ActionDep
-# contains only the two ordering fields, so equal tuples are indistinguishable.
+# Insertion sort (mirrors Lean insDep/sortDeps).
 fn action_key_sort_deps(items: [ActionDep]) -> [ActionDep]:
-    var out = items
-    if out.len() < 2:
-        return out
-    var start = out.len() / 2
-    while start > 0:
-        start = start - 1
-        action_dep_sift_down(out, start, out.len())
-    var end = out.len()
-    while end > 1:
-        end = end - 1
-        val temporary = out[0]
-        out[0] = out[end]
-        out[end] = temporary
-        action_dep_sift_down(out, 0, end)
+    var out: [ActionDep] = []
+    for item in items:
+        var placed = false
+        var next: [ActionDep] = []
+        for d in out:
+            if not placed and action_dep_le(item, d):
+                next.push(item)
+                placed = true
+            next.push(d)
+        if not placed:
+            next.push(item)
+        out = next
     out
 
 # ============================================================================
@@ -188,9 +137,7 @@ fn canon_field(tag: text, encoded_value: text) -> text:
     "F" + "{tag.len()}" + ":" + tag + encoded_value
 
 fn canon_seq(encoded_items: [text]) -> text:
-    var body = ""
-    for item in encoded_items:
-        body = body + item
+    val body = encoded_items.join("")
     "Q" + "{encoded_items.len()}" + ":" + body
 
 # Mirrors Lean encodeDep.
@@ -254,40 +201,170 @@ fn interface_digest_of(parts: [text]) -> text:
         items.push(canon_str(p))
     sha256_text(canon_field("simple/interface/v1", canon_seq(items)))
 
-# Textual interface extraction (v1). Collects declaration HEADER lines from
-# raw source — any line whose trimmed form starts with a declaration keyword.
-# Body statements are not headers, so a body-only edit leaves the part set
-# (and therefore interface_digest_of_source) unchanged, while a signature
-# edit changes it. Known, stated limits of the textual v1 extractor:
-#   - struct/class FIELD lines are not captured (field rename won't change it)
-#   - a nested `fn` inside a body IS captured (rare; over-invalidates, safe)
-# The semantic replacement is 35.semantics/interface/compile_interface.spl;
-# until that is wired, this textual form is the honest first consumer.
-fn source_interface_parts(source: text) -> [text]:
-    var parts: [text] = []
-    for line in source.split("\n"):
-        val t = line.trim()
-        if t.starts_with("fn ") or t.starts_with("pub fn ") or t.starts_with("me ") or t.starts_with("extern fn ") or t.starts_with("struct ") or t.starts_with("class ") or t.starts_with("enum ") or t.starts_with("trait ") or t.starts_with("type ") or t.starts_with("export ") or t.starts_with("impl "):
-            parts.push(t)
-    parts
+# ============================================================================
+# ActionKey v2 (schema_version: 2) — C0 frozen extension (Agent C1)
+#
+# Source of truth: doc/03_plan/compiler/cache/c0_schema_freeze_2026-08-09.md §1
+# Positions 0-14 are BYTE-IDENTICAL to v1 above (same tags, same order, same
+# sort rules) so the v1 proofs (Model.lean) extend rather than break. Positions
+# 15-20 are APPENDED, never interleaved. A separate struct/encoder (not a
+# widening of ActionKey) is used deliberately: ActionKey has zero callers but
+# an existing golden-digest spec (test/01_unit/compiler/cache/action_key_spec.spl,
+# owned by another agent) pins its 15-field literal construction and its v1
+# golden digest string; widening that struct in place would break both without
+# being this agent's file to edit. ActionKeyV2 is the v2 canonical type; v1
+# stays exactly as proven.
+# ============================================================================
 
-# Convenience: canonical interface digest straight from raw source text.
-fn interface_digest_of_source(source: text) -> text:
-    interface_digest_of(source_interface_parts(source))
+# 10 real values (backed) — see cache_protocol.sdn `enums.result_kind`.
+# Encoded by NAME (never ordinal) so future values never perturb old digests.
+enum ResultKind:
+    InterpreterModule
+    MirModule
+    ObjectFile
+    InterfaceSummary
+    Diagnostics
+    AopWeaveArtifact
+    AdviceArtifact
+    AspectPack
+    BlockTransferResult
+    FunctionSummary
+    LinkProduct
 
-# DepInterfaceFold — canonical fold of a module's DEPENDENCIES' interface
-# digests, for inclusion in compilation cache keys. Each entry is a
-# pre-formed "path=iface_digest" text (I/O and fail-closed handling live at
-# the caller, keeping this function pure). Entries are a SET: sorted here so
-# discovery order cannot change the fold. A dependency's body-only edit
-# leaves its iface_digest — and therefore this fold — unchanged; a signature
-# edit changes it, invalidating dependents.
-fn dependency_interface_fold(dep_iface_entries: [text]) -> text:
-    val sorted = action_key_sort_texts(dep_iface_entries)
-    var items: [text] = []
-    for e in sorted:
-        items.push(canon_str(e))
-    sha256_text(canon_field("simple/dep-interfaces/v1", canon_seq(items)))
+fn result_kind_to_text(k: ResultKind) -> text:
+    match k:
+        case InterpreterModule: "interpreter_module"
+        case MirModule: "mir_module"
+        case ObjectFile: "object_file"
+        case InterfaceSummary: "interface_summary"
+        case Diagnostics: "diagnostics"
+        case AopWeaveArtifact: "aop_weave_artifact"
+        case AdviceArtifact: "advice_artifact"
+        case AspectPack: "aspect_pack"
+        case BlockTransferResult: "block_transfer_result"
+        case FunctionSummary: "function_summary"
+        case LinkProduct: "link_product"
+
+# The v2 canonical key: v1's 15 fields (0-14, unchanged names/order) plus the
+# six frozen extension fields (15-20). Field count and order NEVER vary —
+# unbacked fields (16-19; no producer in the tree today per freeze note §1)
+# always carry the sentinel below rather than being omitted, so the C6
+# `fields == theorems` coverage gate stays stable across the whole rollout.
+struct ActionKeyV2:
+    domain: text
+    compiler_exe: text
+    live_compiler_src: text
+    schema_version: i64
+    target_triple: text
+    host_arch: text
+    cfg_features: [text]        # set; canonicalised by sort
+    stdlib_variant: text
+    runtime_family: text
+    source_content: text
+    resolution_witness: text
+    deps: [ActionDep]           # set; canonicalised by sort
+    macro_root: text
+    aop_selection: text
+    ct_env_inputs: [text]       # set; canonicalised by sort
+    schema_digest: text                        # pos 15 — schema_digest_of_protocol
+    aop_surface_root: text                     # pos 16 — SPEC_FORWARD; sentinel until backed
+    aop_candidate_partition_roots: [text]       # pos 17 — set; SPEC_FORWARD; empty until backed
+    aop_weave_root: text                        # pos 18 — SPEC_FORWARD; sentinel until backed
+    block_manifest_roots: [text]                # pos 19 — set; SPEC_FORWARD; empty until backed
+    result_kind: ResultKind                     # pos 20
+
+# Fixed sentinel digest for an unbacked single-digest field (positions 16, 18):
+# the canonical encoding of the empty seq, domain-separated so it can never
+# collide with a real artifact/root digest.
+fn action_key_v2_sentinel_root_digest() -> text:
+    sha256_text(canon_field("simple/cache-sentinel/empty-root/v2", canon_seq([])))
+
+# Unbacked set fields (positions 17, 19) simply encode as the empty set — no
+# separate sentinel value is needed for a set; "no roots yet" IS the empty set.
+fn action_key_v2_empty_root_set() -> [text]:
+    val empty: [text] = []
+    empty
+
+fn action_key_v2_encode(key: ActionKeyV2) -> text:
+    val cfg_sorted = action_key_sort_texts(key.cfg_features)
+    val env_sorted = action_key_sort_texts(key.ct_env_inputs)
+    val deps_sorted = action_key_sort_deps(key.deps)
+    val aop_candidate_sorted = action_key_sort_texts(key.aop_candidate_partition_roots)
+    val block_manifest_sorted = action_key_sort_texts(key.block_manifest_roots)
+
+    var cfg_items: [text] = []
+    for c in cfg_sorted:
+        cfg_items.push(canon_str(c))
+    var env_items: [text] = []
+    for e in env_sorted:
+        env_items.push(canon_str(e))
+    var dep_items: [text] = []
+    for d in deps_sorted:
+        dep_items.push(canon_dep(d))
+    var aop_candidate_items: [text] = []
+    for r in aop_candidate_sorted:
+        aop_candidate_items.push(canon_str(r))
+    var block_manifest_items: [text] = []
+    for r in block_manifest_sorted:
+        block_manifest_items.push(canon_str(r))
+
+    var inner: [text] = []
+    # Positions 1-14: byte-identical to v1 (same tags, same order).
+    inner.push(canon_field("compilerExe", canon_str(key.compiler_exe)))
+    inner.push(canon_field("liveCompilerSrc", canon_str(key.live_compiler_src)))
+    inner.push(canon_field("schemaVersion", canon_nat(key.schema_version)))
+    inner.push(canon_field("targetTriple", canon_str(key.target_triple)))
+    inner.push(canon_field("hostArch", canon_str(key.host_arch)))
+    inner.push(canon_field("cfgFeatures", canon_seq(cfg_items)))
+    inner.push(canon_field("stdlibVariant", canon_str(key.stdlib_variant)))
+    inner.push(canon_field("runtimeFamily", canon_str(key.runtime_family)))
+    inner.push(canon_field("sourceContent", canon_str(key.source_content)))
+    inner.push(canon_field("resolutionWitness", canon_str(key.resolution_witness)))
+    inner.push(canon_field("deps", canon_seq(dep_items)))
+    inner.push(canon_field("macroRoot", canon_str(key.macro_root)))
+    inner.push(canon_field("aopSelection", canon_str(key.aop_selection)))
+    inner.push(canon_field("ctEnvInputs", canon_seq(env_items)))
+    # Positions 15-20: v2 extension, APPENDED.
+    inner.push(canon_field("schemaDigest", canon_str(key.schema_digest)))
+    inner.push(canon_field("aopSurfaceRoot", canon_str(key.aop_surface_root)))
+    inner.push(canon_field("aopCandidatePartitionRoots", canon_seq(aop_candidate_items)))
+    inner.push(canon_field("aopWeaveRoot", canon_str(key.aop_weave_root)))
+    inner.push(canon_field("blockManifestRoots", canon_seq(block_manifest_items)))
+    inner.push(canon_field("resultKind", canon_str(result_kind_to_text(key.result_kind))))
+
+    canon_field(key.domain, canon_seq(inner))
+
+fn action_key_v2_digest(key: ActionKeyV2) -> text:
+    sha256_text(action_key_v2_encode(key))
+
+# Convenience: build an ActionKeyV2 from a v1 ActionKey plus the v2-only
+# fields. Passing sentinels for 16/17/18/19 and a schema_digest/result_kind
+# for 15/20 reproduces the "prefix-compatibility" shape the freeze note (§3)
+# describes: only the appended suffix differs from a pure v1 encoding.
+fn action_key_v2_from_v1(v1: ActionKey, schema_digest: text, result_kind: ResultKind) -> ActionKeyV2:
+    ActionKeyV2(
+        domain: v1.domain,
+        compiler_exe: v1.compiler_exe,
+        live_compiler_src: v1.live_compiler_src,
+        schema_version: v1.schema_version,
+        target_triple: v1.target_triple,
+        host_arch: v1.host_arch,
+        cfg_features: v1.cfg_features,
+        stdlib_variant: v1.stdlib_variant,
+        runtime_family: v1.runtime_family,
+        source_content: v1.source_content,
+        resolution_witness: v1.resolution_witness,
+        deps: v1.deps,
+        macro_root: v1.macro_root,
+        aop_selection: v1.aop_selection,
+        ct_env_inputs: v1.ct_env_inputs,
+        schema_digest: schema_digest,
+        aop_surface_root: action_key_v2_sentinel_root_digest(),
+        aop_candidate_partition_roots: action_key_v2_empty_root_set(),
+        aop_weave_root: action_key_v2_sentinel_root_digest(),
+        block_manifest_roots: action_key_v2_empty_root_set(),
+        result_kind: result_kind
+    )
 
 # ResolutionWitness — records how the resolver arrived at its choice.
 # Candidate probes stay ORDERED (probe order is semantic; NOT sorted).

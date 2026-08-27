@@ -9,7 +9,7 @@
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Scv Change Specification
+# scv_change_spec
 
 ## Scenarios
 
@@ -41,10 +41,18 @@ Reproduction: this block contains the complete executable scenario source.
 | Category | Application |
 | Status | Active |
 | Source | `test/03_system/app/scv/feature/scv_change_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
-## Overview
+## Purpose and audience
+Verifies the scv change behaviour end to end so maintainers of this
+component and reviewers of its spec share one pinned definition.
+## Operator workflow
+Run `bin/simple test <this spec>`; read the per-scenario verdicts in
+the `Results:` summary. Each scenario asserts an observable outcome.
+## Compatibility and limitations
+Covers the currently shipped behaviour only; performance, stress and
+unrelated sibling features are out of scope.
 
 Tests covering REQ-003 stable change ids.
 - REQ-003 stable change ids

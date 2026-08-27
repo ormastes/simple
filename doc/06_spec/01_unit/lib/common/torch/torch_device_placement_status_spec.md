@@ -1,196 +1,29 @@
-# Torch Device Placement Status Specification
+# Spec: Torch Device Placement Status
 
-> Tests covering Torch device placement status.
+Source: `test/01_unit/lib/common/torch/torch_device_placement_status_spec.spl`
 
-| Tests | Active | Skipped | Pending |
-|-------|--------|---------|--------:|
-| 5 | 5 | 0 | 0 |
+## Behavior
 
-<details>
-<summary>Full Scenario Manual</summary>
+- GC and NoGC backend `tensor_cuda(h, device_id)` methods pass the requested
+  device id through to the Torch SFFI instead of forcing CUDA device `0`.
+- GC and NoGC `Tensor.cuda(device_id)` methods pass the requested device id
+  through to the Torch SFFI instead of forcing CUDA device `0`.
+- GC and NoGC Torch stream creation passes the requested device id through to
+  `rt_torch_stream_create`.
+- GC and NoGC optimizer state initialization no longer moves state tensors to
+  CUDA device `0` implicitly.
+- GC and NoGC optimizer state initialization queries the parameter device with
+  `rt_torch_torchtensor_device(param)` and moves zero state tensors to that same
+  CUDA device when the parameter is already CUDA-backed.
 
-# Torch Device Placement Status Specification
+## Covered Requirement
 
-## Scenarios
+- Torch device placement must not be user-visible as correct when it is actually
+  hardcoded to CUDA device `0`.
+- Optimizer momentum and Adam state must preserve the parameter device for
+  already-CUDA parameters instead of falling back to CPU/default state.
 
-### Torch device placement status
+## Not Covered
 
-#### passes explicit CUDA device ids through backend facades
-
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- passes explicit CUDA device ids through backend facades
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 4 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-UNIT
-step("passes explicit CUDA device ids through backend facades")
-assert_backend_uses_requested_cuda_device("src/lib/gc_async_mut/torch/backend.spl")
-assert_backend_uses_requested_cuda_device("src/lib/nogc_sync_mut/torch/backend.spl")
-```
-
-</details>
-
-#### passes explicit CUDA device ids through Tensor methods
-
-- passes explicit CUDA device ids through Tensor methods
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 4 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-UNIT
-step("passes explicit CUDA device ids through Tensor methods")
-assert_tensor_method_uses_requested_cuda_device("src/lib/gc_async_mut/torch/mod.spl")
-assert_tensor_method_uses_requested_cuda_device("src/lib/nogc_sync_mut/torch/mod.spl")
-```
-
-</details>
-
-#### passes explicit stream device ids to stream creation
-
-- passes explicit stream device ids to stream creation
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 4 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-UNIT
-step("passes explicit stream device ids to stream creation")
-assert_stream_uses_requested_device("src/lib/gc_async_mut/torch/torch_training.spl")
-assert_stream_uses_requested_device("src/lib/nogc_sync_mut/torch/torch_training.spl")
-```
-
-</details>
-
-#### does not initialize optimizer state by forcing CUDA device zero
-
-- does not initialize optimizer state by forcing CUDA device zero
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 4 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-UNIT
-step("does not initialize optimizer state by forcing CUDA device zero")
-assert_optimizer_does_not_force_cuda_zero("src/lib/gc_async_mut/torch/optim.spl")
-assert_optimizer_does_not_force_cuda_zero("src/lib/nogc_sync_mut/torch/optim.spl")
-```
-
-</details>
-
-#### initializes optimizer state on the parameter device
-
-- initializes optimizer state on the parameter device
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 4 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-UNIT
-step("initializes optimizer state on the parameter device")
-assert_optimizer_state_uses_parameter_device("src/lib/gc_async_mut/torch/optim.spl")
-assert_optimizer_state_uses_parameter_device("src/lib/nogc_sync_mut/torch/optim.spl")
-```
-
-</details>
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Standard Library |
-| Status | Active |
-| Source | `test/01_unit/lib/common/torch/torch_device_placement_status_spec.spl` |
-| Updated | 2026-08-26 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering Torch device placement status.
-- Torch device placement status
-
-## Scenario Summary
-
-| Metric | Count |
-|--------|------:|
-| Total scenarios | 5 |
-| Active scenarios | 5 |
-| Slow scenarios | 0 |
-| Skipped scenarios | 0 |
-| Pending scenarios | 0 |
-
-
-</details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-UNIT`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `a765b71718373684f81e7c0bc9e12f34bd20ae3f9bd79879ab58d3d6ee891fad`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `a765b71718373684f81e7c0bc9e12f34bd20ae3f9bd79879ab58d3d6ee891fad`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `a765b71718373684f81e7c0bc9e12f34bd20ae3f9bd79879ab58d3d6ee891fad`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/01_unit/lib/common/torch/torch_device_placement_status_spec.spl
-mirror: doc/06_spec/01_unit/lib/common/torch/torch_device_placement_status_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/lib/common/torch/torch_device_placement_status_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/lib/common/torch/torch_device_placement_status_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/lib/common/torch/torch_device_placement_status_spec.spl:85:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'passes explicit CUDA device ids through backend facades' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/lib/common/torch/torch_device_placement_status_spec.spl:91:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'passes explicit CUDA device ids through Tensor methods' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/lib/common/torch/torch_device_placement_status_spec.spl:97:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'passes explicit stream device ids to stream creation' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->
+- Live CUDA placement against libtorch.
+- End-to-end optimizer execution against a live libtorch CUDA installation.

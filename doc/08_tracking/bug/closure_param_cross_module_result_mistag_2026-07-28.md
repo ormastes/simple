@@ -1,8 +1,7 @@
 # Cross-module closure-param invocation mis-tags results (seed run lane)
 
 - **Date:** 2026-07-28
-- Status: OPEN (P2)
-- Status re-verified 2026-08-17 by source inspection (triage shard 00).
+- **Status:** open
 - **Area:** interpreter/JIT closure calls; observed via `bin/simple run` (seed-backed lane — banner "Build and use the pure-Simple bin/simple instead." was printed)
 
 ## Symptom

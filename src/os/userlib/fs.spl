@@ -5,12 +5,8 @@ use std.fs_driver.bytes_util.{text_to_bytes_pure}
 use os.userlib.syscall_raw
 use os.userlib.ipc_protocol(VFS_OPEN, VFS_READ, VFS_WRITE, VFS_CLOSE, VFS_STAT, VFS_STAT_NO_FOLLOW, VFS_MKDIR, VFS_READDIR, VFS_REMOVE, VFS_RENAME, VFS_MOUNT_LIST, VFS_READLINK, VFS_OPEN_O_RDONLY, VFS_OPEN_O_WRONLY, VFS_OPEN_O_CREAT, VFS_OPEN_O_TRUNC)
 use os.kernel.types.fs_types(DirEntry, FsNode, FsNodeKind)
-use os.services.vfs.vfs_positioned_ops.{g_vfs_positioned_fstat}
-use std.fs_driver.error.{FsError}
-use std.fs_driver.types.{FileStat}
 use os.kernel.types.ipc_types(IpcPort, IpcMessage)
 use std.common.crypto.secure_memory.{secure_zero_u8_slots, secure_set_u8_length}
-pub use std.common.contracts.os.dbfs_vfs_mount_capability_v1.{DbfsVfsMountCapabilityV1}
 
 extern fn unsafe_addr_of(ref: any) -> u64
 
@@ -119,7 +115,7 @@ pub fn read_file_bytes_direct(path: text, max_len: u64) -> Result<[u8], text>:
             val _closed = file_close_direct(fd)
             result
 
-pub fn read_file_bytes_direct_owned(path: text, max_len: u64) -> Result<[u8], text>:
+fn read_file_bytes_direct_owned(path: text, max_len: u64) -> Result<[u8], text>:
     """Read into one fixed backing allocation and shrink it in place.
 
     Intended for mutable secrets: no slice allocation retains a second copy.
@@ -349,86 +345,6 @@ fn stat(path: text) -> Result<FsNode, text>:
         modified_ns: 0u64
     ))
 
-fn stat_no_follow(path: text) -> Result<FsNode, text>:
-    val response = vfs_ipc_request_bytes(VFS_STAT_NO_FOLLOW, _vfs_text_bytes(path))?
-    if response.len() != 11u64:
-        return Err("malformed no-follow stat response")
-    Ok(FsNode(
-        id: 0u64,
-        kind: _fs_node_kind_from_u8(response[0u64]),
-        size: _vfs_read_u64(response, 1u64),
-        permissions: _vfs_read_u16(response, 9u64),
-        owner: 0u32, group: 0u32, created_ns: 0u64, modified_ns: 0u64
-    ))
-
-pub fn file_lstat_bounded(path: text) -> Result<VfsFileStat, text>:
-    """Stat one bounded path without following its final symlink."""
-    if path.len() == 0u64 or path.len() > 4096u64 or path.contains("\0"):
-        return Err("invalid no-follow stat path length")
-    val node = stat_no_follow(path)?
-    val type_bits = match node.kind:
-        case FsNodeKind.Directory: 0o040000u32
-        case FsNodeKind.Symlink: 0o120000u32
-        case FsNodeKind.Device: 0o060000u32
-        case FsNodeKind.Pipe: 0o010000u32
-        case _: 0o100000u32
-    Ok(VfsFileStat(
-        kind: node.kind, size: node.size,
-        mode: type_bits | node.permissions.to_u32(),
-        uid: 0u32, gid: 0u32, atime_ns: 0u64, mtime_ns: 0u64,
-        kind_available: true, mode_available: true,
-        uid_gid_available: false, times_available: false))
-
-pub fn file_stat_bounded(path: text) -> Result<VfsFileStat, text>:
-    """Stat one bounded path through canonical VFS_STAT.
-
-    The current wire reply owns kind, size, and permission bits only. UID/GID
-    and times are marked unavailable rather than presented as real zeroes.
-    """
-    if path.len() == 0u64 or path.len() > 4096u64 or path.contains("\0"):
-        return Err("invalid stat path length")
-    val node = stat(path)?
-    val type_bits = match node.kind:
-        case FsNodeKind.Directory: 0o040000u32
-        case FsNodeKind.Symlink: 0o120000u32
-        case FsNodeKind.Device: 0o060000u32
-        case FsNodeKind.Pipe: 0o010000u32
-        case _: 0o100000u32
-    Ok(VfsFileStat(
-        kind: node.kind, size: node.size,
-        mode: type_bits | node.permissions.to_u32(),
-        uid: 0u32, gid: 0u32, atime_ns: 0u64, mtime_ns: 0u64,
-        kind_available: true, mode_available: true,
-        uid_gid_available: false, times_available: false))
-
-fn _vfs_kind_from_mode(mode: u32) -> FsNodeKind:
-    val type_bits = mode & 0o170000u32
-    if type_bits == 0o040000u32: return FsNodeKind.Directory
-    if type_bits == 0o120000u32: return FsNodeKind.Symlink
-    if type_bits == 0o060000u32 or type_bits == 0o020000u32:
-        return FsNodeKind.Device
-    if type_bits == 0o010000u32: return FsNodeKind.Pipe
-    FsNodeKind.File
-
-pub fn file_fstat_bounded(file_object_id: u64) -> Result<VfsFileStat, FsError>:
-    """Stat a live positioned file object without weakening handle ownership."""
-    val value: FileStat = g_vfs_positioned_fstat(file_object_id)?
-    Ok(VfsFileStat(
-        kind: _vfs_kind_from_mode(value.mode), size: value.size,
-        mode: value.mode, uid: value.uid, gid: value.gid,
-        atime_ns: value.atime_ns, mtime_ns: value.mtime_ns,
-        kind_available: (value.mode & 0o170000u32) != 0u32,
-        mode_available: value.mode != 0u32,
-        uid_gid_available: false,
-        times_available: value.atime_ns != 0u64 or value.mtime_ns != 0u64))
-
-pub fn readlink(path: text) -> Result<text, text>:
-    """Read one symbolic-link target through the canonical VFS service."""
-    if path.len() == 0u64 or path.len() > 4096u64:
-        return Err("invalid readlink path length")
-    val response = vfs_ipc_request_bytes(VFS_READLINK, _vfs_text_bytes(path))?
-    Ok(bytes_to_string(response))
-
 fn mkdir(path: text) -> Result<bool, text>:
     val resp = _vfs_request(VFS_MKDIR, path)?
     Ok(true)
@@ -451,9 +367,8 @@ pub fn list_directory_bounded(path: text) -> Result<VfsDirectoryListing, text>:
     # textual until the service owner publishes a different READDIR format.
     val resp = bytes_to_string(response)
     var entries: [DirEntry] = []
-    var total_name_bytes: u64 = 0u64
     if resp.len() == 0:
-        return Ok(VfsDirectoryListing(entries: entries, total_name_bytes: 0u64))
+        return Ok(entries)
     val lines = resp.split("\n")
     var i: u64 = 0
     while i < lines.len() as u64:
@@ -495,7 +410,7 @@ pub fn list_directory_bounded(path: text) -> Result<VfsDirectoryListing, text>:
             )
         ))
         i = i + 1
-    Ok(VfsDirectoryListing(entries: entries, total_name_bytes: total_name_bytes))
+    Ok(entries)
 
 fn remove(path: text) -> Result<bool, text>:
     val resp = _vfs_request(VFS_REMOVE, path)?
@@ -508,13 +423,13 @@ fn rename(old_path: text, new_path: text) -> Result<bool, text>:
 
 fn mount(device: text, mount_path: text, fs_type: text) -> Result<bool, text>:
     val payload = "{device}\0{mount_path}\0{fs_type}"
-    val result = syscall(37, unsafe_addr_of(payload), payload.len() as u64, 0, 0, 0)
+    val result = syscall(37, &payload as u64, payload.len() as u64, 0, 0, 0)
     if result < 0:
         return Err("mount failed with code {result}")
     Ok(true)
 
 fn unmount(path: text) -> Result<bool, text>:
-    val result = syscall(38, unsafe_addr_of(path), path.len() as u64, 0, 0, 0)
+    val result = syscall(38, &path as u64, path.len() as u64, 0, 0, 0)
     if result < 0:
         return Err("unmount failed with code {result}")
     Ok(true)
@@ -534,7 +449,4 @@ fn mount_list() -> Result<[text], text>:
     Ok(result)
 
 # Minimal process-side byte I/O surface used by filesystem-launched tools.
-export file_open_direct, file_read_direct, file_close_direct, stat, list_directory_bounded,
-    VfsDirectoryListing, VfsFileStat, file_stat_bounded, file_lstat_bounded, file_fstat_bounded,
-    VFS_DIRECTORY_ENTRY_LIMIT,
-    VFS_DIRECTORY_NAME_BYTES_LIMIT, VFS_DIRECTORY_TOTAL_NAME_BYTES_LIMIT
+export file_open_direct, file_read_direct, file_close_direct, stat

@@ -13,7 +13,7 @@ use std.common.base_encoding.{text_to_bytes}
 use std.tiny.common.event.{TinyEvent, TINY_EVENT_KEY, TINY_EVENT_POINTER_DOWN, TINY_EVENT_POINTER_UP, TINY_EVENT_TEXT, TINY_EVENT_WHEEL}
 use std.tiny.common.status.{TINY_ERR_INVALID}
 use std.tiny.common.types.{TinyPoint, TinyRect}
-use std.tiny.gui.event_dispatch.{TINY_KEY_TAB}
+use std.tiny.gui.state.{TINY_KEY_TAB}
 use std.tiny.web.scroll.{TinyScrollState}
 use std.tiny.web.resource.{TinyWebMemoryHost, TINY_RESOURCE_BUILTIN, TINY_RESOURCE_ROM, TINY_RESOURCE_VFS}
 use os.apps.tiny_browser.app.{TinyBrowser}
@@ -50,7 +50,7 @@ describe "Tiny fullscreen browser profile":
         expect(receipt.frame.visible_surfaces).to_equal(1)
         expect(receipt.frame.direct_present).to_be(true)
         expect(browser.wm.surface_count).to_equal(1)
-        expect(browser.gui.nodes.len()).to_equal(3)
+        expect(browser.gui.node_count).to_equal(3)
         expect(browser.gui.nodes[1].bounds.width).to_equal(44)
         expect(browser.control_max_length(1)).to_equal(3)
         expect(browser.control_is_disabled(2)).to_be(true)
@@ -89,7 +89,53 @@ describe "Tiny fullscreen browser profile":
         expect(browser.current_path).to_equal("/vfs.html")
         expect(browser.page_source).to_equal(vfs)
 
-        # @req REQ-SSPEC-SYSTEM REQ-SSPEC-SYSTEM REQ-SSPEC-SYSTEM NFR-009 NFR-012
+    # @req REQ-003 REQ-004 REQ-005 NFR-004 NFR-010 NFR-011 NFR-012
+    # @capture(protocol)
+    it "should reuse every Web and GUI arena across render navigation edit and wheel loops":
+        step("Initialize all bounded arenas before admitting runtime work")
+        val page_a = "<body><input type='text' value='A'><p>one</p><p>two</p><p>three</p><p>four</p><p>five</p><p>six</p></body>"
+        val page_b = "<body><input type='text' value='B'><p>alpha</p><p>beta</p><p>gamma</p><p>delta</p><p>epsilon</p><p>zeta</p></body>"
+        var host = TinyWebMemoryHost.bounded(64, 24, 2, 512)
+        expect(host.register(31, TINY_RESOURCE_BUILTIN, "/a.html", text_to_bytes(page_a)).code).to_equal(0)
+        expect(host.register(32, TINY_RESOURCE_ROM, "/b.html", text_to_bytes(page_b)).code).to_equal(0)
+        var browser = TinyBrowser.create(64, 24)
+        expect(browser.bind_web_host(host).code).to_equal(0)
+        val initialized = browser.arena_receipt()
+        expect(initialized.status.code).to_equal(0)
+        expect(initialized.allocation_count).to_equal(12)
+
+        step("Render and navigate repeatedly through retained logical extents")
+        val first = browser.render_resource_id(31, 512)
+        expect(first.status.code).to_equal(0)
+        val second = browser.navigate_resource(TINY_RESOURCE_ROM, "/b.html", 512)
+        expect(second.status.code).to_equal(0)
+        expect(second.frame_id).to_be_greater_than(first.frame_id)
+        val third = browser.navigate_resource(TINY_RESOURCE_BUILTIN, "/a.html", 512)
+        expect(third.status.code).to_equal(0)
+        expect(third.frame_id).to_be_greater_than(second.frame_id)
+
+        step("Edit and wheel without rebuilding GUI or resolved-pane storage")
+        val focused = browser.dispatch(TinyEvent(kind: TINY_EVENT_KEY, point: TinyPoint(x: 0, y: 0), code: TINY_KEY_TAB, value: 0))
+        expect(focused.status.code).to_equal(0)
+        val edited = browser.dispatch(TinyEvent(kind: TINY_EVENT_TEXT, point: TinyPoint(x: 0, y: 0), code: 88, value: 0))
+        expect(edited.status.code).to_equal(0)
+        expect(edited.presented).to_be(true)
+        val wheeled = browser.dispatch(TinyEvent(kind: TINY_EVENT_WHEEL, point: TinyPoint(x: 2, y: 2), code: 0, value: 4))
+        expect(wheeled.status.code).to_equal(0)
+        expect(wheeled.presented).to_be(true)
+
+        step("Compare allocation instrumentation with the initialization baseline")
+        val reused = browser.arena_receipt()
+        expect(reused.status.code).to_equal(0)
+        expect(reused.allocation_count).to_equal(initialized.allocation_count)
+        expect(reused.reuse_count).to_be_greater_than(initialized.reuse_count)
+        expect(reused.token_count).to_be_greater_than(0)
+        expect(reused.node_count).to_be_greater_than(0)
+        expect(reused.style_count).to_equal(reused.node_count)
+        expect(reused.paint_count).to_be_greater_than(0)
+        expect(browser.present.last_surface.checksum).to_equal(browser.renderer.checksum())
+
+    # @req REQ-003 REQ-004 REQ-005 NFR-009 NFR-012
     # @capture(gui)
     it "routes keyboard text and pointer events to visible controls":
         # @req REQ-SSPEC-SYSTEM

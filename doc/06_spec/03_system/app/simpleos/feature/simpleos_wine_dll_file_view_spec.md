@@ -1,6 +1,29 @@
 # Simpleos Wine Dll File View Specification
 
-> Tests covering REQ-047 SimpleOS Wine DLL file-backed view.
+> <details>
+
+<!-- sdn-diagram:id=simpleos_wine_dll_file_view_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=simpleos_wine_dll_file_view_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+simpleos_wine_dll_file_view_spec -> common
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=simpleos_wine_dll_file_view_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -17,38 +40,37 @@
 
 #### maps validated DLL bytes into a retained non-executing process view
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-047
+val files = [wine_dll_probe_file("\\KnownDlls\\kernel32.dll", _dll_bytes())]
+val result = wine_dll_map_file_backed_view("kernel32.dll", "C:\\Games", "C:\\Users\\Player", [], ["kernel32.dll"], files, 45, 46, "pid fs ipc net capability", 0x7a000000)
+expect(result.ok).to_equal(true)
+expect(result.status).to_equal("dll-file-backed-view-mapped")
+expect(result.mapped_base).to_equal(0x7a000000)
+expect(result.mapped_size).to_equal(0x5000)
+expect(result.evidence).to_contain("file-backed-dll-bytes")
+expect(result.evidence).to_contain("file-backed-dll-view-persistent")
+expect(result.evidence).to_contain("image-map")
+expect(result.evidence).to_contain("no-dll-entrypoint-executed")
+expect(result.evidence).to_contain("no-tls-callback-executed")
 ```
 
 </details>
 
 #### maps validated DLL bytes only after PEB/TEB VM byte-write readback
 
-- maps validated DLL bytes only after PEB/TEB VM byte-write readback
-   - Expected: result.ok is true
-   - Expected: result.status equals `dll-file-backed-view-mapped`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("maps validated DLL bytes only after PEB/TEB VM byte-write readback")
 val files = [wine_dll_probe_file("\\KnownDlls\\kernel32.dll", _dll_bytes())]
 val init = wine_peb_teb_init_default()
 val writes = wine_peb_teb_memory_write_gate(init, _startup_write_space())
@@ -73,12 +95,12 @@ expect(result.evidence).to_contain("no-dll-entrypoint-executed")
 | Category | Application |
 | Status | Active |
 | Source | `test/03_system/app/simpleos/feature/simpleos_wine_dll_file_view_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering REQ-047 SimpleOS Wine DLL file-backed view.
+Tests covering:
 - REQ-047 SimpleOS Wine DLL file-backed view
 
 ## Scenario Summary
@@ -93,49 +115,3 @@ Tests covering REQ-047 SimpleOS Wine DLL file-backed view.
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-- `REQ-047`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `5e08ebc8d1d20631d6857d8967eff4b590482044e626861ff7b2faf2a9eef316`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `5e08ebc8d1d20631d6857d8967eff4b590482044e626861ff7b2faf2a9eef316`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `5e08ebc8d1d20631d6857d8967eff4b590482044e626861ff7b2faf2a9eef316`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **94/100**; effective score: **94/100**; blockers: **0**.
-
-SSpec documentization score: 94/100
-source: test/03_system/app/simpleos/feature/simpleos_wine_dll_file_view_spec.spl
-mirror: doc/06_spec/03_system/app/simpleos/feature/simpleos_wine_dll_file_view_spec.md (current)
-findings: 4 blockers: 0
-  narrative=100 structure=90 oracle=100
-  traceability=100 evidence=90 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/app/simpleos/feature/simpleos_wine_dll_file_view_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/app/simpleos/feature/simpleos_wine_dll_file_view_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/app/simpleos/feature/simpleos_wine_dll_file_view_spec.spl:65:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'maps validated DLL bytes into a retained non-executing process view' has no visible step flow
-  why: Ordered visible actions make the manual operable.
-  improve: Add ordered step("...") calls for meaningful actions.
-test/03_system/app/simpleos/feature/simpleos_wine_dll_file_view_spec.spl:82:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'maps validated DLL bytes only after PEB/TEB VM byte-write readback' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

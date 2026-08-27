@@ -2,6 +2,29 @@
 
 > ui_build CLI Integration Specification
 
+<!-- sdn-diagram:id=ui_build_cli_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=ui_build_cli_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+ui_build_cli_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=ui_build_cli_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 5 | 5 | 0 | 0 |
@@ -22,7 +45,7 @@ ui_build CLI Integration Specification
 | Status | In Progress |
 | Design | doc/05_design/ui/html_ui/html_ui_toolchain.md |
 | Source | `test/02_integration/app/ui_build/ui_build_cli_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ui_build CLI Integration Specification
@@ -52,22 +75,24 @@ Examples
 
 #### std build produces an SMF with SMF\\0 magic and a sidecar with form and elements
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- std build produces an SMF with SMF\\0 magic and a sidecar with form and elements
+- shell output
+- make page
+- ui build
+- assert true
+- assert true
+- assert true
+- assert true
+- assert true
+- shell output
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("std build produces an SMF with SMF\\0 magic and a sidecar with form and elements")
 shell_output("rm -rf /tmp/ui_build_spec_std && mkdir -p /tmp/ui_build_spec_std/out")
 make_page("/tmp/ui_build_spec_std")
 ui_build("build /tmp/ui_build_spec_std/page.html -o /tmp/ui_build_spec_std/out --form=std")
@@ -85,18 +110,22 @@ shell_output("rm -rf /tmp/ui_build_spec_std")
 
 #### dyn build produces an SMF artifact and a sidecar listing artifacts
 
-- dyn build produces an SMF artifact and a sidecar listing artifacts
+- shell output
+- make page
+- ui build
+- assert true
+- assert true
+- assert true
+- shell output
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("dyn build produces an SMF artifact and a sidecar listing artifacts")
 shell_output("rm -rf /tmp/ui_build_spec_dyn && mkdir -p /tmp/ui_build_spec_dyn/out")
 make_page("/tmp/ui_build_spec_dyn")
 ui_build("build /tmp/ui_build_spec_dyn/page.html -o /tmp/ui_build_spec_dyn/out --form=dyn")
@@ -111,18 +140,20 @@ shell_output("rm -rf /tmp/ui_build_spec_dyn")
 
 #### verify prints PASS on a freshly built std artifact
 
-- verify prints PASS on a freshly built std artifact
+- shell output
+- make page
+- ui build
+- assert true
+- shell output
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("verify prints PASS on a freshly built std artifact")
 shell_output("rm -rf /tmp/ui_build_spec_vpass && mkdir -p /tmp/ui_build_spec_vpass/out")
 make_page("/tmp/ui_build_spec_vpass")
 ui_build("build /tmp/ui_build_spec_vpass/page.html -o /tmp/ui_build_spec_vpass/out --form=std")
@@ -135,18 +166,23 @@ shell_output("rm -rf /tmp/ui_build_spec_vpass")
 
 #### verify prints FAIL after the smf artifact is truncated in a scratch copy
 
-- verify prints FAIL after the smf artifact is truncated in a scratch copy
+- shell output
+- make page
+- ui build
+- shell output
+- shell output
+- shell output
+- assert true
+- shell output
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("verify prints FAIL after the smf artifact is truncated in a scratch copy")
 shell_output("rm -rf /tmp/ui_build_spec_vfail && mkdir -p /tmp/ui_build_spec_vfail/out")
 make_page("/tmp/ui_build_spec_vfail")
 ui_build("build /tmp/ui_build_spec_vfail/page.html -o /tmp/ui_build_spec_vfail/out --form=std")
@@ -164,18 +200,21 @@ shell_output("rm -rf /tmp/ui_build_spec_vfail")
 
 #### theme showcase std build produces sidecar with at least 40 element entries
 
-- theme showcase std build produces sidecar with at least 40 element entries
+- shell output
+- ui build
+- assert true
+- assert true
+- assert true
+- shell output
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("theme showcase std build produces sidecar with at least 40 element entries")
 shell_output("rm -rf /tmp/ui_build_spec_theme && mkdir -p /tmp/ui_build_spec_theme/out")
 val theme = "src/lib/common/ui/theme_html/theme_showcase.html"
 ui_build("build " + theme + " -o /tmp/ui_build_spec_theme/out --form=std")
@@ -204,55 +243,7 @@ shell_output("rm -rf /tmp/ui_build_spec_theme")
 
 ## Related Documentation
 
-- **Design:** `doc/05_design/ui/html_ui/html_ui_toolchain.md`
+- **Design:** [doc/05_design/ui/html_ui/html_ui_toolchain.md](doc/05_design/ui/html_ui/html_ui_toolchain.md)
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-INTEGRATION`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `4e2b87bd5fd7743d6fa0f594a935e53f4a3fceea907c3e2ac0a997998aab74fa`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `4e2b87bd5fd7743d6fa0f594a935e53f4a3fceea907c3e2ac0a997998aab74fa`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `4e2b87bd5fd7743d6fa0f594a935e53f4a3fceea907c3e2ac0a997998aab74fa`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/02_integration/app/ui_build/ui_build_cli_spec.spl
-mirror: doc/06_spec/02_integration/app/ui_build/ui_build_cli_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/02_integration/app/ui_build/ui_build_cli_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/02_integration/app/ui_build/ui_build_cli_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/02_integration/app/ui_build/ui_build_cli_spec.spl:69:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'std build produces an SMF with SMF\\0 magic and a sidecar with form and elements' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/02_integration/app/ui_build/ui_build_cli_spec.spl:84:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'dyn build produces an SMF artifact and a sidecar listing artifacts' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/02_integration/app/ui_build/ui_build_cli_spec.spl:96:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'verify prints PASS on a freshly built std artifact' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

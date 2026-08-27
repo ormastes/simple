@@ -1,6 +1,29 @@
-# Json Utils Specification
+# JSON Utilities Specification
 
-> Tests covering JSON Utilities, JSON Value Formatting, JSON Arrays, JSON Objects, JSON Builder, JSON Array Builder, Common Structures, Validation, Common Patterns, Edge Cases.
+> This specification covers JSON utility functions for formatting, parsing, and building JSON structures: 1. JSON value formatting (string, number, boolean, null) 2. JSON array and object construction 3. JSON builder classes for fluent API 4. Common JSON patterns (API responses, pagination) 5. JSON validation (structure, balance checking)
+
+<!-- sdn-diagram:id=json_utils_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=json_utils_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+json_utils_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=json_utils_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -9,7 +32,49 @@
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Json Utils Specification
+# JSON Utilities Specification
+
+This specification covers JSON utility functions for formatting, parsing, and building JSON structures: 1. JSON value formatting (string, number, boolean, null) 2. JSON array and object construction 3. JSON builder classes for fluent API 4. Common JSON patterns (API responses, pagination) 5. JSON validation (structure, balance checking)
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Feature IDs | #JSON-001 to #JSON-020 |
+| Category | Tooling \| Data Format |
+| Difficulty | 2/5 |
+| Status | In Progress |
+| Source | `test/01_unit/app/tooling/json_utils_spec.spl` |
+| Updated | 2026-06-01 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+This specification covers JSON utility functions for formatting, parsing, and building JSON structures:
+1. JSON value formatting (string, number, boolean, null)
+2. JSON array and object construction
+3. JSON builder classes for fluent API
+4. Common JSON patterns (API responses, pagination)
+5. JSON validation (structure, balance checking)
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| JSON Formatting | Convert values to JSON-compliant text |
+| Escaping | Handle special characters and escape sequences |
+| Builder Pattern | Fluent API for constructing complex structures |
+| Validation | Check JSON structure validity |
+| Common Patterns | API responses, pagination metadata |
+
+## Behavior
+
+- String values are properly escaped and quoted
+- Null values produce "null" text
+- Booleans produce "true" or "false"
+- Numbers are converted to string representation
+- Builders provide mutable construction API
+- Validation checks for balanced braces and valid structure
 
 ## Scenarios
 
@@ -19,18 +84,16 @@
 
 #### formats string
 
-- formats string
+1. expect json string
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("formats string")
 expect json_string("hello") == "\"hello\""
 ```
 
@@ -38,18 +101,16 @@ expect json_string("hello") == "\"hello\""
 
 #### escapes quotes in string
 
-- escapes quotes in string
+1. expect result contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("escapes quotes in string")
 val result = json_string("She said \"hi\"")
 expect result.contains("\\\"")
 ```
@@ -58,18 +119,16 @@ expect result.contains("\\\"")
 
 #### escapes newlines in string
 
-- escapes newlines in string
+1. expect result contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("escapes newlines in string")
 val result = json_string("line1\nline2")
 expect result.contains("\\n")
 ```
@@ -78,18 +137,17 @@ expect result.contains("\\n")
 
 #### formats number
 
-- formats number
+1. expect json number
+2. expect json number
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("formats number")
 expect json_number(42) == "42"
 expect json_number(-10) == "-10"
 ```
@@ -98,18 +156,17 @@ expect json_number(-10) == "-10"
 
 #### formats boolean
 
-- formats boolean
+1. expect json bool
+2. expect json bool
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("formats boolean")
 expect json_bool(true) == "true"
 expect json_bool(false) == "false"
 ```
@@ -118,18 +175,16 @@ expect json_bool(false) == "false"
 
 #### formats null
 
-- formats null
+1. expect json null
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("formats null")
 expect json_null() == "null"
 ```
 
@@ -139,18 +194,19 @@ expect json_null() == "null"
 
 #### formats string array
 
-- formats string array
+1. expect result contains
+2. expect result contains
+3. expect result contains
+4. expect result contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("formats string array")
 val result = json_array_strings(["apple", "banana", "cherry"])
 expect result.contains("[")
 expect result.contains("]")
@@ -162,18 +218,13 @@ expect result.contains("\"banana\"")
 
 #### formats number array
 
-- formats number array
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("formats number array")
 val result = json_array_numbers([1, 2, 3])
 expect result == "[1, 2, 3]"
 ```
@@ -182,18 +233,18 @@ expect result == "[1, 2, 3]"
 
 #### formats mixed array
 
-- formats mixed array
+1. expect result contains
+2. expect result contains
+3. expect result contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("formats mixed array")
 val items = [json_string("text"), json_number(42), json_bool(true)]
 val result = json_array(items)
 expect result.contains("\"text\"")
@@ -207,18 +258,17 @@ expect result.contains("true")
 
 #### formats key-value pair
 
-- formats key-value pair
+1. expect result contains
+2. expect result contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("formats key-value pair")
 val result = json_pair(key="name", value=json_string("Alice"))
 expect result.contains("\"name\"")
 expect result.contains("\"Alice\"")
@@ -228,18 +278,23 @@ expect result.contains("\"Alice\"")
 
 #### formats object
 
-- formats object
+1.
+2.
+3. expect result contains
+4. expect result contains
+5. expect result contains
+6. expect result contains
+7. expect result contains
+8. expect result contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("formats object")
 val pairs = [
     ("name", json_string("Alice")),
     ("age", json_number(30))
@@ -259,18 +314,25 @@ expect result.contains("30")
 
 #### builds basic object
 
-- builds basic object
+1. var builder = JsonBuilder create
+2. builder add string
+3. builder add number
+4. builder add bool
+5. expect result contains
+6. expect result contains
+7. expect result contains
+8. expect result contains
+9. expect result contains
+10. expect result contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("builds basic object")
 var builder = JsonBuilder.create()
 builder.add_string(key="name", value="Bob")
 builder.add_number("age", 25)
@@ -288,18 +350,19 @@ expect result.contains("true")
 
 #### builds with null
 
-- builds with null
+1. var builder = JsonBuilder create
+2. builder add string
+3. builder add null
+4. expect result contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("builds with null")
 var builder = JsonBuilder.create()
 builder.add_string(key="name", value="Test")
 builder.add_null("data")
@@ -311,18 +374,19 @@ expect result.contains("null")
 
 #### builds with array
 
-- builds with array
+1. var builder = JsonBuilder create
+2. builder add array
+3. expect result contains
+4. expect result contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("builds with array")
 var builder = JsonBuilder.create()
 val items = [json_string("a"), json_string("b")]
 builder.add_array("items", items)
@@ -337,18 +401,24 @@ expect result.contains("[")
 
 #### builds mixed array
 
-- builds mixed array
+1. var builder = JsonArrayBuilder create
+2. builder add string
+3. builder add number
+4. builder add bool
+5. builder add null
+6. expect result contains
+7. expect result contains
+8. expect result contains
+9. expect result contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("builds mixed array")
 var builder = JsonArrayBuilder.create()
 builder.add_string("apple")
 builder.add_number(42)
@@ -367,18 +437,18 @@ expect result.contains("null")
 
 #### creates success response
 
-- creates success response
+1. expect result contains
+2. expect result contains
+3. expect result contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates success response")
 val result = json_success("Operation completed")
 expect result.contains("\"status\"")
 expect result.contains("\"success\"")
@@ -389,18 +459,19 @@ expect result.contains("\"message\"")
 
 #### creates error response
 
-- creates error response
+1. expect result contains
+2. expect result contains
+3. expect result contains
+4. expect result contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates error response")
 val result = json_error("Not found", 404)
 expect result.contains("\"status\"")
 expect result.contains("\"error\"")
@@ -412,18 +483,17 @@ expect result.contains("404")
 
 #### creates data response
 
-- creates data response
+1. expect result contains
+2. expect result contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates data response")
 val data = json_object([("id", json_number(1))])
 val result = json_data(data)
 expect result.contains("\"status\"")
@@ -436,48 +506,8 @@ expect result.contains("\"data\"")
 
 #### detects JSON object
 
-- detects JSON object
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 5 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-UNIT
-step("detects JSON object")
-val json_obj = '{"key": "value"}'
-expect looks_like_json(json_obj)
-expect not looks_like_json("not json")
-```
-
-</details>
-
-#### detects JSON array
-
-- detects JSON array
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 4 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-UNIT
-step("detects JSON array")
-expect looks_like_json("[1, 2, 3]")
-expect not looks_like_json("plain text")
-```
-
-</details>
-
-#### handles empty string
-
-- handles empty string
+1. expect looks like json
+2. expect not looks like json
 
 
 <details>
@@ -487,8 +517,44 @@ Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("handles empty string")
+val json_obj = '{"key": "value"}'
+expect looks_like_json(json_obj)
+expect not looks_like_json("not json")
+```
+
+</details>
+
+#### detects JSON array
+
+1. expect looks like json
+2. expect not looks like json
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect looks_like_json("[1, 2, 3]")
+expect not looks_like_json("plain text")
+```
+
+</details>
+
+#### handles empty string
+
+1. expect not looks like json
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
 expect not looks_like_json("")
 ```
 
@@ -496,7 +562,26 @@ expect not looks_like_json("")
 
 #### validates balanced braces
 
-- validates balanced braces
+1. expect has balanced braces
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val balanced = '{"a": [1, 2]}'
+expect has_balanced_braces(balanced)
+```
+
+</details>
+
+#### detects unbalanced braces
+
+1. expect not has balanced braces
+2. expect not has balanced braces
 
 
 <details>
@@ -506,28 +591,6 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("validates balanced braces")
-val balanced = '{"a": [1, 2]}'
-expect has_balanced_braces(balanced)
-```
-
-</details>
-
-#### detects unbalanced braces
-
-- detects unbalanced braces
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 6 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-UNIT
-step("detects unbalanced braces")
 val unbalanced1 = '{"a": [1, 2}'
 val unbalanced2 = '{"a": 1]]'
 expect not has_balanced_braces(unbalanced1)
@@ -540,18 +603,18 @@ expect not has_balanced_braces(unbalanced2)
 
 #### creates API response with data
 
-- creates API response with data
+1. expect result contains
+2. expect result contains
+3. expect result contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates API response with data")
 val data = json_string("result")
 val result = api_response(true, "Success", Some(data))
 expect result.contains("\"success\"")
@@ -563,18 +626,18 @@ expect result.contains("\"data\"")
 
 #### creates API response without data
 
-- creates API response without data
+1. expect result contains
+2. expect result contains
+3. expect result contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates API response without data")
 val result = api_response(false, "Failed", nil)
 expect result.contains("\"success\"")
 expect result.contains("false")
@@ -585,18 +648,21 @@ expect result.contains("null")
 
 #### creates pagination meta
 
-- creates pagination meta
+1. expect result contains
+2. expect result contains
+3. expect result contains
+4. expect result contains
+5. expect result contains
+6. expect result contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates pagination meta")
 val result = pagination_meta(page=2, per_page=10, total=45)
 expect result.contains("\"page\"")
 expect result.contains("2")
@@ -610,18 +676,19 @@ expect result.contains("5")
 
 #### creates timestamp JSON
 
-- creates timestamp JSON
+1. expect result contains
+2. expect result contains
+3. expect result contains
+4. expect result contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates timestamp JSON")
 val result = timestamp_json(unix=1640000000, iso="2021-12-20T12:00:00Z")
 expect result.contains("\"unix\"")
 expect result.contains("1640000000")
@@ -635,18 +702,16 @@ expect result.contains("2021-12-20")
 
 #### escapes backslash in string
 
-- escapes backslash in string
+1. expect result contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("escapes backslash in string")
 val result = json_string("path\\to\\file")
 expect result.contains("\\\\")
 ```
@@ -655,18 +720,13 @@ expect result.contains("\\\\")
 
 #### formats empty object
 
-- formats empty object
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("formats empty object")
 val result = json_object([])
 expect result == r"{}"
 ```
@@ -675,18 +735,13 @@ expect result == r"{}"
 
 #### formats empty array
 
-- formats empty array
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("formats empty array")
 val result = json_array([])
 expect result == "[]"
 ```
@@ -695,18 +750,23 @@ expect result == "[]"
 
 #### handles nested objects
 
-- handles nested objects
+1. var inner = JsonBuilder create
+2. inner add string
+3. var outer = JsonBuilder create
+4. outer add string
+5. outer add raw
+6. expect result contains
+7. expect result contains
+8. expect result contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("handles nested objects")
 var inner = JsonBuilder.create()
 inner.add_string(key="city", value="NYC")
 
@@ -722,30 +782,6 @@ expect result.contains("\"city\"")
 
 </details>
 
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Application |
-| Status | Active |
-| Source | `test/01_unit/app/tooling/json_utils_spec.spl` |
-| Updated | 2026-08-26 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering JSON Utilities, JSON Value Formatting, JSON Arrays, JSON Objects, JSON Builder, JSON Array Builder, Common Structures, Validation, Common Patterns, Edge Cases.
-- JSON Utilities
-- JSON Value Formatting
-- JSON Arrays
-- JSON Objects
-- JSON Builder
-- JSON Array Builder
-- Common Structures
-- Validation
-- Common Patterns
-- Edge Cases
-
 ## Scenario Summary
 
 | Metric | Count |
@@ -758,51 +794,3 @@ Tests covering JSON Utilities, JSON Value Formatting, JSON Arrays, JSON Objects,
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-UNIT`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `f6170f39990a3108bd414b74d63f0a29e27800522818997a958e0131a9cfde43`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `f6170f39990a3108bd414b74d63f0a29e27800522818997a958e0131a9cfde43`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `f6170f39990a3108bd414b74d63f0a29e27800522818997a958e0131a9cfde43`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/01_unit/app/tooling/json_utils_spec.spl
-mirror: doc/06_spec/01_unit/app/tooling/json_utils_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/app/tooling/json_utils_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/app/tooling/json_utils_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/app/tooling/json_utils_spec.spl:228:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'formats string' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/tooling/json_utils_spec.spl:233:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'escapes quotes in string' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/tooling/json_utils_spec.spl:239:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'escapes newlines in string' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

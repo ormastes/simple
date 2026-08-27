@@ -1,7 +1,7 @@
 # Pattern Rule Pass — Data-Driven MIR Peephole Rewriter (AC-7)
 #
-# Models loaded `.opt.json` rule metadata for future MIR rewriting. Each rule
-# describes a single-instruction pattern (MirPattern) and rewrite metadata
+# Executes loaded `.opt.json` rule files against a MirModule.  Each rule
+# describes a single-instruction pattern (MirPattern) and a rewrite
 # (MirRewrite).  Wildcards use the "$name" prefix; first occurrence binds,
 # subsequent occurrences enforce equality.
 #
@@ -9,10 +9,10 @@
 # `rules: [PatternRule]` array.  A manifest may have zero passes but
 # non-zero rules, or both.
 #
-# All rewrite kinds are currently non-transforming. "Remove" is quarantined:
-# structural matching alone cannot prove a definition dead or an instruction
-# pure/non-trapping. Structural rewrites (BinOp, Copy, etc.) remain skeletons
-# pending the MIR operand builder API and legality receipts.
+# "Remove" in MirRewrite.kind_tag means the instruction is dropped entirely
+# from the rebuilt block.  There is NO Nop variant in MirInstKind.
+# Structural rewrites (BinOp, Copy, etc.) are deferred pending the MIR
+# operand builder API; non-Remove rules currently pass the instruction through.
 #
 # See: doc/05_design/optimizer_manifest_versioned_design.md (AC-7 section)
 
@@ -45,8 +45,8 @@ struct MirPattern:
 struct MirRewrite:
     """Describes the replacement for a matched instruction.
 
-    kind_tag == "Remove" is accepted for v1 wire compatibility but disabled.
-    Any other kind_tag names a future replacement MirInstKind.
+    kind_tag == "Remove" drops the instruction from the rebuilt block.
+    Any other kind_tag names the replacement MirInstKind.
     dest     — "$dest" bound from match.
     operands — literals or bound wildcard names.
     """
@@ -270,11 +270,16 @@ fn try_match_rule(rule: PatternRule, inst: MirInst) -> [WildcardBinding]?:
 fn apply_rewrite_to_inst(rule: PatternRule, bindings: [WildcardBinding], inst: MirInst) -> MirInst?:
     """Apply the rule's rewrite using the bound wildcard values.
 
-    Every rewrite kind currently returns Some(inst) unchanged. "Remove" cannot
-    delete until effect, trap, def-use, liveness, and verifier proofs exist;
-    structural rewrites require the MIR operand builder API and legality facts.
+    Returns nil if kind_tag is "Remove" (caller drops the instruction).
+    Returns Some(inst) unchanged for any other kind_tag (structural rewrites
+    require the MIR operand builder API, which is not yet complete).
     """
-    # Preserve v1 manifests while quarantining every mutation surface.
+    val rw = rule.rewrite
+    if rw.kind_tag == "Remove":
+        return nil
+    # Structural rewrites (BinOp, Copy, etc.) are deferred until the MIR
+    # operand builder API lands.  Pass the original instruction through so
+    # callers always get a valid result.
     Some(inst)
 
 # ============================================================================
@@ -292,22 +297,37 @@ fn apply_rules_to_block(block: MirBlock, rules: [PatternRule]) -> MirBlock:
 # ============================================================================
 
 fn apply_rules_to_function(func: MirFunction, rules: [PatternRule]) -> MirFunction:
-    """Compatibility identity; does not traverse the function."""
-    func
+    """Apply rule set to every block in the function."""
+    if rules.len() == 0:
+        return func
+    var new_blocks: [MirBlock] = []
+    for block in func.blocks:
+        new_blocks = new_blocks.push(apply_rules_to_block(block, rules))
+    MirFunction.with_blocks(func, new_blocks)
 
 # ============================================================================
 # Module-level pass entry point
 # ============================================================================
 
 fn pattern_rule_pass_run(rule_pass: PatternRulePass, module: MirModule) -> MirModule:
-    """Retain loaded rule sets without executing them against the module.
+    """Run all loaded rule sets against every function in the module.
 
-    Registered PatternRuleSets are retained for compatibility but not applied.
-    Every pass currently returns the module unchanged.
+    Rules from all registered PatternRuleSets are merged and applied.
+    Empty pass (no rule sets) returns module unchanged.
     """
-    # AnalysisOnly/Skeleton/Disabled rule metadata is loadable, but no rule is
-    # currently Active. Avoid flattening rule arrays or rebuilding exact input.
-    module
+    # Collect all rules across all sets
+    var all_rules: [PatternRule] = []
+    for rs in rule_pass.rule_sets:
+        for rule in rs.rules:
+            all_rules = all_rules.push(rule)
+
+    if all_rules.len() == 0:
+        return module
+
+    var result = module
+    for sym in module.functions.keys():
+        result.functions[sym] = apply_rules_to_function(result.functions[sym], all_rules)
+    result
 
 fn pattern_rule_pass_new() -> PatternRulePass:
     PatternRulePass(rule_sets: [])

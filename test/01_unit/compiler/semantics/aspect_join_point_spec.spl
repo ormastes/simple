@@ -52,6 +52,7 @@ use compiler.frontend.aspect_registry.{aspect_registry_kind_of_key, aspect_regis
 use compiler.frontend.aspect_registry.{aspect_registry_mode_of_key}
 use compiler.frontend.aspect_registry.{aspect_registry_readonly_of_key, aspect_registry_noalloc_of_key}
 use compiler.frontend.aspect_registry.{aspect_registry_bounded_time_of_key}
+use compiler.hir.hir_types.{HirModule}
 use compiler.hir.hir_lowering.types.{HirLowering}
 use compiler.hir.hir_lowering.items.*
 use compiler.semantics.aspect_validation.{validate_aspect_contracts, aspect_module_identities}
@@ -125,7 +126,11 @@ describe "C3 @advice reaches the real logical join-point model":
         step("Verify: indexes each real module identity once while preserving ordered identities")
         val module = parse_full_frontend(SRC_UNANNOTATED, "adv_identity.spl", "adv_probe", adv_logger())
         var lowering = HirLowering.with_filename("adv_identity.spl")
-        val hir = lowering.lower_module(module)
+        val lowered = lowering.lower_module(module)
+        # parse_full_frontend's legacy module_name parameter does not populate
+        # ParserModule.name. Give this identity fixture the nonempty logical
+        # name whose path/name/catalog-alias projections it claims to cover.
+        val hir = HirModule(..lowered, name: "adv_probe")
         val modules = {"adv_catalog_alias": hir}
         val ordered = aspect_module_identities(modules)
         val indexed = aspect_module_identity_index(modules)
@@ -136,13 +141,11 @@ describe "C3 @advice reaches the real logical join-point model":
         expect(indexed.contains_key("adv_catalog_alias")).to_equal(true)
 
     it "retains matching join-point payloads under value semantics":
-        step("Verify: retains matching join-point payloads under value semantics")
-        # @req: REQ-COMPILER-SEMANTICS-001
         val points = [JoinPoint(kind: "forward", source_symbol: "submit_view",
             target_symbol: "submit_impl", logical_join_point_id: 7)]
         val matches = join_points_matching(points, "forward", "submit_view")
-        expect(matches.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
-        expect(matches[0].logical_join_point_id).to_equal(7)  # oracle: 7 — named expected value from the requirement
+        expect(matches.len()).to_equal(1)
+        expect(matches[0].logical_join_point_id).to_equal(7)
         expect(join_points_matching(points, "forward", "missing").len()).to_equal(0)
 
     it "records advice from real source and proves a real forward join point":

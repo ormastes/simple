@@ -1,0 +1,240 @@
+"""Linux-host bounded, serial TCP adapter for the pure-Simple PostgreSQL subset.
+
+This adapter deliberately owns and serves one accepted connection at a time.
+`PostgresMimicServer` and `PgDatabaseOwner` are mutable capsules and must not be
+captured by thread-per-connection closures.  Production concurrency belongs in
+the async pgwire frontend: fixed socket workers submit typed operations to one
+database-owner queue and receive completions by connection/job identity.
+
+Do not describe `max_sessions` as concurrent capacity on this adapter.  It is a
+protocol/resource bound retained for parity with the future async frontend.
+
+SimpleOS owns a different socket adapter. This module uses the canonical host
+TcpListener/TcpStream surface and never declares runtime externs locally.
+"""
+
+use std.nogc_sync_mut.io.tcp.{TcpListener, TcpStream}
+use std.io.types.{IoError, IoErrorKind}
+use std.database.postgres_mimic.server.{PostgresMimicServer, PgResponse, PgResponseKind}
+use std.database.postgres_mimic.database_owner.{PgDatabaseOwner}
+use std.database.postgres_mimic.dispatch_lifecycle.{
+    PgDispatchOperation, PgDispatchSubmitResult, PgDispatchTakeResult,
+    PgDispatchCompletion
+}
+use std.database.postgres_mimic.connection.{PgWireSslPolicy}
+use std.database.postgres_mimic.transport.{
+    PgWireTransportDriver, PgWireTransportEventKind, pgwire_transport_driver
+}
+use std.database.postgres_mimic.wire_encode.{
+    pgwire_encode_startup, pgwire_encode_query
+}
+use std.database.postgres_mimic.linux_limits.{
+    PgWireLinuxLimits, pgwire_linux_limits, pgwire_limits_valid
+}
+
+class PgWireLinuxServer:
+    database_owner: PgDatabaseOwner
+    listener: TcpListener?
+    ssl_policy: PgWireSslPolicy
+    tls_transport_available: bool
+    limits: PgWireLinuxLimits
+    active_sessions: i64
+    accepted_sessions: i64
+    rejected_sessions: i64
+    draining: bool
+
+    static fn create(database: PostgresMimicServer, ssl_policy: PgWireSslPolicy,
+            tls_transport_available: bool = false,
+            limits: PgWireLinuxLimits = pgwire_linux_limits()) -> Result<PgWireLinuxServer, text>:
+        if not pgwire_limits_valid(limits): return Err("invalid pgwire Linux server limits")
+        if ssl_policy == PgWireSslPolicy.Required and not tls_transport_available:
+            return Err("required TLS has no owned host TLS stream adapter")
+        # Advertising SSL without an owned encrypted TcpStream would be a downgrade.
+        if tls_transport_available:
+            return Err("host TLS stream adapter is unavailable; refusing to advertise SSL")
+        Ok(PgWireLinuxServer(database_owner: PgDatabaseOwner.create(database, limits.max_sessions),
+            listener: nil, ssl_policy: ssl_policy,
+            tls_transport_available: false, limits: limits, active_sessions: 0,
+            accepted_sessions: 0, rejected_sessions: 0, draining: false))
+
+    me bind(address: text) -> Result<(), IoError>:
+        if self.listener != nil:
+            return Err(IoError(kind: IoErrorKind.AddrInUse, message: "pgwire listener already bound", source: nil))
+        self.listener = Some(TcpListener.bind(address)?)
+        Ok(())
+
+    fn local_addr() -> Result<text, IoError>:
+        match self.listener:
+            Some(listener): listener.local_addr()
+            nil: Err(IoError(kind: IoErrorKind.Other, message: "pgwire listener is not bound", source: nil))
+
+    me begin_drain(): self.draining = true
+
+    me close() -> Result<(), IoError>:
+        self.draining = true
+        match self.listener:
+            Some(listener):
+                self.listener = nil
+                listener.close()
+            nil: Ok(())
+
+    me close_database() -> bool:
+        self.database_owner.begin_drain()
+        if self.database_owner.dispatch.active_count() > 0: return false
+        if self.database_owner.checkpoint().is_err(): return false
+        self.database_owner.close().is_ok()
+
+    me serve_once(authenticate: fn(text, text) -> bool, accept_timeout_ms: i64 = 2000) -> Result<bool, IoError>:
+        if self.draining: return Ok(false)
+        if self.active_sessions >= self.limits.max_sessions:
+            self.rejected_sessions = self.rejected_sessions + 1
+            return Ok(false)
+        val stream = match self.listener:
+            Some(listener): listener.accept_timeout(accept_timeout_ms)?
+            nil: return Err(IoError(kind: IoErrorKind.Other, message: "pgwire listener is not bound", source: nil))
+        self.active_sessions = self.active_sessions + 1
+        self.accepted_sessions = self.accepted_sessions + 1
+        self.serve_connection(stream, self.accepted_sessions, authenticate)
+        self.active_sessions = self.active_sessions - 1
+        Ok(not self.draining)
+
+    me serve_bounded(authenticate: fn(text, text) -> bool, max_connections: i64,
+            accept_timeout_ms: i64 = 2000) -> Result<i64, IoError>:
+        if max_connections < 0:
+            return Err(IoError(kind: IoErrorKind.InvalidInput, message: "negative connection bound", source: nil))
+        var served = 0
+        while served < max_connections and not self.draining:
+            if not self.serve_once(authenticate, accept_timeout_ms)?: break
+            served = served + 1
+        Ok(served)
+
+    me finish_submission(submission: PgDispatchSubmitResult) -> PgDispatchCompletion?:
+        val job_id = match submission:
+            PgDispatchSubmitResult.Accepted(id): id
+            PgDispatchSubmitResult.Rejected: return nil
+        if self.database_owner.process_bounded(0, self.limits.max_sessions) <= 0:
+            return nil
+        match self.database_owner.dispatch.take(job_id):
+            PgDispatchTakeResult.Ready(completion): Some(completion)
+            _: nil
+
+    me serve_connection(stream: TcpStream, connection_id: i64,
+            authenticate: fn(text, text) -> bool):
+        var socket = stream
+        if socket.set_read_timeout(self.limits.read_timeout_ms).is_err():
+            val _ = socket.close()
+            return
+        if socket.set_write_timeout(self.limits.write_timeout_ms).is_err():
+            val _ = socket.close()
+            return
+        # Optional TLS must answer N. Required TLS cannot proceed without an
+        # encrypted stream owner and therefore closes on its first SSLRequest.
+        val effective_policy = if self.ssl_policy == PgWireSslPolicy.Optional:
+            PgWireSslPolicy.Disabled
+        else: self.ssl_policy
+        var driver = pgwire_transport_driver(effective_policy, self.limits.max_frame,
+            self.limits.max_parameters, self.limits.max_buffer)
+        var session_id = 0
+        var done = false
+        while not done and not self.draining:
+            val chunk_result = socket.read(self.limits.read_chunk)
+            match chunk_result:
+                Err(_):
+                    done = true
+                Ok(chunk):
+                    if chunk.len() == 0:
+                        done = true
+                    else:
+                        var octets: [i64] = []
+                        for byte in chunk: octets.push(byte.to_i64())
+                        driver.feed(octets)
+                        var event_kind = driver.next_event_kind()
+                        while event_kind != PgWireTransportEventKind.None and not done:
+                            if event_kind == PgWireTransportEventKind.SendSslUnsupported:
+                                if socket.write_all([78]).is_err():
+                                    done = true
+                            elif event_kind == PgWireTransportEventKind.SendSslSupported:
+                                # Required TLS reached an unavailable capability: fail closed.
+                                driver.tls_failed()
+                                done = true
+                            elif event_kind == PgWireTransportEventKind.Authenticate:
+                                val startup_user = driver.event_user()
+                                val startup_database = driver.event_database()
+                                val startup_application = driver.event_application_name()
+                                if authenticate(startup_user, startup_database):
+                                    val startup = self.database_owner.dispatch.submit_startup(
+                                        connection_id, startup_user, startup_database,
+                                        startup_application, 0, self.limits.read_timeout_ms)
+                                    match self.finish_submission(startup):
+                                        Some(completion):
+                                            session_id = completion.session_id
+                                            if completion.close_connection or session_id <= 0:
+                                                if completion.responses.len() > 0:
+                                                    match pgwire_encode_query(completion.responses[0], self.limits.max_response):
+                                                        Ok(bytes):
+                                                            val _ = socket.write_all(bytes)
+                                                        Err(_): ()
+                                                driver.authentication_failed()
+                                                done = true
+                                            else:
+                                                driver.authentication_succeeded()
+                                                match pgwire_encode_startup(completion.responses, self.limits.max_response):
+                                                    Ok(bytes):
+                                                        if socket.write_all(bytes).is_err():
+                                                            done = true
+                                                    Err(_):
+                                                        done = true
+                                        nil:
+                                            if socket.write_all(pgwire_encode_query_error("53300", "database queue full")).is_err():
+                                                done = true
+                                            driver.authentication_failed()
+                                            done = true
+                                else:
+                                    if socket.write_all(pgwire_encode_query_error("28P01", "authentication failed")).is_err():
+                                        done = true
+                                    driver.authentication_failed()
+                                    done = true
+                            elif event_kind == PgWireTransportEventKind.ExecuteQuery:
+                                if session_id <= 0:
+                                    done = true
+                                else:
+                                    val query = self.database_owner.dispatch.submit(
+                                        connection_id, session_id,
+                                        PgDispatchOperation.Query, driver.event_query(), 0,
+                                        self.limits.read_timeout_ms)
+                                    match self.finish_submission(query):
+                                        Some(completion):
+                                            if completion.responses.len() != 1:
+                                                done = true
+                                            else:
+                                                match pgwire_encode_query(completion.responses[0], self.limits.max_response):
+                                                    Ok(bytes):
+                                                        if socket.write_all(bytes).is_err():
+                                                            done = true
+                                                    Err(_):
+                                                        done = true
+                                        nil:
+                                            if socket.write_all(pgwire_encode_query_error("53300", "database queue full")).is_err():
+                                                done = true
+                            elif event_kind == PgWireTransportEventKind.CancelRequest:
+                                done = true
+                            elif event_kind == PgWireTransportEventKind.Close:
+                                done = true
+                            event_kind = driver.next_event_kind()
+        if session_id > 0:
+            val terminate = self.database_owner.dispatch.submit(
+                connection_id, session_id, PgDispatchOperation.Terminate, "",
+                0, self.limits.write_timeout_ms)
+            val _ = self.finish_submission(terminate)
+        val _ = socket.close()
+
+fn pgwire_encode_query_error(sqlstate: text, message: text) -> [u8]:
+    # Reuse the public response encoder through a minimal server-shaped error.
+    val response = PgResponse(kind: PgResponseKind.ErrorResponse, tag: "ERROR", columns: [], rows: [],
+        sqlstate: sqlstate, message: message, transaction_status: "I")
+    match pgwire_encode_query(response):
+        Ok(bytes): bytes
+        Err(_): []
+
+export PgWireLinuxLimits, PgWireLinuxServer
+export pgwire_linux_limits, pgwire_limits_valid

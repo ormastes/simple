@@ -5,6 +5,11 @@ set -eu
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd -P)
 REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd -P)
+BOOTSTRAP_STAGE3_FACADE_PATH="$REPO_ROOT/scripts/check/lib/bootstrap-stage3-provenance.shs"
+STAGE4_PROVENANCE_HELPER_PATH="$REPO_ROOT/scripts/check/lib/stage4-candidate-provenance.shs"
+export BOOTSTRAP_STAGE3_FACADE_PATH STAGE4_PROVENANCE_HELPER_PATH
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+. "$STAGE4_PROVENANCE_HELPER_PATH"
 
 HANDOFF_ROOT=
 STAGE3_MANIFEST=
@@ -20,6 +25,9 @@ FREEBSD_IMAGE=
 FREEBSD_IMAGE_RECEIPT=
 SIMPLEOS_KERNEL=
 SIMPLEOS_MANIFEST=
+CURRENT_TREE_IDENTITY=
+CURRENT_TREE_IDENTITY_DIR=
+HANDOFF_SELFTEST_MODE=0
 
 configure_paths() {
     HANDOFF_ROOT=${BOOTSTRAP_HANDOFF_ROOT:-${SIMPLE_BOOTSTRAP_HANDOFF_ROOT:-${BOOTSTRAP_HANDOFF_FIXTURE_ROOT:-$REPO_ROOT/build/bootstrap/handoff}}}
@@ -90,6 +98,53 @@ manifest_value() {
     ' "$file"
 }
 
+ensure_current_tree_identity() {
+    [ -z "$CURRENT_TREE_IDENTITY" ] || return 0
+    if [ "$HANDOFF_SELFTEST_MODE" = 1 ] &&
+       [ -n "${BOOTSTRAP_HANDOFF_SELFTEST_CURRENT_TREE_IDENTITY:-}" ]; then
+        CURRENT_TREE_IDENTITY=$(canonical_file "$BOOTSTRAP_HANDOFF_SELFTEST_CURRENT_TREE_IDENTITY") || return 1
+        return 0
+    fi
+    CURRENT_TREE_IDENTITY_DIR=$(mktemp -d "${TMPDIR:-/tmp}/bootstrap-handoff-current-tree.XXXXXX") || return 1
+    CURRENT_TREE_IDENTITY="$CURRENT_TREE_IDENTITY_DIR/current.env"
+    stage4_write_current_tree_identity "$CURRENT_TREE_IDENTITY" "$REPO_ROOT" || return 1
+}
+
+release_current_tree_identity() {
+    [ -z "$CURRENT_TREE_IDENTITY_DIR" ] || rm -rf "$CURRENT_TREE_IDENTITY_DIR"
+    CURRENT_TREE_IDENTITY=
+    CURRENT_TREE_IDENTITY_DIR=
+}
+
+verify_current_tree_fields() {
+    receipt=$1
+    ensure_current_tree_identity || return 1
+    for identity_key in repository_root source_revision_kind source_revision \
+        source_roots stage3_source_snapshot_sha256 git_state_sha256 \
+        git_head git_dirty_fingerprint stage3_producer_path \
+        stage3_producer_sha256; do
+        [ "$(manifest_value "$identity_key" "$receipt")" = \
+          "$(manifest_value "$identity_key" "$CURRENT_TREE_IDENTITY")" ] || return 1
+    done
+}
+
+verify_stage3_current_tree_fields() {
+    manifest=$1
+    ensure_current_tree_identity || return 1
+    [ "$(manifest_value source_snapshot_sha256 "$manifest")" = \
+      "$(manifest_value stage3_source_snapshot_sha256 "$CURRENT_TREE_IDENTITY")" ] || return 1
+    [ "$(manifest_value git_state_sha256 "$manifest")" = \
+      "$(manifest_value git_state_sha256 "$CURRENT_TREE_IDENTITY")" ] || return 1
+    [ "$(manifest_value git_head "$manifest")" = \
+      "$(manifest_value git_head "$CURRENT_TREE_IDENTITY")" ] || return 1
+    [ "$(manifest_value git_dirty_fingerprint "$manifest")" = \
+      "$(manifest_value git_dirty_fingerprint "$CURRENT_TREE_IDENTITY")" ] || return 1
+    [ "$(manifest_value bootstrap_script_path "$manifest")" = \
+      "$(manifest_value stage3_producer_path "$CURRENT_TREE_IDENTITY")" ] || return 1
+    [ "$(manifest_value bootstrap_script_sha256 "$manifest")" = \
+      "$(manifest_value stage3_producer_sha256 "$CURRENT_TREE_IDENTITY")" ] || return 1
+}
+
 field_any() {
     file=$1
     shift
@@ -118,6 +173,52 @@ verify_hashed_file() {
     valid_sha256 "$expected" || return 1
     actual=$(hash_file "$file" 2>/dev/null) || return 1
     [ "$actual" = "$expected" ]
+}
+
+canonical_hashed_reference() {
+    reference=$1
+    base_directory=$2
+    expected=$3
+    resolved=$(resolve_reference "$reference" "$base_directory") || return 1
+    canonical=$(canonical_file "$resolved") || return 1
+    verify_hashed_file "$canonical" "$expected" || return 1
+    printf '%s\n' "$canonical"
+}
+
+verify_sanity_receipt() {
+    receipt=$1
+    receipt_sha=$2
+    candidate_sha=$3
+    verify_hashed_file "$receipt" "$receipt_sha" || return 1
+    expect_field schema "$receipt" simple-bootstrap-sanity-evidence-v1 || return 1
+    expect_field status "$receipt" pass || return 1
+    expect_field version_status "$receipt" 0 || return 1
+    expect_field unsupported_status "$receipt" 1 || return 1
+    expect_field frontend_smoke_status "$receipt" 0 || return 1
+    expect_field frontend_smoke_bootstrap_mode_status "$receipt" 0 || return 1
+    expect_field candidate_sha256_before "$receipt" "$candidate_sha" || return 1
+    expect_field candidate_sha256_after "$receipt" "$candidate_sha" || return 1
+    unsupported_sha=$(manifest_value unsupported_output_sha256 "$receipt") || return 1
+    frontend_sha=$(manifest_value frontend_smoke_output_sha256 "$receipt") || return 1
+    valid_sha256 "$unsupported_sha" && valid_sha256 "$frontend_sha"
+}
+
+verify_receiver_receipt() {
+    receipt=$1
+    receipt_sha=$2
+    candidate_sha=$3
+    runtime_sha=$4
+    verify_hashed_file "$receipt" "$receipt_sha" || return 1
+    expect_field schema "$receipt" simple-bootstrap-stage2-receiver-evidence-v1 || return 1
+    expect_field status "$receipt" pass || return 1
+    expect_field probe_exit "$receipt" 0 || return 1
+    expect_field candidate_sha256_before "$receipt" "$candidate_sha" || return 1
+    expect_field candidate_sha256_after "$receipt" "$candidate_sha" || return 1
+    expect_field runtime_snapshot_sha256 "$receipt" "$runtime_sha" || return 1
+    probe_log=$(manifest_value probe_log "$receipt") || return 1
+    probe_log_sha=$(manifest_value probe_log_sha256 "$receipt") || return 1
+    probe_base=$(dirname "$receipt")
+    canonical_hashed_reference "$probe_log" "$probe_base" "$probe_log_sha" >/dev/null
 }
 
 resolve_reference() {
@@ -199,6 +300,10 @@ check_stage3() {
     expect_field schema "$STAGE3_MANIFEST" simple-bootstrap-stage3-provenance-v4 || { STAGE3_REASON=invalid_schema; return 1; }
     expect_field status "$STAGE3_MANIFEST" pass || { STAGE3_REASON=manifest_not_pass; return 1; }
     expect_field artifact_kind "$STAGE3_MANIFEST" pure-simple-bootstrap-compiler || { STAGE3_REASON=invalid_artifact_kind; return 1; }
+    expect_field platform "$STAGE3_MANIFEST" x86_64-unknown-linux-gnu || { STAGE3_REASON=invalid_platform; return 1; }
+    expect_field source_roots "$STAGE3_MANIFEST" src/compiler:src/app:src/lib || { STAGE3_REASON=invalid_source_roots; return 1; }
+    expect_field stage2_sanity_status "$STAGE3_MANIFEST" pass || { STAGE3_REASON=stage2_sanity_not_pass; return 1; }
+    expect_field stage3_sanity_status "$STAGE3_MANIFEST" pass || { STAGE3_REASON=stage3_sanity_not_pass; return 1; }
     expect_field stage2_receiver_status "$STAGE3_MANIFEST" pass || { STAGE3_REASON=stage2_receiver_not_pass; return 1; }
     expect_field stage2_check_policy "$STAGE3_MANIFEST" identity-scoped-receipt-reuse || { STAGE3_REASON=invalid_stage2_check_policy; return 1; }
     expect_field stage2_checks_executed_at_admission "$STAGE3_MANIFEST" 1 || { STAGE3_REASON=invalid_stage2_admission_count; return 1; }
@@ -208,6 +313,12 @@ check_stage3() {
     stage2_admission_receipt=$(manifest_value stage2_admission_receipt_path "$STAGE3_MANIFEST") || { STAGE3_REASON=missing_stage2_admission_receipt; return 1; }
     stage2_admission_receipt_sha=$(manifest_value stage2_admission_receipt_sha256 "$STAGE3_MANIFEST") || { STAGE3_REASON=missing_stage2_admission_receipt_hash; return 1; }
     valid_sha256 "$stage2_admission_receipt_sha" || { STAGE3_REASON=invalid_stage2_admission_receipt_hash; return 1; }
+    seed_ref=$(manifest_value seed_path "$STAGE3_MANIFEST") || { STAGE3_REASON=missing_seed_path; return 1; }
+    seed_sha=$(manifest_value seed_sha256 "$STAGE3_MANIFEST") || { STAGE3_REASON=missing_seed_hash; return 1; }
+    stage2_ref=$(manifest_value stage2_path "$STAGE3_MANIFEST") || { STAGE3_REASON=missing_stage2_path; return 1; }
+    stage2_sha=$(manifest_value stage2_sha256 "$STAGE3_MANIFEST") || { STAGE3_REASON=missing_stage2_hash; return 1; }
+    stage2_admitted_ref=$(manifest_value stage2_admitted_path "$STAGE3_MANIFEST") || { STAGE3_REASON=missing_stage2_admitted_path; return 1; }
+    stage2_admitted_sha=$(manifest_value stage2_admitted_sha256 "$STAGE3_MANIFEST") || { STAGE3_REASON=missing_stage2_admitted_hash; return 1; }
     stage3_path=$(manifest_value stage3_path "$STAGE3_MANIFEST") || { STAGE3_REASON=missing_stage3_path; return 1; }
     stage3_sha=$(manifest_value stage3_sha256 "$STAGE3_MANIFEST") || { STAGE3_REASON=missing_stage3_hash; return 1; }
     output_path=$(manifest_value output_path "$STAGE3_MANIFEST") || { STAGE3_REASON=missing_output_path; return 1; }
@@ -215,10 +326,59 @@ check_stage3() {
     base=$(dirname "$STAGE3_MANIFEST")
     same_file_reference "$stage2_admission_receipt" "$base/stage2-admitted/admission.env" "$base" || { STAGE3_REASON=stage2_admission_receipt_path_mismatch; return 1; }
     verify_hashed_file "$stage2_admission_receipt" "$stage2_admission_receipt_sha" || { STAGE3_REASON=stage2_admission_receipt_hash_mismatch; return 1; }
+    seed_path=$(canonical_hashed_reference "$seed_ref" "$base" "$seed_sha") || { STAGE3_REASON=seed_identity_mismatch; return 1; }
+    stage2_path=$(canonical_hashed_reference "$stage2_ref" "$base" "$stage2_sha") || { STAGE3_REASON=stage2_identity_mismatch; return 1; }
+    stage2_admitted_path=$(canonical_hashed_reference "$stage2_admitted_ref" "$base" "$stage2_admitted_sha") || { STAGE3_REASON=stage2_admitted_identity_mismatch; return 1; }
+    [ "$stage2_sha" = "$stage2_admitted_sha" ] || { STAGE3_REASON=stage2_admitted_hash_mismatch; return 1; }
+    [ "$seed_path" != "$stage2_path" ] && [ "$seed_path" != "$stage2_admitted_path" ] && [ "$seed_sha" != "$stage2_sha" ] || { STAGE3_REASON=seed_substitution_detected; return 1; }
     same_file_reference "$stage3_path" "$STAGE3_CANDIDATE" "$base" || { STAGE3_REASON=stage3_path_mismatch; return 1; }
     same_file_reference "$output_path" "$STAGE3_CANDIDATE" "$base" || { STAGE3_REASON=output_path_mismatch; return 1; }
     verify_hashed_file "$STAGE3_CANDIDATE" "$stage3_sha" || { STAGE3_REASON=stage3_hash_mismatch; return 1; }
     verify_hashed_file "$STAGE3_CANDIDATE" "$output_sha" || { STAGE3_REASON=output_hash_mismatch; return 1; }
+    [ "$seed_path" != "$(canonical_file "$STAGE3_CANDIDATE")" ] && [ "$seed_sha" != "$stage3_sha" ] || { STAGE3_REASON=seed_substitution_detected; return 1; }
+
+    source_ref=$(manifest_value source_snapshot_path "$STAGE3_MANIFEST") || { STAGE3_REASON=missing_source_identity; return 1; }
+    source_sha=$(manifest_value source_snapshot_sha256 "$STAGE3_MANIFEST") || { STAGE3_REASON=missing_source_identity_hash; return 1; }
+    source_fingerprint=$(manifest_value source_fingerprint "$STAGE3_MANIFEST") || { STAGE3_REASON=missing_source_fingerprint; return 1; }
+    canonical_hashed_reference "$source_ref" "$base" "$source_sha" >/dev/null || { STAGE3_REASON=source_identity_mismatch; return 1; }
+    [ "$source_sha" = "$source_fingerprint" ] || { STAGE3_REASON=source_fingerprint_mismatch; return 1; }
+    verify_stage3_current_tree_fields "$STAGE3_MANIFEST" || { STAGE3_REASON=current_tree_identity_mismatch; return 1; }
+    runtime_origin_ref=$(manifest_value runtime_origin_snapshot_path "$STAGE3_MANIFEST") || { STAGE3_REASON=missing_runtime_origin; return 1; }
+    runtime_origin_sha=$(manifest_value runtime_origin_snapshot_sha256 "$STAGE3_MANIFEST") || { STAGE3_REASON=missing_runtime_origin_hash; return 1; }
+    runtime_admitted_ref=$(manifest_value runtime_admitted_snapshot_path "$STAGE3_MANIFEST") || { STAGE3_REASON=missing_runtime_admission; return 1; }
+    runtime_admitted_sha=$(manifest_value runtime_admitted_snapshot_sha256 "$STAGE3_MANIFEST") || { STAGE3_REASON=missing_runtime_admission_hash; return 1; }
+    canonical_hashed_reference "$runtime_origin_ref" "$base" "$runtime_origin_sha" >/dev/null || { STAGE3_REASON=runtime_origin_mismatch; return 1; }
+    canonical_hashed_reference "$runtime_admitted_ref" "$base" "$runtime_admitted_sha" >/dev/null || { STAGE3_REASON=runtime_admission_mismatch; return 1; }
+    [ "$runtime_origin_sha" = "$runtime_admitted_sha" ] || { STAGE3_REASON=runtime_identity_mismatch; return 1; }
+    tool_ref=$(manifest_value tool_authority_path "$STAGE3_MANIFEST") || { STAGE3_REASON=missing_compiler_authority; return 1; }
+    tool_sha=$(manifest_value tool_authority_sha256 "$STAGE3_MANIFEST") || { STAGE3_REASON=missing_compiler_authority_hash; return 1; }
+    canonical_hashed_reference "$tool_ref" "$base" "$tool_sha" >/dev/null || { STAGE3_REASON=compiler_authority_mismatch; return 1; }
+
+    expect_field schema "$stage2_admission_receipt" simple-bootstrap-stage2-admission-v1 || { STAGE3_REASON=invalid_stage2_admission_schema; return 1; }
+    expect_field status "$stage2_admission_receipt" admitted || { STAGE3_REASON=stage2_not_admitted; return 1; }
+    expect_field checks_executed_at_admission "$stage2_admission_receipt" 1 || { STAGE3_REASON=invalid_stage2_receipt_count; return 1; }
+    expect_field checks_replayed_during_stage3 "$stage2_admission_receipt" 0 || { STAGE3_REASON=stage2_receipt_replayed; return 1; }
+    expect_field admission_identity "$stage2_admission_receipt" "$stage2_admission_identity" || { STAGE3_REASON=stage2_admission_identity_mismatch; return 1; }
+    admitted_candidate_ref=$(manifest_value candidate_path "$stage2_admission_receipt") || { STAGE3_REASON=missing_admitted_candidate; return 1; }
+    admitted_candidate_sha=$(manifest_value candidate_sha256 "$stage2_admission_receipt") || { STAGE3_REASON=missing_admitted_candidate_hash; return 1; }
+    same_file_reference "$admitted_candidate_ref" "$stage2_admitted_path" "$(dirname "$stage2_admission_receipt")" || { STAGE3_REASON=admitted_candidate_path_mismatch; return 1; }
+    [ "$admitted_candidate_sha" = "$stage2_admitted_sha" ] || { STAGE3_REASON=admitted_candidate_hash_mismatch; return 1; }
+    expect_field source_snapshot_sha256 "$stage2_admission_receipt" "$source_sha" || { STAGE3_REASON=stage2_source_identity_mismatch; return 1; }
+    expect_field runtime_snapshot_sha256 "$stage2_admission_receipt" "$runtime_admitted_sha" || { STAGE3_REASON=stage2_runtime_identity_mismatch; return 1; }
+    expect_field tool_authority_sha256 "$stage2_admission_receipt" "$tool_sha" || { STAGE3_REASON=stage2_compiler_authority_mismatch; return 1; }
+
+    stage2_sanity_ref=$(manifest_value stage2_sanity_evidence_path "$STAGE3_MANIFEST") || { STAGE3_REASON=missing_stage2_sanity_receipt; return 1; }
+    stage2_sanity_sha=$(manifest_value stage2_sanity_evidence_sha256 "$STAGE3_MANIFEST") || { STAGE3_REASON=missing_stage2_sanity_hash; return 1; }
+    stage2_sanity=$(canonical_hashed_reference "$stage2_sanity_ref" "$base" "$stage2_sanity_sha") || { STAGE3_REASON=stage2_sanity_hash_mismatch; return 1; }
+    verify_sanity_receipt "$stage2_sanity" "$stage2_sanity_sha" "$stage2_sha" || { STAGE3_REASON=stage2_no_stub_contract_invalid; return 1; }
+    stage3_sanity_ref=$(manifest_value stage3_sanity_evidence_path "$STAGE3_MANIFEST") || { STAGE3_REASON=missing_stage3_sanity_receipt; return 1; }
+    stage3_sanity_sha=$(manifest_value stage3_sanity_evidence_sha256 "$STAGE3_MANIFEST") || { STAGE3_REASON=missing_stage3_sanity_hash; return 1; }
+    stage3_sanity=$(canonical_hashed_reference "$stage3_sanity_ref" "$base" "$stage3_sanity_sha") || { STAGE3_REASON=stage3_sanity_hash_mismatch; return 1; }
+    verify_sanity_receipt "$stage3_sanity" "$stage3_sanity_sha" "$stage3_sha" || { STAGE3_REASON=stage3_no_stub_contract_invalid; return 1; }
+    receiver_ref=$(manifest_value stage2_receiver_evidence_path "$STAGE3_MANIFEST") || { STAGE3_REASON=missing_stage2_receiver_receipt; return 1; }
+    receiver_sha=$(manifest_value stage2_receiver_evidence_sha256 "$STAGE3_MANIFEST") || { STAGE3_REASON=missing_stage2_receiver_hash; return 1; }
+    receiver=$(canonical_hashed_reference "$receiver_ref" "$base" "$receiver_sha") || { STAGE3_REASON=stage2_receiver_hash_mismatch; return 1; }
+    verify_receiver_receipt "$receiver" "$receiver_sha" "$stage2_sha" "$runtime_admitted_sha" || { STAGE3_REASON=stage2_runtime_receiver_invalid; return 1; }
     STAGE3_STATUS=ready
     STAGE3_REASON=validated
     return 0
@@ -228,11 +388,18 @@ check_stage4() {
     STAGE4_STATUS=blocked
     if ! canonical_file "$STAGE4_PROVENANCE" >/dev/null 2>&1; then STAGE4_REASON=missing_or_symlinked_provenance; return 1; fi
     if ! canonical_file "$STAGE4_CANDIDATE" >/dev/null 2>&1; then STAGE4_REASON=missing_or_symlinked_candidate; return 1; fi
+    [ -x "$STAGE4_CANDIDATE" ] || { STAGE4_REASON=candidate_not_executable; return 1; }
     expect_field schema "$STAGE4_PROVENANCE" simple-bootstrap-stage4-provenance-v1 || { STAGE4_REASON=invalid_schema; return 1; }
     expect_field status "$STAGE4_PROVENANCE" pass || { STAGE4_REASON=provenance_not_pass; return 1; }
     expect_field artifact_kind "$STAGE4_PROVENANCE" pure-simple-full-cli || { STAGE4_REASON=invalid_artifact_kind; return 1; }
     output_path=$(manifest_value output_path "$STAGE4_PROVENANCE") || { STAGE4_REASON=missing_output_path; return 1; }
     output_sha=$(manifest_value output_sha256 "$STAGE4_PROVENANCE") || { STAGE4_REASON=missing_output_hash; return 1; }
+    expect_field source_revision_kind "$STAGE4_PROVENANCE" content-sha256 || { STAGE4_REASON=invalid_source_revision_kind; return 1; }
+    source_revision=$(manifest_value source_revision "$STAGE4_PROVENANCE") || { STAGE4_REASON=missing_source_revision; return 1; }
+    valid_sha256 "$source_revision" || { STAGE4_REASON=invalid_source_revision; return 1; }
+    expect_field source_roots "$STAGE4_PROVENANCE" src/compiler:src/lib:src/app:src/runtime:examples/10_tooling || { STAGE4_REASON=invalid_source_roots; return 1; }
+    parent_ref=$(manifest_value parent_compiler_path "$STAGE4_PROVENANCE") || { STAGE4_REASON=missing_parent_compiler; return 1; }
+    parent_sha=$(manifest_value parent_compiler_sha256 "$STAGE4_PROVENANCE") || { STAGE4_REASON=missing_parent_compiler_hash; return 1; }
     stage3_ref=$(manifest_value stage3_provenance_path "$STAGE4_PROVENANCE") || { STAGE4_REASON=missing_stage3_provenance; return 1; }
     stage3_provenance_sha=$(manifest_value stage3_provenance_sha256 "$STAGE4_PROVENANCE") || { STAGE4_REASON=missing_stage3_provenance_hash; return 1; }
     smoke_ref=$(manifest_value essential_tools_log_path "$STAGE4_PROVENANCE") || { STAGE4_REASON=missing_smoke_receipt; return 1; }
@@ -241,8 +408,13 @@ check_stage4() {
     base=$(dirname "$STAGE4_PROVENANCE")
     same_file_reference "$output_path" "$STAGE4_CANDIDATE" "$base" || { STAGE4_REASON=output_path_mismatch; return 1; }
     verify_hashed_file "$STAGE4_CANDIDATE" "$output_sha" || { STAGE4_REASON=output_hash_mismatch; return 1; }
+    same_file_reference "$parent_ref" "$STAGE3_CANDIDATE" "$base" || { STAGE4_REASON=parent_compiler_mismatch; return 1; }
+    stage3_sha=$(manifest_value stage3_sha256 "$STAGE3_MANIFEST") || { STAGE4_REASON=stage3_identity_missing; return 1; }
+    [ "$parent_sha" = "$stage3_sha" ] && verify_hashed_file "$STAGE3_CANDIDATE" "$parent_sha" || { STAGE4_REASON=parent_compiler_hash_mismatch; return 1; }
     same_file_reference "$stage3_ref" "$STAGE3_MANIFEST" "$base" || { STAGE4_REASON=stage3_provenance_mismatch; return 1; }
     verify_hashed_file "$STAGE3_MANIFEST" "$stage3_provenance_sha" || { STAGE4_REASON=stage3_provenance_hash_mismatch; return 1; }
+    verify_current_tree_fields "$STAGE4_PROVENANCE" || { STAGE4_REASON=current_tree_identity_mismatch; return 1; }
+    stage4_verify_stage3_identity_fields "$STAGE4_PROVENANCE" "$STAGE3_MANIFEST" "$REPO_ROOT" || { STAGE4_REASON=stage3_source_or_producer_mismatch; return 1; }
     STAGE4_SMOKE_FROM_PROVENANCE=$(resolve_reference "$smoke_ref" "$base")
     verify_hashed_file "$STAGE4_SMOKE_FROM_PROVENANCE" "$smoke_sha" || { STAGE4_REASON=smoke_receipt_hash_mismatch; return 1; }
     STAGE4_STATUS=ready
@@ -266,6 +438,11 @@ check_smoke() {
         SMOKE_RECEIPT=$STAGE4_SMOKE_FROM_PROVENANCE
     fi
     if ! canonical_file "$SMOKE_RECEIPT" >/dev/null 2>&1; then SMOKE_REASON=missing_or_symlinked_receipt; return 1; fi
+    [ -x "$STAGE4_CANDIDATE" ] || { SMOKE_REASON=stage4_candidate_not_executable; return 1; }
+    check_smoke_marker essential_tools_identity_rc=0 || { SMOKE_REASON=missing_executable_identity_status; return 1; }
+    check_smoke_marker essential_tools_pure_simple_identity=true || { SMOKE_REASON=missing_pure_simple_identity; return 1; }
+    check_smoke_marker "command: run_timeout_kill 180 env SIMPLE_BINARY=$STAGE4_CANDIDATE sh scripts/check/check-bootstrap-essential-tools-smoke.shs" || { SMOKE_REASON=receipt_not_bound_to_stage4_execution; return 1; }
+    if grep -Fq 'error=' "$SMOKE_RECEIPT"; then SMOKE_REASON=smoke_error_present; return 1; fi
     check_smoke_marker essential_test_runner_smoke=true && SMOKE_TEST_RUNNER_STATUS=ready
     check_smoke_marker essential_lint_smoke=true && SMOKE_LINT_STATUS=ready
     check_smoke_marker essential_duplicate_checker_smoke=true && SMOKE_DUPLICATE_STATUS=ready
@@ -307,18 +484,47 @@ check_deploy() {
     expect_field schema "$DEPLOY_RECEIPT" bootstrap-deploy-receipt-v1 || { DEPLOY_REASON=invalid_schema; return 1; }
     expect_field deployment_status "$DEPLOY_RECEIPT" pass || { DEPLOY_REASON=receipt_not_pass; return 1; }
     expect_field platform_acceptance_claimed "$DEPLOY_RECEIPT" false || { DEPLOY_REASON=false_platform_claim_missing; return 1; }
+    deploy_platform=$(manifest_value platform "$DEPLOY_RECEIPT") || { DEPLOY_REASON=missing_platform; return 1; }
     current_ref=$(manifest_value current_path "$DEPLOY_RECEIPT") || { DEPLOY_REASON=missing_current_path; return 1; }
     current_sha=$(manifest_value current_sha256 "$DEPLOY_RECEIPT") || { DEPLOY_REASON=missing_current_hash; return 1; }
     backup_ref=$(manifest_value backup_path "$DEPLOY_RECEIPT") || { DEPLOY_REASON=missing_backup_path; return 1; }
     backup_sha=$(manifest_value backup_sha256 "$DEPLOY_RECEIPT") || { DEPLOY_REASON=missing_backup_hash; return 1; }
     [ "$backup_sha" != none ] || { DEPLOY_REASON=rollback_backup_missing; return 1; }
     base=$(dirname "$DEPLOY_RECEIPT")
+    stage4_ref=$(manifest_value stage4_candidate_path "$DEPLOY_RECEIPT") || { DEPLOY_REASON=missing_stage4_candidate_path; return 1; }
+    stage4_provenance_ref=$(manifest_value stage4_provenance_path "$DEPLOY_RECEIPT") || { DEPLOY_REASON=missing_stage4_provenance_path; return 1; }
+    stage4_provenance_sha=$(manifest_value stage4_provenance_sha256 "$DEPLOY_RECEIPT") || { DEPLOY_REASON=missing_stage4_provenance_hash; return 1; }
+    same_file_reference "$stage4_ref" "$STAGE4_CANDIDATE" "$base" || { DEPLOY_REASON=stage4_candidate_path_mismatch; return 1; }
+    same_file_reference "$stage4_provenance_ref" "$STAGE4_PROVENANCE" "$base" || { DEPLOY_REASON=stage4_provenance_path_mismatch; return 1; }
+    verify_hashed_file "$STAGE4_PROVENANCE" "$stage4_provenance_sha" || { DEPLOY_REASON=stage4_provenance_hash_mismatch; return 1; }
+    verify_current_tree_fields "$DEPLOY_RECEIPT" || { DEPLOY_REASON=current_tree_identity_mismatch; return 1; }
+    for identity_key in repository_root source_revision_kind source_revision \
+        source_roots stage3_source_snapshot_sha256 git_state_sha256 git_head \
+        git_dirty_fingerprint stage3_producer_path stage3_producer_sha256; do
+        expect_field "$identity_key" "$DEPLOY_RECEIPT" \
+          "$(manifest_value "$identity_key" "$STAGE4_PROVENANCE")" || { DEPLOY_REASON=stage4_identity_mismatch; return 1; }
+    done
+    acceptance_ref=$(manifest_value stage3_current_acceptance_receipt "$DEPLOY_RECEIPT") || { DEPLOY_REASON=missing_stage3_acceptance; return 1; }
+    acceptance_sha=$(manifest_value stage3_current_acceptance_receipt_sha256 "$DEPLOY_RECEIPT") || { DEPLOY_REASON=missing_stage3_acceptance_hash; return 1; }
+    acceptance=$(canonical_hashed_reference "$acceptance_ref" "$base" "$acceptance_sha") || { DEPLOY_REASON=stage3_acceptance_hash_mismatch; return 1; }
+    expect_field stage3_current_acceptance_status "$DEPLOY_RECEIPT" verified || { DEPLOY_REASON=stage3_acceptance_not_verified; return 1; }
+    expect_field status "$acceptance" verified || { DEPLOY_REASON=stage3_acceptance_receipt_not_verified; return 1; }
+    expect_field stage4_candidate_sha256 "$acceptance" "$(manifest_value stage4_candidate_sha256 "$DEPLOY_RECEIPT")" || { DEPLOY_REASON=stage3_acceptance_candidate_mismatch; return 1; }
+    expect_field stage4_provenance_sha256 "$acceptance" "$stage4_provenance_sha" || { DEPLOY_REASON=stage3_acceptance_provenance_mismatch; return 1; }
+    for identity_key in repository_root source_revision_kind source_revision \
+        source_roots stage3_source_snapshot_sha256 git_state_sha256 git_head \
+        git_dirty_fingerprint stage3_producer_path stage3_producer_sha256; do
+        expect_field "$identity_key" "$acceptance" \
+          "$(manifest_value "$identity_key" "$DEPLOY_RECEIPT")" || { DEPLOY_REASON=stage3_acceptance_identity_mismatch; return 1; }
+    done
     current_path=$(resolve_reference "$current_ref" "$base")
     backup_path=$(resolve_reference "$backup_ref" "$base")
     verify_hashed_file "$current_path" "$current_sha" || { DEPLOY_REASON=current_hash_mismatch; return 1; }
     verify_hashed_file "$backup_path" "$backup_sha" || { DEPLOY_REASON=backup_hash_mismatch; return 1; }
     stage4_sha=$(manifest_value output_sha256 "$STAGE4_PROVENANCE") || { DEPLOY_REASON=stage4_lineage_missing; return 1; }
+    expect_field stage4_candidate_sha256 "$DEPLOY_RECEIPT" "$stage4_sha" || { DEPLOY_REASON=stage4_candidate_receipt_mismatch; return 1; }
     [ "$current_sha" = "$stage4_sha" ] || { DEPLOY_REASON=stage4_lineage_mismatch; return 1; }
+    [ "$current_path" != "$backup_path" ] || { DEPLOY_REASON=non_atomic_same_path; return 1; }
     DEPLOY_STATUS=ready
     DEPLOY_REASON=validated
     return 0
@@ -327,9 +533,34 @@ check_deploy() {
 check_rollback() {
     ROLLBACK_STATUS=blocked
     canonical_file "$ROLLBACK_RECEIPT" >/dev/null 2>&1 || { ROLLBACK_REASON=missing_or_invalid_receipt; return 1; }
+    canonical_file "$DEPLOY_RECEIPT" >/dev/null 2>&1 || { ROLLBACK_REASON=deploy_receipt_missing; return 1; }
     expect_field schema "$ROLLBACK_RECEIPT" bootstrap-rollback-receipt-v1 || { ROLLBACK_REASON=invalid_schema; return 1; }
     expect_field rollback_status "$ROLLBACK_RECEIPT" pass || { ROLLBACK_REASON=receipt_not_pass; return 1; }
     expect_field platform_acceptance_claimed "$ROLLBACK_RECEIPT" false || { ROLLBACK_REASON=false_platform_claim_missing; return 1; }
+    rollback_platform=$(manifest_value platform "$ROLLBACK_RECEIPT") || { ROLLBACK_REASON=missing_platform; return 1; }
+    deploy_platform=$(manifest_value platform "$DEPLOY_RECEIPT") || { ROLLBACK_REASON=deploy_platform_missing; return 1; }
+    [ "$rollback_platform" = "$deploy_platform" ] || { ROLLBACK_REASON=platform_mismatch; return 1; }
+    deploy_receipt_sha=$(manifest_value deploy_receipt_sha256 "$ROLLBACK_RECEIPT") || { ROLLBACK_REASON=missing_deploy_receipt_hash; return 1; }
+    verify_hashed_file "$DEPLOY_RECEIPT" "$deploy_receipt_sha" || { ROLLBACK_REASON=deploy_receipt_hash_mismatch; return 1; }
+    verify_current_tree_fields "$ROLLBACK_RECEIPT" || { ROLLBACK_REASON=current_tree_identity_mismatch; return 1; }
+    for identity_key in repository_root source_revision_kind source_revision \
+        source_roots stage3_source_snapshot_sha256 git_state_sha256 git_head \
+        git_dirty_fingerprint stage3_producer_path stage3_producer_sha256; do
+        expect_field "$identity_key" "$ROLLBACK_RECEIPT" \
+          "$(manifest_value "$identity_key" "$DEPLOY_RECEIPT")" || { ROLLBACK_REASON=deploy_identity_mismatch; return 1; }
+    done
+    stage4_ref=$(manifest_value stage4_candidate_path "$ROLLBACK_RECEIPT") || { ROLLBACK_REASON=missing_stage4_candidate_path; return 1; }
+    stage4_sha=$(manifest_value stage4_candidate_sha256 "$ROLLBACK_RECEIPT") || { ROLLBACK_REASON=missing_stage4_candidate_hash; return 1; }
+    stage4_provenance_ref=$(manifest_value stage4_provenance_path "$ROLLBACK_RECEIPT") || { ROLLBACK_REASON=missing_stage4_provenance_path; return 1; }
+    stage4_provenance_sha=$(manifest_value stage4_provenance_sha256 "$ROLLBACK_RECEIPT") || { ROLLBACK_REASON=missing_stage4_provenance_hash; return 1; }
+    same_file_reference "$stage4_ref" "$STAGE4_CANDIDATE" "$(dirname "$ROLLBACK_RECEIPT")" || { ROLLBACK_REASON=stage4_candidate_path_mismatch; return 1; }
+    [ "$stage4_sha" = "$(manifest_value stage4_candidate_sha256 "$DEPLOY_RECEIPT")" ] || { ROLLBACK_REASON=stage4_candidate_hash_mismatch; return 1; }
+    same_file_reference "$stage4_provenance_ref" "$STAGE4_PROVENANCE" "$(dirname "$ROLLBACK_RECEIPT")" || { ROLLBACK_REASON=stage4_provenance_path_mismatch; return 1; }
+    [ "$stage4_provenance_sha" = "$(manifest_value stage4_provenance_sha256 "$DEPLOY_RECEIPT")" ] && verify_hashed_file "$STAGE4_PROVENANCE" "$stage4_provenance_sha" || { ROLLBACK_REASON=stage4_provenance_hash_mismatch; return 1; }
+    acceptance_ref=$(manifest_value stage3_current_acceptance_receipt "$ROLLBACK_RECEIPT") || { ROLLBACK_REASON=missing_stage3_acceptance; return 1; }
+    acceptance_sha=$(manifest_value stage3_current_acceptance_receipt_sha256 "$ROLLBACK_RECEIPT") || { ROLLBACK_REASON=missing_stage3_acceptance_hash; return 1; }
+    [ "$acceptance_ref" = "$(manifest_value stage3_current_acceptance_receipt "$DEPLOY_RECEIPT")" ] || { ROLLBACK_REASON=stage3_acceptance_path_mismatch; return 1; }
+    [ "$acceptance_sha" = "$(manifest_value stage3_current_acceptance_receipt_sha256 "$DEPLOY_RECEIPT")" ] && canonical_hashed_reference "$acceptance_ref" "$(dirname "$ROLLBACK_RECEIPT")" "$acceptance_sha" >/dev/null || { ROLLBACK_REASON=stage3_acceptance_hash_mismatch; return 1; }
     current_ref=$(manifest_value current_path "$ROLLBACK_RECEIPT") || { ROLLBACK_REASON=missing_current_path; return 1; }
     current_sha=$(manifest_value current_sha256 "$ROLLBACK_RECEIPT") || { ROLLBACK_REASON=missing_current_hash; return 1; }
     backup_ref=$(manifest_value backup_path "$ROLLBACK_RECEIPT") || { ROLLBACK_REASON=missing_backup_path; return 1; }
@@ -339,6 +570,15 @@ check_rollback() {
     backup_path=$(resolve_reference "$backup_ref" "$base")
     verify_hashed_file "$current_path" "$current_sha" || { ROLLBACK_REASON=current_hash_mismatch; return 1; }
     verify_hashed_file "$backup_path" "$backup_sha" || { ROLLBACK_REASON=backup_hash_mismatch; return 1; }
+    deploy_base=$(dirname "$DEPLOY_RECEIPT")
+    deploy_current_ref=$(manifest_value current_path "$DEPLOY_RECEIPT") || { ROLLBACK_REASON=deploy_current_path_missing; return 1; }
+    deploy_backup_ref=$(manifest_value backup_path "$DEPLOY_RECEIPT") || { ROLLBACK_REASON=deploy_backup_path_missing; return 1; }
+    deploy_current_path=$(canonical_hashed_reference "$deploy_current_ref" "$deploy_base" "$(manifest_value current_sha256 "$DEPLOY_RECEIPT")") || { ROLLBACK_REASON=deploy_current_identity_mismatch; return 1; }
+    deploy_backup_path=$(canonical_hashed_reference "$deploy_backup_ref" "$deploy_base" "$(manifest_value backup_sha256 "$DEPLOY_RECEIPT")") || { ROLLBACK_REASON=deploy_backup_identity_mismatch; return 1; }
+    [ "$current_path" = "$deploy_backup_path" ] && [ "$backup_path" = "$deploy_current_path" ] || { ROLLBACK_REASON=atomic_path_swap_mismatch; return 1; }
+    deploy_current_sha=$(manifest_value current_sha256 "$DEPLOY_RECEIPT") || { ROLLBACK_REASON=deploy_current_hash_missing; return 1; }
+    deploy_backup_sha=$(manifest_value backup_sha256 "$DEPLOY_RECEIPT") || { ROLLBACK_REASON=deploy_backup_hash_missing; return 1; }
+    [ "$current_sha" = "$deploy_backup_sha" ] && [ "$backup_sha" = "$deploy_current_sha" ] || { ROLLBACK_REASON=atomic_hash_swap_mismatch; return 1; }
     ROLLBACK_STATUS=ready
     ROLLBACK_REASON=validated
     return 0
@@ -451,9 +691,11 @@ evaluate_readiness() {
         READINESS_STATUS=ready
         READINESS_REASON=all_required_receipts_valid
         GATE_LIST=none
+        release_current_tree_identity
         return 0
     fi
     READINESS_STATUS=blocked
+    release_current_tree_identity
     return 1
 }
 
@@ -524,33 +766,157 @@ verdict_self_test() {
 
 self_test_file() { printf '%b\n' "$2" >"$1"; }
 
+self_test_replace_field() {
+    file=$1
+    key=$2
+    value=$3
+    tmp="$file.replace.$$"
+    awk -F '=' -v wanted="$key" -v replacement="$value" '
+        $1 == wanted { $0=wanted "=" replacement; found++ }
+        { print }
+        END { if (found != 1) exit 1 }
+    ' "$file" >"$tmp" || return 1
+    mv "$tmp" "$file"
+}
+
 self_test() {
     test_root=$(mktemp -d "${TMPDIR:-/tmp}/bootstrap-handoff-self-test.XXXXXX") || exit 1
     trap 'rm -rf "$test_root"' EXIT INT TERM
-    mkdir -p "$test_root/stage3" "$test_root/stage4" "$test_root/deploy" "$test_root/simpleos"
+    mkdir -p "$test_root/seed" "$test_root/stage2" "$test_root/stage2-admitted" "$test_root/stage3" "$test_root/stage4" "$test_root/deploy" "$test_root/simpleos"
+    seed="$test_root/seed/simple"
+    stage2="$test_root/stage2/simple"
+    stage2_admitted="$test_root/stage2-admitted/simple"
     stage3="$test_root/stage3/simple"
     stage4="$test_root/stage4/simple"
     smoke="$test_root/essential-tools-smoke.receipt"
+    self_test_file "$seed" seed-fixture
+    self_test_file "$stage2" stage2-fixture
+    self_test_file "$stage2_admitted" stage2-fixture
     self_test_file "$stage3" stage3-fixture
     self_test_file "$stage4" stage4-fixture
-    self_test_file "$smoke" 'essential_test_runner_smoke=true
+    chmod 755 "$seed" "$stage2" "$stage2_admitted" "$stage3" "$stage4"
+    self_test_file "$smoke" "command: run_timeout_kill 180 env SIMPLE_BINARY=$stage4 sh scripts/check/check-bootstrap-essential-tools-smoke.shs
+essential_tools_identity_rc=0
+essential_tools_pure_simple_identity=true
+essential_test_runner_smoke=true
 essential_lint_smoke=true
 essential_duplicate_checker_smoke=true
-bootstrap_essential_tools_smoke=true'
+bootstrap_essential_tools_smoke=true"
+    seed_sha=$(hash_file "$seed")
+    stage2_sha=$(hash_file "$stage2")
     stage3_sha=$(hash_file "$stage3")
     stage4_sha=$(hash_file "$stage4")
     smoke_sha=$(hash_file "$smoke")
     stage3_manifest="$test_root/stage3.provenance.env"
     stage4_manifest="$test_root/stage4.provenance.env"
-    mkdir -p "$test_root/stage2-admitted"
     stage2_admission_receipt="$test_root/stage2-admitted/admission.env"
-    self_test_file "$stage2_admission_receipt" 'schema=simple-bootstrap-stage2-admission-v1
-status=admitted'
+    source_snapshot="$test_root/source.snapshot"
+    runtime_origin="$test_root/runtime-origin.snapshot"
+    runtime_admitted="$test_root/runtime-admitted.snapshot"
+    tool_authority="$test_root/tool-authority.snapshot"
+    self_test_file "$source_snapshot" source-fixture
+    self_test_file "$runtime_origin" runtime-fixture
+    self_test_file "$runtime_admitted" runtime-fixture
+    self_test_file "$tool_authority" tool-authority-fixture
+    source_sha=$(hash_file "$source_snapshot")
+    runtime_sha=$(hash_file "$runtime_origin")
+    tool_sha=$(hash_file "$tool_authority")
+    stage4_source_sha=5555555555555555555555555555555555555555555555555555555555555555
+    git_state_sha=3333333333333333333333333333333333333333333333333333333333333333
+    git_head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    git_dirty_fingerprint=4444444444444444444444444444444444444444444444444444444444444444
+    stage3_producer="$REPO_ROOT/scripts/bootstrap/bootstrap-from-scratch.sh"
+    stage3_producer_sha=$(hash_file "$stage3_producer")
+    current_tree_identity="$test_root/current-tree.env"
+    self_test_file "$current_tree_identity" "schema=simple-bootstrap-current-tree-identity-v1
+repository_root=$REPO_ROOT
+source_revision_kind=content-sha256
+source_revision=$stage4_source_sha
+source_roots=src/compiler:src/lib:src/app:src/runtime:examples/10_tooling
+stage3_source_snapshot_sha256=$source_sha
+git_state_sha256=$git_state_sha
+git_head=$git_head
+git_dirty_fingerprint=$git_dirty_fingerprint
+stage3_producer_path=$stage3_producer
+stage3_producer_sha256=$stage3_producer_sha"
+    stage2_sanity="$test_root/stage2-sanity.receipt"
+    stage3_sanity="$test_root/stage3-sanity.receipt"
+    sanity_unsupported_sha=1111111111111111111111111111111111111111111111111111111111111111
+    sanity_frontend_sha=2222222222222222222222222222222222222222222222222222222222222222
+    self_test_file "$stage2_sanity" "schema=simple-bootstrap-sanity-evidence-v1
+status=pass
+version_status=0
+unsupported_status=1
+frontend_smoke_status=0
+frontend_smoke_bootstrap_mode_status=0
+candidate_sha256_before=$stage2_sha
+candidate_sha256_after=$stage2_sha
+unsupported_output_sha256=$sanity_unsupported_sha
+frontend_smoke_output_sha256=$sanity_frontend_sha"
+    self_test_file "$stage3_sanity" "schema=simple-bootstrap-sanity-evidence-v1
+status=pass
+version_status=0
+unsupported_status=1
+frontend_smoke_status=0
+frontend_smoke_bootstrap_mode_status=0
+candidate_sha256_before=$stage3_sha
+candidate_sha256_after=$stage3_sha
+unsupported_output_sha256=$sanity_unsupported_sha
+frontend_smoke_output_sha256=$sanity_frontend_sha"
+    stage2_sanity_sha=$(hash_file "$stage2_sanity")
+    stage3_sanity_sha=$(hash_file "$stage3_sanity")
+    receiver_log="$test_root/stage2-receiver.log"
+    receiver="$test_root/stage2-receiver.receipt"
+    self_test_file "$receiver_log" receiver-probe-fixture
+    receiver_log_sha=$(hash_file "$receiver_log")
+    self_test_file "$receiver" "schema=simple-bootstrap-stage2-receiver-evidence-v1
+status=pass
+probe_exit=0
+candidate_sha256_before=$stage2_sha
+candidate_sha256_after=$stage2_sha
+runtime_snapshot_sha256=$runtime_sha
+probe_log=$receiver_log
+probe_log_sha256=$receiver_log_sha"
+    receiver_sha=$(hash_file "$receiver")
+    self_test_file "$stage2_admission_receipt" "schema=simple-bootstrap-stage2-admission-v1
+status=admitted
+candidate_path=$stage2_admitted
+candidate_sha256=$stage2_sha
+source_snapshot_path=$source_snapshot
+source_snapshot_sha256=$source_sha
+runtime_snapshot_path=$runtime_admitted
+runtime_snapshot_sha256=$runtime_sha
+tool_authority_path=$tool_authority
+tool_authority_sha256=$tool_sha
+admission_identity=0000000000000000000000000000000000000000000000000000000000000000
+checks_executed_at_admission=1
+checks_replayed_during_stage3=0"
     stage2_admission_receipt_sha=$(hash_file "$stage2_admission_receipt")
     self_test_file "$stage3_manifest" "schema=simple-bootstrap-stage3-provenance-v4
 status=pass
 artifact_kind=pure-simple-bootstrap-compiler
+platform=x86_64-unknown-linux-gnu
+source_roots=src/compiler:src/app:src/lib
+source_fingerprint=$source_sha
+source_snapshot_path=$source_snapshot
+source_snapshot_sha256=$source_sha
+git_state_sha256=$git_state_sha
+git_head=$git_head
+git_dirty_fingerprint=$git_dirty_fingerprint
+bootstrap_script_path=$stage3_producer
+bootstrap_script_sha256=$stage3_producer_sha
+seed_path=$seed
+seed_sha256=$seed_sha
+stage2_path=$stage2
+stage2_sha256=$stage2_sha
+stage2_admitted_path=$stage2_admitted
+stage2_admitted_sha256=$stage2_sha
+stage2_sanity_status=pass
+stage2_sanity_evidence_path=$stage2_sanity
+stage2_sanity_evidence_sha256=$stage2_sanity_sha
 stage2_receiver_status=pass
+stage2_receiver_evidence_path=$receiver
+stage2_receiver_evidence_sha256=$receiver_sha
 stage2_check_policy=identity-scoped-receipt-reuse
 stage2_admission_identity=0000000000000000000000000000000000000000000000000000000000000000
 stage2_admission_receipt_path=$stage2_admission_receipt
@@ -559,6 +925,15 @@ stage2_checks_executed_at_admission=1
 stage2_checks_replayed_during_stage3=0
 stage3_path=$stage3
 stage3_sha256=$stage3_sha
+stage3_sanity_status=pass
+stage3_sanity_evidence_path=$stage3_sanity
+stage3_sanity_evidence_sha256=$stage3_sanity_sha
+runtime_origin_snapshot_path=$runtime_origin
+runtime_origin_snapshot_sha256=$runtime_sha
+runtime_admitted_snapshot_path=$runtime_admitted
+runtime_admitted_snapshot_sha256=$runtime_sha
+tool_authority_path=$tool_authority
+tool_authority_sha256=$tool_sha
 output_path=$stage3
 output_sha256=$stage3_sha"
     stage3_manifest_sha=$(hash_file "$stage3_manifest")
@@ -567,11 +942,44 @@ status=pass
 artifact_kind=pure-simple-full-cli
 output_path=$stage4
 output_sha256=$stage4_sha
+source_revision_kind=content-sha256
+source_revision=$stage4_source_sha
+source_roots=src/compiler:src/lib:src/app:src/runtime:examples/10_tooling
+repository_root=$REPO_ROOT
+stage3_source_snapshot_sha256=$source_sha
+git_state_sha256=$git_state_sha
+git_head=$git_head
+git_dirty_fingerprint=$git_dirty_fingerprint
+stage3_producer_path=$stage3_producer
+stage3_producer_sha256=$stage3_producer_sha
+parent_compiler_path=$stage3
+parent_compiler_sha256=$stage3_sha
 stage3_provenance_path=$stage3_manifest
 stage3_provenance_sha256=$stage3_manifest_sha
 essential_tools_log_path=$smoke
 essential_tools_log_sha256=$smoke_sha
 completed_gate=stage4-essential-tools-smoke"
+    stage3_acceptance="$test_root/stage4/simple.stage3-acceptance.env"
+    self_test_file "$stage3_acceptance" "schema=simple-bootstrap-stage3-current-acceptance-v1
+status=verified
+stage3_provenance_path=$stage3_manifest
+stage3_provenance_sha256=$stage3_manifest_sha
+stage4_candidate_path=$stage4
+stage4_candidate_sha256=$stage4_sha
+stage4_provenance_path=$stage4_manifest
+stage4_provenance_sha256=$(hash_file "$stage4_manifest")
+repository_root=$REPO_ROOT
+source_revision_kind=content-sha256
+source_revision=$stage4_source_sha
+source_roots=src/compiler:src/lib:src/app:src/runtime:examples/10_tooling
+stage3_source_snapshot_sha256=$source_sha
+git_state_sha256=$git_state_sha
+git_head=$git_head
+git_dirty_fingerprint=$git_dirty_fingerprint
+stage3_producer_path=$stage3_producer
+stage3_producer_sha256=$stage3_producer_sha"
+    stage3_acceptance_sha=$(hash_file "$stage3_acceptance")
+    stage4_manifest_sha=$(hash_file "$stage4_manifest")
     deployed="$test_root/deploy/installed-simple"
     previous="$test_root/deploy/simple.pre_deploy"
     cp "$stage4" "$deployed"
@@ -582,16 +990,51 @@ completed_gate=stage4-essential-tools-smoke"
 platform=test-platform
 current_path=$deployed
 current_sha256=$deployed_sha
+stage4_candidate_path=$stage4
+stage4_candidate_sha256=$deployed_sha
+stage4_provenance_path=$stage4_manifest
+stage4_provenance_sha256=$stage4_manifest_sha
 backup_path=$previous
 backup_sha256=$previous_sha
 deployment_status=pass
+stage3_current_acceptance_status=verified
+stage3_current_acceptance_receipt=$stage3_acceptance
+stage3_current_acceptance_receipt_sha256=$stage3_acceptance_sha
+repository_root=$REPO_ROOT
+source_revision_kind=content-sha256
+source_revision=$stage4_source_sha
+source_roots=src/compiler:src/lib:src/app:src/runtime:examples/10_tooling
+stage3_source_snapshot_sha256=$source_sha
+git_state_sha256=$git_state_sha
+git_head=$git_head
+git_dirty_fingerprint=$git_dirty_fingerprint
+stage3_producer_path=$stage3_producer
+stage3_producer_sha256=$stage3_producer_sha
 platform_acceptance_claimed=false"
+    deploy_receipt_sha=$(hash_file "$test_root/deploy.receipt.env")
     self_test_file "$test_root/rollback.receipt.env" "schema=bootstrap-rollback-receipt-v1
 platform=test-platform
 current_path=$previous
 current_sha256=$previous_sha
 backup_path=$deployed
 backup_sha256=$deployed_sha
+deploy_receipt_sha256=$deploy_receipt_sha
+stage4_candidate_path=$stage4
+stage4_candidate_sha256=$stage4_sha
+stage4_provenance_path=$stage4_manifest
+stage4_provenance_sha256=$stage4_manifest_sha
+stage3_current_acceptance_receipt=$stage3_acceptance
+stage3_current_acceptance_receipt_sha256=$stage3_acceptance_sha
+repository_root=$REPO_ROOT
+source_revision_kind=content-sha256
+source_revision=$stage4_source_sha
+source_roots=src/compiler:src/lib:src/app:src/runtime:examples/10_tooling
+stage3_source_snapshot_sha256=$source_sha
+git_state_sha256=$git_state_sha
+git_head=$git_head
+git_dirty_fingerprint=$git_dirty_fingerprint
+stage3_producer_path=$stage3_producer
+stage3_producer_sha256=$stage3_producer_sha
 rollback_status=pass
 platform_acceptance_claimed=false"
     for native in linux-aarch64-native-host macos-native-host; do
@@ -636,10 +1079,111 @@ build_log_path=$simpleos_log
 build_log_sha256=$simpleos_log_sha
 compiler_receipt_path=$compiler_receipt
 compiler_receipt_sha256=$compiler_receipt_sha"
+    self_test_rehash_lineage() {
+        self_test_replace_field "$stage4_manifest" stage3_provenance_sha256 "$(hash_file "$stage3_manifest")"
+        stage4_manifest_sha=$(hash_file "$stage4_manifest")
+        self_test_replace_field "$stage3_acceptance" stage3_provenance_sha256 "$(hash_file "$stage3_manifest")"
+        self_test_replace_field "$stage3_acceptance" stage4_provenance_sha256 "$stage4_manifest_sha"
+        stage3_acceptance_sha=$(hash_file "$stage3_acceptance")
+        self_test_replace_field "$test_root/deploy.receipt.env" stage4_provenance_sha256 "$stage4_manifest_sha"
+        self_test_replace_field "$test_root/deploy.receipt.env" stage3_current_acceptance_receipt_sha256 "$stage3_acceptance_sha"
+        deploy_receipt_sha=$(hash_file "$test_root/deploy.receipt.env")
+        self_test_replace_field "$test_root/rollback.receipt.env" stage4_provenance_sha256 "$stage4_manifest_sha"
+        self_test_replace_field "$test_root/rollback.receipt.env" stage3_current_acceptance_receipt_sha256 "$stage3_acceptance_sha"
+        self_test_replace_field "$test_root/rollback.receipt.env" deploy_receipt_sha256 "$deploy_receipt_sha"
+    }
     BOOTSTRAP_HANDOFF_ROOT=$test_root
+    HANDOFF_SELFTEST_MODE=1
+    BOOTSTRAP_HANDOFF_SELFTEST_CURRENT_TREE_IDENTITY=$current_tree_identity
     unset BOOTSTRAP_HANDOFF_STAGE3_MANIFEST BOOTSTRAP_HANDOFF_STAGE3_CANDIDATE BOOTSTRAP_HANDOFF_STAGE4_PROVENANCE BOOTSTRAP_HANDOFF_STAGE4_CANDIDATE BOOTSTRAP_HANDOFF_ESSENTIAL_SMOKE_RECEIPT BOOTSTRAP_HANDOFF_SMOKE_RECEIPT BOOTSTRAP_HANDOFF_DEPLOY_RECEIPT BOOTSTRAP_HANDOFF_ROLLBACK_RECEIPT BOOTSTRAP_HANDOFF_LINUX_AARCH64_NATIVE_HOST_RECEIPT BOOTSTRAP_HANDOFF_LINUX_AARCH64_HOST BOOTSTRAP_HANDOFF_MACOS_NATIVE_HOST_RECEIPT BOOTSTRAP_HANDOFF_MACOS_HOST BOOTSTRAP_HANDOFF_FREEBSD_BASE_IMAGE BOOTSTRAP_HANDOFF_FREEBSD_BASE_IMAGE_RECEIPT BOOTSTRAP_HANDOFF_SIMPLEOS_ARM64_KERNEL BOOTSTRAP_HANDOFF_SIMPLEOS_ARM64_PRODUCER_MANIFEST BOOTSTRAP_HANDOFF_SIMPLEOS_ARM64_MANIFEST || :
     evaluate_readiness || { emit_result; echo bootstrap_handoff_self_test=fail_ready_fixture; exit 1; }
     [ "$READINESS_STATUS" = ready ] || { echo bootstrap_handoff_self_test=fail_ready_status; exit 1; }
+
+    for receipt_copy in "$stage3_manifest" "$stage4_manifest" "$stage3_acceptance" \
+        "$test_root/deploy.receipt.env" "$test_root/rollback.receipt.env"; do
+        cp "$receipt_copy" "${receipt_copy}.tree-good"
+    done
+    stale_dirty=6666666666666666666666666666666666666666666666666666666666666666
+    self_test_replace_field "$stage3_manifest" git_dirty_fingerprint "$stale_dirty"
+    for stale_receipt in "$stage4_manifest" "$stage3_acceptance" \
+        "$test_root/deploy.receipt.env" "$test_root/rollback.receipt.env"; do
+        self_test_replace_field "$stale_receipt" git_dirty_fingerprint "$stale_dirty"
+    done
+    self_test_rehash_lineage
+    evaluate_readiness && { echo bootstrap_handoff_self_test=fail_coherent_stale_tree; exit 1; } || :
+    [ "$STAGE3_REASON" = current_tree_identity_mismatch ] || { echo bootstrap_handoff_self_test=wrong_coherent_stale_tree_reason; exit 1; }
+    for receipt_copy in "$stage3_manifest" "$stage4_manifest" "$stage3_acceptance" \
+        "$test_root/deploy.receipt.env" "$test_root/rollback.receipt.env"; do
+        mv "${receipt_copy}.tree-good" "$receipt_copy"
+    done
+
+    for receipt_copy in "$stage4_manifest" "$stage3_acceptance" \
+        "$test_root/deploy.receipt.env" "$test_root/rollback.receipt.env"; do
+        cp "$receipt_copy" "${receipt_copy}.root-good"
+        self_test_replace_field "$receipt_copy" repository_root /wrong/bootstrap/worktree
+    done
+    self_test_rehash_lineage
+    evaluate_readiness && { echo bootstrap_handoff_self_test=fail_wrong_current_worktree; exit 1; } || :
+    [ "$STAGE4_REASON" = current_tree_identity_mismatch ] || { echo bootstrap_handoff_self_test=wrong_current_worktree_reason; exit 1; }
+    for receipt_copy in "$stage4_manifest" "$stage3_acceptance" \
+        "$test_root/deploy.receipt.env" "$test_root/rollback.receipt.env"; do
+        mv "${receipt_copy}.root-good" "$receipt_copy"
+    done
+
+    cp "$source_snapshot" "$source_snapshot.good"
+    self_test_file "$source_snapshot" stale-source
+    evaluate_readiness && { echo bootstrap_handoff_self_test=fail_source_identity; exit 1; } || :
+    [ "$STAGE3_REASON" = source_identity_mismatch ] || { echo bootstrap_handoff_self_test=wrong_source_identity_reason; exit 1; }
+    mv "$source_snapshot.good" "$source_snapshot"
+
+    cp "$runtime_origin" "$runtime_origin.good"
+    self_test_file "$runtime_origin" stale-runtime
+    evaluate_readiness && { echo bootstrap_handoff_self_test=fail_runtime_identity; exit 1; } || :
+    [ "$STAGE3_REASON" = runtime_origin_mismatch ] || { echo bootstrap_handoff_self_test=wrong_runtime_identity_reason; exit 1; }
+    mv "$runtime_origin.good" "$runtime_origin"
+
+    cp "$seed" "$seed.good"
+    cp "$stage3_manifest" "$stage3_manifest.good"
+    cp "$stage4_manifest" "$stage4_manifest.good"
+    cp "$stage2" "$seed"
+    self_test_replace_field "$stage3_manifest" seed_sha256 "$stage2_sha"
+    self_test_replace_field "$stage4_manifest" stage3_provenance_sha256 "$(hash_file "$stage3_manifest")"
+    evaluate_readiness && { echo bootstrap_handoff_self_test=fail_seed_substitution; exit 1; } || :
+    [ "$STAGE3_REASON" = seed_substitution_detected ] || { echo bootstrap_handoff_self_test=wrong_seed_substitution_reason; exit 1; }
+    mv "$seed.good" "$seed"
+    mv "$stage3_manifest.good" "$stage3_manifest"
+    mv "$stage4_manifest.good" "$stage4_manifest"
+
+    cp "$stage2_sanity" "$stage2_sanity.good"
+    cp "$stage3_manifest" "$stage3_manifest.good"
+    cp "$stage4_manifest" "$stage4_manifest.good"
+    self_test_replace_field "$stage2_sanity" unsupported_status 0
+    self_test_replace_field "$stage3_manifest" stage2_sanity_evidence_sha256 "$(hash_file "$stage2_sanity")"
+    self_test_replace_field "$stage4_manifest" stage3_provenance_sha256 "$(hash_file "$stage3_manifest")"
+    evaluate_readiness && { echo bootstrap_handoff_self_test=fail_no_stub_contract; exit 1; } || :
+    [ "$STAGE3_REASON" = stage2_no_stub_contract_invalid ] || { echo bootstrap_handoff_self_test=wrong_no_stub_reason; exit 1; }
+    mv "$stage2_sanity.good" "$stage2_sanity"
+    mv "$stage3_manifest.good" "$stage3_manifest"
+    mv "$stage4_manifest.good" "$stage4_manifest"
+
+    cp "$smoke" "$smoke.good"
+    cp "$stage4_manifest" "$stage4_manifest.good"
+    sed '1d' "$smoke.good" >"$smoke"
+    self_test_replace_field "$stage4_manifest" essential_tools_log_sha256 "$(hash_file "$smoke")"
+    evaluate_readiness && { echo bootstrap_handoff_self_test=fail_stage4_execution_contract; exit 1; } || :
+    [ "$SMOKE_REASON" = receipt_not_bound_to_stage4_execution ] || { echo bootstrap_handoff_self_test=wrong_stage4_execution_reason; exit 1; }
+    mv "$smoke.good" "$smoke"
+    mv "$stage4_manifest.good" "$stage4_manifest"
+
+    cp "$test_root/rollback.receipt.env" "$test_root/rollback.receipt.env.good"
+    atomic_alias="$test_root/deploy/atomic-alias"
+    cp "$deployed" "$atomic_alias"
+    self_test_replace_field "$test_root/rollback.receipt.env" backup_path "$atomic_alias"
+    evaluate_readiness && { echo bootstrap_handoff_self_test=fail_atomic_rollback_binding; exit 1; } || :
+    [ "$ROLLBACK_REASON" = atomic_path_swap_mismatch ] || { echo bootstrap_handoff_self_test=wrong_atomic_rollback_reason; exit 1; }
+    mv "$test_root/rollback.receipt.env.good" "$test_root/rollback.receipt.env"
+    rm "$atomic_alias"
+
     mv "$test_root/deploy.receipt.env" "$test_root/deploy.receipt.env.missing"
     evaluate_readiness && { echo bootstrap_handoff_self_test=fail_missing_receipt; exit 1; } || :
     mv "$test_root/deploy.receipt.env.missing" "$test_root/deploy.receipt.env"
@@ -652,6 +1196,13 @@ compiler_receipt_sha256=$compiler_receipt_sha"
     evaluate_readiness && { echo bootstrap_handoff_self_test=fail_symlink; exit 1; } || :
     rm "$stage3"
     mv "$test_root/stage3.saved" "$stage3"
+    printf 'bootstrap_handoff_identity_guard_self_test=pass\n'
+    printf 'bootstrap_handoff_stage2_stage3_guard_self_test=pass\n'
+    printf 'bootstrap_handoff_no_seed_no_stub_guard_self_test=pass\n'
+    printf 'bootstrap_handoff_atomic_rollback_guard_self_test=pass\n'
+    printf 'bootstrap_handoff_stage4_execution_guard_self_test=pass\n'
+    printf 'bootstrap_handoff_current_tree_guard_self_test=pass\n'
+    printf 'bootstrap_handoff_wrong_worktree_guard_self_test=pass\n'
     printf 'bootstrap_handoff_self_test=pass\n'
     printf 'platform_acceptance_claimed=false\n'
 }

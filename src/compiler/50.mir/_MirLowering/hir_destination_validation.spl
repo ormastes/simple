@@ -1,0 +1,59 @@
+# Allocation-free scalar validation for a frozen function graph before MIR
+# emission. Freeze already proves cross-reference integrity globally; this pass
+# proves the receipt and the rows the hot MIR loops will directly dispatch.
+use compiler.hir.hir_lowering.hir_destination_registry_reader.*
+use compiler.hir.hir_lowering.hir_destination_graph.*
+use compiler.mir._MirLowering.hir_destination_receipt.*
+use compiler.mir._MirLowering.hir_destination_dispatch.*
+
+fn mir_destination_range_rows_supported(r: MirDestinationFunctionReceipt,
+        handle: i64, expected_kind: i64) -> bool:
+    if handle < 0 or not hdr_range_published(r.slot, r.generation, handle):
+        return false
+    if hdr_range_kind(r.slot, r.generation, handle) != expected_kind:
+        return false
+    val length = hdr_range_length(r.slot, r.generation, handle)
+    if length < 0: return false
+    val subtype = hdr_range_subtype(r.slot, r.generation, handle)
+    var offset = 0
+    while offset < length:
+        val row = hdr_range_value(r.slot, r.generation, handle, subtype, offset)
+        if row < 0: return false
+        val supported = if expected_kind == HD_RANGE_EXPR:
+            mir_destination_expr_shape_supported(hdr_expr_shape(r.slot, r.generation, row))
+        elif expected_kind == HD_RANGE_STMT:
+            mir_destination_stmt_shape_supported(hdr_stmt_shape(r.slot, r.generation, row))
+        elif expected_kind == HD_RANGE_TYPE:
+            mir_destination_type_shape_supported(hdr_type_shape(r.slot, r.generation, row))
+        elif expected_kind == HD_RANGE_PATTERN:
+            mir_destination_pattern_shape_supported(hdr_pattern_shape(r.slot, r.generation, row))
+        elif expected_kind == HD_RANGE_EFFECT:
+            mir_destination_effect_shape_supported(hdr_effect_shape(r.slot, r.generation, row))
+        elif expected_kind == HD_RANGE_DIM:
+            mir_destination_dim_shape_supported(hdr_dim_shape(r.slot, r.generation, row))
+        elif expected_kind == HD_RANGE_AUX:
+            mir_destination_aux_shape_supported(hdr_aux_shape(r.slot, r.generation, row))
+        else:
+            row >= 0
+        if not supported: return false
+        offset = offset + 1
+    true
+
+fn mir_destination_function_graph_supported(r: MirDestinationFunctionReceipt) -> bool:
+    if not mir_destination_receipt_still_active(r): return false
+    val stmts = hdr_block_stmt_range(r.slot, r.generation, r.root_block)
+    if not mir_destination_range_rows_supported(r, stmts, HD_RANGE_STMT):
+        return false
+    val value = hdr_block_value(r.slot, r.generation, r.root_block)
+    # finalize_block publishes an expression row here. BlockValue rows are
+    # reachable only through an HD_EXPR_CUSTOM_BLOCK payload.
+    if value >= 0 and not mir_destination_expr_shape_supported(
+            hdr_expr_shape(r.slot, r.generation, value)):
+        return false
+    val return_type = hdr_function_return_type(r.slot, r.generation, r.function_row)
+    if return_type < 0 or not mir_destination_type_shape_supported(
+            hdr_type_shape(r.slot, r.generation, return_type)):
+        return false
+    true
+
+export mir_destination_range_rows_supported, mir_destination_function_graph_supported

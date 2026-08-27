@@ -1,0 +1,157 @@
+# @cover scripts/os/build_root_service_catalog.shs 100%
+# @req REQ-005
+"""# Root service catalogue native-build contract
+
+## Overview
+
+PID1 can only launch its fixed VFS, net and HTTP catalogue children when the
+disk staging tree contains target-native ELF images at their canonical paths.
+The dedicated producer builds PID1 and all three children explicitly; bake
+remains a consumer and validator rather than silently compiling substitutes.
+
+## Requirements
+
+**Requirements:** doc/02_requirements/feature/simple_os_enhance.md
+
+REQ-005 requires PID1 to launch the fixed dependency chain with concrete,
+least-authority child images.
+
+## Plan
+
+**Plan:** doc/03_plan/sys_test/simple_os_enhance.md
+
+## Design
+
+**Design:** doc/05_design/simple_os_enhance.md
+
+## Research
+
+**Research:** doc/01_research/local/simple_os_enhance.md
+
+## Syntax
+
+```text
+sh scripts/os/build_root_service_catalog.shs --target <target> --rootfs <tree>
+```
+
+## Evidence boundary
+
+This contract verifies the explicit source-to-output mapping and mandatory ELF
+validation. The target build and QEMU boot remain separate evidence gates.
+
+## Inputs
+
+The target defaults to `x86_64-unknown-simpleos`.
+
+The rootfs defaults to `build/os/rootfs`.
+
+The caller may override both values explicitly.
+
+Only x86_64 and riscv64 catalogue targets are accepted.
+
+Every target has a fixed expected ELF machine value.
+
+The build script does not infer a host architecture.
+
+It does not accept an unrecognised target spelling.
+
+## Algorithm
+
+The producer selects the target-specific native-build wrapper.
+
+It builds the PID1 manager first.
+
+It builds the VFS service second.
+
+It builds the network service third.
+
+It builds the HTTP service last.
+
+Each build uses its own freestanding Simple entrypoint.
+
+Each output is written below the provided rootfs tree.
+
+PID1 is written to `/system/service_manager.smf`.
+
+VFS is written to `/system/services/vfs.smf`.
+
+Network is written to `/system/services/net.smf`.
+
+HTTP is written to `/system/services/http.smf`.
+
+The `.smf` suffix does not change the producer artifact format.
+
+The producer writes raw target ELFs.
+
+The legacy C disk writer may add its SMF envelope later.
+
+The Simple disk bake stages raw target ELFs directly.
+
+## Validation
+
+After every native build the producer requires a non-empty output.
+
+It verifies the ELF magic bytes.
+
+It verifies the output machine field matches the requested target.
+
+It requires the native-build provenance stamp.
+
+It verifies the stamp's target field.
+
+Any failure stops before the next catalogue image is treated as ready.
+
+No missing child is replaced with a shell or fixture executable.
+
+No host executable passes the target machine check.
+
+The disk bake then independently validates every staged image.
+
+## Failure modes
+
+An unsupported target fails before invoking a compiler.
+
+A missing compiler output fails at the producer boundary.
+
+A malformed ELF fails at the producer boundary.
+
+A wrong-architecture ELF fails at the producer boundary.
+
+A missing build stamp fails at the producer boundary.
+
+A mismatched build-stamp target fails at the producer boundary.
+
+The caller must repair the target build before attempting disk creation.
+
+## Non-goals
+
+The producer does not sign the catalogue images.
+
+Signing requires a release-owned trust anchor and is a separate gate.
+
+The producer does not create a FAT filesystem.
+
+The producer does not launch QEMU.
+
+The producer does not grant service capabilities.
+
+The kernel root-service catalogue remains the sole authority mint path.
+"""
+
+use std.spec.{describe, it, expect}
+
+describe "root service catalogue native-build contract":
+    it "builds the four fixed freestanding entrypoints":
+        val source = file_read("scripts/os/build_root_service_catalog.shs")
+        expect(source).to_contain("src/os/services/init/service_manager_main.spl")
+        expect(source).to_contain("src/os/services/vfs/vfs_service_main.spl")
+        expect(source).to_contain("src/os/services/netstack/net_service_main.spl")
+        expect(source).to_contain("src/os/services/web/http_service_main.spl")
+
+    it "publishes exactly the catalogue paths and validates each target ELF":
+        val source = file_read("scripts/os/build_root_service_catalog.shs")
+        expect(source).to_contain("$ROOTFS/system/service_manager.smf")
+        expect(source).to_contain("$ROOTFS/system/services/vfs.smf")
+        expect(source).to_contain("$ROOTFS/system/services/net.smf")
+        expect(source).to_contain("$ROOTFS/system/services/http.smf")
+        expect(source).to_contain("validate_target_elf")

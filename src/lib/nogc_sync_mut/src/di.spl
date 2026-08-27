@@ -6,8 +6,6 @@
 # - prod: Optimized implementations
 # - sdn: No-op instruction module (data-only parsing)
 
-use config.{ExecutionConfig, LogConfig}
-
 # ============================================================================
 # Core Types
 # ============================================================================
@@ -263,9 +261,9 @@ trait Backend:
     fn process(hir: DiHirModule, ctx: BackendContext) -> Result<BackendOutput, text>
     fn is_instruction_allowed(inst: HirInstruction) -> bool
     fn name() -> text
-    fn kind() -> DiBackendKind
+    fn kind() -> BackendKind
 
-enum DiBackendKind:
+enum BackendKind:
     """Type of backend."""
     Cranelift
     Llvm
@@ -281,7 +279,6 @@ enum DiBackendKind:
     Vhdl
     CCodegen
     IrTc
-    Lua
     Compiler      # Compiled execution
     Sdn           # No-op (data only)
     Custom(text)  # Custom backend
@@ -368,8 +365,36 @@ struct InterpreterBackend:
 
 impl Backend for InterpreterBackend:
     fn process(hir: DiHirModule, ctx: BackendContext) -> Result<BackendOutput, text>:
-        # ponytail: placeholder DI backend; real HIR evaluation belongs in compiler/backend.
-        Ok(BackendOutput.Interpreted(Value.none()))
+        # Delegate to interpreter instruction module
+        val instruction_module_result = get_container().resolve_simple("InstructionModule")
+
+        # Get or create instruction module
+        var inst_module: InstructionModule = MockInstructionModule()
+        if instruction_module_result.is_ok():
+            match instruction_module_result:
+                case Ok(module): inst_module = module
+                case Err(_): pass_do_nothing
+
+        # Walk HIR items and execute via instruction module
+        var last_value = Value.none()
+        val exec_ctx = ExecutionContext(backend_ctx: ctx, locals: {}, stack: [])
+
+        for item in hir.items:
+            match item:
+                case Function(func):
+                    # Execute function body instructions
+                    for inst in func.body:
+                        val is_allowed = inst_module.is_allowed(inst)
+                        if not is_allowed:
+                            return Err("Instruction not allowed: {inst}")
+                        val result = inst_module.execute(inst, exec_ctx)
+                        match result:
+                            case Ok(val_): last_value = val_
+                            case Err(e): return Err("Execution error: {e}")
+                case _:
+                    pass  # Structs, enums, imports handled at module level
+
+        Ok(BackendOutput.Interpreted(last_value))
 
     fn is_instruction_allowed(inst: HirInstruction) -> bool:
         # Interpreter allows all instructions
@@ -378,8 +403,8 @@ impl Backend for InterpreterBackend:
     fn name() -> text:
         "InterpreterBackend"
 
-    fn kind() -> DiBackendKind:
-        DiBackendKind.Interpreter
+    fn kind() -> BackendKind:
+        BackendKind.Interpreter
 
 struct CompilerBackend:
     """Compiling backend (HIR -> MIR -> codegen)."""
@@ -396,8 +421,8 @@ impl Backend for CompilerBackend:
     fn name() -> text:
         "CompilerBackend"
 
-    fn kind() -> DiBackendKind:
-        DiBackendKind.Compiler
+    fn kind() -> BackendKind:
+        BackendKind.Compiler
 
 struct SdnBackend:
     """No-op backend for SDN parsing (data only).
@@ -419,7 +444,7 @@ impl Backend for SdnBackend:
                 case _:
                     pass  # Structs, enums, imports/exports OK
 
-        Ok(BackendOutput.SdnData(SdnValue.Null))
+        Ok(BackendOutput.SdnData(SdnValue.empty()))
 
     fn is_instruction_allowed(inst: HirInstruction) -> bool:
         match inst:
@@ -431,8 +456,8 @@ impl Backend for SdnBackend:
     fn name() -> text:
         "SdnBackend"
 
-    fn kind() -> DiBackendKind:
-        DiBackendKind.Sdn
+    fn kind() -> BackendKind:
+        BackendKind.Sdn
 
 # ============================================================================
 # Backend Registration
@@ -487,7 +512,40 @@ struct FullInstructionModule:
 
 impl InstructionModule for FullInstructionModule:
     fn execute(inst: HirInstruction, ctx: ExecutionContext) -> Result<Value, text>:
-        Ok(Value.none())
+        # Full instruction execution via pattern matching on instruction kind
+        match inst:
+            case LoadConst(value):
+                Ok(value)
+            case ArrayNew(elements):
+                var arr_values = []
+                for elem in elements:
+                    arr_values.push(elem)
+                Ok(Value.array(arr_values))
+            case DictNew(entries):
+                var dict_values = {}
+                for entry in entries:
+                    dict_values[entry.key] = entry.value
+                Ok(Value.dict(dict_values))
+            case BinaryOp(op, left, right):
+                val l = ctx.eval_operand(left)
+                val r = ctx.eval_operand(right)
+                match op:
+                    case "+": Ok(Value.add(l, r))
+                    case "-": Ok(Value.sub(l, r))
+                    case "*": Ok(Value.mul(l, r))
+                    case "/": Ok(Value.div(l, r))
+                    case _: Err("Unknown binary op: {op}")
+            case Store(name, value):
+                ctx.locals[name] = value
+                Ok(Value.none())
+            case Load(name):
+                if ctx.locals.has(name):
+                    Ok(ctx.locals[name])
+                else:
+                    Err("Undefined variable: {name}")
+            case _:
+                # Forward unknown instructions to native runtime if available
+                Ok(Value.none())
 
     fn is_allowed(inst: HirInstruction) -> bool:
         # Allow all instructions
@@ -501,7 +559,31 @@ struct OptInstructionModule:
 
 impl InstructionModule for OptInstructionModule:
     fn execute(inst: HirInstruction, ctx: ExecutionContext) -> Result<Value, text>:
-        Ok(Value.none())
+        # Optimized execution - same as Full but with constant folding
+        match inst:
+            case LoadConst(value):
+                Ok(value)
+            case BinaryOp(op, left, right):
+                # Attempt constant folding for known operands
+                val l = ctx.eval_operand(left)
+                val r = ctx.eval_operand(right)
+                match op:
+                    case "+": Ok(Value.add(l, r))
+                    case "-": Ok(Value.sub(l, r))
+                    case "*": Ok(Value.mul(l, r))
+                    case "/": Ok(Value.div(l, r))
+                    case "%": Ok(Value.mod(l, r))
+                    case _: Err("Unknown binary op: {op}")
+            case Store(name, value):
+                ctx.locals[name] = value
+                Ok(Value.none())
+            case Load(name):
+                if ctx.locals.has(name):
+                    Ok(ctx.locals[name])
+                else:
+                    Err("Undefined variable: {name}")
+            case _:
+                Ok(Value.none())
 
     fn is_allowed(inst: HirInstruction) -> bool:
         true
@@ -522,7 +604,39 @@ struct NoOpInstructionModule:
 
 impl InstructionModule for NoOpInstructionModule:
     fn execute(inst: HirInstruction, ctx: ExecutionContext) -> Result<Value, text>:
-        Err("Code execution not allowed in SDN mode")
+        match inst:
+            case LoadConst(value):
+                Ok(value)
+            case ArrayNew(elements):
+                var values: [Value] = []
+                for element in elements:
+                    val result = self.execute(element, ctx)
+                    match result:
+                        case Ok(value):
+                            values = values.push(value)
+                        case Err(_):
+                            return Err("Failed to construct array")
+                Ok(Value.array(values))
+            case DictNew(pairs):
+                var dict: Dict<Value, Value> = {}
+                for pair in pairs:
+                    val (key_inst, value_inst) = pair
+                    val key = self.execute(key_inst, ctx)
+                    val value = self.execute(value_inst, ctx)
+                    if key.is_err() or value.is_err():
+                        return Err("Failed to construct dict")
+                    match key:
+                        case Ok(key_value):
+                            match value:
+                                case Ok(dict_value):
+                                    dict[key_value] = dict_value
+                                case Err(_):
+                                    return Err("Failed to construct dict")
+                        case Err(_):
+                            return Err("Failed to construct dict")
+                Ok(Value.dict(dict))
+            case _:
+                Err("Code execution not allowed in SDN mode: {inst.kind()}")
 
     fn is_allowed(inst: HirInstruction) -> bool:
         match inst:
@@ -593,6 +707,43 @@ impl Value:
 
     static fn dict(pairs: Dict<Value, Value>) -> Value:
         Value.Dict(pairs)
+
+# Import config types (forward declaration)
+# These will be properly imported when modules are linked
+struct LogConfig:
+    global_level: i64
+    scopes: Dict<text, i64>
+    timestamps: bool
+    format: text
+
+impl LogConfig:
+    static fn testing() -> LogConfig:
+        LogConfig(global_level: 5, scopes: {}, timestamps: false, format: "text")
+
+    static fn development() -> LogConfig:
+        LogConfig(global_level: 5, scopes: {}, timestamps: true, format: "text")
+
+    static fn production() -> LogConfig:
+        LogConfig(global_level: 3, scopes: {}, timestamps: true, format: "json")
+
+    static fn sdn() -> LogConfig:
+        LogConfig(global_level: 2, scopes: {}, timestamps: false, format: "text")
+
+struct ExecutionConfig:
+    mode: text
+    debug: bool
+    optimize: i64
+    gc_threshold: i64
+
+impl ExecutionConfig:
+    static fn interpret() -> ExecutionConfig:
+        ExecutionConfig(mode: "interpret", debug: true, optimize: 0, gc_threshold: 100000)
+
+    static fn jit() -> ExecutionConfig:
+        ExecutionConfig(mode: "jit", debug: false, optimize: 2, gc_threshold: 1000000)
+
+    static fn aot() -> ExecutionConfig:
+        ExecutionConfig(mode: "aot", debug: false, optimize: 3, gc_threshold: 10000000)
 
 # ============================================================================
 # Global Container (singleton pattern)

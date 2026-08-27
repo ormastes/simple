@@ -2,6 +2,29 @@
 
 > Validates the explicit PyTorch dynamic linalg adapter. The default scalar
 
+<!-- sdn-diagram:id=linalg_torch_backend_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=linalg_torch_backend_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+linalg_torch_backend_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=linalg_torch_backend_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 44 | 44 | 0 | 0 |
@@ -21,7 +44,7 @@ Validates the explicit PyTorch dynamic linalg adapter. The default scalar
 | Category | Other |
 | Status | Active |
 | Source | `test/03_system/feature/scilib/linalg_torch_backend_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 Validates the explicit PyTorch dynamic linalg adapter. The default scalar
@@ -34,25 +57,16 @@ backend errors when the dynamic torch shim is unavailable.
 
 #### reports either an available PyTorch backend or a typed unavailable error
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- reports either an available PyTorch backend or a typed unavailable error
-   - Expected: status.selected equals `pytorch`
-   - Expected: status.available is true
-   - Expected: name equals `pytorch`
+1. fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("reports either an available PyTorch backend or a typed unavailable error")
 val required = require_linalg_backend("pytorch")
 match required:
     case Ok(status):
@@ -68,20 +82,16 @@ match required:
 
 #### matches scalar dot when the PyTorch shim is available
 
-- matches scalar dot when the PyTorch shim is available
-   - Expected: value equals `dot(left, right).unwrap()`
-   - Expected: name equals `pytorch`
+1. fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("matches scalar dot when the PyTorch shim is available")
 val left = vector_from([Float64.new(1.0), Float64.new(2.0), Float64.new(3.0)])
 val right = vector_from([Float64.new(4.0), Float64.new(5.0), Float64.new(6.0)])
 val result = torch_dot(left, right)
@@ -98,14 +108,19 @@ match result:
 
 #### keeps public dot, gemv, gemm, solve, and inv scalar-compatible when PyTorch is configured
 
-- keeps public dot, gemv, gemm, solve, and inv scalar-compatible when PyTorch is configured
-   - Expected: dot(left, right).unwrap() equals `Float64.new(32.0)`
+1. [Float64 new
+2. [Float64 new
    - Expected: gemv_result.get_f64(Index.new(0)) equals `Float64.new(32.0)`
    - Expected: gemv_result.get_f64(Index.new(1)) equals `Float64.new(77.0)`
+3. [Float64 new
+4. [Float64 new
+5. [Float64 new
    - Expected: gemm_result.get_at([Index.new(0), Index.new(0)]) equals `Float64.new(58.0)`
    - Expected: gemm_result.get_at([Index.new(0), Index.new(1)]) equals `Float64.new(64.0)`
    - Expected: gemm_result.get_at([Index.new(1), Index.new(0)]) equals `Float64.new(139.0)`
    - Expected: gemm_result.get_at([Index.new(1), Index.new(1)]) equals `Float64.new(154.0)`
+6. [Float64 new
+7. [Float64 new
    - Expected: solve_result.get_f64(Index.new(0)) equals `Float64.new(2.0)`
    - Expected: solve_result.get_f64(Index.new(1)) equals `Float64.new(3.0)`
    - Expected: inv_result.rows() equals `Index.new(16)`
@@ -118,12 +133,10 @@ match result:
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 39 lines folded for reproduction.
+Runnable source: 37 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("keeps public dot, gemv, gemm, solve, and inv scalar-compatible when PyTorch is configured")
 val left = vector_from([Float64.new(1.0), Float64.new(2.0), Float64.new(3.0)])
 val right = vector_from([Float64.new(4.0), Float64.new(5.0), Float64.new(6.0)])
 expect(dot(left, right).unwrap()).to_equal(Float64.new(32.0))
@@ -167,18 +180,16 @@ expect(inv_result.get_f64_at([Index.new(0), Index.new(15)])).to_equal(Float64.ne
 
 #### returns a typed error for shape mismatches before backend execution
 
-- returns a typed error for shape mismatches before backend execution
+1. fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns a typed error for shape mismatches before backend execution")
 val result = torch_dot_values([Float64.new(1.0)], [Float64.new(1.0), Float64.new(2.0)])
 match result:
     case Err(BackendError.BackendExecutionFailed(message)):
@@ -191,23 +202,26 @@ match result:
 
 #### matches scalar gemm when the PyTorch shim is available
 
-- matches scalar gemm when the PyTorch shim is available
+1. [Float64 new
+2. [Float64 new
+3. [Float64 new
+4. [Float64 new
+5. [Float64 new
    - Expected: value.get_at([Index.new(0), Index.new(0)]) equals `scalar.get_at([Index.new(0), Index.new(0)])`
    - Expected: value.get_at([Index.new(0), Index.new(1)]) equals `scalar.get_at([Index.new(0), Index.new(1)])`
    - Expected: value.get_at([Index.new(1), Index.new(0)]) equals `scalar.get_at([Index.new(1), Index.new(0)])`
    - Expected: value.get_at([Index.new(1), Index.new(1)]) equals `scalar.get_at([Index.new(1), Index.new(1)])`
    - Expected: name equals `pytorch`
+6. fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("matches scalar gemm when the PyTorch shim is available")
 val a = matrix_from_rows([
     [Float64.new(1.0), Float64.new(2.0), Float64.new(3.0)],
     [Float64.new(4.0), Float64.new(5.0), Float64.new(6.0)]])
@@ -234,18 +248,16 @@ match result:
 
 #### returns a typed error for gemm shape mismatches before backend execution
 
-- returns a typed error for gemm shape mismatches before backend execution
+1. fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns a typed error for gemm shape mismatches before backend execution")
 val a = matrix_from_rows([[Float64.new(1.0), Float64.new(2.0)]])
 val b = matrix_from_rows([[Float64.new(3.0), Float64.new(4.0)]])
 val c_in = zeros_matrix(Index.new(1), Index.new(2))
@@ -261,21 +273,21 @@ match result:
 
 #### matches scalar gemv when the PyTorch shim is available
 
-- matches scalar gemv when the PyTorch shim is available
+1. [Float64 new
+2. [Float64 new
    - Expected: value.get_f64(Index.new(0)) equals `scalar.get_f64(Index.new(0))`
    - Expected: value.get_f64(Index.new(1)) equals `scalar.get_f64(Index.new(1))`
    - Expected: name equals `pytorch`
+3. fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("matches scalar gemv when the PyTorch shim is available")
 val matrix = matrix_from_rows([
     [Float64.new(1.0), Float64.new(2.0), Float64.new(3.0)],
     [Float64.new(4.0), Float64.new(5.0), Float64.new(6.0)]])
@@ -297,18 +309,16 @@ match result:
 
 #### returns a typed error for gemv shape mismatches before backend execution
 
-- returns a typed error for gemv shape mismatches before backend execution
+1. fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns a typed error for gemv shape mismatches before backend execution")
 val matrix = matrix_from_rows([[Float64.new(1.0), Float64.new(2.0)]])
 val vector = vector_from([Float64.new(3.0)])
 val y_in = vector_from([Float64.new(0.0)])
@@ -324,21 +334,21 @@ match result:
 
 #### matches scalar solve when the PyTorch shim is available
 
-- matches scalar solve when the PyTorch shim is available
+1. [Float64 new
+2. [Float64 new
    - Expected: value.get_f64(Index.new(0)) equals `scalar.get_f64(Index.new(0))`
    - Expected: value.get_f64(Index.new(1)) equals `scalar.get_f64(Index.new(1))`
    - Expected: name equals `pytorch`
+3. fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("matches scalar solve when the PyTorch shim is available")
 val a = matrix_from_rows([
     [Float64.new(3.0), Float64.new(1.0)],
     [Float64.new(1.0), Float64.new(2.0)]])
@@ -359,18 +369,16 @@ match result:
 
 #### returns a typed error for solve shape mismatches before backend execution
 
-- returns a typed error for solve shape mismatches before backend execution
+1. fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns a typed error for solve shape mismatches before backend execution")
 val a = matrix_from_rows([[Float64.new(1.0), Float64.new(2.0)]])
 val b = vector_from([Float64.new(3.0)])
 val result = torch_solve(a, b)
@@ -385,19 +393,19 @@ match result:
 
 #### matches scalar inverse when the PyTorch shim is available
 
-- matches scalar inverse when the PyTorch shim is available
+1. [Float64 new
+2. [Float64 new
    - Expected: name equals `pytorch`
+3. fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 24 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("matches scalar inverse when the PyTorch shim is available")
 val a = matrix_from_rows([
     [Float64.new(4.0), Float64.new(7.0)],
     [Float64.new(2.0), Float64.new(6.0)]])
@@ -426,18 +434,16 @@ match result:
 
 #### returns a typed error for inverse shape mismatches before backend execution
 
-- returns a typed error for inverse shape mismatches before backend execution
+1. fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns a typed error for inverse shape mismatches before backend execution")
 val a = matrix_from_rows([[Float64.new(1.0), Float64.new(2.0)]])
 val result = torch_inv(a)
 match result:
@@ -451,7 +457,8 @@ match result:
 
 #### round-trips copied Float64 NDArray storage through a PyTorch-owned tensor when available
 
-- round-trips copied Float64 NDArray storage through a PyTorch-owned tensor when available
+1. [Float64 new
+2. [Float64 new
    - Expected: tensor.dtype equals `DType.F64`
    - Expected: tensor.device equals `pytorch:cpu`
    - Expected: tensor.shape equals `host.shape`
@@ -462,17 +469,16 @@ match result:
    - Expected: roundtrip.get_at([Index.new(1), Index.new(1)]) equals `Float64.new(4.5)`
    - Expected: tensor.free() equals `0`
    - Expected: name equals `pytorch`
+3. fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("round-trips copied Float64 NDArray storage through a PyTorch-owned tensor when available")
 val host = matrix_from_rows([
     [Float64.new(1.5), Float64.new(2.5)],
     [Float64.new(3.5), Float64.new(4.5)]])
@@ -499,30 +505,18 @@ match result:
 
 #### creates PyTorch-owned Float64 zeros, ones, and full tensors before explicit host copy
 
-- creates PyTorch-owned Float64 zeros, ones, and full tensors before explicit host copy
-   - Expected: zeros_host.shape equals `Shape.new([Index.new(3)])`
-   - Expected: zeros_host.get_f64(Index.new(0)) equals `Float64.new(0.0)`
-   - Expected: zeros_host.get_f64(Index.new(2)) equals `Float64.new(0.0)`
-   - Expected: ones_host.shape equals `Shape.new([Index.new(2), Index.new(2)])`
-   - Expected: ones_host.get_at([Index.new(0), Index.new(0)]) equals `Float64.new(1.0)`
-   - Expected: ones_host.get_at([Index.new(1), Index.new(1)]) equals `Float64.new(1.0)`
-   - Expected: full_host.get_f64(Index.new(0)) equals `Float64.new(7.5)`
-   - Expected: full_host.get_f64(Index.new(1)) equals `Float64.new(7.5)`
-   - Expected: full.free() equals `0`
-   - Expected: ones.free() equals `0`
-   - Expected: zeros.free() equals `0`
-   - Expected: name equals `pytorch`
+1. fail
+2. fail
+3. fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 38 lines folded for reproduction.
+Runnable source: 36 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("creates PyTorch-owned Float64 zeros, ones, and full tensors before explicit host copy")
 match TorchNDArray.zeros_f64(Shape.new([Index.new(3)])):
     case Ok(zeros):
         val zeros_host = zeros.to_host_f64().unwrap()
@@ -565,34 +559,19 @@ match TorchNDArray.ones_f64(Shape.new([Index.new(1), Index.new(1), Index.new(1),
 
 #### creates PyTorch-owned Float64 arange, linspace, and eye tensors before explicit host copy
 
-- creates PyTorch-owned Float64 arange, linspace, and eye tensors before explicit host copy
-   - Expected: arange_host.shape equals `Shape.new([Index.new(3)])`
-   - Expected: arange_host.get_f64(Index.new(0)) equals `Float64.new(1.0)`
-   - Expected: arange_host.get_f64(Index.new(1)) equals `Float64.new(2.5)`
-   - Expected: arange_host.get_f64(Index.new(2)) equals `Float64.new(4.0)`
-   - Expected: linspace_host.shape equals `Shape.new([Index.new(3)])`
-   - Expected: linspace_host.get_f64(Index.new(0)) equals `Float64.new(0.0)`
-   - Expected: linspace_host.get_f64(Index.new(1)) equals `Float64.new(0.5)`
-   - Expected: linspace_host.get_f64(Index.new(2)) equals `Float64.new(1.0)`
-   - Expected: eye_host.shape equals `Shape.new([Index.new(3), Index.new(3)])`
-   - Expected: eye_host.get_at([Index.new(0), Index.new(0)]) equals `Float64.new(1.0)`
-   - Expected: eye_host.get_at([Index.new(0), Index.new(1)]) equals `Float64.new(0.0)`
-   - Expected: eye_host.get_at([Index.new(2), Index.new(2)]) equals `Float64.new(1.0)`
-   - Expected: eye.free() equals `0`
-   - Expected: linspace.free() equals `0`
-   - Expected: arange.free() equals `0`
-   - Expected: name equals `pytorch`
+1. fail
+2. fail
+3. fail
+4. fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 48 lines folded for reproduction.
+Runnable source: 46 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("creates PyTorch-owned Float64 arange, linspace, and eye tensors before explicit host copy")
 match TorchNDArray.arange_f64(Float64.new(1.0), Float64.new(5.0), Float64.new(1.5)):
     case Ok(arange):
         val arange_host = arange.to_host_f64().unwrap()
@@ -645,27 +624,17 @@ match TorchNDArray.eye_f64(Index.new(-1)):
 
 #### creates PyTorch-owned Float64 empty and random tensors before explicit host copy
 
-- creates PyTorch-owned Float64 empty and random tensors before explicit host copy
-   - Expected: empty_host.shape equals `Shape.new([Index.new(3)])`
-   - Expected: empty_host.len() equals `Index.new(3)`
-   - Expected: uniform_host.shape equals `Shape.new([Index.new(2), Index.new(2)])`
-   - Expected: normal_host.shape equals `Shape.new([Index.new(2)])`
-   - Expected: normal_host.len() equals `Index.new(2)`
-   - Expected: normal.free() equals `0`
-   - Expected: uniform.free() equals `0`
-   - Expected: empty.free() equals `0`
-   - Expected: name equals `pytorch`
+1. fail
+2. fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 33 lines folded for reproduction.
+Runnable source: 31 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("creates PyTorch-owned Float64 empty and random tensors before explicit host copy")
 match TorchNDArray.empty_f64(Shape.new([Index.new(3)])):
     case Ok(empty):
         val empty_host = empty.to_host_f64().unwrap()
@@ -703,30 +672,17 @@ match TorchNDArray.random_uniform_f64(Shape.new([Index.new(-1)])):
 
 #### creates PyTorch-owned higher-rank Float64 tensors before explicit host copy
 
-- creates PyTorch-owned higher-rank Float64 tensors before explicit host copy
-   - Expected: full3_host.shape equals `Shape.new([Index.new(2), Index.new(1), Index.new(2)])`
-   - Expected: full3_host.len() equals `Index.new(4)`
-   - Expected: full3_host.get_at([Index.new(1), Index.new(0), Index.new(1)]) equals `Float64.new(4.5)`
-   - Expected: zeros4_host.shape equals `Shape.new([Index.new(1), Index.new(2), Index.new(1), Index.new(2)])`
-   - Expected: zeros4_host.len() equals `Index.new(4)`
-   - Expected: zeros4_host.get_at([Index.new(0), Index.new(1), Index.new(0), Index.new(1)]) equals `Float64.new(0.0)`
-   - Expected: random4_host.shape equals `Shape.new([Index.new(1), Index.new(1), Index.new(1), Index.new(2)])`
-   - Expected: random4_host.len() equals `Index.new(2)`
-   - Expected: random4.free() equals `0`
-   - Expected: zeros4.free() equals `0`
-   - Expected: full3.free() equals `0`
-   - Expected: name equals `pytorch`
+1. fail
+2. fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 35 lines folded for reproduction.
+Runnable source: 33 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("creates PyTorch-owned higher-rank Float64 tensors before explicit host copy")
 match TorchNDArray.full_f64(Shape.new([Index.new(2), Index.new(1), Index.new(2)]), Float64.new(4.5)):
     case Ok(full3):
         val full3_host = full3.to_host_f64().unwrap()
@@ -766,29 +722,18 @@ match TorchNDArray.ones_f64(Shape.new([Index.new(1), Index.new(1), Index.new(1),
 
 #### computes PyTorch-owned Float64 addition and reductions before explicit host copy
 
-- computes PyTorch-owned Float64 addition and reductions before explicit host copy
-   - Expected: added.sum_f64().unwrap() equals `Float64.new(30.0)`
-   - Expected: added.mean_f64().unwrap() equals `Float64.new(7.5)`
-   - Expected: added.min_f64().unwrap() equals `Float64.new(3.0)`
-   - Expected: added.max_f64().unwrap() equals `Float64.new(10.0)`
-   - Expected: added_host.get_f64(Index.new(0)) equals `Float64.new(10.0)`
-   - Expected: added_host.get_f64(Index.new(3)) equals `Float64.new(3.0)`
-   - Expected: added.free() equals `0`
-   - Expected: left.free() equals `0`
-   - Expected: right.free() equals `0`
+1. fail
    - Expected: name equals `pytorch`
-   - Expected: name equals `pytorch`
+2. fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 29 lines folded for reproduction.
+Runnable source: 27 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("computes PyTorch-owned Float64 addition and reductions before explicit host copy")
 val left_host = vector_from([Float64.new(8.0), Float64.new(6.0), Float64.new(4.0), Float64.new(2.0)])
 val right_host = vector_from([Float64.new(2.0), Float64.new(3.0), Float64.new(4.0), Float64.new(1.0)])
 val left_result = TorchNDArray.from_f64_array(left_host)
@@ -822,15 +767,9 @@ match left_result:
 
 #### computes PyTorch-owned Float64 subtraction, multiplication, and division before explicit host copy
 
-- computes PyTorch-owned Float64 subtraction, multiplication, and division before explicit host copy
-   - Expected: subbed_host.get_f64(Index.new(0)) equals `Float64.new(6.0)`
-   - Expected: subbed_host.get_f64(Index.new(3)) equals `Float64.new(1.0)`
-   - Expected: subbed.sum_f64().unwrap() equals `Float64.new(10.0)`
-   - Expected: subbed.free() equals `0`
-   - Expected: left.free() equals `0`
-   - Expected: right.free() equals `0`
+1. fail
    - Expected: name equals `pytorch`
-   - Expected: name equals `pytorch`
+2. fail
    - Expected: multiplied_host.get_f64(Index.new(0)) equals `Float64.new(16.0)`
    - Expected: multiplied_host.get_f64(Index.new(3)) equals `Float64.new(2.0)`
    - Expected: multiplied.sum_f64().unwrap() equals `Float64.new(52.0)`
@@ -838,7 +777,9 @@ match left_result:
    - Expected: left.free() equals `0`
    - Expected: right.free() equals `0`
    - Expected: name equals `pytorch`
+3. fail
    - Expected: name equals `pytorch`
+4. fail
    - Expected: divided_host.get_f64(Index.new(0)) equals `Float64.new(4.0)`
    - Expected: divided_host.get_f64(Index.new(3)) equals `Float64.new(2.0)`
    - Expected: divided.sum_f64().unwrap() equals `Float64.new(9.0)`
@@ -846,18 +787,18 @@ match left_result:
    - Expected: left.free() equals `0`
    - Expected: right.free() equals `0`
    - Expected: name equals `pytorch`
+5. fail
    - Expected: name equals `pytorch`
+6. fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 72 lines folded for reproduction.
+Runnable source: 70 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("computes PyTorch-owned Float64 subtraction, multiplication, and division before explicit host copy")
 val left_host = vector_from([Float64.new(8.0), Float64.new(6.0), Float64.new(4.0), Float64.new(2.0)])
 val right_host = vector_from([Float64.new(2.0), Float64.new(3.0), Float64.new(4.0), Float64.new(1.0)])
 val sub_left_result = TorchNDArray.from_f64_array(left_host)
@@ -934,36 +875,48 @@ match div_left_result:
 
 #### computes PyTorch-owned Float64 abs, neg, and square before explicit host copy
 
-- computes PyTorch-owned Float64 abs, neg, and square before explicit host copy
+1. Float64 new
+2. Float64 new
+3. Float64 new
+4. Float64 new
    - Expected: absolute_host.get_f64(Index.new(0)) equals `Float64.new(3.0)`
    - Expected: absolute_host.get_f64(Index.new(2)) equals `Float64.new(1.0)`
    - Expected: absolute.sum_f64().unwrap() equals `Float64.new(10.0)`
    - Expected: absolute.free() equals `0`
    - Expected: tensor.free() equals `0`
    - Expected: name equals `pytorch`
+5. fail
+6. Float64 new
+7. Float64 new
+8. Float64 new
+9. Float64 new
    - Expected: negated_host.get_f64(Index.new(0)) equals `Float64.new(3.0)`
    - Expected: negated_host.get_f64(Index.new(3)) equals `Float64.new(-4.0)`
    - Expected: negated.sum_f64().unwrap() equals `Float64.new(-2.0)`
    - Expected: negated.free() equals `0`
    - Expected: tensor.free() equals `0`
    - Expected: name equals `pytorch`
+10. fail
+11. Float64 new
+12. Float64 new
+13. Float64 new
+14. Float64 new
    - Expected: squared_host.get_f64(Index.new(0)) equals `Float64.new(9.0)`
    - Expected: squared_host.get_f64(Index.new(3)) equals `Float64.new(16.0)`
    - Expected: squared.sum_f64().unwrap() equals `Float64.new(30.0)`
    - Expected: squared.free() equals `0`
    - Expected: tensor.free() equals `0`
    - Expected: name equals `pytorch`
+15. fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 61 lines folded for reproduction.
+Runnable source: 59 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("computes PyTorch-owned Float64 abs, neg, and square before explicit host copy")
 val abs_result = TorchNDArray.from_f64_array(vector_from([
     Float64.new(-3.0),
     Float64.new(2.0),
@@ -1029,54 +982,81 @@ match square_result:
 
 #### computes PyTorch-owned Float64 sqrt, relu, and scalar arithmetic before explicit host copy
 
-- computes PyTorch-owned Float64 sqrt, relu, and scalar arithmetic before explicit host copy
+1. Float64 new
+2. Float64 new
+3. Float64 new
+4. Float64 new
    - Expected: roots_host.get_f64(Index.new(0)) equals `Float64.new(0.0)`
    - Expected: roots_host.get_f64(Index.new(3)) equals `Float64.new(4.0)`
    - Expected: roots.sum_f64().unwrap() equals `Float64.new(9.0)`
    - Expected: roots.free() equals `0`
    - Expected: tensor.free() equals `0`
    - Expected: name equals `pytorch`
+5. fail
+6. Float64 new
+7. Float64 new
+8. Float64 new
+9. Float64 new
    - Expected: activated_host.get_f64(Index.new(0)) equals `Float64.new(0.0)`
    - Expected: activated_host.get_f64(Index.new(3)) equals `Float64.new(4.0)`
    - Expected: activated.sum_f64().unwrap() equals `Float64.new(6.0)`
    - Expected: activated.free() equals `0`
    - Expected: tensor.free() equals `0`
    - Expected: name equals `pytorch`
+10. fail
+11. Float64 new
+12. Float64 new
+13. Float64 new
+14. Float64 new
    - Expected: shifted_host.get_f64(Index.new(0)) equals `Float64.new(2.5)`
    - Expected: shifted_host.get_f64(Index.new(3)) equals `Float64.new(5.5)`
    - Expected: shifted.sum_f64().unwrap() equals `Float64.new(16.0)`
    - Expected: shifted.free() equals `0`
    - Expected: tensor.free() equals `0`
    - Expected: name equals `pytorch`
+15. fail
+16. Float64 new
+17. Float64 new
+18. Float64 new
+19. Float64 new
    - Expected: lowered_host.get_f64(Index.new(0)) equals `Float64.new(0.5)`
    - Expected: lowered_host.get_f64(Index.new(3)) equals `Float64.new(3.5)`
    - Expected: lowered.sum_f64().unwrap() equals `Float64.new(8.0)`
    - Expected: lowered.free() equals `0`
    - Expected: tensor.free() equals `0`
    - Expected: name equals `pytorch`
+20. fail
+21. Float64 new
+22. Float64 new
+23. Float64 new
+24. Float64 new
    - Expected: scaled_host.get_f64(Index.new(0)) equals `Float64.new(2.0)`
    - Expected: scaled_host.get_f64(Index.new(3)) equals `Float64.new(8.0)`
    - Expected: scaled.sum_f64().unwrap() equals `Float64.new(20.0)`
    - Expected: scaled.free() equals `0`
    - Expected: tensor.free() equals `0`
    - Expected: name equals `pytorch`
+25. fail
+26. Float64 new
+27. Float64 new
+28. Float64 new
+29. Float64 new
    - Expected: divided_host.get_f64(Index.new(0)) equals `Float64.new(1.0)`
    - Expected: divided_host.get_f64(Index.new(3)) equals `Float64.new(4.0)`
    - Expected: divided.sum_f64().unwrap() equals `Float64.new(10.0)`
    - Expected: divided.free() equals `0`
    - Expected: tensor.free() equals `0`
    - Expected: name equals `pytorch`
+30. fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 121 lines folded for reproduction.
+Runnable source: 119 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("computes PyTorch-owned Float64 sqrt, relu, and scalar arithmetic before explicit host copy")
 val sqrt_result = TorchNDArray.from_f64_array(vector_from([
     Float64.new(0.0),
     Float64.new(4.0),
@@ -1202,37 +1182,51 @@ match scalar_div_result:
 
 #### computes PyTorch-owned Float64 pow, leaky_relu, gelu, softmax, and log_softmax before explicit host copy
 
-- computes PyTorch-owned Float64 pow, leaky_relu, gelu, softmax, and log_softmax before explicit host copy
+1. Float64 new
+2. Float64 new
    - Expected: host.get_f64(Index.new(0)) equals `Float64.new(8.0)`
    - Expected: host.get_f64(Index.new(1)) equals `Float64.new(27.0)`
    - Expected: powered.free() equals `0`
    - Expected: tensor.free() equals `0`
    - Expected: name equals `pytorch`
+3. fail
+4. Float64 new
+5. Float64 new
    - Expected: host.get_f64(Index.new(0)) equals `Float64.new(-1.0)`
    - Expected: host.get_f64(Index.new(1)) equals `Float64.new(2.0)`
    - Expected: activated.free() equals `0`
    - Expected: tensor.free() equals `0`
    - Expected: name equals `pytorch`
+6. fail
+7. Float64 new
+8. Float64 new
+9. Float64 new
    - Expected: host.get_f64(Index.new(1)) equals `Float64.new(0.0)`
    - Expected: activated.free() equals `0`
    - Expected: tensor.free() equals `0`
    - Expected: name equals `pytorch`
+10. fail
+11. [Float64 new
+12. [Float64 new
+13. Float64 new
+14. Float64 new
+15. ])) unwrap
+16. fail
    - Expected: logged.free() equals `0`
    - Expected: log_tensor.free() equals `0`
    - Expected: normalized.free() equals `0`
    - Expected: tensor.free() equals `0`
    - Expected: name equals `pytorch`
+17. fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 101 lines folded for reproduction.
+Runnable source: 99 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("computes PyTorch-owned Float64 pow, leaky_relu, gelu, softmax, and log_softmax before explicit host copy")
 val pow_result = TorchNDArray.from_f64_array(vector_from([
     Float64.new(2.0),
     Float64.new(3.0)
@@ -1338,25 +1332,30 @@ match softmax_result:
 
 #### computes PyTorch-owned Float64 norm, sample variance, sample std, and determinant before explicit host copy
 
-- computes PyTorch-owned Float64 norm, sample variance, sample std, and determinant before explicit host copy
+1. Float64 new
+2. Float64 new
+3. Float64 new
    - Expected: tensor.var_f64().unwrap() equals `Float64.new(1.0)`
    - Expected: tensor.std_f64().unwrap() equals `Float64.new(1.0)`
    - Expected: tensor.free() equals `0`
    - Expected: name equals `pytorch`
+4. fail
+5. [Float64 new
+6. [Float64 new
+7. fail
    - Expected: nonsquare.free() equals `0`
    - Expected: tensor.free() equals `0`
    - Expected: name equals `pytorch`
+8. fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 41 lines folded for reproduction.
+Runnable source: 39 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("computes PyTorch-owned Float64 norm, sample variance, sample std, and determinant before explicit host copy")
 val stats_result = TorchNDArray.from_f64_array(vector_from([
     Float64.new(1.0),
     Float64.new(2.0),
@@ -1402,23 +1401,24 @@ match det_result:
 
 #### computes PyTorch-owned Float64 inverse before explicit host copy
 
-- computes PyTorch-owned Float64 inverse before explicit host copy
+1. [Float64 new
+2. [Float64 new
    - Expected: host.shape equals `Shape.new([Index.new(2), Index.new(2)])`
+3. fail
    - Expected: nonsquare.free() equals `0`
    - Expected: inverse.free() equals `0`
    - Expected: tensor.free() equals `0`
    - Expected: name equals `pytorch`
+4. fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 36 lines folded for reproduction.
+Runnable source: 34 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("computes PyTorch-owned Float64 inverse before explicit host copy")
 val inverse_result = TorchNDArray.from_f64_array(matrix_from_rows([
     [Float64.new(4.0), Float64.new(7.0)],
     [Float64.new(2.0), Float64.new(6.0)]
@@ -1459,29 +1459,33 @@ match inverse_result:
 
 #### solves PyTorch-owned Float64 linear systems before explicit host copy
 
-- solves PyTorch-owned Float64 linear systems before explicit host copy
+1. [Float64 new
+2. [Float64 new
+3. Float64 new
+4. Float64 new
    - Expected: host.shape equals `Shape.new([Index.new(2)])`
    - Expected: host.get_f64(Index.new(0)) equals `Float64.new(2.0)`
    - Expected: host.get_f64(Index.new(1)) equals `Float64.new(3.0)`
+5. fail
    - Expected: short_rhs.free() equals `0`
    - Expected: solution.free() equals `0`
    - Expected: rhs.free() equals `0`
    - Expected: matrix.free() equals `0`
    - Expected: name equals `pytorch`
    - Expected: matrix.free() equals `0`
+6. fail
    - Expected: matrix.free() equals `0`
    - Expected: name equals `pytorch`
+7. fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 39 lines folded for reproduction.
+Runnable source: 37 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("solves PyTorch-owned Float64 linear systems before explicit host copy")
 val matrix_result = TorchNDArray.from_f64_array(matrix_from_rows([
     [Float64.new(3.0), Float64.new(1.0)],
     [Float64.new(1.0), Float64.new(2.0)]
@@ -1525,16 +1529,22 @@ match matrix_result:
 
 #### clones, unsqueezes, and squeezes PyTorch-owned Float64 tensors before explicit host copy
 
-- clones, unsqueezes, and squeezes PyTorch-owned Float64 tensors before explicit host copy
+1. Float64 new
+2. Float64 new
    - Expected: cloned_host.get_f64(Index.new(0)) equals `Float64.new(5.0)`
    - Expected: cloned_host.get_f64(Index.new(1)) equals `Float64.new(6.0)`
    - Expected: row.shape.dims[0] equals `Index.new(1)`
    - Expected: row.shape.dims[1] equals `Index.new(2)`
    - Expected: row_host.get_at([Index.new(0), Index.new(1)]) equals `Float64.new(6.0)`
+3. Float64 new
+4. Float64 new
+5. ])) unwrap
    - Expected: column.shape.dims[0] equals `Index.new(2)`
    - Expected: column.shape.dims[1] equals `Index.new(1)`
    - Expected: squeezed_host.get_f64(Index.new(0)) equals `Float64.new(5.0)`
    - Expected: squeezed_host.get_f64(Index.new(1)) equals `Float64.new(6.0)`
+6. fail
+7. fail
    - Expected: squeezed.free() equals `0`
    - Expected: column.free() equals `0`
    - Expected: column_source.free() equals `0`
@@ -1542,17 +1552,16 @@ match matrix_result:
    - Expected: cloned.free() equals `0`
    - Expected: tensor.free() equals `0`
    - Expected: name equals `pytorch`
+8. fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 52 lines folded for reproduction.
+Runnable source: 50 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("clones, unsqueezes, and squeezes PyTorch-owned Float64 tensors before explicit host copy")
 val shape_result = TorchNDArray.from_f64_array(vector_from([
     Float64.new(5.0),
     Float64.new(6.0)
@@ -1609,34 +1618,45 @@ match shape_result:
 
 #### computes PyTorch-owned Float64 exp, log, sigmoid, and tanh before explicit host copy
 
-- computes PyTorch-owned Float64 exp, log, sigmoid, and tanh before explicit host copy
+1. Float64 new
+2. Float64 new
    - Expected: host.get_f64(Index.new(0)) equals `Float64.new(1.0)`
    - Expected: exponentiated.free() equals `0`
    - Expected: tensor.free() equals `0`
    - Expected: name equals `pytorch`
+3. fail
+4. Float64 new
+5. Float64 new
    - Expected: host.get_f64(Index.new(0)) equals `Float64.new(0.0)`
    - Expected: logged.free() equals `0`
    - Expected: tensor.free() equals `0`
    - Expected: name equals `pytorch`
+6. fail
+7. Float64 new
+8. Float64 new
+9. Float64 new
    - Expected: sigmoid_host.get_f64(Index.new(1)) equals `Float64.new(0.5)`
    - Expected: sigmoid.free() equals `0`
    - Expected: tensor.free() equals `0`
    - Expected: name equals `pytorch`
+10. fail
+11. Float64 new
+12. Float64 new
+13. Float64 new
    - Expected: tanh_host.get_f64(Index.new(1)) equals `Float64.new(0.0)`
    - Expected: tanh.free() equals `0`
    - Expected: tensor.free() equals `0`
    - Expected: name equals `pytorch`
+14. fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 79 lines folded for reproduction.
+Runnable source: 77 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("computes PyTorch-owned Float64 exp, log, sigmoid, and tanh before explicit host copy")
 val exp_result = TorchNDArray.from_f64_array(vector_from([
     Float64.new(0.0),
     Float64.new(1.0)
@@ -1720,30 +1740,36 @@ match tanh_result:
 
 #### computes PyTorch-owned Float64 sin, cos, and tan before explicit host copy
 
-- computes PyTorch-owned Float64 sin, cos, and tan before explicit host copy
+1. Float64 new
+2. Float64 new
    - Expected: host.get_f64(Index.new(0)) equals `Float64.new(0.0)`
    - Expected: sine.free() equals `0`
    - Expected: tensor.free() equals `0`
    - Expected: name equals `pytorch`
+3. fail
+4. Float64 new
+5. Float64 new
    - Expected: host.get_f64(Index.new(0)) equals `Float64.new(1.0)`
    - Expected: cosine.free() equals `0`
    - Expected: tensor.free() equals `0`
    - Expected: name equals `pytorch`
+6. fail
+7. Float64 new
+8. Float64 new
    - Expected: host.get_f64(Index.new(0)) equals `Float64.new(0.0)`
    - Expected: tangent.free() equals `0`
    - Expected: tensor.free() equals `0`
    - Expected: name equals `pytorch`
+9. fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 58 lines folded for reproduction.
+Runnable source: 56 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("computes PyTorch-owned Float64 sin, cos, and tan before explicit host copy")
 val sin_result = TorchNDArray.from_f64_array(vector_from([
     Float64.new(0.0),
     Float64.new(1.5707963267948966)
@@ -1806,26 +1832,29 @@ match tan_result:
 
 #### computes PyTorch-owned Float64 asin and acos before explicit host copy
 
-- computes PyTorch-owned Float64 asin and acos before explicit host copy
+1. Float64 new
+2. Float64 new
    - Expected: host.get_f64(Index.new(0)) equals `Float64.new(0.0)`
    - Expected: arcsine.free() equals `0`
    - Expected: tensor.free() equals `0`
    - Expected: name equals `pytorch`
+3. fail
+4. Float64 new
+5. Float64 new
    - Expected: host.get_f64(Index.new(0)) equals `Float64.new(0.0)`
    - Expected: arccosine.free() equals `0`
    - Expected: tensor.free() equals `0`
    - Expected: name equals `pytorch`
+6. fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 39 lines folded for reproduction.
+Runnable source: 37 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("computes PyTorch-owned Float64 asin and acos before explicit host copy")
 val asin_result = TorchNDArray.from_f64_array(vector_from([
     Float64.new(0.0),
     Float64.new(1.0)
@@ -1869,26 +1898,29 @@ match acos_result:
 
 #### computes PyTorch-owned Float64 atan2 before explicit host copy
 
-- computes PyTorch-owned Float64 atan2 before explicit host copy
+1. Float64 new
+2. Float64 new
+3. Float64 new
+4. Float64 new
    - Expected: host.get_f64(Index.new(0)) equals `Float64.new(0.0)`
    - Expected: angle.free() equals `0`
    - Expected: x_tensor.free() equals `0`
    - Expected: y_tensor.free() equals `0`
    - Expected: name equals `pytorch`
    - Expected: y_tensor.free() equals `0`
+5. fail
    - Expected: y_tensor.free() equals `0`
    - Expected: name equals `pytorch`
+6. fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 33 lines folded for reproduction.
+Runnable source: 31 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("computes PyTorch-owned Float64 atan2 before explicit host copy")
 val y_result = TorchNDArray.from_f64_array(vector_from([
     Float64.new(0.0),
     Float64.new(1.0)
@@ -1926,7 +1958,11 @@ match y_result:
 
 #### computes PyTorch-owned Float64 matmul before explicit host copy
 
-- computes PyTorch-owned Float64 matmul before explicit host copy
+1. [Float64 new
+2. [Float64 new
+3. [Float64 new
+4. [Float64 new
+5. [Float64 new
    - Expected: product_host.shape equals `Shape.new([Index.new(2), Index.new(2)])`
    - Expected: product_host.get_at([Index.new(0), Index.new(0)]) equals `Float64.new(58.0)`
    - Expected: product_host.get_at([Index.new(0), Index.new(1)]) equals `Float64.new(64.0)`
@@ -1936,18 +1972,18 @@ match y_result:
    - Expected: left.free() equals `0`
    - Expected: right.free() equals `0`
    - Expected: name equals `pytorch`
+6. fail
    - Expected: name equals `pytorch`
+7. fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 33 lines folded for reproduction.
+Runnable source: 31 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("computes PyTorch-owned Float64 matmul before explicit host copy")
 val left_result = TorchNDArray.from_f64_array(matrix_from_rows([
     [Float64.new(1.0), Float64.new(2.0), Float64.new(3.0)],
     [Float64.new(4.0), Float64.new(5.0), Float64.new(6.0)]
@@ -1985,30 +2021,31 @@ match left_result:
 
 #### computes PyTorch-owned Float64 axis reductions before explicit host copy
 
-- computes PyTorch-owned Float64 axis reductions before explicit host copy
+1. [Float64 new
+2. [Float64 new
    - Expected: col_sum_host.shape equals `Shape.new([Index.new(3)])`
    - Expected: col_sum_host.get_f64(Index.new(0)) equals `Float64.new(5.0)`
    - Expected: col_sum_host.get_f64(Index.new(2)) equals `Float64.new(9.0)`
    - Expected: col_sum.free() equals `0`
    - Expected: tensor.free() equals `0`
    - Expected: name equals `pytorch`
+3. fail
    - Expected: row_mean_host.shape equals `Shape.new([Index.new(2)])`
    - Expected: row_mean_host.get_f64(Index.new(0)) equals `Float64.new(2.0)`
    - Expected: row_mean_host.get_f64(Index.new(1)) equals `Float64.new(5.0)`
    - Expected: row_mean.free() equals `0`
    - Expected: tensor.free() equals `0`
    - Expected: name equals `pytorch`
+4. fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 33 lines folded for reproduction.
+Runnable source: 31 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("computes PyTorch-owned Float64 axis reductions before explicit host copy")
 val host = matrix_from_rows([
     [Float64.new(1.0), Float64.new(2.0), Float64.new(3.0)],
     [Float64.new(4.0), Float64.new(5.0), Float64.new(6.0)]])
@@ -2046,18 +2083,21 @@ match mean_result:
 
 #### computes PyTorch-owned Float64 min, max, argmin, and argmax axis reductions before explicit host copy
 
-- computes PyTorch-owned Float64 min, max, argmin, and argmax axis reductions before explicit host copy
+1. [Float64 new
+2. [Float64 new
    - Expected: row_min_host.shape equals `Shape.new([Index.new(2)])`
    - Expected: row_min_host.get_f64(Index.new(0)) equals `Float64.new(1.0)`
    - Expected: row_min_host.get_f64(Index.new(1)) equals `Float64.new(4.0)`
    - Expected: row_min.free() equals `0`
    - Expected: tensor.free() equals `0`
    - Expected: name equals `pytorch`
+3. fail
    - Expected: row_argmin_host.get_f64(Index.new(0)) equals `Float64.new(1.0)`
    - Expected: row_argmin_host.get_f64(Index.new(1)) equals `Float64.new(2.0)`
    - Expected: row_argmin.free() equals `0`
    - Expected: tensor.free() equals `0`
    - Expected: name equals `pytorch`
+4. fail
    - Expected: col_max_host.shape equals `Shape.new([Index.new(3)])`
    - Expected: col_max_host.get_f64(Index.new(0)) equals `Float64.new(6.0)`
    - Expected: col_max_host.get_f64(Index.new(1)) equals `Float64.new(5.0)`
@@ -2065,22 +2105,22 @@ match mean_result:
    - Expected: col_max.free() equals `0`
    - Expected: tensor.free() equals `0`
    - Expected: name equals `pytorch`
+5. fail
    - Expected: col_argmax_host.get_f64(Index.new(0)) equals `Float64.new(1.0)`
    - Expected: col_argmax_host.get_f64(Index.new(2)) equals `Float64.new(1.0)`
    - Expected: col_argmax.free() equals `0`
    - Expected: tensor.free() equals `0`
    - Expected: name equals `pytorch`
+6. fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 60 lines folded for reproduction.
+Runnable source: 58 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("computes PyTorch-owned Float64 min, max, argmin, and argmax axis reductions before explicit host copy")
 val host = matrix_from_rows([
     [Float64.new(3.0), Float64.new(1.0), Float64.new(2.0)],
     [Float64.new(6.0), Float64.new(5.0), Float64.new(4.0)]])
@@ -2145,35 +2185,37 @@ match argmax_result:
 
 #### computes PyTorch-owned Float64 reshape, flatten, and transpose before explicit host copy
 
-- computes PyTorch-owned Float64 reshape, flatten, and transpose before explicit host copy
+1. [Float64 new
+2. [Float64 new
    - Expected: reshaped_host.shape equals `Shape.new([Index.new(3), Index.new(2)])`
    - Expected: reshaped_host.get_at([Index.new(0), Index.new(0)]) equals `Float64.new(1.0)`
    - Expected: reshaped_host.get_at([Index.new(2), Index.new(1)]) equals `Float64.new(6.0)`
    - Expected: reshaped.free() equals `0`
    - Expected: tensor.free() equals `0`
    - Expected: name equals `pytorch`
+3. fail
    - Expected: flattened_host.shape equals `Shape.new([Index.new(6)])`
    - Expected: flattened_host.get_f64(Index.new(5)) equals `Float64.new(6.0)`
    - Expected: flattened.free() equals `0`
    - Expected: tensor.free() equals `0`
    - Expected: name equals `pytorch`
+4. fail
    - Expected: transposed_host.shape equals `Shape.new([Index.new(3), Index.new(2)])`
    - Expected: transposed_host.get_at([Index.new(0), Index.new(1)]) equals `Float64.new(4.0)`
    - Expected: transposed_host.get_at([Index.new(2), Index.new(1)]) equals `Float64.new(6.0)`
    - Expected: transposed.free() equals `0`
    - Expected: tensor.free() equals `0`
    - Expected: name equals `pytorch`
+5. fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 46 lines folded for reproduction.
+Runnable source: 44 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("computes PyTorch-owned Float64 reshape, flatten, and transpose before explicit host copy")
 val host = matrix_from_rows([
     [Float64.new(1.0), Float64.new(2.0), Float64.new(3.0)],
     [Float64.new(4.0), Float64.new(5.0), Float64.new(6.0)]])
@@ -2224,24 +2266,16 @@ match transpose_result:
 
 #### computes PyTorch-owned higher-rank Float64 reshape before explicit host copy
 
-- computes PyTorch-owned higher-rank Float64 reshape before explicit host copy
-   - Expected: reshaped4_host.shape equals `Shape.new([Index.new(1), Index.new(2), Index.new(1), Index.new(3)])`
-   - Expected: reshaped4_host.len() equals `Index.new(6)`
-   - Expected: reshaped4_host.get_at([Index.new(0), Index.new(1), Index.new(0), Index.new(2)]) equals `Float64.new(8.0)`
-   - Expected: reshaped4.free() equals `0`
-   - Expected: tensor.free() equals `0`
-   - Expected: name equals `pytorch`
+1. fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("computes PyTorch-owned higher-rank Float64 reshape before explicit host copy")
 match TorchNDArray.full_f64(Shape.new([Index.new(2), Index.new(1), Index.new(3)]), Float64.new(8.0)):
     case Ok(tensor):
         val reshaped4 = tensor.reshape_f64(Shape.new([Index.new(1), Index.new(2), Index.new(1), Index.new(3)])).unwrap()
@@ -2261,15 +2295,7 @@ match TorchNDArray.full_f64(Shape.new([Index.new(2), Index.new(1), Index.new(3)]
 
 #### computes PyTorch-owned higher-rank Float64 permutes before explicit host copy
 
-- computes PyTorch-owned higher-rank Float64 permutes before explicit host copy
-   - Expected: host.shape equals `Shape.new([Index.new(4), Index.new(2), Index.new(3)])`
-   - Expected: host.get_at([Index.new(0), Index.new(0), Index.new(0)]) equals `Float64.new(0.0)`
-   - Expected: host.get_at([Index.new(1), Index.new(1), Index.new(0)]) equals `Float64.new(13.0)`
-   - Expected: host.get_at([Index.new(3), Index.new(1), Index.new(2)]) equals `Float64.new(23.0)`
-   - Expected: permuted.free() equals `0`
-   - Expected: tensor.free() equals `0`
-   - Expected: base.free() equals `0`
-   - Expected: name equals `pytorch`
+1. fail
    - Expected: host.shape equals `Shape.new([Index.new(2), Index.new(3), Index.new(1), Index.new(1)])`
    - Expected: host.get_at([Index.new(0), Index.new(0), Index.new(0), Index.new(0)]) equals `Float64.new(0.0)`
    - Expected: host.get_at([Index.new(1), Index.new(2), Index.new(0), Index.new(0)]) equals `Float64.new(5.0)`
@@ -2277,17 +2303,16 @@ match TorchNDArray.full_f64(Shape.new([Index.new(2), Index.new(1), Index.new(3)]
    - Expected: tensor.free() equals `0`
    - Expected: base.free() equals `0`
    - Expected: name equals `pytorch`
+2. fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 34 lines folded for reproduction.
+Runnable source: 32 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("computes PyTorch-owned higher-rank Float64 permutes before explicit host copy")
 match TorchNDArray.arange_f64(Float64.new(0.0), Float64.new(24.0), Float64.new(1.0)):
     case Ok(base):
         val tensor = base.reshape_f64(Shape.new([Index.new(2), Index.new(3), Index.new(4)])).unwrap()
@@ -2326,27 +2351,16 @@ match TorchNDArray.arange_f64(Float64.new(0.0), Float64.new(6.0), Float64.new(1.
 
 #### materializes PyTorch-owned permuted Float64 tensors as contiguous before explicit host copy
 
-- materializes PyTorch-owned permuted Float64 tensors as contiguous before explicit host copy
-   - Expected: host.shape equals `Shape.new([Index.new(4), Index.new(2), Index.new(3)])`
-   - Expected: host.get_at([Index.new(0), Index.new(0), Index.new(0)]) equals `Float64.new(0.0)`
-   - Expected: host.get_at([Index.new(2), Index.new(0), Index.new(1)]) equals `Float64.new(6.0)`
-   - Expected: host.get_at([Index.new(3), Index.new(1), Index.new(2)]) equals `Float64.new(23.0)`
-   - Expected: contiguous.free() equals `0`
-   - Expected: permuted.free() equals `0`
-   - Expected: tensor.free() equals `0`
-   - Expected: base.free() equals `0`
-   - Expected: name equals `pytorch`
+1. fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("materializes PyTorch-owned permuted Float64 tensors as contiguous before explicit host copy")
 match TorchNDArray.arange_f64(Float64.new(0.0), Float64.new(24.0), Float64.new(1.0)):
     case Ok(base):
         val tensor = base.reshape_f64(Shape.new([Index.new(2), Index.new(3), Index.new(4)])).unwrap()
@@ -2371,7 +2385,7 @@ match TorchNDArray.arange_f64(Float64.new(0.0), Float64.new(24.0), Float64.new(1
 
 #### computes PyTorch-owned Float64 one-dimensional and two-dimensional slices before explicit host copy
 
-- computes PyTorch-owned Float64 one-dimensional and two-dimensional slices before explicit host copy
+1. Float64 new
    - Expected: middle_host.shape equals `Shape.new([Index.new(2)])`
    - Expected: middle_host.get_f64(Index.new(0)) equals `Float64.new(2.0)`
    - Expected: middle_host.get_f64(Index.new(1)) equals `Float64.new(4.0)`
@@ -2380,23 +2394,28 @@ match TorchNDArray.arange_f64(Float64.new(0.0), Float64.new(24.0), Float64.new(1
    - Expected: empty.free() equals `0`
    - Expected: tensor.free() equals `0`
    - Expected: name equals `pytorch`
+2. fail
+3. [Float64 new
+4. [Float64 new
+5. [Float64 new
+6. Slice new
+7. Slice new
    - Expected: block_host.shape equals `Shape.new([Index.new(2), Index.new(2)])`
    - Expected: block_host.get_at([Index.new(0), Index.new(0)]) equals `Float64.new(2.0)`
    - Expected: block_host.get_at([Index.new(1), Index.new(1)]) equals `Float64.new(9.0)`
    - Expected: block.free() equals `0`
    - Expected: tensor.free() equals `0`
    - Expected: name equals `pytorch`
+8. fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 40 lines folded for reproduction.
+Runnable source: 38 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("computes PyTorch-owned Float64 one-dimensional and two-dimensional slices before explicit host copy")
 val vector_result = TorchNDArray.from_f64_array(vector_from([
     Float64.new(1.0), Float64.new(2.0), Float64.new(3.0), Float64.new(4.0), Float64.new(5.0)]))
 match vector_result:
@@ -2441,30 +2460,18 @@ match matrix_result:
 
 #### computes PyTorch-owned Float64 concatenate and stack before explicit host copy
 
-- computes PyTorch-owned Float64 concatenate and stack before explicit host copy
-   - Expected: concatenated_host.shape equals `Shape.new([Index.new(6)])`
-   - Expected: concatenated_host.get_f64(Index.new(0)) equals `Float64.new(1.0)`
-   - Expected: concatenated_host.get_f64(Index.new(5)) equals `Float64.new(6.0)`
-   - Expected: stacked_host.shape equals `Shape.new([Index.new(2), Index.new(3)])`
-   - Expected: stacked_host.get_at([Index.new(0), Index.new(2)]) equals `Float64.new(3.0)`
-   - Expected: stacked_host.get_at([Index.new(1), Index.new(0)]) equals `Float64.new(4.0)`
-   - Expected: concatenated.free() equals `0`
-   - Expected: stacked.free() equals `0`
-   - Expected: first.free() equals `0`
-   - Expected: second.free() equals `0`
+1. fail
    - Expected: name equals `pytorch`
-   - Expected: name equals `pytorch`
+2. fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 30 lines folded for reproduction.
+Runnable source: 28 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("computes PyTorch-owned Float64 concatenate and stack before explicit host copy")
 val first_result = TorchNDArray.from_f64_array(vector_from([Float64.new(1.0), Float64.new(2.0), Float64.new(3.0)]))
 val second_result = TorchNDArray.from_f64_array(vector_from([Float64.new(4.0), Float64.new(5.0), Float64.new(6.0)]))
 match first_result:
@@ -2499,23 +2506,26 @@ match first_result:
 
 #### rejects invalid PyTorch-owned reshape and stack requests before backend execution
 
-- rejects invalid PyTorch-owned reshape and stack requests before backend execution
+1. fail
+2. fail
+3. fail
    - Expected: matrix.free() equals `0`
+4. fail
    - Expected: left.free() equals `0`
    - Expected: right.free() equals `0`
    - Expected: name equals `pytorch`
+5. fail
    - Expected: name equals `pytorch`
+6. fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 40 lines folded for reproduction.
+Runnable source: 38 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("rejects invalid PyTorch-owned reshape and stack requests before backend execution")
 val left_result = TorchNDArray.from_f64_array(vector_from([Float64.new(1.0), Float64.new(2.0)]))
 val right_result = TorchNDArray.from_f64_array(vector_from([Float64.new(3.0)]))
 match left_result:
@@ -2560,22 +2570,26 @@ match left_result:
 
 #### rejects invalid PyTorch-owned slice requests before backend execution
 
-- rejects invalid PyTorch-owned slice requests before backend execution
+1. fail
    - Expected: vector.free() equals `0`
    - Expected: name equals `pytorch`
+2. fail
+3. [Float64 new
+4. Slice new
+5. Slice new
+6. fail
    - Expected: matrix.free() equals `0`
    - Expected: name equals `pytorch`
+7. fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 32 lines folded for reproduction.
+Runnable source: 30 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("rejects invalid PyTorch-owned slice requests before backend execution")
 val vector_result = TorchNDArray.from_f64_array(vector_from([Float64.new(1.0), Float64.new(2.0)]))
 match vector_result:
     case Ok(vector):
@@ -2612,22 +2626,24 @@ match matrix_result:
 
 #### rejects invalid PyTorch-owned axis reductions before backend execution
 
-- rejects invalid PyTorch-owned axis reductions before backend execution
+1. fail
    - Expected: vector.free() equals `0`
    - Expected: name equals `pytorch`
+2. fail
+3. [Float64 new
+4. fail
    - Expected: matrix.free() equals `0`
    - Expected: name equals `pytorch`
+5. fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 29 lines folded for reproduction.
+Runnable source: 27 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("rejects invalid PyTorch-owned axis reductions before backend execution")
 val vector_result = TorchNDArray.from_f64_array(vector_from([Float64.new(1.0), Float64.new(2.0)]))
 match vector_result:
     case Ok(vector):
@@ -2661,24 +2677,25 @@ match matrix_result:
 
 #### rejects PyTorch-owned arithmetic shape mismatches before backend execution
 
-- rejects PyTorch-owned arithmetic shape mismatches before backend execution
+1. fail
+2. fail
    - Expected: left_matrix.free() equals `0`
    - Expected: right_matrix.free() equals `0`
    - Expected: left.free() equals `0`
    - Expected: right.free() equals `0`
    - Expected: name equals `pytorch`
+3. fail
    - Expected: name equals `pytorch`
+4. fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 33 lines folded for reproduction.
+Runnable source: 31 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("rejects PyTorch-owned arithmetic shape mismatches before backend execution")
 val left_result = TorchNDArray.from_f64_array(vector_from([Float64.new(1.0)]))
 val right_result = TorchNDArray.from_f64_array(vector_from([Float64.new(1.0), Float64.new(2.0)]))
 match left_result:
@@ -2716,18 +2733,16 @@ match left_result:
 
 #### rejects non-Float64 PyTorch tensor owner inputs before backend allocation
 
-- rejects non-Float64 PyTorch tensor owner inputs before backend allocation
+1. fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("rejects non-Float64 PyTorch tensor owner inputs before backend allocation")
 val host = vector_from_f32([Float32.new(1.0), Float32.new(2.0)])
 val result = TorchNDArray.from_f64_array(host)
 match result:
@@ -2751,56 +2766,3 @@ match result:
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-- `REQ-SCILIB-C-003`
-- `REQ-SCILIB-C-004`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `77d2c896202299b7682c27c69343a4b0cd52535a54bff2651b1c3e916b212f57`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `77d2c896202299b7682c27c69343a4b0cd52535a54bff2651b1c3e916b212f57`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `77d2c896202299b7682c27c69343a4b0cd52535a54bff2651b1c3e916b212f57`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
-
-SSpec documentization score: 86/100
-source: test/03_system/feature/scilib/linalg_torch_backend_spec.spl
-mirror: doc/06_spec/03_system/feature/scilib/linalg_torch_backend_spec.md (current)
-findings: 6 blockers: 0
-  narrative=100 structure=100 oracle=70
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/feature/scilib/linalg_torch_backend_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/feature/scilib/linalg_torch_backend_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/feature/scilib/linalg_torch_backend_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 147 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/03_system/feature/scilib/linalg_torch_backend_spec.spl:25:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'reports either an available PyTorch backend or a typed unavailable error' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/scilib/linalg_torch_backend_spec.spl:38:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'matches scalar dot when the PyTorch shim is available' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/scilib/linalg_torch_backend_spec.spl:52:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'keeps public dot, gemv, gemm, solve, and inv scalar-compatible when PyTorch is configured' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

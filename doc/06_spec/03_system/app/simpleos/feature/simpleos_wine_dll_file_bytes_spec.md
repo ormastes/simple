@@ -1,6 +1,29 @@
 # Simpleos Wine Dll File Bytes Specification
 
-> Tests covering REQ-045 SimpleOS Wine DLL file bytes.
+> <details>
+
+<!-- sdn-diagram:id=simpleos_wine_dll_file_bytes_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=simpleos_wine_dll_file_bytes_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+simpleos_wine_dll_file_bytes_spec -> common
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=simpleos_wine_dll_file_bytes_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -17,19 +40,23 @@
 
 #### validates selected DLL path bytes without retaining or executing the DLL
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-# @req REQ-045
+val result = wine_dll_validate_file_bytes("kernel32.dll", "\\KnownDlls\\kernel32.dll", _dll_bytes())
+expect(result.ok).to_equal(true)
+expect(result.status).to_equal("dll-file-bytes-validated")
+expect(result.image_size).to_equal(0x5000)
+expect(result.entrypoint_rva).to_equal(0x1200)
+expect(result.evidence).to_contain("file-backed-dll-bytes")
+expect(result.evidence).to_contain("pe-dll-characteristic")
+expect(result.evidence).to_contain("no-persistent-dll-view")
+expect(result.evidence).to_contain("no-dll-entrypoint-executed")
+expect(result.evidence).to_contain("no-tls-callback-executed")
 ```
 
 </details>
@@ -41,12 +68,12 @@ Reproduction: this block contains the complete executable scenario source.
 | Category | Application |
 | Status | Active |
 | Source | `test/03_system/app/simpleos/feature/simpleos_wine_dll_file_bytes_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering REQ-045 SimpleOS Wine DLL file bytes.
+Tests covering:
 - REQ-045 SimpleOS Wine DLL file bytes
 
 ## Scenario Summary
@@ -61,50 +88,3 @@ Tests covering REQ-045 SimpleOS Wine DLL file bytes.
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-- `REQ-045`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `08f547c87e94a737c90449c5bf7de2ecca855573ba91bddf28dbbbb82c56e607`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `08f547c87e94a737c90449c5bf7de2ecca855573ba91bddf28dbbbb82c56e607`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `08f547c87e94a737c90449c5bf7de2ecca855573ba91bddf28dbbbb82c56e607`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **85/100**; effective score: **49/100**; blockers: **1**.
-
-SSpec documentization score: 49/100
-source: test/03_system/app/simpleos/feature/simpleos_wine_dll_file_bytes_spec.spl
-mirror: doc/06_spec/03_system/app/simpleos/feature/simpleos_wine_dll_file_bytes_spec.md (current)
-findings: 4 blockers: 1
-  narrative=100 structure=90 oracle=50
-  traceability=100 evidence=100 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-  raw=85; blocker cap makes effective=49
-doc/06_spec/03_system/app/simpleos/feature/simpleos_wine_dll_file_bytes_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/app/simpleos/feature/simpleos_wine_dll_file_bytes_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/app/simpleos/feature/simpleos_wine_dll_file_bytes_spec.spl:1:1: blocker SSDOC-ORA-001 [oracle] (-50): no real executed assertion or compiler oracle
-  why: A passing-looking document without an oracle is not conformance evidence.
-  improve: Replace placeholders with an observable production assertion.
-test/03_system/app/simpleos/feature/simpleos_wine_dll_file_bytes_spec.spl:48:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'validates selected DLL path bytes without retaining or executing the DLL' has no visible step flow
-  why: Ordered visible actions make the manual operable.
-  improve: Add ordered step("...") calls for meaningful actions.
-<!-- sspec-maintain:scorecard:end -->

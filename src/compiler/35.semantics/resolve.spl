@@ -22,6 +22,7 @@ use compiler.semantics.resolve_strategies.*
 # callers import this leaf directly (the bootstrap driver does), which leaves
 # the extension calls as unresolved linker symbols.
 use compiler.semantics.resolve_lookup_helpers.*
+use compiler.hir.hir_types.{HirModule}  # explicit: a glob is not an import-origin for surface projection
 
 # ============================================================================
 # Type Compatibility
@@ -91,7 +92,7 @@ struct TypeChecker:
             # Default: not compatible
             case _: false
 
-    static fn get_type_symbol(ty: HirType) -> SymbolId?:
+    fn get_type_symbol(ty: HirType) -> SymbolId?:
         """Get the symbol ID for a named type."""
         match ty.kind:
             case Named(sym, _): sym
@@ -147,6 +148,8 @@ class MethodResolver:
     # resolve_methods), so call-site default-argument fill must read callee
     # signatures (params + defaults) from here. Empty when constructed standalone.
     module_functions: Dict<SymbolId, HirFunction>
+    facet_interfaces: [HirFacetInterfaceDecl] = []
+    facet_authority: ManifestSealAuthority? = nil
 
     static fn new(symbols: SymbolTable) -> MethodResolver:
         MethodResolver(
@@ -196,66 +199,71 @@ fn create_method_resolver(symbols: SymbolTable) -> MethodResolver:
         module_functions: {}
     )
 
-impl MethodResolver:
     # ========================================================================
     # Module Resolution
     # ========================================================================
 
-    me resolve_module(module: HirModule) -> HirModule:
+    me resolve_module(module: HirModule, authority: ManifestSealAuthority?) -> HirModule:
         """Resolve all method calls in a module."""
         # Record the module's function registry so call-site default-argument fill
         # can read callee signatures (params + defaults) during expression resolution.
         self.module_functions = module.functions
+        self.facet_interfaces = module.facet_interfaces
+        self.facet_authority = authority
         # Build trait implementation map from impls
         self.build_trait_impls(module.impls)
 
         # Resolve functions
         var resolved_functions: Dict<SymbolId, HirFunction> = {}
-        for func in module.functions.values():
-            val resolved_func = self.resolve_function(func)
-            resolved_functions[resolved_func.symbol] = resolved_func
+        for key in module.functions.keys():
+            val func = module.functions[key]
+            resolved_functions[key] = self.resolve_function(func)
 
         # Resolve constants
         var resolved_constants: Dict<SymbolId, HirConst> = {}
-        for const_ in module.constants.values():
-            val resolved_const = HirConst(
+        for key in module.constants.keys():
+            val const_ = module.constants[key]
+            resolved_constants[key] = HirConst(
                 symbol: const_.symbol,
                 name: const_.name,
                 type_: const_.type_,
                 value: self.resolve_expr(const_.value),
                 is_mutable: const_.is_mutable,
                 visibility: const_.visibility,
-                is_public: const_.is_public,
+                is_public: const_.visibility.is_public(),
                 is_volatile: const_.is_volatile,
                 fixed_address: const_.fixed_address,
                 span: const_.span
             )
-            resolved_constants[resolved_const.symbol] = resolved_const
 
         # Return resolved module
         HirModule(
             name: module.name,
             path: module.path,
+            authored_path: module.authored_path,
             imports: module.imports,
             exports: module.exports,
             domain_blocks: module.domain_blocks,
             symbols: module.symbols,
             functions: resolved_functions,
-            gpu_function_targets: module.gpu_function_targets,
-            gpu_function_backend_orders: module.gpu_function_backend_orders,
             classes: module.classes,
             structs: module.structs,
             enums: module.enums,
             bitfields: module.bitfields,
-            traits: module.traits,
+            traits: resolved_traits,
             impls: module.impls,
             constants: resolved_constants,
-            static_asserts: module.static_asserts,
+            static_asserts: resolved_asserts,
             aop_advices: module.aop_advices,
             di_bindings: module.di_bindings,
             arch_rules: module.arch_rules,
             mock_decls: module.mock_decls,
-            types: []
+            types: module.types,
+            extend_enums: module.extend_enums,
+            facet_interfaces: resolved_facet_interfaces,
+            facet_impls: resolved_facet_impls,
+            facet_bindings: module.facet_bindings,
+            facet_requirements: module.facet_requirements
         )
 
     me build_trait_impls(impls: [HirImpl]):
@@ -263,13 +271,13 @@ impl MethodResolver:
         for impl_ in impls:
             match impl_.trait_:
                 case Some(trait_type):
-                    match TypeChecker.get_type_symbol(impl_.type_):
+                    match self.type_checker.get_type_symbol(impl_.type_):
                         case Some(type_symbol):
                             if type_symbol == nil:
                                 pass
                             else:
                                 val type_id = type_symbol.id
-                                match TypeChecker.get_type_symbol(trait_type):
+                                match self.type_checker.get_type_symbol(trait_type):
                                     case Some(trait_symbol):
                                         if trait_symbol == nil:
                                             pass
@@ -303,11 +311,18 @@ impl MethodResolver:
     me resolve_function(func: HirFunction) -> HirFunction:
         """Resolve method calls in a function body."""
         self.current_fn_sym = Some(func.symbol)
+        var resolved_params: [HirParam] = []
+        for param in func.params:
+            resolved_params.push(HirParam(
+                symbol: param.symbol, name: param.name, type_: param.type_,
+                has_default: param.has_default,
+                default: if param.has_default: self.resolve_expr(param.default) else: param.default,
+                span: param.span, is_mutable: param.is_mutable))
         HirFunction(
             symbol: func.symbol,
             name: func.name,
             type_params: func.type_params,
-            params: func.params,
+            params: resolved_params,
             return_type: func.return_type,
             body: self.resolve_block(func.body),
             effects: func.effects,
@@ -332,6 +347,16 @@ impl MethodResolver:
             verification_contract: self.resolve_verification_contract(func.verification_contract)
         )
 
+    me resolve_field(field: HirField) -> HirField:
+        HirField(
+            symbol: field.symbol, name: field.name, type_: field.type_,
+            has_default: field.has_default,
+            default: if field.has_default: self.resolve_expr(field.default) else: field.default,
+            visibility: field.visibility, is_public: field.is_public,
+            is_volatile: field.is_volatile, has_bits_attr: field.has_bits_attr,
+            bits_width: field.bits_width, has_fixed_address: field.has_fixed_address,
+            fixed_address: field.fixed_address, span: field.span)
+
     # ========================================================================
     # Block and Statement Resolution
     # ========================================================================
@@ -342,16 +367,16 @@ impl MethodResolver:
         for stmt in block.stmts:
             resolved_stmts = resolved_stmts.push(self.resolve_stmt(stmt))
 
-        val resolved_value = match block.value:
-            case Some(value):
-                Some(self.resolve_expr(value))
-            case nil:
-                nil
+        var resolved_value = block.value
+        if block.has:
+            resolved_value = self.resolve_expr(block.value)
 
         HirBlock(
             stmts: resolved_stmts,
+            has: block.has,
             value: resolved_value,
-            span: block.span
+            span: block.span,
+            unsafe_caps: block.unsafe_caps
         )
 
     me resolve_stmt(stmt: HirStmt) -> HirStmt:
@@ -370,8 +395,8 @@ impl MethodResolver:
                     self.resolve_expr(value)
                 )
 
-            case Block(inner_block):
-                HirStmtKind.Block(self.resolve_block(inner_block))
+            case Block(block):
+                HirStmtKind.Block(self.resolve_block(block))
 
         HirStmt(kind: kind, span: stmt.span)
 
@@ -381,97 +406,23 @@ impl MethodResolver:
 
     me resolve_expr(expr: HirExpr) -> HirExpr:
         """Resolve method calls in an expression."""
-        var resolved_has_type = expr.has_type_
         var resolved_type = expr.type_
         val kind = match expr.kind:
             # Method calls - the main target
             case MethodCall(receiver, method, call_args, resolution):
-                # Do not keep payload-enum fields live across recursive work.
-                # Snapshot only scalar discriminants/IDs; staged native value
-                # transport can otherwise alias/corrupt an adjacent payload.
-                var resolution_tag = 0
-                var resolution_owner_id = -1
-                var resolution_method_id = -1
-                match resolution:
-                    case InstanceMethod(type_id, method_id):
-                        resolution_tag = 1
-                        resolution_owner_id = type_id.id
-                        resolution_method_id = method_id.id
-                    case TraitMethod(trait_id, method_id):
-                        resolution_tag = 2
-                        resolution_owner_id = trait_id.id
-                        resolution_method_id = method_id.id
-                    case FreeFunction(func_id):
-                        resolution_tag = 3
-                        resolution_method_id = func_id.id
-                    case StaticMethod(type_id, method_id):
-                        resolution_tag = 4
-                        resolution_owner_id = type_id.id
-                        resolution_method_id = method_id.id
-                    case Unresolved: ()
-
-                # Static ownership is syntactic. Snapshot the receiver symbol
-                # before resolving nested receiver/argument expressions so no
-                # Var/NamedVar payload aggregate survives that recursion.
-                var receiver_symbol_id = -1
-                match receiver.kind:
-                    case Var(symbol): receiver_symbol_id = symbol.id
-                    case NamedVar(symbol, _): receiver_symbol_id = symbol.id
-                    case _: ()
-
                 val resolved_receiver = self.resolve_expr(receiver)
-                val resolved_args = self.resolve_call_args(call_args)
+                val resolved_args = self.resolve_call_args(args)
 
                 # Check if this is actually a static method call (Type.method())
-                var is_static = false
-                if receiver_symbol_id >= 0:
-                    if val receiver_symbol = self.symbols.get_symbol_raw(receiver_symbol_id):
-                        match receiver_symbol.kind:
-                            case Class | Struct | Enum | Import: is_static = true
-                            case _: ()
+                val is_static = self.is_static_method_call(resolved_receiver)
 
-                # Keep MethodResolution transport explicit.  It is a payload
-                # enum whose owner/method fields are value-type SymbolIds; the
-                # staged native lane has corrupted those fields when the enum
-                # crosses both a generic enum method (`is_resolved`) and an
-                # if-expression result boundary.  Snapshot every payload as
-                # raw scalars and rebuild it at this HIR ownership boundary.
-                val new_resolution = match resolution_tag:
-                    case 0:
-                        val discovered = if is_static:
-                            self.resolve_static_method(resolved_receiver, method, resolved_args)
-                        else:
-                            self.resolve_method(resolved_receiver, method, resolved_args)
-                        match discovered:
-                            case InstanceMethod(type_id, method_id):
-                                MethodResolution.InstanceMethod(SymbolId(id: type_id.id), SymbolId(id: method_id.id))
-                            case TraitMethod(trait_id, method_id):
-                                MethodResolution.TraitMethod(SymbolId(id: trait_id.id), SymbolId(id: method_id.id))
-                            case FreeFunction(func_id):
-                                MethodResolution.FreeFunction(SymbolId(id: func_id.id))
-                            case StaticMethod(type_id, method_id):
-                                MethodResolution.StaticMethod(SymbolId(id: type_id.id), SymbolId(id: method_id.id))
-                            case Unresolved:
-                                MethodResolution.Unresolved
-                    case 1:
-                        MethodResolution.InstanceMethod(
-                            SymbolId(id: resolution_owner_id),
-                            SymbolId(id: resolution_method_id)
-                        )
-                    case 2:
-                        MethodResolution.TraitMethod(
-                            SymbolId(id: resolution_owner_id),
-                            SymbolId(id: resolution_method_id)
-                        )
-                    case 3:
-                        MethodResolution.FreeFunction(SymbolId(id: resolution_method_id))
-                    case 4:
-                        MethodResolution.StaticMethod(
-                            SymbolId(id: resolution_owner_id),
-                            SymbolId(id: resolution_method_id)
-                        )
-                    case _:
-                        MethodResolution.Unresolved
+                # Only resolve if not already resolved
+                val new_resolution = if resolution.is_resolved():
+                    resolution
+                elif is_static:
+                    self.resolve_static_method(resolved_receiver, method, resolved_args)
+                else:
+                    self.resolve_method(resolved_receiver, method, resolved_args)
 
                 val resolved_method_raw_id: i64? = match new_resolution:
                     case InstanceMethod(_, method_id): method_id.id
@@ -480,28 +431,23 @@ impl MethodResolver:
                     case StaticMethod(_, method_id): method_id.id
                     case Unresolved: nil
 
-                var fallback_type: HirType? = nil
-                if expr.has_type_ and expr.type_ != nil:
-                    fallback_type = Some(expr.type_)
-                val maybe_resolved_type = self.resolve_call_result_type_raw(resolved_method_raw_id, fallback_type)
-                match maybe_resolved_type:
-                    case Some(found_type):
-                        resolved_type = found_type
-                        resolved_has_type = true
-                    case nil:
-                        resolved_has_type = false
+                resolved_type = self.resolve_call_result_type_raw(resolved_method_raw_id, expr.type_)
                 HirExprKind.MethodCall(resolved_receiver, method, resolved_args, new_resolution)
 
             # Regular function calls - resolve arguments, then fill omitted
             # trailing default arguments from the callee signature (G50 / M12-3b).
-            case Call(callee, call_args, type_args):
+            case Call(callee, args, type_args):
                 val resolved_callee = self.resolve_expr(callee)
-                val resolved_args = self.resolve_call_args(call_args)
+                val resolved_args = self.resolve_call_args(args)
                 HirExprKind.Call(
                     resolved_callee,
                     self.fill_call_defaults(resolved_callee, resolved_args, expr.span),
                     type_args
                 )
+
+            case StaticCall(type_, method, call_args, resolution):
+                HirExprKind.StaticCall(
+                    type_, method, self.resolve_call_args(call_args), resolution)
 
             # Literals - no resolution needed
             case IntLit(_, _): expr.kind
@@ -551,14 +497,17 @@ impl MethodResolver:
                     resolved = resolved.push(self.resolve_expr(e))
                 HirExprKind.ArrayLit(resolved, type_)
 
-            case ArrayRepeat(value, count, elem_type):
-                HirExprKind.ArrayRepeat(self.resolve_expr(value), self.resolve_expr(count), elem_type)
-
             case TupleLit(elements):
                 var resolved: [HirExpr] = []
                 for e in elements:
                     resolved = resolved.push(self.resolve_expr(e))
                 HirExprKind.TupleLit(resolved)
+
+            case SetLit(elements, elem_type):
+                var resolved: [HirExpr] = []
+                for e in elements:
+                    resolved.push(self.resolve_expr(e))
+                HirExprKind.SetLit(resolved, elem_type)
 
             case DictLit(entries, key_type, value_type):
                 var resolved: [(HirExpr, HirExpr)] = []
@@ -589,8 +538,8 @@ impl MethodResolver:
             # Control flow
             case If(cond, then_, else_):
                 val resolved_else = match else_:
-                    case Some(else_block):
-                        Some(self.resolve_block(else_block))
+                    case Some(block):
+                        Some(self.resolve_block(block))
                     case nil:
                         nil
                 HirExprKind.If(self.resolve_expr(cond), self.resolve_block(then_), resolved_else)
@@ -612,17 +561,16 @@ impl MethodResolver:
             case MatchCase(scrutinee, arms):
                 var resolved_arms: [HirMatchArm] = []
                 for arm in arms:
-                    # Typed rebind (deployed seed treats `arm` as ANY otherwise,
-                    # mis-decoding HirBlock/HirExpr fields -> "len on i64"). guard
-                    # is a DESUGARED (has_guard, guard) pair, NOT an Option.
-                    val typed_arm: HirMatchArm = arm
-                    val resolved_guard = if typed_arm.has_guard: self.resolve_expr(typed_arm.guard) else: typed_arm.guard
+                    val resolved_guard = match arm.guard:
+                        case Some(guard):
+                            Some(self.resolve_expr(guard))
+                        case nil:
+                            nil
                     resolved_arms = resolved_arms.push(HirMatchArm(
-                        pattern: typed_arm.pattern,
-                        has_guard: typed_arm.has_guard,
+                        pattern: arm.pattern,
                         guard: resolved_guard,
-                        body: self.resolve_block(typed_arm.body),
-                        span: typed_arm.span
+                        body: self.resolve_block(arm.body),
+                        span: arm.span
                     ))
                 HirExprKind.MatchCase(self.resolve_expr(scrutinee), resolved_arms)
 
@@ -635,12 +583,20 @@ impl MethodResolver:
             case For(var_, iter, body, label):
                 HirExprKind.For(var_, self.resolve_expr(iter), self.resolve_block(body), label)
 
+            case With(items, body):
+                var resolved_items: [HirWithItem] = []
+                for item in items:
+                    resolved_items.push(HirWithItem(
+                        context_expr: self.resolve_expr(item.context_expr),
+                        has_target: item.has_target, target: item.target, span: item.span))
+                HirExprKind.With(resolved_items, self.resolve_block(body))
+
             # Closures
             case Lambda(params, body, captures):
                 HirExprKind.Lambda(params, self.resolve_expr(body), captures)
 
-            case Block(inner_block):
-                HirExprKind.Block(self.resolve_block(inner_block))
+            case Block(block):
+                HirExprKind.Block(self.resolve_block(block))
 
             case HostGpuLane(lane_code, payload_size, marker, body):
                 HirExprKind.HostGpuLane(
@@ -652,11 +608,7 @@ impl MethodResolver:
 
             # Control transfer
             case Return(value):
-                val resolved_value = match value:
-                    case Some(expr_):
-                        Some(self.resolve_expr(expr_))
-                    case nil:
-                        nil
+                val resolved_value = if value.?: Some(self.resolve_expr(value.unwrap())) else: nil
                 HirExprKind.Return(resolved_value)
 
             case Break(label, value):
@@ -757,10 +709,55 @@ impl MethodResolver:
             case NogradBlock(body):
                 HirExprKind.NogradBlock(self.resolve_block(body))
 
+            case UnsafeBlock(body):
+                HirExprKind.UnsafeBlock(self.resolve_block(body))
+
+            case InlineAsm(asm_node):
+                HirExprKind.InlineAsm(self.resolve_asm(asm_node))
+
+            case InlineAsmMatch(arms):
+                var resolved_arms: [HirAsmMatchArm] = []
+                for arm in arms:
+                    var resolved_arm = arm
+                    if arm.has_asm_body:
+                        resolved_arm.asm_body = self.resolve_asm(arm.asm_body)
+                    resolved_arms.push(resolved_arm)
+                HirExprKind.InlineAsmMatch(resolved_arms)
+
+            case TypeTest(value, type_name):
+                HirExprKind.TypeTest(self.resolve_expr(value), type_name)
+
+            case FacetAcquire(receiver, interface_type, _, _, mode):
+                val resolved_receiver = self.resolve_expr(receiver)
+                val interface_id = facet_sealed_interface_id(interface_type, self.facet_interfaces)
+                if interface_id == nil:
+                    self.errors.push(ResolveError(
+                        message: "E-FACET002: facet acquisition type argument is not a sealed facet interface",
+                        span: expr.span))
+                    expr.kind
+                else:
+                    var sealed_hint: ConcreteTypeId? = nil
+                    match mode:
+                        case HirFacetAcquireMode.TryResident: pass
+                        case _:
+                            if not resolved_receiver.has_type_ or self.facet_authority == nil:
+                                self.errors.push(ResolveError(
+                                    message: "E-FACET003: facet receiver has no authenticated concrete type identity",
+                                    span: expr.span))
+                            else:
+                                sealed_hint = facet_static_concrete_type_id_v1(
+                                    resolved_receiver.type_, self.facet_authority.unwrap())
+                                if sealed_hint == nil:
+                                    self.errors.push(ResolveError(
+                                        message: "E-FACET003: facet receiver concrete type identity is unresolved",
+                                        span: expr.span))
+                    HirExprKind.FacetAcquire(
+                        resolved_receiver, interface_type, interface_id.unwrap(), sealed_hint, mode)
+
             # Error
             case Error: expr.kind
 
-        HirExpr(kind: kind, has_type_: resolved_has_type, type_: resolved_type, span: expr.span)
+        HirExpr(kind: kind, has_type_: expr.has_type_, type_: resolved_type, span: expr.span)
 
     # ========================================================================
     # Method Resolution Logic (UFCS)
@@ -784,20 +781,26 @@ impl ResolveError:
 # Public API
 # ============================================================================
 
-fn resolve_methods(module: HirModule) -> (HirModule, [ResolveError]):
+fn resolve_methods(module: HirModule,
+        authority: ManifestSealAuthority? = nil) -> (HirModule, [ResolveError]):
     """Resolve all method calls in a module.
 
     This is the main entry point for the resolution pass.
     Returns the resolved module and any errors encountered.
     """
-    # Receiver-owned methods live in the HIR module's symbol table.  Replacing
-    # it with an empty table discarded both type identity and import ownership,
-    # making same-named methods fall through to unrelated global candidates.
-    val resolver = create_method_resolver(module.symbols)
+    # Phase 9 follow-up (2026-04-18): unstub by creating a fresh empty
+    # SymbolTable. MethodResolver.try_method finds no instance methods
+    # in the empty table, falls through to try_ufcs (free-function
+    # dispatch with receiver as first arg). This is exactly what UI
+    # phases 3-6 need so duplicate with_*/method definitions can be
+    # collapsed eventually. See doc/05_design/compiler_rfc_ufcs.md.
+    val symbols = SymbolTable.new()
+    val resolver = create_method_resolver(symbols)
     val resolved = resolver.resolve_module(module)
     (resolved, resolver.errors)
 
-fn resolve_methods_with_solver(module: HirModule, solver: TraitSolver) -> (HirModule, [ResolveError]):
+fn resolve_methods_with_solver(module: HirModule, solver: TraitSolver,
+        authority: ManifestSealAuthority? = nil) -> (HirModule, [ResolveError]):
     """Resolve all method calls in a module using an existing TraitSolver.
 
     This variant allows integration with type inference, where the TraitSolver
@@ -809,5 +812,7 @@ fn resolve_methods_with_solver(module: HirModule, solver: TraitSolver) -> (HirMo
     - You want to use enhanced generic type matching for method resolution
     - You need trait bound checking during method resolution
     """
-    # Bootstrap fallback: same as resolve_methods().
-    (module, [])
+    # Until solver-aware facet lookup is implemented, route through the same
+    # mandatory seal/sentinel gate.  Never let this compatibility entrypoint
+    # bypass facet admission.
+    resolve_methods(module, authority)

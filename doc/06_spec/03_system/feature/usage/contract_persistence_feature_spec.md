@@ -2,6 +2,29 @@
 
 > Tests consumer-driven contract persistence including serialization to Pact-compatible JSON format, saving contracts to the filesystem, and mock Pact broker integration for contract publishing. Verifies the full contract lifecycle from creation through builder pattern to file output.
 
+<!-- sdn-diagram:id=contract_persistence_feature_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=contract_persistence_feature_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+contract_persistence_feature_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=contract_persistence_feature_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 6 | 6 | 0 | 0 |
@@ -21,7 +44,7 @@ Tests consumer-driven contract persistence including serialization to Pact-compa
 | Category | Infrastructure |
 | Status | Active |
 | Source | `test/03_system/feature/usage/contract_persistence_feature_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -34,8 +57,6 @@ contract lifecycle from creation through builder pattern to file output.
 ## Syntax
 
 ```simple
-use std.spec.step
-
 val contract = ct.Contract__new("web-app", "user-api")
 val json = contract.to_pact_json()
 val result = contract.save("/tmp/contract-test.json")
@@ -53,18 +74,19 @@ Implements Pact-compatible contract persistence
 
 #### converts contract to valid JSON
 
-- converts contract to valid JSON
+1. contract add interaction
+2. check
+3. check
+4. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("converts contract to valid JSON")
 val contract = ct.Contract__new("web-app", "user-api")
 val request = ct.HttpRequest__new("GET", "/users/1")
 val response = ct.HttpResponse__new(200)
@@ -81,18 +103,20 @@ check(json.contains("interactions"))
 
 #### includes all interaction details in JSON
 
-- includes all interaction details in JSON
+1. response set body
+2. contract add interaction
+3. check
+4. check
+5. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("includes all interaction details in JSON")
 val contract = ct.Contract__new("app", "api")
 val request = ct.HttpRequest__new("POST", "/data")
 val response = ct.HttpResponse__new(201)
@@ -112,18 +136,17 @@ check(json.contains("201"))
 
 #### saves contract to file
 
-- saves contract to file
+1. contract add interaction
+2. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("saves contract to file")
 val contract = ct.Contract__new("client", "provider")
 val request = ct.HttpRequest__new("GET", "/api/data")
 val response = ct.HttpResponse__new(200)
@@ -138,18 +161,16 @@ check(result.is_ok())
 
 #### returns error when save fails
 
-- returns error when save fails
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns error when save fails")
 val contract = ct.Contract__new("client", "provider")
 # Try to save to an invalid path
 val result = contract.save("/root/invalid/path/contract.json")
@@ -164,18 +185,22 @@ check(result.is_err() or result.is_ok())
 
 #### enables contracts for broker publishing
 
-- enables contracts for broker publishing
+1.  given
+2.  upon receiving
+3.  with request
+4.  will respond with
+5.  status
+6.  build
+7. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("enables contracts for broker publishing")
 val contract = ct.ContractBuilder__new("consumer", "provider")
     .given("ready")
     .upon_receiving("request")
@@ -195,18 +220,13 @@ check(result.is_ok())
 
 #### demonstrates saving contracts
 
-- demonstrates saving contracts
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("demonstrates saving contracts")
 # ```simple
 # # Create and save a contract
 # val contract = ContractBuilder__new("web-app", "api")
@@ -240,51 +260,3 @@ pass
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `eb53f2f3b08f62f05d5a40ab9a8ce83e23a9bed5fbdd030be3680ec0a28e8daa`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `eb53f2f3b08f62f05d5a40ab9a8ce83e23a9bed5fbdd030be3680ec0a28e8daa`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `eb53f2f3b08f62f05d5a40ab9a8ce83e23a9bed5fbdd030be3680ec0a28e8daa`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/03_system/feature/usage/contract_persistence_feature_spec.spl
-mirror: doc/06_spec/03_system/feature/usage/contract_persistence_feature_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/feature/usage/contract_persistence_feature_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/feature/usage/contract_persistence_feature_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/feature/usage/contract_persistence_feature_spec.spl:68:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'converts contract to valid JSON' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/usage/contract_persistence_feature_spec.spl:82:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'includes all interaction details in JSON' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/usage/contract_persistence_feature_spec.spl:100:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'saves contract to file' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

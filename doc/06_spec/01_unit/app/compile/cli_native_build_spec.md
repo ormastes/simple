@@ -1,6 +1,30 @@
 # Cli Native Build Specification
 
-> Tests covering cli_native_build parser hardening.
+> <details>
+
+<!-- sdn-diagram:id=cli_native_build_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=cli_native_build_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+cli_native_build_spec -> std
+cli_native_build_spec -> app
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=cli_native_build_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -139,14 +163,10 @@ expect(cli_native_build(["native-build", "--backend=llvm-lib", "--log"])).to_equ
 
 #### rejects an empty inline --log value
 
-- rejects an empty inline --log value
-   - Expected: cli_native_build(["native-build", "--backend=llvm-lib", "--log="]) equals `2`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -159,14 +179,10 @@ expect(cli_native_build(["native-build", "--backend=llvm-lib", "--log="])).to_eq
 
 #### rejects bare --log followed by another option
 
-- rejects bare --log followed by another option
-   - Expected: cli_native_build(["native-build", "--backend=llvm-lib", "--log", "--backend=llvm-lib"]) equals `2`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -179,14 +195,10 @@ expect(cli_native_build(["native-build", "--backend=llvm-lib", "--log", "--backe
 
 #### rejects typoed --log-prefixed flags
 
-- rejects typoed --log-prefixed flags
-   - Expected: cli_native_build(["native-build", "--backend=llvm-lib", "--logg", "off"]) equals `2`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -199,14 +211,10 @@ expect(cli_native_build(["native-build", "--backend=llvm-lib", "--logg", "off"])
 
 #### rejects a single invalid inline --log value
 
-- rejects a single invalid inline --log value
-   - Expected: cli_native_build(["native-build", "--backend=llvm-lib", "--log=maybe"]) equals `2`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -219,14 +227,10 @@ expect(cli_native_build(["native-build", "--backend=llvm-lib", "--log=maybe"])).
 
 #### rejects an invalid later --log value instead of keeping an earlier valid one
 
-- rejects an invalid later --log value instead of keeping an earlier valid one
-   - Expected: cli_native_build(["native-build", "--backend=llvm-lib", "--log=on", "--log", "maybe"]) equals `2`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -237,22 +241,32 @@ expect(cli_native_build(["native-build", "--backend=llvm-lib", "--log=on", "--lo
 
 </details>
 
+#### forwards an explicit runtime path to both native runtime lanes
+
+The source contract requires parsing `--runtime-path` in split and inline form,
+then publishing it to both `SIMPLE_RUNTIME_PATH` and
+`SIMPLE_CORE_RUNTIME_PATH`.
+
+#### propagates low-memory mode into both compiler driver branches
+
+The source contract requires `--low-memory`, a false default, and exactly two
+`options.low_memory = low_memory` assignments—one per driver branch.
+
+#### restores native runtime lanes after a failed build
+
+The executable scenario installs sentinel runtime paths, performs a deliberately
+failing build with a temporary path, verifies both sentinels were restored, and
+then restores the caller's original environment.
+
 #### accepts a valid llvm-lib --log flag and forwards it before later build failure
-
-- accepts a valid llvm-lib --log flag and forwards it before later build failure
-   - Expected: cli_native_build(["native-build", "--backend=llvm-lib", "--log=off", "--entry", "missing-entry.spl"]) equals `1`
-   - Expected: env_get("SIMPLE_OS_LOG_MODE") ?? "" equals `before`
-
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-APP
-step("accepts a valid llvm-lib --log flag and forwards it before later build failure")
 val prior = env_get("SIMPLE_OS_LOG_MODE")
 val before = if prior == nil: "" else: prior
 expect(cli_native_build(["native-build", "--backend=llvm-lib", "--log=off", "--entry", "missing-entry.spl"])).to_equal(1)
@@ -358,8 +372,9 @@ expect(env_set("SIMPLE_CORE_RUNTIME_PATH", prior_core_runtime)).to_equal(true)
 
 ## Overview
 
-Tests covering cli_native_build parser hardening.
+Tests covering:
 - cli_native_build parser hardening
+- visible partial dynload packaging and its one-binary remediation
 
 ## Scenario Summary
 
@@ -373,54 +388,3 @@ Tests covering cli_native_build parser hardening.
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-APP`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `173eede22163984b707a5f2d7f42a34b409f7c7864f34acce2d78206a2541e4f`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `173eede22163984b707a5f2d7f42a34b409f7c7864f34acce2d78206a2541e4f`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `173eede22163984b707a5f2d7f42a34b409f7c7864f34acce2d78206a2541e4f`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
-
-SSpec documentization score: 86/100
-source: test/01_unit/app/compile/cli_native_build_spec.spl
-mirror: doc/06_spec/01_unit/app/compile/cli_native_build_spec.md (current)
-findings: 6 blockers: 0
-  narrative=100 structure=100 oracle=70
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/app/compile/cli_native_build_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/app/compile/cli_native_build_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/app/compile/cli_native_build_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 14 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/01_unit/app/compile/cli_native_build_spec.spl:22:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'accepts sole help and rejects malformed help combinations' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/compile/cli_native_build_spec.spl:29:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'rejects unknown and incomplete options before compilation' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/compile/cli_native_build_spec.spl:48:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'leaves an existing output untouched for invalid CLI' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

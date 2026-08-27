@@ -1,0 +1,277 @@
+# Worktree-local ad-hoc bootstrap capsule runner.
+#
+# It never writes bin/simple and never claims Stage4 or release admission.
+
+use app.io.bootstrap_adhoc_ops.{
+    bootstrap_adhoc_dir_create, bootstrap_adhoc_file_delete,
+    bootstrap_adhoc_file_exists, bootstrap_adhoc_file_hash,
+    bootstrap_adhoc_file_write, bootstrap_adhoc_hash_text,
+    bootstrap_adhoc_process_run, bootstrap_adhoc_process_run_limited,
+    bootstrap_adhoc_runtime_args
+}
+use app.bootstrap_adhoc.args.{BootstrapAdhocConfig, bootstrap_adhoc_parse_args}
+use app.bootstrap_adhoc.policy.{
+    BootstrapAdhocDecision, bootstrap_adhoc_decide,
+    bootstrap_adhoc_memory_bytes, bootstrap_adhoc_output_has_exact_marker,
+    bootstrap_adhoc_pass_marker, bootstrap_adhoc_timeout_ms
+}
+
+fn bootstrap_adhoc_cli_args() -> [text]:
+    val raw = bootstrap_adhoc_runtime_args()
+    var args: [text] = []
+    if raw == nil:
+        return args
+    var i = 1
+    while i < raw.len():
+        args.push(raw[i])
+        i = i + 1
+    args
+
+fn bootstrap_adhoc_help():
+    print "Usage: bootstrap-adhoc <plan|check|selftest> [options]"
+    print ""
+    print "plan options:"
+    print "  --changed PATH        Changed compiler file; repeat for every change"
+    print "  --lane auto|frontend|hir|mir|backend"
+    print ""
+    print "check options:"
+    print "  --compiler PATH       Verified pure Stage3 or deployed Simple binary"
+    print "  --positive PATH       Executable positive capsule fixture"
+    print "  --negative PATH       Capsule fixture expected not to compile"
+    print "  --negative-expect TXT Required diagnostic substring"
+    print "  --output DIR          Worktree-local artifact root"
+    print "  --backend llvm|cranelift"
+    print "  --jobs 1|2|4|8|16|32|64"
+    print ""
+    print "This command is developer evidence only. Full Stage4 remains mandatory."
+
+fn bootstrap_adhoc_print_decision(decision: BootstrapAdhocDecision):
+    print "bootstrap_adhoc_admitted={decision.admitted}"
+    print "bootstrap_adhoc_lane={decision.lane}"
+    print "bootstrap_adhoc_reason={decision.reason}"
+    print "bootstrap_adhoc_release_admissible=false"
+
+fn bootstrap_adhoc_config_error(config: BootstrapAdhocConfig) -> text:
+    if not config.valid:
+        return config.error
+    if config.changed_paths.len() == 0:
+        return "at least one --changed compiler path is required"
+    if config.action == "check" and config.compiler == "":
+        return "check requires --compiler"
+    if config.action == "check" and config.positive_fixture == "":
+        return "check requires --positive"
+    if config.action == "check" and config.negative_fixture == "":
+        return "check requires --negative"
+    if config.action == "check" and config.negative_expect == "":
+        return "check requires --negative-expect"
+    ""
+
+fn bootstrap_adhoc_file_error(config: BootstrapAdhocConfig) -> text:
+    if not bootstrap_adhoc_file_exists(config.compiler):
+        return "compiler does not exist: {config.compiler}"
+    if not bootstrap_adhoc_file_exists(config.positive_fixture):
+        return "positive fixture does not exist: {config.positive_fixture}"
+    if not bootstrap_adhoc_file_exists(config.negative_fixture):
+        return "negative fixture does not exist: {config.negative_fixture}"
+    for path in config.changed_paths:
+        if not bootstrap_adhoc_file_exists(path):
+            return "changed path must exist; deletions require full bootstrap: {path}"
+    ""
+
+fn bootstrap_adhoc_compiler_error(compiler: text) -> text:
+    val result = bootstrap_adhoc_process_run(compiler, ["--version"], 10000, 65536)
+    val identity = result.stdout + "\n" + result.stderr
+    if result.exit_code != 0:
+        return "compiler --version failed"
+    if identity == "":
+        return "compiler identity is empty"
+    if identity.contains("Rust-built") or identity.contains("bootstrap seed only"):
+        return "Rust bootstrap seed is not admissible"
+    if not identity.contains("simple-bootstrap") and not identity.lower().contains("simple"):
+        return "unrecognized compiler identity: {identity}"
+    ""
+
+fn bootstrap_adhoc_authority(config: BootstrapAdhocConfig, lane: text) -> text:
+    var authority = "schema=bootstrap-adhoc-authority-v1\n"
+    authority = authority + "lane={lane}\n"
+    authority = authority + "backend={config.backend}\n"
+    authority = authority + "jobs={config.jobs}\n"
+    authority = authority + "compiler={config.compiler}\n"
+    authority = authority + "compiler_sha256={bootstrap_adhoc_file_hash(config.compiler)}\n"
+    authority = authority + "positive={config.positive_fixture}\n"
+    authority = authority + "positive_sha256={bootstrap_adhoc_file_hash(config.positive_fixture)}\n"
+    authority = authority + "negative={config.negative_fixture}\n"
+    authority = authority + "negative_sha256={bootstrap_adhoc_file_hash(config.negative_fixture)}\n"
+    authority = authority + "negative_expect={config.negative_expect}\n"
+    for path in config.changed_paths:
+        authority = authority + "changed={path}\n"
+        authority = authority + "changed_sha256={bootstrap_adhoc_file_hash(path)}\n"
+    authority
+
+fn bootstrap_adhoc_compile_args(
+    config: BootstrapAdhocConfig,
+    fixture: text,
+    cache_dir: text,
+    output: text
+) -> [text]:
+    [
+        "native-build",
+        "--backend={config.backend}",
+        "--runtime-bundle=core-c-bootstrap",
+        "--entry-closure",
+        "--threads={config.jobs}",
+        "--cache-dir={cache_dir}",
+        "--mode=one-binary",
+        fixture,
+        "-o",
+        output
+    ]
+
+fn bootstrap_adhoc_write_log(path: text, stdout: text, stderr: text, code: i64):
+    val _written = bootstrap_adhoc_file_write(path, "exit_code={code}\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}\n")
+
+fn bootstrap_adhoc_check(config: BootstrapAdhocConfig, decision: BootstrapAdhocDecision) -> i64:
+    val file_error = bootstrap_adhoc_file_error(config)
+    if file_error != "":
+        print "error: {file_error}"
+        return 2
+    val compiler_error = bootstrap_adhoc_compiler_error(config.compiler)
+    if compiler_error != "":
+        print "error: {compiler_error}"
+        return 2
+
+    val authority = bootstrap_adhoc_authority(config, decision.lane)
+    val authority_sha = bootstrap_adhoc_hash_text(config.output_root, authority)
+    if authority_sha == "":
+        print "error: cannot hash authority"
+        return 2
+    val session_dir = "{config.output_root}/{decision.lane}-{authority_sha}"
+    val cache_dir = "{session_dir}/cache"
+    if not bootstrap_adhoc_dir_create(cache_dir):
+        print "error: cannot create worktree-local session directory: {session_dir}"
+        return 2
+    val _authority_written = bootstrap_adhoc_file_write("{session_dir}/authority.env", authority + "authority_sha256={authority_sha}\n")
+
+    val positive_artifact = "{session_dir}/positive-capsule"
+    val negative_artifact = "{session_dir}/negative-capsule"
+    val _positive_removed = bootstrap_adhoc_file_delete(positive_artifact)
+    val _negative_removed = bootstrap_adhoc_file_delete(negative_artifact)
+    val timeout_ms = bootstrap_adhoc_timeout_ms(decision.lane)
+    val memory_bytes = bootstrap_adhoc_memory_bytes(decision.lane)
+    val positive = bootstrap_adhoc_process_run_limited(
+        config.compiler,
+        bootstrap_adhoc_compile_args(config, config.positive_fixture, cache_dir, positive_artifact),
+        timeout_ms, memory_bytes, 4194304
+    )
+    bootstrap_adhoc_write_log(
+        "{session_dir}/positive-compile.log",
+        positive.stdout, positive.stderr, positive.exit_code
+    )
+    if positive.exit_code != 0 or not bootstrap_adhoc_file_exists(positive_artifact):
+        print "error: positive capsule compile failed; see {session_dir}/positive-compile.log"
+        return 1
+
+    val positive_run = bootstrap_adhoc_process_run_limited(
+        positive_artifact, [], 60000, 1073741824, 1048576
+    )
+    bootstrap_adhoc_write_log(
+        "{session_dir}/positive-run.log",
+        positive_run.stdout, positive_run.stderr, positive_run.exit_code
+    )
+    if positive_run.exit_code != 0 or
+       not bootstrap_adhoc_output_has_exact_marker(positive_run.stdout, decision.lane):
+        print "error: positive capsule did not emit exact marker {bootstrap_adhoc_pass_marker(decision.lane)}"
+        return 1
+
+    val negative = bootstrap_adhoc_process_run_limited(
+        config.compiler,
+        bootstrap_adhoc_compile_args(config, config.negative_fixture, cache_dir, negative_artifact),
+        timeout_ms, memory_bytes, 4194304
+    )
+    bootstrap_adhoc_write_log(
+        "{session_dir}/negative-compile.log",
+        negative.stdout, negative.stderr, negative.exit_code
+    )
+    val negative_output = negative.stdout + "\n" + negative.stderr
+    if negative.exit_code == 0 or bootstrap_adhoc_file_exists(negative_artifact):
+        print "error: negative capsule compiled successfully"
+        return 1
+    if not negative_output.contains(config.negative_expect):
+        print "error: negative capsule missed expected diagnostic: {config.negative_expect}"
+        return 1
+
+    val receipt = authority +
+        "authority_sha256={authority_sha}\n" +
+        "positive_artifact={positive_artifact}\n" +
+        "positive_artifact_sha256={bootstrap_adhoc_file_hash(positive_artifact)}\n" +
+        "positive_marker={bootstrap_adhoc_pass_marker(decision.lane)}\n" +
+        "negative_compile_exit={negative.exit_code}\n" +
+        "release_admissible=false\n" +
+        "full_stage4_required=true\n" +
+        "status=pass\n"
+    if not bootstrap_adhoc_file_write("{session_dir}/receipt.env", receipt):
+        print "error: cannot write receipt"
+        return 1
+    print "BOOTSTRAP_ADHOC_CHECK_PASS lane={decision.lane}"
+    print "bootstrap_adhoc_session={session_dir}"
+    print "bootstrap_adhoc_release_admissible=false"
+    0
+
+fn bootstrap_adhoc_selftest() -> i64:
+    val frontend = bootstrap_adhoc_decide(
+        ["src/compiler/10.frontend/core/parser_preprocessor.spl"], "auto"
+    )
+    val mixed = bootstrap_adhoc_decide(
+        ["src/compiler/10.frontend/core/parser.spl", "src/compiler/50.mir/mir_data.spl"],
+        "auto"
+    )
+    val unsafe = bootstrap_adhoc_decide(
+        ["src/compiler/99.loader/module_resolver/main.spl"], "auto"
+    )
+    val narrow = bootstrap_adhoc_decide(
+        ["src/compiler/50.mir/mir_data.spl"], "frontend"
+    )
+    if not frontend.admitted or frontend.lane != "frontend":
+        print "selftest failed: frontend classification"
+        return 1
+    if not mixed.admitted or mixed.lane != "mir":
+        print "selftest failed: mixed classification"
+        return 1
+    if unsafe.admitted or unsafe.lane != "full":
+        print "selftest failed: unsafe escalation"
+        return 1
+    if narrow.admitted or narrow.lane != "mir":
+        print "selftest failed: narrow override"
+        return 1
+    if not bootstrap_adhoc_output_has_exact_marker(
+        "noise\nBOOTSTRAP_ADHOC_PASS lane=hir\n", "hir"
+    ):
+        print "selftest failed: exact marker"
+        return 1
+    if bootstrap_adhoc_output_has_exact_marker(
+        "BOOTSTRAP_ADHOC_PASS lane=hir extra", "hir"
+    ):
+        print "selftest failed: marker suffix"
+        return 1
+    print "BOOTSTRAP_ADHOC_SELFTEST_PASS"
+    0
+
+fn main() -> i64:
+    val config = bootstrap_adhoc_parse_args(bootstrap_adhoc_cli_args())
+    if config.action == "help":
+        bootstrap_adhoc_help()
+        return 0
+    if config.action == "selftest":
+        return bootstrap_adhoc_selftest()
+    val config_error = bootstrap_adhoc_config_error(config)
+    if config_error != "":
+        print "error: {config_error}"
+        bootstrap_adhoc_help()
+        return 2
+    val decision = bootstrap_adhoc_decide(config.changed_paths, config.lane)
+    bootstrap_adhoc_print_decision(decision)
+    if not decision.admitted:
+        return 2
+    if config.action == "plan":
+        return 0
+    bootstrap_adhoc_check(config, decision)

@@ -12,7 +12,6 @@ Configuration files for build, test, packaging, and tooling.
 | `di.sdn` | Dependency injection configuration |
 | `dl.config.sdn` | Deep learning configuration |
 | `doc_coverage.sdn` | Documentation coverage configuration |
-| `freestanding_fabricated_stub_baseline.sdn` | Per-entry NEW-only ratchet for weak nil-returning freestanding stubs |
 | `docker-compose.test.yml` | Docker test compose |
 | `docker-compose.yml` | Docker compose |
 | `mcp` | MCP server configurations |
@@ -25,7 +24,6 @@ Configuration files for build, test, packaging, and tooling.
 | `simple.test.sdn` | Test configuration |
 | `t32` | TRACE32 configurations |
 | `t32_stm_linux_hidden.t32` | TRACE32 STM configuration |
-| `theme` | Standalone WM/GUI theme CSS files (SIMPLE_WM_THEME_FILE) |
 | `themes` | Theme definitions |
 | `traceability.sdn` | Traceability configuration |
 | `FILE.md` | This manifest |

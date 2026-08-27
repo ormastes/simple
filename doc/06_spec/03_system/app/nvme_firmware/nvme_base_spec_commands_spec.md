@@ -68,6 +68,7 @@ media behavior, PCIe interoperability, or power-loss durability.
    - Expected: code equals `0`
 - Verify Identify Controller and Identify Namespace results
 - Verify legal queue order and invalid binding rejection
+-  expect no fail marker
 
 
 <details>
@@ -107,6 +108,7 @@ _expect_no_fail_marker(out, "host controller lifecycle")
    - Expected: code equals `0`
 - Verify admin, queue, opcode, and NVM command families
 - Verify reserved-field, namespace, Abort, and backpressure guards
+-  expect no fail marker
 
 
 <details>

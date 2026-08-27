@@ -1,7 +1,6 @@
 # Browser renderer Linux pre-exec sandbox gap
 
-Status: OPEN (P3)
-Status re-verified 2026-08-17 by source inspection (triage shard 00).
+Status: implemented and admission-guarded; installed production evidence
 pending, release-blocking
 
 `rt_browser_renderer_spawn_sandboxed` scrubs descriptors/environment and then
@@ -57,34 +56,3 @@ a hostile site renderer from disclosing the same-UID broker's robust futex-list
 address. The focused host C containment gate passes. Installed pure-Simple
 READY/frame evidence remains compiler-blocked and no bootstrap/seed substitute
 is accepted.
-
-## 2026-08-17 verification — runtime lane
-
-**Verdict: STILL OPEN as an EVIDENCE gap, not a code defect.**
-
-The doc's own remaining item is un-landed *installed-production evidence*, not a
-missing implementation — stage one is implemented and admission-guarded. No
-source defect in `src/runtime/runtime_process.c` was identified or fixed by this
-lane, and none is claimed.
-
-**What was NOT proven.** The named reproducer
-`test/01_unit/runtime/run_process_piped_write_test.shs` was not executed this
-session (host reserved for a stage-3 bootstrap), so there is no `Results:` line
-either way. Closing this row requires the installed-production transcript the
-doc asks for; a source read cannot supply it.
-
-## 2026-08-17 verification — runtime slice (classified by CONTENT)
-
-**Verdict: STILL OPEN, but the open item is EVIDENCE, not code.** The pre-exec
-sandbox stage is present in current source: `src/runtime/runtime_process.c`
-declares `rt_browser_renderer_spawn_sandboxed` (:889, :1408) and
-`rt_browser_renderer_sandbox_enter` (:896), includes `<linux/seccomp.h>` (:966),
-and `proc_spawn(..., bool sandboxed_renderer)` (:1239) admission-guards the slot
-(`proc_alloc`, :1003-1016), forces an absolute `cmd` (:1244), and redirects
-stdout/stderr to `/dev/null` in the child (:1328-1330). Whole-tree syntax gate is
-green: `PASS — 104 file(s) compiled, 0 errors` (`check-c-runtime-compiles-push.shs`).
-
-**What was NOT proven.** The doc's actual gap — installed-production evidence from
-a deployed renderer — was not collected. Nothing in `src/runtime/*.c` is reachable
-from `bin/simple` (Rust seed, Rust runtime), so no interpreted probe here can be
-anything but vacuous. Needs a native build + an installed-production run transcript.

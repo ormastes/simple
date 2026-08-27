@@ -49,7 +49,7 @@ enum EventMode:
 enum EventBackend:
     """Platform-native I/O notification backend.
 
-    Detected at runtime via `platform_name()`. Only one backend
+    Detected at runtime via `rt_platform_name()`. Only one backend
     is active per process.
 
     ```simple
@@ -67,7 +67,7 @@ enum EventBackend:
 # Platform Detection
 # ============================================================================
 
-use std.io_runtime.{platform_name}
+extern fn rt_platform_name() -> text
 
 fn detect_backend() -> EventBackend:
     """Detect the best event notification backend for the current OS.
@@ -81,7 +81,7 @@ fn detect_backend() -> EventBackend:
         # Linux -> EventBackend.Epoll
         # macOS -> EventBackend.Kqueue
     """
-    val platform = platform_name()
+    val platform = rt_platform_name()
     if platform == "linux":
         EventBackend.Epoll
     else if platform == "macos" or platform == "freebsd":
@@ -118,63 +118,44 @@ fn _i64_to_mode(value: i64) -> EventMode:
 # ============================================================================
 
 # Epoll (Linux) — delegates to the existing rt_event_loop_* implementation
-@unsafe(reason: "creates a copyable raw epoll handle", capabilities: [ffi, raw_ptr])
 extern fn rt_event_loop_create() -> i64
-@unsafe(reason: "registers unbranded raw epoll and descriptor handles", capabilities: [ffi, raw_ptr])
 extern fn rt_event_loop_register(loop_fd: i64, fd: i64, interest: i64, token: i64, edge: bool) -> bool
-@unsafe(reason: "deregisters unbranded raw epoll and descriptor handles", capabilities: [ffi, raw_ptr])
 extern fn rt_event_loop_deregister(loop_fd: i64, fd: i64) -> bool
-@unsafe(reason: "polls a copyable raw epoll handle and returns an unverified descriptor array", capabilities: [ffi, raw_ptr])
 extern fn rt_event_loop_poll(loop_fd: i64, max_events: i64, timeout_ms: i64) -> [i64]
-@unsafe(reason: "closes a copyable raw epoll handle", capabilities: [ffi, raw_ptr])
-extern fn rt_event_loop_close(loop_fd: i64) -> bool
+# runtime_native.c exposes the host close(2) status: 0 is success, -1 failure.
+# Keep that scalar ABI here and normalize it at the pure-Simple boundary.
+extern fn rt_event_loop_close(loop_fd: i64) -> i64
 
 # Kqueue (BSD/macOS)
-@unsafe(reason: "creates a copyable raw kqueue handle", capabilities: [ffi, raw_ptr])
 extern fn rt_kqueue_create() -> i64
-@unsafe(reason: "registers unbranded raw kqueue and descriptor handles", capabilities: [ffi, raw_ptr])
 extern fn rt_kqueue_register(loop_fd: i64, fd: i64, interest: i64, token: i64, edge: bool) -> bool
-@unsafe(reason: "deregisters unbranded raw kqueue and descriptor handles", capabilities: [ffi, raw_ptr])
 extern fn rt_kqueue_deregister(loop_fd: i64, fd: i64) -> bool
-@unsafe(reason: "polls a copyable raw kqueue handle and returns an unverified descriptor array", capabilities: [ffi, raw_ptr])
 extern fn rt_kqueue_poll(loop_fd: i64, max_events: i64, timeout_ms: i64) -> [i64]
-@unsafe(reason: "closes a copyable raw kqueue handle", capabilities: [ffi, raw_ptr])
 extern fn rt_kqueue_close(loop_fd: i64) -> bool
 
 # IOCP (Windows)
 # NOTE: IOCP is completion-based (proactor pattern). The register/poll API
 # here provides a readiness-based facade. Internally IOCP uses
 # GetQueuedCompletionStatusEx or WSAPoll as a transitional fallback.
-@unsafe(reason: "creates a copyable raw IOCP handle", capabilities: [ffi, raw_ptr])
 extern fn rt_iocp_create() -> i64
-@unsafe(reason: "registers unbranded raw IOCP and descriptor handles", capabilities: [ffi, raw_ptr])
 extern fn rt_iocp_register(loop_fd: i64, fd: i64, interest: i64, token: i64, edge: bool) -> bool
-@unsafe(reason: "deregisters unbranded raw IOCP and descriptor handles", capabilities: [ffi, raw_ptr])
 extern fn rt_iocp_deregister(loop_fd: i64, fd: i64) -> bool
-@unsafe(reason: "polls a copyable raw IOCP handle and returns an unverified completion array", capabilities: [ffi, raw_ptr])
 extern fn rt_iocp_poll(loop_fd: i64, max_events: i64, timeout_ms: i64) -> [i64]
-@unsafe(reason: "closes a copyable raw IOCP handle", capabilities: [ffi, raw_ptr])
 extern fn rt_iocp_close(loop_fd: i64) -> bool
 
 # Event Ports (Solaris/illumos)
 # NOTE: Event ports are one-shot by default — after receiving an event the fd
 # must be re-associated via port_associate before the next poll.
-@unsafe(reason: "creates a copyable raw event-port handle", capabilities: [ffi, raw_ptr])
 extern fn rt_event_ports_create() -> i64
-@unsafe(reason: "registers unbranded raw event-port and descriptor handles", capabilities: [ffi, raw_ptr])
 extern fn rt_event_ports_register(loop_fd: i64, fd: i64, interest: i64, token: i64, edge: bool) -> bool
-@unsafe(reason: "deregisters unbranded raw event-port and descriptor handles", capabilities: [ffi, raw_ptr])
 extern fn rt_event_ports_deregister(loop_fd: i64, fd: i64) -> bool
-@unsafe(reason: "polls a copyable raw event-port handle and returns an unverified descriptor array", capabilities: [ffi, raw_ptr])
 extern fn rt_event_ports_poll(loop_fd: i64, max_events: i64, timeout_ms: i64) -> [i64]
-@unsafe(reason: "closes a copyable raw event-port handle", capabilities: [ffi, raw_ptr])
 extern fn rt_event_ports_close(loop_fd: i64) -> bool
 
 # ============================================================================
 # PlatformEvent — Cross-Platform Event Abstraction
 # ============================================================================
 
-@unsafe(reason: "raw platform-event facade owns copyable native handles and unverified poll results", capabilities: [ffi, raw_ptr])
 class PlatformEvent:
     """Cross-platform event notification abstraction.
 
@@ -233,6 +214,7 @@ class PlatformEvent:
             case EventBackend.EventPorts: "event_port"
             case EventBackend.Poll: "poll"
 
+    @unsafe(reason: "creates a copyable backend-specific native event handle", capabilities: [ffi, raw_ptr])
     fn create() -> i64:
         """Create a new event notification handle.
 
@@ -246,14 +228,14 @@ class PlatformEvent:
         Returns:
             Native event handle (>= 0) or -1 on error.
         """
-        unsafe(capabilities: [ffi, raw_ptr]):
-            match self._backend:
-                case EventBackend.Epoll: rt_event_loop_create()
-                case EventBackend.Kqueue: rt_kqueue_create()
-                case EventBackend.Iocp: rt_iocp_create()
-                case EventBackend.EventPorts: rt_event_ports_create()
-                case EventBackend.Poll: -1
+        match self._backend:
+            case EventBackend.Epoll: rt_event_loop_create()
+            case EventBackend.Kqueue: rt_kqueue_create()
+            case EventBackend.Iocp: rt_iocp_create()
+            case EventBackend.EventPorts: rt_event_ports_create()
+            case EventBackend.Poll: -1
 
+    @unsafe(reason: "registers unbranded native event and descriptor handles", capabilities: [ffi, raw_ptr])
     fn register(handle: i64, fd: i64, mode: EventMode) -> bool:
         """Register an fd for level-triggered event monitoring.
 
@@ -274,14 +256,14 @@ class PlatformEvent:
         if handle < 0 or fd < 0:
             return false
         val interest = _mode_to_i64(mode)
-        unsafe(capabilities: [ffi, raw_ptr]):
-            match self._backend:
-                case EventBackend.Epoll: rt_event_loop_register(handle, fd, interest, fd, false)
-                case EventBackend.Kqueue: rt_kqueue_register(handle, fd, interest, fd, false)
-                case EventBackend.Iocp: rt_iocp_register(handle, fd, interest, fd, false)
-                case EventBackend.EventPorts: rt_event_ports_register(handle, fd, interest, fd, false)
-                case EventBackend.Poll: false
+        match self._backend:
+            case EventBackend.Epoll: rt_event_loop_register(handle, fd, interest, fd, false)
+            case EventBackend.Kqueue: rt_kqueue_register(handle, fd, interest, fd, false)
+            case EventBackend.Iocp: rt_iocp_register(handle, fd, interest, fd, false)
+            case EventBackend.EventPorts: rt_event_ports_register(handle, fd, interest, fd, false)
+            case EventBackend.Poll: false
 
+    @unsafe(reason: "registers unbranded native handles with backend-specific edge semantics", capabilities: [ffi, raw_ptr])
     fn register_edge(handle: i64, fd: i64, mode: EventMode) -> bool:
         """Register an fd for edge-triggered event monitoring.
 
@@ -305,14 +287,14 @@ class PlatformEvent:
         if handle < 0 or fd < 0:
             return false
         val interest = _mode_to_i64(mode)
-        unsafe(capabilities: [ffi, raw_ptr]):
-            match self._backend:
-                case EventBackend.Epoll: rt_event_loop_register(handle, fd, interest, fd, true)
-                case EventBackend.Kqueue: rt_kqueue_register(handle, fd, interest, fd, true)
-                case EventBackend.Iocp: rt_iocp_register(handle, fd, interest, fd, true)
-                case EventBackend.EventPorts: rt_event_ports_register(handle, fd, interest, fd, true)
-                case EventBackend.Poll: false
+        match self._backend:
+            case EventBackend.Epoll: rt_event_loop_register(handle, fd, interest, fd, true)
+            case EventBackend.Kqueue: rt_kqueue_register(handle, fd, interest, fd, true)
+            case EventBackend.Iocp: rt_iocp_register(handle, fd, interest, fd, true)
+            case EventBackend.EventPorts: rt_event_ports_register(handle, fd, interest, fd, true)
+            case EventBackend.Poll: false
 
+    @unsafe(reason: "registers unbranded native handles and caller-owned tokens", capabilities: [ffi, raw_ptr])
     fn register_with_token(handle: i64, fd: i64, mode: EventMode, token: i64, edge: bool) -> bool:
         """Register an fd with explicit token and edge-trigger control.
 
@@ -331,14 +313,14 @@ class PlatformEvent:
         if handle < 0 or fd < 0:
             return false
         val interest = _mode_to_i64(mode)
-        unsafe(capabilities: [ffi, raw_ptr]):
-            match self._backend:
-                case EventBackend.Epoll: rt_event_loop_register(handle, fd, interest, token, edge)
-                case EventBackend.Kqueue: rt_kqueue_register(handle, fd, interest, token, edge)
-                case EventBackend.Iocp: rt_iocp_register(handle, fd, interest, token, edge)
-                case EventBackend.EventPorts: rt_event_ports_register(handle, fd, interest, token, edge)
-                case EventBackend.Poll: false
+        match self._backend:
+            case EventBackend.Epoll: rt_event_loop_register(handle, fd, interest, token, edge)
+            case EventBackend.Kqueue: rt_kqueue_register(handle, fd, interest, token, edge)
+            case EventBackend.Iocp: rt_iocp_register(handle, fd, interest, token, edge)
+            case EventBackend.EventPorts: rt_event_ports_register(handle, fd, interest, token, edge)
+            case EventBackend.Poll: false
 
+    @unsafe(reason: "deregisters unbranded native event and descriptor handles", capabilities: [ffi, raw_ptr])
     fn deregister(handle: i64, fd: i64) -> bool:
         """Remove an fd from event monitoring.
 
@@ -357,14 +339,14 @@ class PlatformEvent:
         """
         if handle < 0 or fd < 0:
             return false
-        unsafe(capabilities: [ffi, raw_ptr]):
-            match self._backend:
-                case EventBackend.Epoll: rt_event_loop_deregister(handle, fd)
-                case EventBackend.Kqueue: rt_kqueue_deregister(handle, fd)
-                case EventBackend.Iocp: rt_iocp_deregister(handle, fd)
-                case EventBackend.EventPorts: rt_event_ports_deregister(handle, fd)
-                case EventBackend.Poll: false
+        match self._backend:
+            case EventBackend.Epoll: rt_event_loop_deregister(handle, fd)
+            case EventBackend.Kqueue: rt_kqueue_deregister(handle, fd)
+            case EventBackend.Iocp: rt_iocp_deregister(handle, fd)
+            case EventBackend.EventPorts: rt_event_ports_deregister(handle, fd)
+            case EventBackend.Poll: false
 
+    @unsafe(reason: "polls a raw native handle and returns an unverified descriptor/token array", capabilities: [ffi, raw_ptr])
     fn poll(handle: i64, max: i64, timeout_ms: i64) -> [i64]:
         """Wait for I/O events and return ready descriptors.
 
@@ -389,14 +371,14 @@ class PlatformEvent:
         """
         if handle < 0 or max <= 0:
             return []
-        unsafe(capabilities: [ffi, raw_ptr]):
-            match self._backend:
-                case EventBackend.Epoll: rt_event_loop_poll(handle, max, timeout_ms)
-                case EventBackend.Kqueue: rt_kqueue_poll(handle, max, timeout_ms)
-                case EventBackend.Iocp: rt_iocp_poll(handle, max, timeout_ms)
-                case EventBackend.EventPorts: rt_event_ports_poll(handle, max, timeout_ms)
-                case EventBackend.Poll: []
+        match self._backend:
+            case EventBackend.Epoll: rt_event_loop_poll(handle, max, timeout_ms)
+            case EventBackend.Kqueue: rt_kqueue_poll(handle, max, timeout_ms)
+            case EventBackend.Iocp: rt_iocp_poll(handle, max, timeout_ms)
+            case EventBackend.EventPorts: rt_event_ports_poll(handle, max, timeout_ms)
+            case EventBackend.Poll: []
 
+    @unsafe(reason: "closes a copyable backend-specific native event handle", capabilities: [ffi, raw_ptr])
     fn close(handle: i64) -> bool:
         """Close the event notification handle and release resources.
 
@@ -408,10 +390,9 @@ class PlatformEvent:
         """
         if handle < 0:
             return false
-        unsafe(capabilities: [ffi, raw_ptr]):
-            match self._backend:
-                case EventBackend.Epoll: rt_event_loop_close(handle)
-                case EventBackend.Kqueue: rt_kqueue_close(handle)
-                case EventBackend.Iocp: rt_iocp_close(handle)
-                case EventBackend.EventPorts: rt_event_ports_close(handle)
-                case EventBackend.Poll: false
+        match self._backend:
+            case EventBackend.Epoll: rt_event_loop_close(handle)
+            case EventBackend.Kqueue: rt_kqueue_close(handle)
+            case EventBackend.Iocp: rt_iocp_close(handle)
+            case EventBackend.EventPorts: rt_event_ports_close(handle)
+            case EventBackend.Poll: false

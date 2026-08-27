@@ -1,12 +1,13 @@
 # Duplicate-check — token interner + progress/verbose logging
 
 use compiler.tools.duplicate_check.config.{DuplicationConfig}
-use compiler.tools.duplicate_check.tokenizer.{SimpleToken, SimpleTokenKind, tokenize, token_to_string}
+use compiler.tools.duplicate_check.tokenizer.{SimpleToken, tokenize, token_to_string}
 use compiler.tools.duplicate_check.features.{FeatureVec, extract_token_frequencies, build_feature_vector, cosine_similarity}
 use compiler.tools.duplicate_check.debug.{debug_log, debug_log_progress}
 use compiler.tools.duplicate_check.cache.{TokenCacheManager, get_cached_tokens, set_cached_tokens, set_cached_tokens_with_content, get_cached_content}
 use compiler.tools.duplicate_check.detector_files.{collect_detector_files}
 use std.nogc_sync_mut.io.file_ops.{file_read}
+use std.nogc_sync_mut.io.process_ops.{shell_output}
 use std.nogc_sync_mut.io.time_ops.{current_time_ms}
 
 struct TokenInterner:
@@ -29,12 +30,12 @@ fn intern_token(interner: TokenInterner, token_str: text) -> i64:
 
 fn log_progress(config: DuplicationConfig, message: text):
     """Print progress message if not quiet."""
-    if not config.quiet and config.output_format != "json":
+    if not config.quiet:
         print message
 
 fn log_verbose(config: DuplicationConfig, message: text):
     """Print verbose message if verbose mode enabled."""
-    if config.verbose and not config.quiet and config.output_format != "json":
+    if config.verbose and not config.quiet:
         print message
 
 fn progress_on(config: DuplicationConfig) -> bool:
@@ -67,18 +68,14 @@ fn progress_tick(config: DuplicationConfig, phase: text, done: i64, total: i64, 
     val pct = if total > 0:
         (done * 100) / total
     else:
-        0
-    val count_text = if total > 0:
-        "{done}/{total} ({pct}%)"
-    else:
-        "{done}"
+        100
     val elapsed = (now - start_ms) / 1000
     val rss = rss_mb()
     val rss_text = if rss >= 0:
         "{rss}MB"
     else:
         "n/a"
-    eprint("[dupcheck] {phase}: {count_text} elapsed={elapsed}s rss={rss_text}")
+    eprint("[dupcheck] {phase}: {done}/{total} ({pct}%) elapsed={elapsed}s rss={rss_text}")
     now
 
 struct DuplicateBlock:
@@ -120,105 +117,85 @@ struct SimilarityPrep:
     file_count: i64
 
 fn normalize_line_for_duplicate_key(line: text) -> text:
-    line.trim_end()
+    line.trim()
 
 fn line_window_key(lines: [text], start: i64, window: i64) -> text:
-    var fragments: [text] = []
+    var key = ""
     var i = 0
     while i < window and start + i < lines.len():
         if i > 0:
-            fragments.push("\n")
-        fragments.push(normalize_line_for_duplicate_key(lines[start + i]))
+            key = key + "\n"
+        key = key + normalize_line_for_duplicate_key(lines[start + i])
         i = i + 1
-    fragments.join("")
+    key
 
-fn line_window_prefixes(source: text, config: DuplicationConfig) -> ([i64], [i64]):
-    val lines = source.lines()
+fn signal_line_prefix(source: text, config: DuplicationConfig) -> [i64]:
+    val lines = source.split("\n")
     var signal_lines: [bool] = []
-    var token_counts: [i64] = []
     for line in lines:
         signal_lines.push(false)
-        token_counts.push(0)
 
     for token in tokenize(source, config):
-        if token.line > 0 and token.line <= signal_lines.len():
-            val line_index = token.line - 1
-            token_counts[line_index] = token_counts[line_index] + 1
-            val is_signal = token.kind == SimpleTokenKind.Keyword and (token.value == "fn" or token.value == "if" or token.value == "while" or token.value == "for" or token.value == "match" or token.value == "return" or token.value == "val" or token.value == "var")
-            if is_signal:
-                signal_lines[line_index] = true
+        val is_signal = token.kind == SimpleTokenKind.Keyword and (token.value == "fn" or token.value == "if" or token.value == "while" or token.value == "for" or token.value == "match" or token.value == "return" or token.value == "val" or token.value == "var")
+        if is_signal and token.line > 0 and token.line <= signal_lines.len():
+            signal_lines[token.line - 1] = true
 
-    var signal_prefix: [i64] = [0]
-    var token_prefix: [i64] = [0]
-    var signal_count = 0
-    var token_count = 0
-    var i = 0
-    while i < signal_lines.len():
-        val has_signal = signal_lines[i]
+    var prefix: [i64] = [0]
+    var count = 0
+    for has_signal in signal_lines:
         if has_signal:
-            signal_count = signal_count + 1
-        token_count = token_count + token_counts[i]
-        signal_prefix.push(signal_count)
-        token_prefix.push(token_count)
-        i = i + 1
-    (signal_prefix, token_prefix)
+            count = count + 1
+        prefix.push(count)
+    prefix
 
 fn window_has_signal(prefix: [i64], start: i64, window: i64) -> bool:
     if start < 0 or window <= 0 or start + window >= prefix.len():
         return false
     prefix[start + window] > prefix[start]
 
-fn fast_line_window_blocks_in_file(file: text, config: DuplicationConfig) -> [DuplicateBlock]:
-    var blocks: [DuplicateBlock] = []
-    val window = if config.min_lines > 0: config.min_lines else: 5
-    val source = read_detector_source(file)
-    val lines = source.lines()
-    val (signal_prefix, token_prefix) = line_window_prefixes(source, config)
-    if lines.len() < window:
-        return blocks
-
-    var start = 0
-    while start + window <= lines.len():
-        val key = line_window_key(lines, start, window)
-        val token_count = token_prefix[start + window] - token_prefix[start]
-        if token_count >= config.min_tokens and window_has_signal(signal_prefix, start, window):
-            blocks.push(DuplicateBlock(
-                file: file,
-                line_start: start + 1,
-                line_end: start + window,
-                token_count: token_count,
-                hash_value: 0,
-                snippet_start_offset: -1,
-                snippet_end_offset: -1,
-                code: key
-            ))
-        start = start + 1
-    blocks
-
-fn group_fast_line_window_blocks(blocks: [DuplicateBlock], config: DuplicationConfig) -> [DuplicateGroup]:
+fn fast_line_window_duplicate_groups(files: [text], config: DuplicationConfig) -> [DuplicateGroup]:
     var exact_map = {}
-    for block in blocks:
-        if exact_map.has(block.code):
-            var existing = exact_map[block.code]
-            existing.push(block)
-            exact_map[block.code] = existing
-        else:
-            exact_map[block.code] = [block]
+    val window = if config.min_lines > 0: config.min_lines else: 5
+
+    for file in files:
+        val source = read_detector_source(file)
+        val lines = source.split("\n")
+        val signal_prefix = signal_line_prefix(source, config)
+        if lines.len() < window:
+            continue
+
+        var start = 0
+        while start + window <= lines.len():
+            val key = line_window_key(lines, start, window)
+            if window_has_signal(signal_prefix, start, window):
+                val block = DuplicateBlock(
+                    file: file,
+                    line_start: start + 1,
+                    line_end: start + window,
+                    token_count: config.min_tokens,
+                    hash_value: 0,
+                    snippet_start_offset: -1,
+                    snippet_end_offset: -1,
+                    code: key
+                )
+                if exact_map.has(key):
+                    var existing = exact_map[key]
+                    existing.push(block)
+                    exact_map[key] = existing
+                else:
+                    exact_map[key] = [block]
+            start = start + 1
+
     var groups = []
     for key in exact_map.keys():
-        val matching = exact_map[key]
-        if matching.len() < 2:
+        val blocks = exact_map[key]
+        if blocks.len() < 2:
             continue
-        val group = build_duplicate_group(matching)
+        val group = build_duplicate_group(blocks)
         if group.impact_score >= config.min_impact:
             groups.push(group)
-    sort_by_impact(groups)
 
-fn fast_line_window_duplicate_groups(files: [text], config: DuplicationConfig) -> [DuplicateGroup]:
-    var blocks: [DuplicateBlock] = []
-    for file in files:
-        blocks.merge(fast_line_window_blocks_in_file(file, config))
-    group_fast_line_window_blocks(blocks, config)
+    sort_by_impact(groups)
 
 fn rolling_hash(tokens: [SimpleToken], start: i64, window: i64) -> i64:
     """Compute rolling hash for token window with inlined character hashing."""
@@ -359,7 +336,7 @@ fn build_duplicate_group(blocks: [DuplicateBlock]) -> DuplicateGroup:
 fn duplicate_block_signature(block: DuplicateBlock) -> text:
     "{block.token_count}|{block.code}"
 
-fn materialize_block_code(block: DuplicateBlock, mut source_cache: {text: text}, cache_manager: TokenCacheManager) -> DuplicateBlock:
+fn materialize_block_code(block: DuplicateBlock, source_cache: {text: text}, cache_manager: TokenCacheManager) -> DuplicateBlock:
     if block.code.len() > 0:
         return block
 
@@ -456,7 +433,10 @@ fn power_mod(base: i64, exp: i64, mod_val: i64) -> i64:
     result
 
 fn read_detector_source(file_path: text) -> text:
-    file_read(file_path)
+    var content = file_read(file_path)
+    if content.len() == 0:
+        content = shell_output("cat '{file_path}' 2>/dev/null || true", "")
+    content
 
 fn load_tokens_for_file(file_path: text, config: DuplicationConfig, cache_manager: TokenCacheManager) -> [SimpleToken]:
     val cached = get_cached_tokens(cache_manager, file_path)
@@ -494,14 +474,6 @@ fn collect_token_window_candidates(tokens: [SimpleToken], config: DuplicationCon
 
     var candidates = []
     var i = 0
-    # Two-pointer: end_idx only ever advances across outer iterations. The
-    # original code reset `end_idx = i + window_size` fresh on every i and
-    # re-scanned forward token-by-token to reach min_lines — since start_line
-    # is non-decreasing in i, the minimal satisfying end_idx is too, so
-    # resetting made this O(n^2) on files with long/dense lines (each outer
-    # step re-walks tokens an earlier step already walked). Carrying end_idx
-    # forward makes total work O(tokens.len()) amortized over the whole file.
-    var end_idx = window_size.min(tokens.len())
     while i + config.min_tokens <= tokens.len():
         if i > 0:
             val old_code = token_codes[i - 1]
@@ -510,8 +482,7 @@ fn collect_token_window_candidates(tokens: [SimpleToken], config: DuplicationCon
             hash = (hash * base + new_code) % mod_val
 
         val start_line = tokens[i].line
-        if end_idx < i + config.min_tokens:
-            end_idx = i + config.min_tokens
+        var end_idx = (i + config.min_tokens).min(tokens.len())
         while end_idx < tokens.len():
             val current_end_line = tokens[end_idx - 1].line
             if current_end_line - start_line + 1 >= config.min_lines:
@@ -551,10 +522,6 @@ fn collect_hash_counts_in_file(file_path: text, config: DuplicationConfig, cache
         j = j + 1
 
     var i = 0
-    # Two-pointer: see collect_token_window_candidates for why end_idx must
-    # carry forward instead of resetting to i+window_size each iteration
-    # (that reset made this O(n^2) on files with long/dense lines).
-    var end_idx = window_size.min(tokens.len())
     while i + window_size <= tokens.len():
         if i > 0:
             val old_code = compute_token_code(tokens[i - 1])
@@ -563,8 +530,7 @@ fn collect_hash_counts_in_file(file_path: text, config: DuplicationConfig, cache
             hash = (hash * base + new_code) % mod_val
 
         val start_line = tokens[i].line
-        if end_idx < i + window_size:
-            end_idx = i + window_size
+        var end_idx = (i + window_size).min(tokens.len())
         while end_idx < tokens.len():
             val current_end_line = tokens[end_idx - 1].line
             if current_end_line - start_line + 1 >= config.min_lines:
@@ -658,7 +624,7 @@ fn find_duplicates_in_file_with_hash_filter(file_path: text, config: Duplication
 
     blocks
 
-fn bucket_exact_blocks(blocks: [DuplicateBlock], mut source_cache: {text: text}, cache_manager: TokenCacheManager) -> {text: [DuplicateBlock]}:
+fn bucket_exact_blocks(blocks: [DuplicateBlock], source_cache: {text: text}, cache_manager: TokenCacheManager) -> {text: [DuplicateBlock]}:
     var exact_map = {}
     for block in blocks:
         val materialized = materialize_block_code(block, source_cache, cache_manager)

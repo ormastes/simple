@@ -1,6 +1,34 @@
 # Unified Debug + Profile Capability Architecture (host + GPU, shared interfaces)
 
-**Status:** Design v2, not yet implemented (plan:
+<!-- codex-design -->
+
+**Status:** Historical capability-layer design; partially implemented and
+superseded for service ownership by
+[`simple_unified_debugging_evidence.md`](../../simple_unified_debugging_evidence.md).
+The `DebugTarget`/`ProfileTarget` capability work in this document remains a
+valid adapter-level design, but these traits no longer define the client-facing
+debug architecture.
+
+**Current reconciliation (2026-08-14):** `DebugServiceV1` centrally owns
+mutable sessions and clients carry `DebugSessionId`. DAP, CLI, MCP and Lab are
+outward clients of that service. Existing `DebugTarget`, `ProfileTarget`,
+`DebugAdapter` and `DebugBackend` implementations enter through migration
+adapters; they must not grow independent session registries. The frozen V1
+contracts and initial registry/probe/receipt/evidence implementation are in
+`src/lib/common/debug/{contracts_v1,service_v1}.spl`; the legacy bridge is
+`src/lib/nogc_async_mut/debug/legacy_service_adapter_v1.spl`.
+
+Implemented today: the V1 value contracts, central in-process registry,
+authorization/receipt recording, target graph, probe lifecycle, normalized
+evidence manifests, a fail-closed wire dispatcher/executor, legacy
+`DebugBackend` bridge, live host doctor probe, and a minimal CLI parser. Still
+open: transferring DAP/DebugAdapter ownership into the service, a stable
+out-of-process adapter host, MCP/Lab clients, real CLI execution context,
+native raw bundle capture, full TTL/rate/redaction enforcement, and the
+GPU/browser/SQL/mobile/embedded vertical slices. Capability source presence is
+not live verification.
+
+**Original status (2026-08-09):** Design v2, not yet implemented (plan:
 `doc/03_plan/agent_tasks/unified_debug_profile_capability_parallel_plan_2026-08-09.md`)
 **Supersedes/extends:** `gpu_debugger_common_interface_architecture_2026-08-09.md`
 (its DBG-1 protocol, debug conformance vectors, and lane-session delegation
@@ -293,6 +321,12 @@ programs) asserting `steps` exactness on every backend vs `ref_vm`, and
 devices. Same host-aware skip contract as everything else.
 
 ## 8. DAP integration — one adapter, any target
+
+> **Reconciliation:** This section describes the capability adapter beneath
+> DAP, not the final ownership boundary. DAP must translate requests to the
+> centrally owned `DebugServiceV1` session and use its receipts/policy. Direct
+> target ownership in `target_session.spl` is transitional until that migration
+> is complete.
 
 `src/app/dap/` gains a target-neutral session (`target_session.spl`):
 launch config selects the target —

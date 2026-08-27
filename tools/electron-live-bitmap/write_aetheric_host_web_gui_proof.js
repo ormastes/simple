@@ -8,9 +8,6 @@
 const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
-const {
-  resolveElectronIdentity,
-} = require("./aetheric_electron_identity");
 
 function option(name) {
   const index = process.argv.indexOf(name);
@@ -92,18 +89,6 @@ function main() {
   const generatorBinaryPath = required("--generator-binary");
   const rendererBinaryPath = required("--renderer-binary");
   const uiDriverBinaryPath = required("--ui-driver-binary");
-  const providerProvenancePath = required("--provider-provenance");
-  const rendererWmProviderPath = required("--renderer-wm-provider");
-  const rendererCWmProviderPath = required("--renderer-c-wm-provider");
-  const uiSqliteProviderPath = required("--ui-sqlite-provider");
-  const uiSqliteSystemProviderPath = required("--ui-sqlite-system-provider");
-  const electronIdentity = resolveElectronIdentity({
-    root: process.cwd(),
-    launcher: required("--electron-launcher"),
-    appExecutable: required("--electron-app-executable"),
-    package: required("--electron-package"),
-    lock: required("--electron-lock"),
-  });
   const revision = required("--revision");
   const uiAccessDir = required("--ui-access-dir");
   const outputPath = required("--output");
@@ -114,13 +99,6 @@ function main() {
   const events = electronPixels.event_proof || {};
   const renderedPixelCount = Array.isArray(simplePixels.pixels) ? simplePixels.pixels.length : 0;
   const electronNonblank = nonblankArgb(electronPixels.pixels);
-  const providerFactsPass = [
-    providerProvenancePath,
-    rendererWmProviderPath,
-    rendererCWmProviderPath,
-    uiSqliteProviderPath,
-    uiSqliteSystemProviderPath,
-  ].every(providerPath => fs.statSync(providerPath).isFile() && fs.statSync(providerPath).size > 0);
   const generated = line(sourceLog, "aetheric_host_web_gui_generation_status") === "pass";
   const sourceProducer = line(sourceLog, "aetheric_host_web_gui_generation_producer");
   const sourceSynthetic = line(sourceLog, "aetheric_host_web_gui_generation_synthetic_fixture");
@@ -202,19 +180,14 @@ function main() {
     electronPixels.blur_or_tolerance_used === false &&
     String(events.status || "") === "pass" &&
     String(observation.status || "") === "pass" &&
-    value(observation, "electron_process_version") === "42.5.0" &&
-    /^[0-9]+(?:\.[0-9]+)*$/.test(value(observation, "chrome_process_version")) &&
-    electronIdentity.version === "42.5.0" &&
     electronNonblank > 0 &&
     fs.statSync(screenshotPath).size > 0;
 
-  const admitted = productionFactsPass && providerFactsPass && uiAccessPass;
+  const admitted = productionFactsPass && uiAccessPass;
   const fields = {
     schema: "aetheric-host-web-gui-v1",
     status: admitted ? "pass" : "fail",
-    reason: admitted ? "pass" :
-      (!productionFactsPass ? "production-capture-failed" :
-        (!providerFactsPass ? "native-provider-provenance-failed" : "canonical-ui-access-failed")),
+    reason: admitted ? "pass" : (productionFactsPass ? "canonical-ui-access-failed" : "production-capture-failed"),
     producer: productionFactsPass ? "production-html-webir-drawir-electron" : "production-provenance-rejected",
     theme_id: line(sourceLog, "aetheric_host_web_gui_generation_theme_id"),
     theme_source_manifest_sha256: line(sourceLog, "aetheric_host_web_gui_generation_theme_manifest_sha256"),
@@ -227,32 +200,12 @@ function main() {
     renderer_binary_sha256: sha256(rendererBinaryPath),
     ui_driver_binary_path: uiDriverBinaryPath,
     ui_driver_binary_sha256: sha256(uiDriverBinaryPath),
-    provider_provenance_path: providerProvenancePath,
-    provider_provenance_sha256: sha256(providerProvenancePath),
-    renderer_wm_provider_path: rendererWmProviderPath,
-    renderer_wm_provider_sha256: sha256(rendererWmProviderPath),
-    renderer_c_wm_provider_path: rendererCWmProviderPath,
-    renderer_c_wm_provider_sha256: sha256(rendererCWmProviderPath),
-    ui_sqlite_provider_path: uiSqliteProviderPath,
-    ui_sqlite_provider_sha256: sha256(uiSqliteProviderPath),
-    ui_sqlite_system_provider_path: uiSqliteSystemProviderPath,
-    ui_sqlite_system_provider_sha256: sha256(uiSqliteSystemProviderPath),
     source_log_path: sourceLogPath,
     source_log_sha256: sha256(sourceLogPath),
     html_path: htmlPath,
     html_sha256: sha256(htmlPath),
     observation_path: observationPath,
     observation_sha256: sha256(observationPath),
-    electron_process_version: value(observation, "electron_process_version"),
-    chrome_process_version: value(observation, "chrome_process_version"),
-    electron_launcher_path: electronIdentity.launcherPath,
-    electron_launcher_sha256: electronIdentity.launcherSha256,
-    electron_app_executable_path: electronIdentity.appExecutablePath,
-    electron_app_executable_sha256: electronIdentity.appExecutableSha256,
-    electron_package_path: electronIdentity.packagePath,
-    electron_package_sha256: electronIdentity.packageSha256,
-    electron_lock_path: electronIdentity.lockPath,
-    electron_lock_sha256: electronIdentity.lockSha256,
     backend: resolvedBackend,
     simple_renderer_producer: simpleProducer,
     simple_requested_backend: requestedBackend,

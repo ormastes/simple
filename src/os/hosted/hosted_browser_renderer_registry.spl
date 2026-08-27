@@ -7,19 +7,16 @@ use common.ui.wm_chrome_theme.{
 use nogc_sync_mut.ui.theme_package.{default_theme_id}
 use std.gc_async_mut.web.browser_session_url.{
     browser_address_backspace, browser_address_update,
-    browser_address_draft_after_control_press,
     normalize_browser_address_reference_url
 }
 use std.gc_async_mut.web.browser_session.{
     BrowserBookmarkSnapshot, BrowserHstsSnapshot, BrowserSession
 }
+use std.common.encoding.utf8.{text_without_last_codepoint}
 use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
 use os.compositor.simple_web_window_renderer.{
     simple_web_content_revision_with_theme,
-    simple_web_content_revision_with_theme_receipt,
-    simple_web_content_full_html_with_install_wire,
-    simple_web_external_content_frame,
-    simple_web_external_content_frame_with_theme_receipt
+    simple_web_external_content_frame
 }
 use os.hosted.hosted_browser_renderer_process.{
     HOSTED_BROWSER_SITE_SWAP_REQUIRED,
@@ -36,6 +33,8 @@ use os.hosted.hosted_theme_runtime.{
 }
 
 extern fn rt_time_now_monotonic_ms() -> i64
+extern fn rt_text_to_bytes(value: text) -> [u8]
+
 val HOSTED_BROWSER_RENDERER_REGISTRY_MAX_COUNT: i64 = 4
 
 pub struct HostedBrowserRendererDispatch:
@@ -190,21 +189,13 @@ pub class HostedBrowserRendererRegistry:
     home_url: text
     next_generation: i64
     pressed_window_id: i64
-    pressed_event_id: i64
     pending_cancel_window_id: i64
     pending_cancel_event_id: i64
-    pointer_cancel_receipt_count: i64
     bookmark_snapshot: BrowserBookmarkSnapshot
     bookmark_revision: i64
     hsts: BrowserSession
     shared_hsts_dirty: bool
     shared_hsts_revision: i64
-    theme_enabled: bool
-    theme_revision: i64
-    theme_wire_text: text
-    theme_id: text
-    theme_source_manifest_sha256: text
-    theme_material_sha256: text
 
     static fn create(
         executable: text,
@@ -216,50 +207,14 @@ pub class HostedBrowserRendererRegistry:
             home_url: home_url,
             next_generation: 2,
             pressed_window_id: 0,
-            pressed_event_id: 0,
             pending_cancel_window_id: 0,
             pending_cancel_event_id: 0,
-            pointer_cancel_receipt_count: 0,
             bookmark_snapshot: BrowserBookmarkSnapshot.create([]),
             bookmark_revision: 0,
             hsts: BrowserSession.new_without_runtime(),
             shared_hsts_dirty: false,
-            shared_hsts_revision: 0,
-            theme_enabled: false,
-            theme_revision: 0,
-            theme_wire_text: "",
-            theme_id: "",
-            theme_source_manifest_sha256: "",
-            theme_material_sha256: ""
+            shared_hsts_revision: 0
         )
-
-    static fn create_with_theme(
-        executable: text,
-        home_url: text,
-        theme_revision: i64,
-        theme_wire_text: text
-    ) -> HostedBrowserRendererRegistry:
-        var registry = HostedBrowserRendererRegistry.create(
-            executable, home_url
-        )
-        registry.theme_enabled = true
-        registry.theme_revision = theme_revision
-        registry.theme_wire_text = theme_wire_text
-        if hosted_theme_wire_valid(theme_revision, theme_wire_text):
-            registry.theme_id = hosted_theme_id(
-                theme_revision, theme_wire_text
-            )
-            registry.theme_source_manifest_sha256 = (
-                hosted_theme_source_manifest_sha256(
-                    theme_revision, theme_wire_text
-                )
-            )
-            registry.theme_material_sha256 = (
-                hosted_theme_material_sha256(
-                    theme_revision, theme_wire_text
-                )
-            )
-        registry
 
     me set_bookmark_snapshot(snapshot: BrowserBookmarkSnapshot):
         self.bookmark_snapshot = snapshot
@@ -327,12 +282,6 @@ pub class HostedBrowserRendererRegistry:
         val entry = self.entries[index]
         entry.renderer.document_url
 
-    fn bookmark_stored_title(window_id: i64) -> text:
-        val index = self._index(window_id)
-        if index < 0:
-            return ""
-        self.entries[index].renderer.bookmark_stored_title()
-
     fn address_text(window_id: i64) -> text:
         val index = self._index(window_id)
         if index < 0:
@@ -343,7 +292,6 @@ pub class HostedBrowserRendererRegistry:
         var entry = self.entries[index]
         if self.pressed_window_id == entry.window_id:
             self.pressed_window_id = 0
-            self.pressed_event_id = 0
         entry.pressed_control = ""
         if self.pending_cancel_window_id == entry.window_id:
             self.pending_cancel_window_id = 0
@@ -357,10 +305,6 @@ pub class HostedBrowserRendererRegistry:
                 entry.renderer_closed = true
                 entry.close_pending = false
                 entry.close_retry_at_micros = 0
-                if reason == "":
-                    entry.failure_reason = _drop_renderer_close_failure(
-                        entry.failure_reason
-                    )
             else:
                 entry.close_pending = true
                 if entry.failure_reason == "":
@@ -386,10 +330,9 @@ pub class HostedBrowserRendererRegistry:
 
     me _begin_site_swap(index: i32, wall_clock_ms: i64) -> text:
         var entry = self.entries[index]
-        val cond_389 = (not entry.renderer.site_swap_pending or
+        if (not entry.renderer.site_swap_pending or
             entry.renderer.site_swap_site == "" or
-            not entry.renderer.navigation_permit.active)
-        if cond_389:
+            not entry.renderer.navigation_permit.active):
             self.entries[index] = entry
             return self._fail(index, "site-swap-state")
         val site = entry.renderer.site_swap_site
@@ -398,8 +341,6 @@ pub class HostedBrowserRendererRegistry:
         val document_url = entry.renderer.document_url
         val document_origin = entry.renderer.document_origin
         val history_urls = entry.renderer.history_urls
-        val history_csp_policies = entry.renderer.history_csp_policies
-        val history_csp_ready = entry.renderer.history_csp_ready
         val history_index = entry.renderer.history_index
         val history_current_url = entry.renderer.history_current_url
         val history_back_url = entry.renderer.history_back_url
@@ -408,17 +349,6 @@ pub class HostedBrowserRendererRegistry:
         val pending_history_index = entry.renderer.pending_history_index
         val pending_history_target_url = (
             entry.renderer.pending_history_target_url
-        )
-        val document_csp_policy = entry.renderer.document_csp_policy
-        val document_csp_ready = entry.renderer.document_csp_ready
-        val pending_document_csp_policy = (
-            entry.renderer.pending_document_csp_policy
-        )
-        val pending_document_csp_ready = (
-            entry.renderer.pending_document_csp_ready
-        )
-        val provisional_document_origin = (
-            entry.renderer.provisional_document_origin
         )
         val home_url = entry.renderer.home_url
         var restart_html = ""
@@ -443,36 +373,18 @@ pub class HostedBrowserRendererRegistry:
                 return self._fail(
                     index, "theme-parent-projection-mismatch"
                 )
-        if self.pressed_window_id == entry.window_id:
-            self.pressed_window_id = 0
-            self.pressed_event_id = 0
-        entry.pressed_control = ""
-        if self.pending_cancel_window_id == entry.window_id:
-            self.pending_cancel_window_id = 0
-            self.pending_cancel_event_id = 0
         if not entry.renderer.close():
             self.entries[index] = entry
             return self._fail(index, "site-swap-close-failed")
         val generation = self.next_generation
         self.next_generation = self.next_generation + 1
-        var replacement = if self.theme_enabled:
-            HostedBrowserRendererProcess.create_with_theme(
-                generation,
-                entry.renderer.width,
-                entry.renderer.height,
-                self.theme_revision,
-                self.theme_wire_text
-            )
-        else:
-            HostedBrowserRendererProcess.create(
-                generation, entry.renderer.width, entry.renderer.height
-            )
+        var replacement = HostedBrowserRendererProcess.create(
+            generation, entry.renderer.width, entry.renderer.height
+        )
         replacement.network.cookie_store = cookie_store
         replacement.document_url = document_url
         replacement.document_origin = document_origin
         replacement.history_urls = history_urls
-        replacement.history_csp_policies = history_csp_policies
-        replacement.history_csp_ready = history_csp_ready
         replacement.history_index = history_index
         replacement.history_current_url = history_current_url
         replacement.history_back_url = history_back_url
@@ -480,15 +392,6 @@ pub class HostedBrowserRendererRegistry:
         replacement.pending_history_action = pending_history_action
         replacement.pending_history_index = pending_history_index
         replacement.pending_history_target_url = pending_history_target_url
-        replacement.document_csp_policy = document_csp_policy
-        replacement.document_csp_ready = document_csp_ready
-        replacement.pending_document_csp_policy = (
-            pending_document_csp_policy
-        )
-        replacement.pending_document_csp_ready = pending_document_csp_ready
-        replacement.provisional_document_origin = (
-            provisional_document_origin
-        )
         replacement.navigation_permit = permit
         replacement.site_lock = site
         replacement.site_swap_pending = true
@@ -529,9 +432,8 @@ pub class HostedBrowserRendererRegistry:
         if entry.raster_closed:
             return self._fail(index, "renderer-raster-unavailable")
         var raster = entry.raster
-        val cond_531 = (raster.w != entry.renderer.width or
-            raster.h != entry.renderer.height)
-        if cond_531:
+        if (raster.w != entry.renderer.width or
+            raster.h != entry.renderer.height):
             raster.shutdown()
             raster = Engine2dCompositorBackend.create_from_env(
                 entry.renderer.width, entry.renderer.height
@@ -652,7 +554,11 @@ pub class HostedBrowserRendererRegistry:
                 result.cpu_composited_count,
                 result.cpu_composited_sha256,
                 result.solid_material_count,
-                result.solid_material_sha256
+                result.solid_material_sha256,
+                result.composition_revision,
+                raster.web_effective_damage_mode,
+                raster.damage_rects_to_i64(),
+                raster.web_effective_damage_valid
             )
         else:
             simple_web_external_content_frame(
@@ -665,7 +571,11 @@ pub class HostedBrowserRendererRegistry:
                 result.cpu_composited_count,
                 result.cpu_composited_sha256,
                 result.solid_material_count,
-                result.solid_material_sha256
+                result.solid_material_sha256,
+                result.composition_revision,
+                raster.web_effective_damage_mode,
+                raster.damage_rects_to_i64(),
+                raster.web_effective_damage_valid
             )
         if frame.checksum == 0u64 or frame.pixels.len() == 0:
             self.entries[index] = entry
@@ -709,10 +619,9 @@ pub class HostedBrowserRendererRegistry:
                 self.entries[existing].pending_frame
             ):
                 return "frame"
-            val cond_708 = (self.entries[existing].renderer_closed or
+            if (self.entries[existing].renderer_closed or
                 self.entries[existing].close_pending or
-                self.entries[existing].failure_reason != "")
-            if cond_708:
+                self.entries[existing].failure_reason != ""):
                 return "failed"
             return "none"
         val cond_713 = (window_id <= 0 or self.executable == "" or
@@ -722,42 +631,12 @@ pub class HostedBrowserRendererRegistry:
             return "failed"
         val generation = self.next_generation
         self.next_generation = self.next_generation + 1
-        var startup_html = initial_html
-        if self.theme_enabled:
-            if not hosted_theme_wire_valid(
-                self.theme_revision, self.theme_wire_text
-            ):
-                return "failed"
-            startup_html = (
-                simple_web_content_full_html_with_install_wire(
-                    self.theme_wire_text,
-                    self.theme_revision,
-                    "",
-                    initial_html,
-                    width,
-                    height
-                )
-            )
-            if startup_html == "":
-                return "failed"
-        val process = if self.theme_enabled:
-            HostedBrowserRendererProcess.create_with_theme(
-                generation,
-                width,
-                height,
-                self.theme_revision,
-                self.theme_wire_text
-            )
-        else:
-            HostedBrowserRendererProcess.create(
-                generation, width, height
-            )
         var entry = HostedBrowserRendererEntry.create(
             window_id,
-            process,
+            HostedBrowserRendererProcess.create(generation, width, height),
             Engine2dCompositorBackend.create_from_env(width, height),
             now_micros,
-            startup_html
+            initial_html
         )
         val _ = entry.renderer.set_home_url(self.home_url)
         val snapshot = self.hsts_snapshot(wall_clock_ms)
@@ -771,52 +650,6 @@ pub class HostedBrowserRendererRegistry:
                 self._fail(index, reason)
             Ok(_):
                 "none"
-
-    me _accept_polled_result(
-        index: i32,
-        result: HostedBrowserRendererResult,
-        title: text,
-        body_html: text,
-        now_micros: i64,
-        wall_clock_ms: i64
-    ) -> text:
-        var entry = self.entries[index]
-        val was_ready = entry.ready
-        if not result.ok:
-            if result.reason == HOSTED_BROWSER_SITE_SWAP_REQUIRED:
-                return self._begin_site_swap(index, wall_clock_ms)
-            return self._fail(index, result.reason)
-        if entry.renderer.state == "await-theme-init":
-            val theme_started = entry.renderer.begin_theme_init(2000)
-            self.entries[index] = entry
-            match theme_started:
-                Err(reason):
-                    return self._fail(index, reason)
-                Ok(_):
-                    return "none"
-        if entry.renderer.state == "await-init":
-            val initialized = entry.renderer.begin_init(
-                entry.startup_html, 2000
-            )
-            self.entries[index] = entry
-            match initialized:
-                Err(reason):
-                    return self._fail(index, reason)
-                Ok(_):
-                    return "none"
-        if entry.renderer.site_swap_pending:
-            val resumed = entry.renderer.begin_resume_site_swap(2000)
-            self.entries[index] = entry
-            match resumed:
-                Err(reason):
-                    return self._fail(index, reason)
-                Ok(_):
-                    return "none"
-        entry.ready = true
-        if not was_ready:
-            entry.animation_origin_micros = now_micros
-        self.entries[index] = entry
-        self._store_frame(index, result, title, body_html)
 
     me advance_window(
         window_id: i64,
@@ -840,15 +673,13 @@ pub class HostedBrowserRendererRegistry:
                     entry.renderer_closed = true
                     entry.close_pending = false
                     entry.close_retry_at_micros = 0
-                    entry.failure_reason = _drop_renderer_close_failure(
-                        entry.failure_reason
-                    )
                 else:
                     entry.close_retry_at_micros = now_micros + 1000000
             self.entries[index] = entry
             return if entry.failure_published: "none" else: "failed"
         if entry.renderer_closed or entry.failure_reason != "":
             return if entry.failure_published: "none" else: "failed"
+        val was_ready = entry.ready
         val polled = entry.renderer.poll()
         self.entries[index] = entry
         if entry.renderer.hsts_dirty:
@@ -858,20 +689,38 @@ pub class HostedBrowserRendererRegistry:
             )
             entry = self.entries[index]
         if val Some(result) = polled:
-            return self._accept_polled_result(
-                index,
-                result,
-                title,
-                body_html,
-                now_micros,
-                wall_clock_ms
-            )
+            if not result.ok:
+                if result.reason == HOSTED_BROWSER_SITE_SWAP_REQUIRED:
+                    return self._begin_site_swap(index, wall_clock_ms)
+                return self._fail(index, result.reason)
+            if entry.renderer.state == "await-init":
+                val initialized = entry.renderer.begin_init(
+                    entry.startup_html, 2000
+                )
+                self.entries[index] = entry
+                match initialized:
+                    Err(reason):
+                        return self._fail(index, reason)
+                    Ok(_):
+                        return "none"
+            if entry.renderer.site_swap_pending:
+                val resumed = entry.renderer.begin_resume_site_swap(2000)
+                self.entries[index] = entry
+                match resumed:
+                    Err(reason):
+                        return self._fail(index, reason)
+                    Ok(_):
+                        return "none"
+            entry.ready = true
+            if not was_ready:
+                entry.animation_origin_micros = now_micros
+            self.entries[index] = entry
+            return self._store_frame(index, result, title, body_html)
         if not entry.ready:
             return "none"
-        val cond_865 = (entry.bookmark_revision < self.bookmark_revision and
+        if (entry.bookmark_revision < self.bookmark_revision and
             entry.renderer.command_deadline_ms <= 0 and
-            entry.renderer.network_job_handle <= 0)
-        if cond_865:
+            entry.renderer.network_job_handle <= 0):
             match entry.renderer.begin_bookmark_snapshot(
                 self.bookmark_snapshot, 2000
             ):
@@ -883,17 +732,13 @@ pub class HostedBrowserRendererRegistry:
                     entry.bookmark_revision = self.bookmark_revision
                     self.entries[index] = entry
                     return "none"
-        val cond_879 = (self.pending_cancel_window_id == window_id and
+        if (self.pending_cancel_window_id == window_id and
             self.pending_cancel_event_id > 0 and
-            entry.renderer.command_deadline_ms <= 0)
-        if cond_879:
+            entry.renderer.command_deadline_ms <= 0):
             match entry.renderer.begin_pointer(
                 self.pending_cancel_event_id, -1, -1, false, 2000
             ):
                 Ok(_):
-                    self.pointer_cancel_receipt_count = (
-                        self.pointer_cancel_receipt_count + 1
-                    )
                     self.pending_cancel_window_id = 0
                     self.pending_cancel_event_id = 0
                 Err(_):
@@ -925,10 +770,9 @@ pub class HostedBrowserRendererRegistry:
         val animation_time_ms = (
             now_micros - entry.animation_origin_micros
         ) / 1000
-        val cond_920 = (entry.renderer.command_deadline_ms <= 0 and
+        if (entry.renderer.command_deadline_ms <= 0 and
             entry.renderer.next_animation_ms >= 0 and
-            animation_time_ms >= entry.renderer.next_animation_ms)
-        if cond_920:
+            animation_time_ms >= entry.renderer.next_animation_ms):
             match entry.renderer.begin_advance(animation_time_ms, 2000):
                 Err(reason):
                     self.entries[index] = entry
@@ -961,26 +805,10 @@ pub class HostedBrowserRendererRegistry:
         self.entries[index] = entry
         result
 
-    me _begin_address_navigation(index: i64) -> Result<bool, text>:
-        var entry = self.entries[index]
-        val url = normalize_browser_address_reference_url(
-            entry.renderer.document_url, entry.address_draft
-        )?
-        val result = entry.renderer.begin_navigate(
-            url, "GET", "", "", "", 2000
-        )
-        if val Ok(_) = result:
-            entry.address_editing = false
-            entry.address_replace_on_text = false
-        self.entries[index] = entry
-        result
-
     me _begin_control(window_id: i64, control: text) -> Result<bool, text>:
         val index = self._index(window_id)
         if index < 0 or not self.entries[index].ready:
             return Err("renderer-unavailable")
-        if control == "go":
-            return self._begin_address_navigation(index)
         var entry = self.entries[index]
         val result = if control == "back":
             entry.renderer.begin_go_back(2000)
@@ -993,9 +821,8 @@ pub class HostedBrowserRendererRegistry:
         elif control == "home":
             entry.renderer.begin_go_home(2000)
         elif control == "favorite":
-            val cond_987 = (entry.renderer.command_deadline_ms > 0 or
-                entry.renderer.network_job_handle > 0)
-            if cond_987:
+            if (entry.renderer.command_deadline_ms > 0 or
+                entry.renderer.network_job_handle > 0):
                 Err("renderer-busy")
             else:
                 Ok(false)
@@ -1003,40 +830,6 @@ pub class HostedBrowserRendererRegistry:
             Err("unknown-browser-control")
         self.entries[index] = entry
         result
-
-    me _clear_pressed_controls():
-        if self.pending_cancel_window_id > 0:
-            return
-        val armed_window_id = self.pressed_window_id
-        val armed_event_id = self.pressed_event_id
-        val index = self._index(armed_window_id)
-        self.pressed_window_id = 0
-        self.pressed_event_id = 0
-        if index < 0:
-            self.pending_cancel_window_id = 0
-            self.pending_cancel_event_id = 0
-            return
-        var entry = self.entries[index]
-        val page_press = entry.pressed_control == ""
-        entry.pressed_control = ""
-        if not page_press:
-            self.entries[index] = entry
-            return
-        self.pending_cancel_window_id = armed_window_id
-        self.pending_cancel_event_id = armed_event_id
-        if entry.ready and entry.renderer.command_deadline_ms <= 0:
-            match entry.renderer.begin_pointer(
-                armed_event_id, -1, -1, false, 2000
-            ):
-                Ok(_):
-                    self.pointer_cancel_receipt_count = (
-                        self.pointer_cancel_receipt_count + 1
-                    )
-                    self.pending_cancel_window_id = 0
-                    self.pending_cancel_event_id = 0
-                Err(_):
-                    pass
-        self.entries[index] = entry
 
     me dispatch_pointer(
         event_id: i64, window_id: i64, x: i64, y: i64, pressed: bool
@@ -1046,18 +839,14 @@ pub class HostedBrowserRendererRegistry:
             return _dispatch(event_id, window_id, "", 0, 0,
                 "renderer-unavailable")
         var entry = self.entries[index]
-        val cond_1039 = (not pressed and
+        if (not pressed and
             (self.pressed_window_id != window_id or
-             entry.pressed_control != ""))
-        if cond_1039:
+             entry.pressed_control != "")):
             return _dispatch(event_id, window_id, "browser:page", 0,
                 entry.mutation_revision, "pointer-release-target-mismatch")
         if pressed and self.pending_cancel_window_id > 0:
             return _dispatch(event_id, window_id, "browser:page", 0,
                 entry.mutation_revision, "pointer-cancel-pending")
-        if pressed:
-            self._clear_pressed_controls()
-            entry = self.entries[index]
         entry.address_editing = false
         entry.address_replace_on_text = false
         self.entries[index] = entry
@@ -1067,11 +856,14 @@ pub class HostedBrowserRendererRegistry:
                     entry.mutation_revision, reason)
             Ok(_):
                 if pressed:
+                    val prior_index = self._index(self.pressed_window_id)
+                    if prior_index >= 0:
+                        var prior = self.entries[prior_index]
+                        prior.pressed_control = ""
+                        self.entries[prior_index] = prior
                     self.pressed_window_id = window_id
-                    self.pressed_event_id = event_id
                 else:
                     self.pressed_window_id = 0
-                    self.pressed_event_id = 0
                 _dispatch(event_id, window_id, "browser:page", 1,
                     entry.mutation_revision, "")
 
@@ -1106,18 +898,31 @@ pub class HostedBrowserRendererRegistry:
             if self.pending_cancel_window_id > 0:
                 return _dispatch(event_id, window_id, target, 0,
                     entry.mutation_revision, "pointer-cancel-pending")
-            self._clear_pressed_controls()
-            entry = self.entries[index]
+            val prior_index = self._index(self.pressed_window_id)
+            if prior_index >= 0:
+                var prior = self.entries[prior_index]
+                if prior.pressed_control == "" and prior.ready:
+                    self.pending_cancel_window_id = prior.window_id
+                    self.pending_cancel_event_id = event_id
+                    match prior.renderer.begin_pointer(
+                        event_id, -1, -1, false, 2000
+                    ):
+                        Ok(_):
+                            self.pending_cancel_window_id = 0
+                            self.pending_cancel_event_id = 0
+                        Err(_):
+                            pass
+                prior.pressed_control = ""
+                self.entries[prior_index] = prior
+                if prior_index == index:
+                    entry = prior
             entry.pressed_control = control
             self.pressed_window_id = window_id
             self.pressed_event_id = event_id
-            entry.address_draft = browser_address_draft_after_control_press(
-                control, entry.renderer.document_url, entry.address_draft
-            )
             if control == "address":
                 entry.address_editing = true
                 entry.address_replace_on_text = true
-            else:
+            elif control != "home":
                 entry.address_editing = false
                 entry.address_replace_on_text = false
             self.entries[index] = entry
@@ -1129,7 +934,6 @@ pub class HostedBrowserRendererRegistry:
                 entry.mutation_revision, "chrome-release-target-mismatch")
         entry.pressed_control = ""
         self.pressed_window_id = 0
-        self.pressed_event_id = 0
         if control == "address":
             entry.address_editing = true
             entry.address_replace_on_text = true
@@ -1137,25 +941,16 @@ pub class HostedBrowserRendererRegistry:
             return _dispatch(event_id, window_id, target, 0,
                 entry.mutation_revision, "address-focused")
         self.entries[index] = entry
+        if control == "favorite":
+            return _dispatch(event_id, window_id, target, 0,
+                entry.mutation_revision, "favorite-parent")
         match self._begin_control(window_id, control):
             Err(reason):
                 _dispatch(event_id, window_id, target, 0,
                     entry.mutation_revision, reason)
             Ok(_):
-                if control == "home":
-                    entry = self.entries[index]
-                    entry.address_draft = (
-                        entry.renderer.navigation_permit.url
-                    )
-                    entry.address_editing = false
-                    entry.address_replace_on_text = false
-                    self.entries[index] = entry
-                if control == "favorite":
-                    _dispatch(event_id, window_id, target, 0,
-                        entry.mutation_revision, "favorite-parent")
-                else:
-                    _dispatch(event_id, window_id, target, 1,
-                        entry.mutation_revision, "")
+                _dispatch(event_id, window_id, target, 1,
+                    entry.mutation_revision, "")
 
     me dispatch_key_with_shift(
         event_id: i64, window_id: i64, key_code: i64,
@@ -1172,15 +967,28 @@ pub class HostedBrowserRendererRegistry:
                     "browser:parent#address", 0,
                     entry.mutation_revision, "key-up")
             if key_code == 13:
-                match self._begin_address_navigation(index):
+                match normalize_network_navigation_url(entry.address_draft):
                     Err(reason):
                         return _dispatch(event_id, window_id,
                             "browser:parent#address", 0,
                             entry.mutation_revision, reason)
-                    Ok(_):
-                        return _dispatch(event_id, window_id,
-                            "browser:parent#address", 1,
-                            entry.mutation_revision, "")
+                    Ok(url):
+                        val result = entry.renderer.begin_navigate(
+                            url, "GET", "", "", "", 2000
+                        )
+                        match result:
+                            Err(reason):
+                                self.entries[index] = entry
+                                return _dispatch(event_id, window_id,
+                                    "browser:parent#address", 0,
+                                    entry.mutation_revision, reason)
+                            Ok(_):
+                                entry.address_editing = false
+                                entry.address_replace_on_text = false
+                                self.entries[index] = entry
+                                return _dispatch(event_id, window_id,
+                                    "browser:parent#address", 1,
+                                    entry.mutation_revision, "")
             if key_code == 27:
                 entry.address_draft = if entry.renderer.document_url != "":
                     entry.renderer.document_url
@@ -1189,15 +997,9 @@ pub class HostedBrowserRendererRegistry:
                 entry.address_editing = false
                 entry.address_replace_on_text = false
             elif key_code == 8:
-                val updated = match browser_address_backspace(
-                    entry.address_draft, entry.address_replace_on_text
-                ):
-                    Err(reason):
-                        return _dispatch(event_id, window_id,
-                            "browser:parent#address", 0,
-                            entry.mutation_revision, reason)
-                    Ok(value): value
-                entry.address_draft = updated
+                entry.address_draft = text_without_last_codepoint(
+                    entry.address_draft
+                )
                 entry.address_replace_on_text = false
             self.entries[index] = entry
             return _dispatch(event_id, window_id,
@@ -1227,15 +1029,14 @@ pub class HostedBrowserRendererRegistry:
                 "renderer-unavailable")
         var entry = self.entries[index]
         if entry.address_editing:
-            val updated = match browser_address_update(
-                entry.address_draft, value,
-                entry.address_replace_on_text
-            ):
-                Err(reason):
-                    return _dispatch(event_id, window_id,
-                        "browser:parent#address", 0,
-                        entry.mutation_revision, reason)
-                Ok(next): next
+            val updated = if entry.address_replace_on_text:
+                value
+            else:
+                entry.address_draft + value
+            if rt_text_to_bytes(updated).len() > 2048:
+                return _dispatch(event_id, window_id,
+                    "browser:parent#address", 0,
+                    entry.mutation_revision, "address-too-long")
             entry.address_draft = updated
             entry.address_replace_on_text = false
             self.entries[index] = entry
@@ -1255,8 +1056,34 @@ pub class HostedBrowserRendererRegistry:
                 _dispatch(event_id, window_id, "browser:page", 1,
                     entry.mutation_revision, "")
 
-    me cancel_pointer_state(_event_id: i64):
-        self._clear_pressed_controls()
+    me cancel_pointer_state(event_id: i64):
+        if self.pending_cancel_window_id > 0:
+            return
+        val armed_window_id = self.pressed_window_id
+        val index = self._index(armed_window_id)
+        self.pressed_window_id = 0
+        if index < 0:
+            self.pending_cancel_window_id = 0
+            self.pending_cancel_event_id = 0
+            return
+        var entry = self.entries[index]
+        val page_press = entry.pressed_control == ""
+        entry.pressed_control = ""
+        if not page_press:
+            self.entries[index] = entry
+            return
+        self.pending_cancel_window_id = armed_window_id
+        self.pending_cancel_event_id = event_id
+        if entry.ready and entry.renderer.command_deadline_ms <= 0:
+            match entry.renderer.begin_pointer(
+                event_id, -1, -1, false, 2000
+            ):
+                Ok(_):
+                    self.pending_cancel_window_id = 0
+                    self.pending_cancel_event_id = 0
+                Err(_):
+                    pass
+        self.entries[index] = entry
 
     me remove_window(window_id: i64) -> bool:
         val index = self._index(window_id)
@@ -1318,7 +1145,4 @@ pub class HostedBrowserRendererRegistry:
                 ok = false
             i = i + 1
         self.entries = retained
-        if ok:
-            self.hsts.hsts_policies = []
-            self.shared_hsts_dirty = false
         ok

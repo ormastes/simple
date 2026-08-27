@@ -1,0 +1,89 @@
+use std.spec.*
+use app.io.vhdl_ffi.{ghdl_available, ghdl_analyze, ghdl_elaborate, ghdl_run,
+    vhdl_write_file}
+use compiler.mir.hwir.types.{CoreConfig}
+use compiler.backend.backend.riscv_scalar_decoder_to_vhdl.{
+    compile_strict_riscv_scalar_decoder_product}
+
+fn decoder_testbench(entity_name: text, legal_bits: text,
+    operand_width_32: text) -> text:
+    """
+library ieee;
+use ieee.std_logic_1164.all;
+use std.env.all;
+entity {entity_name}_tb is end entity;
+architecture sim of {entity_name}_tb is
+  signal instruction : std_logic_vector(31 downto 0) := (others => '0');
+  signal decoded_valid : std_logic;
+  signal decoded_row_index : std_logic_vector(5 downto 0);
+  signal canonical_instruction : std_logic_vector(31 downto 0);
+  signal decoded_execution_class : std_logic_vector(2 downto 0);
+  signal decoded_memory_effect : std_logic_vector(2 downto 0);
+  signal decoded_semantic_opcode : std_logic_vector(5 downto 0);
+  signal decoded_operand_width_32 : std_logic;
+  signal instruction_rd_field : std_logic_vector(4 downto 0);
+  signal instruction_rs1_field : std_logic_vector(4 downto 0);
+  signal instruction_rs2_field : std_logic_vector(4 downto 0);
+begin
+  dut: entity work.{entity_name} port map(
+    instruction=>instruction, decoded_valid=>decoded_valid,
+    decoded_row_index=>decoded_row_index,
+    canonical_instruction=>canonical_instruction,
+    decoded_execution_class=>decoded_execution_class,
+    decoded_memory_effect=>decoded_memory_effect,
+    decoded_semantic_opcode=>decoded_semantic_opcode,
+    decoded_operand_width_32=>decoded_operand_width_32,
+    instruction_rd_field=>instruction_rd_field,
+    instruction_rs1_field=>instruction_rs1_field,
+    instruction_rs2_field=>instruction_rs2_field);
+  process begin
+    instruction <= "{legal_bits}"; wait for 1 ns;
+    assert decoded_valid = '1' report "declared scalar row rejected" severity failure;
+    assert decoded_row_index /= "000000" report "declared row identity missing" severity failure;
+    assert canonical_instruction = "{legal_bits}" report "canonical instruction mismatch" severity failure;
+    assert decoded_execution_class = "001" report "execution class mismatch" severity failure;
+    assert decoded_memory_effect = "000" report "memory effect mismatch" severity failure;
+    assert decoded_semantic_opcode = "000001" report "semantic opcode mismatch" severity failure;
+    assert decoded_operand_width_32 = '{operand_width_32}'
+      report "operand-width mode mismatch" severity failure;
+    assert instruction_rd_field = "01010" report "rd field mismatch" severity failure;
+    assert instruction_rs1_field = "01010" report "rs1 field mismatch" severity failure;
+    assert instruction_rs2_field = "01011" report "rs2 field mismatch" severity failure;
+    instruction <= (others => '0'); wait for 1 ns;
+    assert decoded_valid = '0' report "illegal scalar row accepted" severity failure;
+    assert decoded_row_index = "000000" report "illegal row identity leaked" severity failure;
+    assert canonical_instruction = x"00000000" report "illegal canonical instruction leaked" severity failure;
+    assert decoded_execution_class = "000" and decoded_memory_effect = "000"
+      report "illegal routing metadata leaked" severity failure;
+    assert decoded_semantic_opcode = "000000" and decoded_operand_width_32 = '0'
+      report "illegal semantic metadata leaked" severity failure;
+    assert instruction_rd_field = "00000" and instruction_rs1_field = "00000" and
+      instruction_rs2_field = "00000" report "illegal operand field leaked" severity failure;
+    finish;
+  end process;
+end architecture;
+"""
+
+describe "declarative scalar decoder VHDL behavior":
+    slow_it "simulates legal and illegal fixed RV32I and RV64 privileged decode":
+        if not ghdl_available():
+            print "SKIP: GHDL not available"
+            return
+        val products = [
+            ("scalar_decoder_ghdl_rv32", CoreConfig.rv32(),
+                "00000000101101010000010100110011", "0"),
+            ("scalar_decoder_ghdl_rv64", CoreConfig.rv64_zicsr_zifencei(),
+                "00000000101101010000010100111011", "1")]
+        for product in products:
+            val emitted = compile_strict_riscv_scalar_decoder_product(
+                product[0], product[1])
+            expect(emitted.is_success()).to_equal(true)
+            if emitted.is_success():
+                expect(emitted.route).to_equal("hwir-gen2-scalar-decoder-v1")
+                val path = "/tmp/" + product[0] + ".vhd"
+                expect(vhdl_write_file(path, emitted.vhdl + "\n" +
+                    decoder_testbench(product[0], product[2], product[3]))).to_equal(true)
+                expect(ghdl_analyze(path).success).to_equal(true)
+                expect(ghdl_elaborate(product[0]).success).to_equal(true)
+                expect(ghdl_elaborate(product[0] + "_tb").success).to_equal(true)
+                expect(ghdl_run(product[0] + "_tb", Some("10ns")).success).to_equal(true)

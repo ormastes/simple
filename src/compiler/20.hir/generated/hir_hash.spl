@@ -5,10 +5,13 @@
 # every child hash, so it is stable across two builds of the same HIR and
 # changes when a literal changes. Non-primitive opaque payloads (symbol
 # ids, spans, operator enums) are deliberately NOT folded in: they are
-# not structural.
+# not structural. Module-qualified resolution receipts are the exception:
+# their module+symbol tuple is the semantic identity and must affect cache keys.
 
 use compiler.hir.hir_definitions.*
 use compiler.hir.hir_types.*
+
+use common.facet_abi.*
 
 val HIR_HASH_SEED = 1469598103
 val HIR_HASH_MOD = 1000000007
@@ -27,6 +30,21 @@ fn _hir_mix_i64(h: i64, v: i64) -> i64:
 fn _hir_mix_prim<T>(h: i64, v: T) -> i64:
     """Fold one primitive payload field by its printed form."""
     _hir_mix_text(h, "{v}")
+
+fn _hir_mix_qualified_resolution(h: i64, resolution: MethodResolution) -> i64:
+    match resolution:
+        case QualifiedInstanceMethod(module, type_id, method_id): _hir_mix_prim(_hir_mix_prim(_hir_mix_prim(h, module), type_id.id), method_id.id)
+        case QualifiedTraitMethod(module, trait_id, method_id): _hir_mix_prim(_hir_mix_prim(_hir_mix_prim(h, module), trait_id.id), method_id.id)
+        case QualifiedFreeFunction(module, func_id): _hir_mix_prim(_hir_mix_prim(h, module), func_id.id)
+        case QualifiedStaticMethod(module, type_id, method_id): _hir_mix_prim(_hir_mix_prim(_hir_mix_prim(h, module), type_id.id), method_id.id)
+        case _: h
+
+fn hir_hash_tensor_suffix(node: HirTensorSuffix) -> i64:
+    var h = _hir_mix_text(HIR_HASH_SEED, "HirTensorSuffix")
+    h = _hir_mix_prim(h, node.has_dtype); h = _hir_mix_prim(h, node.dtype)
+    h = _hir_mix_prim(h, node.has_device); h = _hir_mix_prim(h, node.device_kind); h = _hir_mix_prim(h, node.device_id)
+    h = _hir_mix_prim(h, node.trainable); h = _hir_mix_prim(h, node.pinned)
+    h = _hir_mix_prim(h, node.has_backend); h = _hir_mix_prim(h, node.backend); _hir_mix_prim(h, node.raw)
 
 fn hir_hash_expr(node: HirExpr) -> i64:
     if node == nil:
@@ -127,18 +145,21 @@ fn hir_hash_expr(node: HirExpr) -> i64:
                 h = _hir_mix_i64(h, hir_hash_call_arg(it1))
             for it2 in b_type_args:
                 h = _hir_mix_i64(h, hir_hash_type(it2))
-        case MethodCall(b_receiver, b_method, b_args, _):
+        case MethodCall(b_receiver, b_method, b_args, _, b_type_args):
             h = _hir_mix_text(h, "MethodCall")
             h = _hir_mix_i64(h, hir_hash_expr(b_receiver))
             h = _hir_mix_prim(h, b_method)
             for it2 in b_args:
                 h = _hir_mix_i64(h, hir_hash_call_arg(it2))
+            for it4 in b_type_args:
+                h = _hir_mix_i64(h, hir_hash_type(it4))
         case StaticCall(b_type_, b_method, b_args, _):
             h = _hir_mix_text(h, "StaticCall")
             h = _hir_mix_i64(h, hir_hash_type(b_type_))
             h = _hir_mix_prim(h, b_method)
             for it2 in b_args:
                 h = _hir_mix_i64(h, hir_hash_call_arg(it2))
+            h = _hir_mix_qualified_resolution(h, b_resolution)
         case If(b_cond, b_then_, b_else_):
             h = _hir_mix_text(h, "If")
             h = _hir_mix_i64(h, hir_hash_expr(b_cond))
@@ -270,6 +291,21 @@ fn hir_hash_expr(node: HirExpr) -> i64:
             for clause in b_clauses:
                 h = _hir_mix_i64(h, hir_hash_catch_clause(clause))
             h = _hir_mix_i64(h, hir_hash_block(b_finally))
+        case Spawn(b_value):
+            h = _hir_mix_text(h, "Spawn"); h = _hir_mix_i64(h, hir_hash_expr(b_value))
+        case DictComprehension(b_key, b_value, b_clauses):
+            h = _hir_mix_text(h, "DictComprehension"); h = _hir_mix_i64(h, hir_hash_expr(b_key)); h = _hir_mix_i64(h, hir_hash_expr(b_value))
+            for clause in b_clauses: h = _hir_mix_i64(h, hir_hash_comp_clause(clause))
+        case ArrayLitSuffix(b_elements, b_suffix):
+            h = _hir_mix_text(h, "ArrayLitSuffix")
+            for element in b_elements: h = _hir_mix_i64(h, hir_hash_expr(element))
+            h = _hir_mix_i64(h, hir_hash_tensor_suffix(b_suffix))
+        case KernelLaunch(b_kernel, b_grid, b_block, b_args):
+            h = _hir_mix_text(h, "KernelLaunch"); h = _hir_mix_i64(h, hir_hash_expr(b_kernel)); h = _hir_mix_i64(h, hir_hash_expr(b_grid)); h = _hir_mix_i64(h, hir_hash_expr(b_block))
+            for arg in b_args: h = _hir_mix_i64(h, hir_hash_call_arg(arg))
+        case GpuIntrinsic(b_kind, b_dimension, b_args):
+            h = _hir_mix_text(h, "GpuIntrinsic"); h = _hir_mix_prim(h, b_kind); h = _hir_mix_prim(h, b_dimension)
+            for arg in b_args: h = _hir_mix_i64(h, hir_hash_expr(arg))
         case _: unreachable_hir_variant("HirExprKind", "hir_hash_expr")
     h
 
@@ -294,6 +330,25 @@ fn hir_hash_stmt(node: HirStmt) -> i64:
             h = _hir_mix_i64(h, hir_hash_block(b_block))
         case AsmAssert(_):
             h = _hir_mix_text(h, "AsmAssert")
+        case SharedVal(_, b_type_, b_has_init, b_init):
+            h = _hir_mix_text(h, "SharedVal")
+            h = _hir_mix_i64(h, hir_hash_type(b_type_))
+            h = _hir_mix_prim(h, b_has_init)
+            if b_has_init:
+                h = _hir_mix_i64(h, hir_hash_expr(b_init))
+        case SharedVar(_, b_type_, b_has_init, b_init):
+            h = _hir_mix_text(h, "SharedVar")
+            h = _hir_mix_i64(h, hir_hash_type(b_type_))
+            h = _hir_mix_prim(h, b_has_init)
+            if b_has_init:
+                h = _hir_mix_i64(h, hir_hash_expr(b_init))
+        case GpuLaunch(b_config, b_body):
+            h = _hir_mix_text(h, "GpuLaunch")
+            for grid_expr in b_config.grid:
+                h = _hir_mix_i64(h, hir_hash_expr(grid_expr))
+            for block_expr in b_config.block:
+                h = _hir_mix_i64(h, hir_hash_expr(block_expr))
+            h = _hir_mix_i64(h, hir_hash_block(b_body))
         case _: unreachable_hir_variant("HirStmtKind", "hir_hash_stmt")
     h
 
@@ -376,6 +431,15 @@ fn hir_hash_type(node: HirType) -> i64:
         case Isolated(b_inner):
             h = _hir_mix_text(h, "Isolated")
             h = _hir_mix_i64(h, hir_hash_type(b_inner))
+        case Weak(b_inner):
+            h = _hir_mix_text(h, "Weak")
+            h = _hir_mix_i64(h, hir_hash_type(b_inner))
+        case Atomic(b_inner):
+            h = _hir_mix_text(h, "Atomic")
+            h = _hir_mix_i64(h, hir_hash_type(b_inner))
+        case QualifiedDynTrait(b_module, b_trait):
+            h = _hir_mix_text(h, "QualifiedDynTrait")
+            h = _hir_mix_prim(h, b_module); h = _hir_mix_prim(h, b_trait.id)
         case Infer(b_id, b_level):
             h = _hir_mix_text(h, "Infer")
             h = _hir_mix_prim(h, b_id)
@@ -637,6 +701,161 @@ fn hir_hash_enum_payload(node: HirEnumPayload) -> i64:
         case _: unreachable_hir_variant("HirEnumPayload", "hir_hash_enum_payload")
     h
 
+fn hir_hash_extend_constructor(node: HirExtendConstructor) -> i64:
+    if node == nil:
+        return 0
+    var h = _hir_mix_text(HIR_HASH_SEED, "HirExtendConstructor")
+    h = _hir_mix_prim(h, node.provider)
+    h = _hir_mix_prim(h, node.name)
+    h
+
+fn hir_hash_extend_enum(node: HirExtendEnum) -> i64:
+    if node == nil:
+        return 0
+    var h = _hir_mix_text(HIR_HASH_SEED, "HirExtendEnum")
+    h = _hir_mix_prim(h, node.target)
+    for it1 in node.constructors:
+        h = _hir_mix_i64(h, hir_hash_extend_constructor(it1))
+    h
+
+fn hir_hash_facet_access_mode(node: HirFacetAccessMode) -> i64:
+    if node == nil:
+        return 0
+    var h = _hir_mix_text(HIR_HASH_SEED, "HirFacetAccessMode")
+    match node:
+        case PublicReadonly:
+            h = _hir_mix_text(h, "PublicReadonly")
+        case InspectReadonly:
+            h = _hir_mix_text(h, "InspectReadonly")
+        case _: unreachable_hir_variant("HirFacetAccessMode", "hir_hash_facet_access_mode")
+    h
+
+fn hir_hash_facet_acquire_mode(node: HirFacetAcquireMode) -> i64:
+    if node == nil:
+        return 0
+    var h = _hir_mix_text(HIR_HASH_SEED, "HirFacetAcquireMode")
+    match node:
+        case TryResident:
+            h = _hir_mix_text(h, "TryResident")
+        case LoadOptional:
+            h = _hir_mix_text(h, "LoadOptional")
+        case LoadRequired:
+            h = _hir_mix_text(h, "LoadRequired")
+        case _: unreachable_hir_variant("HirFacetAcquireMode", "hir_hash_facet_acquire_mode")
+    h
+
+fn hir_hash_facet_binding_decl(node: HirFacetBindingDecl) -> i64:
+    if node == nil:
+        return 0
+    var h = _hir_mix_text(HIR_HASH_SEED, "HirFacetBindingDecl")
+    h = _hir_mix_prim(h, node.aspect_version)
+    h = _hir_mix_i64(h, hir_hash_type(node.interface_type))
+    h = _hir_mix_i64(h, hir_hash_type_pointcut(node.target_type_rule))
+    h = _hir_mix_i64(h, hir_hash_type(node.implementation_type))
+    h = _hir_mix_i64(h, hir_hash_facet_binding_mode(node.mode))
+    h = _hir_mix_prim(h, node.priority)
+    h = _hir_mix_prim(h, node.provider_id)
+    h
+
+fn hir_hash_facet_binding_mode(node: HirFacetBindingMode) -> i64:
+    if node == nil:
+        return 0
+    var h = _hir_mix_text(HIR_HASH_SEED, "HirFacetBindingMode")
+    match node:
+        case Attached:
+            h = _hir_mix_text(h, "Attached")
+        case NominalStatic:
+            h = _hir_mix_text(h, "NominalStatic")
+        case _: unreachable_hir_variant("HirFacetBindingMode", "hir_hash_facet_binding_mode")
+    h
+
+fn hir_hash_facet_impl_decl(node: HirFacetImplDecl) -> i64:
+    if node == nil:
+        return 0
+    var h = _hir_mix_text(HIR_HASH_SEED, "HirFacetImplDecl")
+    h = _hir_mix_prim(h, node.aspect_version)
+    h = _hir_mix_prim(h, node.name)
+    for it2 in node.type_params:
+        h = _hir_mix_i64(h, hir_hash_type_param(it2))
+    h = _hir_mix_i64(h, hir_hash_type(node.base_type))
+    for it4 in node.interfaces:
+        h = _hir_mix_i64(h, hir_hash_type(it4))
+    h = _hir_mix_i64(h, hir_hash_facet_access_mode(node.access_mode))
+    for it6 in node.methods:
+        h = _hir_mix_i64(h, hir_hash_facet_method(it6))
+    h = _hir_mix_prim(h, node.provider_id)
+    h = _hir_mix_prim(h, node.implementation_hash)
+    h = _hir_mix_prim(h, node.required_base_abi_hash)
+    h = _hir_mix_prim(h, node.required_layout_hash)
+    h
+
+fn hir_hash_facet_interface_decl(node: HirFacetInterfaceDecl) -> i64:
+    if node == nil:
+        return 0
+    var h = _hir_mix_text(HIR_HASH_SEED, "HirFacetInterfaceDecl")
+    h = _hir_mix_prim(h, node.aspect_version)
+    h = _hir_mix_prim(h, node.name)
+    for it2 in node.type_params:
+        h = _hir_mix_i64(h, hir_hash_type_param(it2))
+    for it3 in node.composes:
+        h = _hir_mix_i64(h, hir_hash_type(it3))
+    for it4 in node.methods:
+        h = _hir_mix_i64(h, hir_hash_facet_method(it4))
+    h = _hir_mix_prim(h, node.is_public)
+    h = _hir_mix_prim(h, node.interface_abi_hash)
+    h
+
+fn hir_hash_facet_method(node: HirFacetMethod) -> i64:
+    if node == nil:
+        return 0
+    var h = _hir_mix_text(HIR_HASH_SEED, "HirFacetMethod")
+    h = _hir_mix_prim(h, node.name)
+    h = _hir_mix_i64(h, hir_hash_function(node.function))
+    h = _hir_mix_prim(h, node.signature_hash)
+    h
+
+fn hir_hash_facet_requirement_decl(node: HirFacetRequirementDecl) -> i64:
+    if node == nil:
+        return 0
+    var h = _hir_mix_text(HIR_HASH_SEED, "HirFacetRequirementDecl")
+    h = _hir_mix_prim(h, node.aspect_version)
+    h = _hir_mix_i64(h, hir_hash_type(node.interface_type))
+    h = _hir_mix_i64(h, hir_hash_type_pointcut(node.target_type_rule))
+    h
+
+fn hir_hash_function(node: HirFunction) -> i64:
+    if node == nil:
+        return 0
+    var h = _hir_mix_text(HIR_HASH_SEED, "HirFunction")
+    h = _hir_mix_prim(h, node.name)
+    for it1 in node.type_params:
+        h = _hir_mix_i64(h, hir_hash_type_param(it1))
+    for it2 in node.params:
+        h = _hir_mix_i64(h, hir_hash_param(it2))
+    h = _hir_mix_i64(h, hir_hash_type(node.return_type))
+    h = _hir_mix_i64(h, hir_hash_block(node.body))
+    for it5 in node.effects:
+        h = _hir_mix_i64(h, hir_hash_effect(it5))
+    h = _hir_mix_prim(h, node.is_async)
+    h = _hir_mix_prim(h, node.is_static)
+    h = _hir_mix_prim(h, node.is_public)
+    h = _hir_mix_prim(h, node.is_method)
+    h = _hir_mix_prim(h, node.is_mutable)
+    h = _hir_mix_prim(h, node.is_const)
+    h = _hir_mix_prim(h, node.is_extern)
+    h = _hir_mix_prim(h, node.has_export_attr)
+    h = _hir_mix_prim(h, node.has_driver_manifest_attr)
+    h = _hir_mix_prim(h, node.has_suspension)
+    h = _hir_mix_prim(h, node.has_vhdl_metadata)
+    h = _hir_mix_prim(h, node.has_doc_comment)
+    if node.has_doc_comment:
+        h = _hir_mix_prim(h, node.doc_comment)
+    h = _hir_mix_prim(h, node.is_gpu_kernel)
+    h = _hir_mix_prim(h, node.gpu_target)
+    h = _hir_mix_prim(h, node.gpu_backend_order)
+    h = _hir_mix_prim(h, node.is_generic_template)
+    h
+
 fn hir_hash_if_arm(node: HirIfArm) -> i64:
     if node == nil:
         return 0
@@ -707,6 +926,47 @@ fn hir_hash_pattern_payload(node: HirPatternPayload) -> i64:
         case _: unreachable_hir_variant("HirPatternPayload", "hir_hash_pattern_payload")
     h
 
+fn hir_hash_type_param(node: HirTypeParam) -> i64:
+    if node == nil:
+        return 0
+    var h = _hir_mix_text(HIR_HASH_SEED, "HirTypeParam")
+    h = _hir_mix_prim(h, node.name)
+    for it1 in node.bounds:
+        h = _hir_mix_i64(h, hir_hash_type(it1))
+    h = _hir_mix_prim(h, node.has_default)
+    if node.has_default:
+        h = _hir_mix_i64(h, hir_hash_type(node.default))
+    h
+
+fn hir_hash_type_pointcut(node: HirTypePointcut) -> i64:
+    if node == nil:
+        return 0
+    var h = _hir_mix_text(HIR_HASH_SEED, "HirTypePointcut")
+    match node:
+        case TypeName(b_pattern):
+            h = _hir_mix_text(h, "TypeName")
+            h = _hir_mix_prim(h, b_pattern)
+        case Implements(b_interface_type):
+            h = _hir_mix_text(h, "Implements")
+            h = _hir_mix_i64(h, hir_hash_type(b_interface_type))
+        case Subtype(b_base_type):
+            h = _hir_mix_text(h, "Subtype")
+            h = _hir_mix_i64(h, hir_hash_type(b_base_type))
+        case And(b_terms):
+            h = _hir_mix_text(h, "And")
+            for it0 in b_terms:
+                h = _hir_mix_i64(h, hir_hash_type_pointcut(it0))
+        case Or(b_terms):
+            h = _hir_mix_text(h, "Or")
+            for it0 in b_terms:
+                h = _hir_mix_i64(h, hir_hash_type_pointcut(it0))
+        case Not(b_terms):
+            h = _hir_mix_text(h, "Not")
+            for it0 in b_terms:
+                h = _hir_mix_i64(h, hir_hash_type_pointcut(it0))
+        case _: unreachable_hir_variant("HirTypePointcut", "hir_hash_type_pointcut")
+    h
+
 fn hir_hash_with_item(node: HirWithItem) -> i64:
     if node == nil:
         return 0
@@ -716,4 +976,4 @@ fn hir_hash_with_item(node: HirWithItem) -> i64:
     h
 
 export HIR_HASH_SEED, HIR_HASH_MOD, _hir_mix_text, _hir_mix_i64, _hir_mix_prim
-export hir_hash_expr, hir_hash_stmt, hir_hash_type, hir_hash_pattern, hir_hash_dim_expr, hir_hash_dim_expr_kind, hir_hash_effect, hir_hash_effect_kind, hir_hash_asm, hir_hash_asm_constraint, hir_hash_asm_match_arm, hir_hash_block, hir_hash_call_arg, hir_hash_comp_clause, hir_hash_comp_clause_kind, hir_hash_comprehension_kind, hir_hash_enum_payload, hir_hash_if_arm, hir_hash_interpolation, hir_hash_match_arm, hir_hash_param, hir_hash_pattern_payload, hir_hash_with_item
+export hir_hash_expr, hir_hash_stmt, hir_hash_type, hir_hash_pattern, hir_hash_dim_expr, hir_hash_dim_expr_kind, hir_hash_effect, hir_hash_effect_kind, hir_hash_asm, hir_hash_asm_constraint, hir_hash_asm_match_arm, hir_hash_block, hir_hash_call_arg, hir_hash_comp_clause, hir_hash_comp_clause_kind, hir_hash_comprehension_kind, hir_hash_enum_payload, hir_hash_extend_constructor, hir_hash_extend_enum, hir_hash_facet_access_mode, hir_hash_facet_acquire_mode, hir_hash_facet_binding_decl, hir_hash_facet_binding_mode, hir_hash_facet_impl_decl, hir_hash_facet_interface_decl, hir_hash_facet_method, hir_hash_facet_requirement_decl, hir_hash_function, hir_hash_if_arm, hir_hash_interpolation, hir_hash_match_arm, hir_hash_module, hir_hash_param, hir_hash_pattern_payload, hir_hash_type_param, hir_hash_type_pointcut, hir_hash_with_item

@@ -1,0 +1,166 @@
+use std.spec.*
+use compiler.mir.hwir.types.{CoreConfig}
+use compiler.mir.hwir.riscv_lsu_config.{LsuConfig}
+use compiler.mir.hwir.riscv_scalar_runtime_pipeline_v9_flat.{strict_riscv_scalar_runtime_pipeline_v9_flat_direct}
+
+fn rv32_im_zicsr() -> CoreConfig:
+    CoreConfig(xlen: 32, physical_address_bits: 32, register_count: 32,
+        profile: "riscv-gen2-rv32-im-zicsr", isa_profile: "rv32im_zicsr_zifencei",
+        compressed_decode_profile: "none")
+
+fn rv64_im_zicsr() -> CoreConfig:
+    CoreConfig(xlen: 64, physical_address_bits: 56, register_count: 32,
+        profile: "riscv-gen2-rv64-im-zicsr", isa_profile: "rv64im_zicsr_zifencei",
+        compressed_decode_profile: "none")
+
+describe "flattened runtime scalar pipeline v9":
+    it "owns the tag-three CSR provider and exposes its service boundary":
+        val pipeline = strict_riscv_scalar_runtime_pipeline_v9_flat_direct(
+            "runtime_v9_flat", rv32_im_zicsr(), LsuConfig.rv32_product_default()).unwrap()
+        expect(pipeline.local_diagnostic()).to_equal("")
+        expect(pipeline.csr.entity_name).to_equal("runtime_v9_flat_csr")
+        expect(pipeline.top_ports.any(_.name == "csr_present" and _.direction == "in")).to_be(true)
+        expect(pipeline.top_ports.any(_.name == "csr_commit_value" and _.direction == "out")).to_be(true)
+
+    it "constructs the combined profiles with an exact closed direct-child graph":
+        for row in [(rv32_im_zicsr(), LsuConfig.rv32_product_default()),
+                (rv64_im_zicsr(), LsuConfig.rv64_product_default())]:
+            val pipeline = strict_riscv_scalar_runtime_pipeline_v9_flat_direct(
+                "runtime_v9_flat_closed_" + row[0].xlen.to_text(), row[0], row[1]).unwrap()
+            expect(pipeline.local_diagnostic()).to_equal("")
+            expect(pipeline.binding_prefix_diagnostic()).to_equal("")
+            expect(pipeline.diagnostic()).to_equal("")
+            expect(pipeline.csr.entity_name).to_equal(
+                "runtime_v9_flat_closed_" + row[0].xlen.to_text() + "_csr")
+
+    it "freezes the exact ordered 21-child V9 product":
+        val pipeline = strict_riscv_scalar_runtime_pipeline_v9_flat_direct(
+            "runtime_v9_flat_children", rv32_im_zicsr(), LsuConfig.rv32_product_default()).unwrap()
+        val child_names = [pipeline.decoder.entity_name, pipeline.uop_skid.entity_name,
+            pipeline.alu.entity_name, pipeline.control.entity_name, pipeline.system.entity_name,
+            pipeline.illegal_provider.entity_name, pipeline.router.entity_name,
+            pipeline.immediate_adapter.entity_name, pipeline.pending.entity_name,
+            pipeline.projection.entity_name, pipeline.muldiv.entity_name, pipeline.csr.entity_name,
+            pipeline.lsu.entity_name, pipeline.fence.entity_name, pipeline.selector.entity_name,
+            pipeline.completion_merge.entity_name, pipeline.completion_skid.entity_name,
+            pipeline.global_fault_gate.entity_name, pipeline.fault_owner.entity_name,
+            pipeline.defaults.entity_name, pipeline.zero_defaults.entity_name]
+        expect(child_names.len()).to_equal(21)
+        expect(child_names).to_equal(["runtime_v9_flat_children_decoder",
+            "runtime_v9_flat_children_uop_skid", "runtime_v9_flat_children_alu",
+            "runtime_v9_flat_children_control", "runtime_v9_flat_children_system",
+            "runtime_v9_flat_children_illegal", "runtime_v9_flat_children_router",
+            "runtime_v9_flat_children_immediate_adapter", "runtime_v9_flat_children_pending",
+            "runtime_v9_flat_children_projection", "runtime_v9_flat_children_muldiv",
+            "runtime_v9_flat_children_csr", "runtime_v9_flat_children_lsu",
+            "runtime_v9_flat_children_fence", "runtime_v9_flat_children_selector",
+            "runtime_v9_flat_children_completion_merge", "runtime_v9_flat_children_completion_skid",
+            "runtime_v9_flat_children_global_fault_gate", "runtime_v9_flat_children_fault_owner",
+            "runtime_v9_flat_children_defaults", "runtime_v9_flat_children_zero_defaults"])
+
+    it "freezes every CSR service top-port direction and XLEN-aware width":
+        for row in [(rv32_im_zicsr(), LsuConfig.rv32_product_default()),
+                (rv64_im_zicsr(), LsuConfig.rv64_product_default())]:
+            val pipeline = strict_riscv_scalar_runtime_pipeline_v9_flat_direct(
+                "runtime_v9_flat_csr_abi_" + row[0].xlen.to_text(), row[0], row[1]).unwrap()
+            for port in [("csr_present", "in", 1), ("csr_read_value", "in", row[0].xlen),
+                    ("csr_lookup_valid", "out", 1), ("csr_lookup_address", "out", 12),
+                    ("csr_lookup_read_enable", "out", 1), ("csr_commit_valid", "out", 1),
+                    ("csr_commit_address", "out", 12), ("csr_commit_value", "out", row[0].xlen)]:
+                expect(pipeline.top_ports.any(_.name == port[0] and _.direction == port[1] and
+                    _.bit_width == port[2])).to_be(true)
+
+    it "routes class six through pending tag three and retains the CSR child":
+        val pipeline = strict_riscv_scalar_runtime_pipeline_v9_flat_direct(
+            "runtime_v9_flat_csr_route", rv64_im_zicsr(), LsuConfig.rv64_product_default()).unwrap()
+        expect(pipeline.router.entity_name).to_equal("runtime_v9_flat_csr_route_router")
+        expect(pipeline.router.constants.any(_.name == "class6" and _.bit_width == 3 and _.value == 6)).to_be(true)
+        expect(pipeline.router.constants.any(_.name == "tag_csr" and _.bit_width == 3 and _.value == 3)).to_be(true)
+        expect(pipeline.bindings.any(_.source_owner == "router" and _.source_port == "pending_dispatch_tag" and
+            _.destination_owner == "pending" and _.destination_port == "dispatch_tag" and _.bit_width == 3)).to_be(true)
+        expect(pipeline.csr.entity_name).to_equal("runtime_v9_flat_csr_route_csr")
+
+    it "ties only CSR's unused illegal input low and gates the CSR fault row":
+        val pipeline = strict_riscv_scalar_runtime_pipeline_v9_flat_direct(
+            "runtime_v9_flat_csr_live", rv32_im_zicsr(), LsuConfig.rv32_product_default()).unwrap()
+        val csr_zero_defaults = pipeline.bindings.filter(_.source_owner == "zero_defaults" and
+            _.destination_owner == "csr")
+        expect(csr_zero_defaults.len()).to_equal(1)
+        expect(csr_zero_defaults[0].source_port).to_equal("zero_1")
+        expect(csr_zero_defaults[0].destination_port).to_equal("illegal_valid")
+        expect(csr_zero_defaults[0].bit_width).to_equal(1)
+        expect(pipeline.bindings.any(_.source_owner == "csr" and _.source_port == "provider_protocol_fault" and
+            _.destination_owner == "global_fault_gate" and _.destination_port == "csr_fault" and
+            _.bit_width == 1)).to_be(true)
+
+    it "rejects malformed direct edges and reordered otherwise-closed canonical graphs":
+        val malformed = strict_riscv_scalar_runtime_pipeline_v9_flat_direct(
+            "runtime_v9_flat_malformed", rv32_im_zicsr(), LsuConfig.rv32_product_default()).unwrap()
+        malformed.bindings[0].source_port = "missing_port"
+        expect(malformed.local_diagnostic()).to_equal(
+            "HWIR-E-RISCV-RUNTIME-PIPELINE-V9-ENDPOINT: binding endpoint must exist")
+        val reordered = strict_riscv_scalar_runtime_pipeline_v9_flat_direct(
+            "runtime_v9_flat_reordered", rv32_im_zicsr(), LsuConfig.rv32_product_default()).unwrap()
+        val first = reordered.bindings[0]
+        reordered.bindings[0] = reordered.bindings[1]
+        reordered.bindings[1] = first
+        expect(reordered.local_diagnostic()).to_equal("")
+        expect(reordered.diagnostic()).to_equal(
+            "HWIR-E-RISCV-RUNTIME-PIPELINE-V9-CANONICAL: pipeline requires exact direct compiler-owned children")
+
+    it "rejects IM and standalone CSR profiles at the V9 product boundary":
+        expect(strict_riscv_scalar_runtime_pipeline_v9_flat_direct(
+            "runtime_v9_flat_im_rejected", CoreConfig.rv32im(), LsuConfig.rv32_product_default()).is_err()).to_be(true)
+        expect(strict_riscv_scalar_runtime_pipeline_v9_flat_direct(
+            "runtime_v9_flat_zicsr_rejected", CoreConfig.rv32_zicsr_zifencei(),
+            LsuConfig.rv32_product_default()).is_err()).to_be(true)
+
+    it "binds pending tag-three service, completion, and fail-closed paths directly":
+        val pipeline = strict_riscv_scalar_runtime_pipeline_v9_flat_direct(
+            "runtime_v9_flat_edges", rv32_im_zicsr(), LsuConfig.rv32_product_default()).unwrap()
+        for edge in [("pending", "csr_request_valid", "csr", "request_valid", 1),
+                ("pending", "csr_request_provider_tag", "csr", "request_provider_tag", 3),
+                ("csr", "completion_valid", "pending", "csr_completion_valid", 1),
+                ("pending", "csr_completion_ready", "csr", "completion_ready", 1),
+                ("csr", "provider_protocol_fault", "global_fault_gate", "csr_fault", 1),
+                ("csr", "csr_commit_valid", "global_fault_gate", "raw_csr_commit_valid", 1)]:
+            expect(pipeline.bindings.any(_.source_owner == edge[0] and _.source_port == edge[1] and
+                _.destination_owner == edge[2] and _.destination_port == edge[3] and _.bit_width == edge[4])).to_be(true)
+
+    it "binds tag-two M request, acceptance, held readiness, and all 25 payload edges":
+        val pipeline = strict_riscv_scalar_runtime_pipeline_v9_flat_direct(
+            "runtime_v9_flat_m_edges", rv64_im_zicsr(), LsuConfig.rv64_product_default()).unwrap()
+        for edge in [("pending", "muldiv_request_valid", "muldiv", "request_valid", 1),
+                ("pending", "muldiv_request_provider_tag", "muldiv", "request_provider_tag", 3),
+                ("muldiv", "request_ready", "pending", "muldiv_request_ready", 1),
+                ("muldiv", "request_accept", "pending", "muldiv_request_accept", 1),
+                ("pending", "muldiv_completion_ready", "muldiv", "completion_ready", 1)]:
+            expect(pipeline.bindings.any(_.source_owner == edge[0] and _.source_port == edge[1] and
+                _.destination_owner == edge[2] and _.destination_port == edge[3] and _.bit_width == edge[4])).to_be(true)
+        for edge in [("completion_privilege", "muldiv_completion_privilege", 2),
+                ("completion_original_instruction", "muldiv_completion_original_instruction", 32),
+                ("completion_canonical_instruction", "muldiv_completion_canonical_instruction", 32),
+                ("completion_instruction_length_bytes", "muldiv_completion_instruction_length_bytes", 3),
+                ("completion_pc_before", "muldiv_completion_pc_before", 64),
+                ("completion_pc_after", "muldiv_completion_pc_after", 64),
+                ("completion_rd", "muldiv_completion_rd", 5),
+                ("completion_rd_write", "muldiv_completion_rd_write", 1),
+                ("completion_rd_value", "muldiv_completion_rd_value", 64),
+                ("completion_memory_address", "muldiv_completion_memory_address", 64),
+                ("completion_memory_read_mask", "muldiv_completion_memory_read_mask", 32),
+                ("completion_memory_write_mask", "muldiv_completion_memory_write_mask", 32),
+                ("completion_memory_read_data", "muldiv_completion_memory_read_data", 64),
+                ("completion_memory_write_data", "muldiv_completion_memory_write_data", 64),
+                ("completion_execute_trap_valid", "muldiv_completion_execute_trap_valid", 1),
+                ("completion_execute_trap_cause", "muldiv_completion_execute_trap_cause", 64),
+                ("completion_execute_trap_tval", "muldiv_completion_execute_trap_tval", 64),
+                ("completion_memory_trap_valid", "muldiv_completion_memory_trap_valid", 1),
+                ("completion_memory_trap_cause", "muldiv_completion_memory_trap_cause", 64),
+                ("completion_memory_trap_tval", "muldiv_completion_memory_trap_tval", 64),
+                ("completion_redirect_valid", "muldiv_completion_redirect_valid", 1),
+                ("completion_redirect_target", "muldiv_completion_redirect_target", 64),
+                ("completion_illegal_valid", "muldiv_completion_illegal_valid", 1),
+                ("completion_provider_event_id", "muldiv_completion_event_id", 64),
+                ("completion_decode_event_id", "muldiv_completion_decode_event_id", 64)]:
+            expect(pipeline.bindings.any(_.source_owner == "muldiv" and _.source_port == edge[0] and
+                _.destination_owner == "pending" and _.destination_port == edge[1] and _.bit_width == edge[2])).to_be(true)

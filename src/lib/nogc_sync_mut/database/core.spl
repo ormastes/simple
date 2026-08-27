@@ -20,9 +20,8 @@
 #   file_write("doc/08_tracking/bug/bug_db.sdn", content)  // ❌ Race condition!
 
 use nogc_sync_mut.database.atomic (atomic_write, atomic_read)
-use std.convert (try_parse_int, try_parse_i32)
 
-use std.nogc_sync_mut.compression.gzip (crc32_text)
+extern fn rt_crc32_text(content: text) -> i64
 use nogc_sync_mut.database.wal (WriteAheadLog, WalEntry, WalEntryType, wal_payload_to_row)
 use nogc_sync_mut.database.db_metrics (DbMetrics)
 # Minimal StringId definition (avoids external dependency during bootstrap)
@@ -34,7 +33,7 @@ struct StringId:
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_file_exists(path: text) -> bool
-use std.io_runtime.{file_rename}
+extern fn rt_file_rename(from: text, to: text) -> bool
 
 fn file_read(path: text) -> text:
     # Bootstrap runtime wraps rt_file_read_text result in Option
@@ -105,7 +104,7 @@ class StringInterner:
 
     # Load from SDN table
     static fn from_sdn(table: SdnTable) -> StringInterner:
-        var interner = StringInterner(str_to_id: {}, id_to_str: {}, next_id: StringId(value: 0))
+        val interner = StringInterner(str_to_id: {}, id_to_str: {}, next_id: StringId(value: 0))
         for row in table.rows:
             if val Some(id_str) = row.get("id"):
                 if val Some(value) = row.get("value"):
@@ -152,29 +151,20 @@ struct SdnRow:
             nil
 
     # Get as i32
-    #
-    # FAIL-CLOSED. Was `value.to_int()` + `if parsed == nil` -- a dead guard:
-    # `.to_int()` is typed `i64?` but its runtime (rt_string_to_int) returns a
-    # plain int64_t and can never produce nil, so "abc" was admitted as 0.
-    # `try_parse_i32` genuinely returns nil (and range-checks). The value is
-    # returned bare, never `Some(...)`: wrapping an i64 in an explicit Some
-    # multiplies the payload by 8 on the JIT backend.
     fn get_i32(column: text) -> i32?:
         val value = self.get(column)?
-        val parsed = try_parse_i32(value)
+        val parsed = value.to_int()
         if parsed == nil:
             return nil
-        val n: i64 = parsed ?? 0
-        n.to_i32()
+        Some(parsed)
 
-    # Get as i64 -- fail-closed, see get_i32 above.
+    # Get as i64
     fn get_i64(column: text) -> i64?:
         val value = self.get(column)?
-        val parsed = try_parse_int(value)
+        val parsed = value.to_int()
         if parsed == nil:
             return nil
-        val n: i64 = parsed ?? 0
-        n
+        Some(parsed)
 
     # Get as f64
     fn get_f64(column: text) -> f64?:
@@ -222,14 +212,14 @@ class SdnTable:
 
     # Parse from SDN format
     static fn parse(content: text) -> SdnTable?:
-        val lines: [text] = content.split("\n")
+        val lines = content.split("\n")
         if lines.len() == 0:
             return nil
 
         # Find table header line (format: "table_name |col1, col2, col3|")
         var header_idx = -1
-        var table_name: text = ""
-        var columns: [text] = []
+        var table_name = ""
+        var columns = []
 
         var i = 0
         while i < lines.len():
@@ -237,12 +227,12 @@ class SdnTable:
             val trimmed = line.trim()
             if trimmed.contains("|") and not trimmed.starts_with("#"):
                 # Parse header
-                val parts: [text] = trimmed.split("|")
+                val parts = trimmed.split("|")
                 if parts.len() >= 3:
                     table_name = parts[0].trim()
                     val col_part = parts[1].trim()
                     # NOTE: Cannot chain .split().map() - bootstrap runtime bug
-                    val raw_cols: [text] = col_part.split(",")
+                    val raw_cols = col_part.split(",")
                     columns = raw_cols.map(&:trim)
                     header_idx = i
                     break
@@ -297,26 +287,10 @@ class SdnTable:
 
         parts.join("")
 
-    # Name of the primary-key column.
-    #
-    # Only the `strings` table literally has an `id` column; every other table
-    # in the test DB keys on its FIRST column (`run_id`, `test_id`, ...). Keying
-    # lookups on a hardcoded "id" made update_row/get_row/mark_deleted match
-    # nothing at all, so every in-place update was silently dropped — test runs
-    # stayed `running` forever. See
-    # doc/08_tracking/bug/test_db_update_row_keys_nonexistent_id_column_2026-08-21.md
-    fn primary_key_column() -> text:
-        for col in self.columns:
-            if col == "id":
-                return "id"
-        if self.columns.len() > 0:
-            return self.columns[0]
-        "id"
-
     # Add row
     me add_row(row: SdnRow) -> bool:
-        # If has primary key, add to index
-        val id = row.get(self.primary_key_column())
+        # If has primary key (id field), add to index
+        val id = row.get("id")
         if id.?:
             self.index[id ?? ""] = self.rows.len()
 
@@ -339,7 +313,7 @@ class SdnTable:
         while i < self.rows.len():
             val current = self.rows[i]
             val current_row: SdnRow = current
-            if current_row.get(pk) == Some(key):
+            if current_row.get("id") == Some(key):
                 self.rows[i] = row
                 self.index[key] = i
                 return Ok(())
@@ -364,7 +338,7 @@ class SdnTable:
         while i < self.rows.len():
             val current = self.rows[i]
             val current_row: SdnRow = current
-            if current_row.get(pk) == Some(key):
+            if current_row.get("id") == Some(key):
                 if current_row._version != expected_version:
                     return Err("version mismatch: expected {expected_version}, got {current_row._version}")
                 val new_row = SdnRow(fields: row.fields, _version: expected_version + 1)
@@ -376,9 +350,8 @@ class SdnTable:
 
     # Get row by primary key
     fn get_row(key: text) -> SdnRow?:
-        val pk = self.primary_key_column()
         for row in self.rows:
-            if row.get(pk) == Some(key):
+            if row.get("id") == Some(key):
                 return Some(row)
         nil
 
@@ -389,7 +362,7 @@ class SdnTable:
         while i < self.rows.len():
             val current = self.rows[i]
             val current_row: SdnRow = current
-            if current_row.get(pk) == Some(key):
+            if current_row.get("id") == Some(key):
                 # NOTE: self.rows[idx].set() modifies a copy in bootstrap runtime
                 # Must read, modify, write back
                 var row: SdnRow = current_row
@@ -417,8 +390,8 @@ class SdnTable:
 
     # Clear all rows and index
     me clear():
-        self.rows = []
-        self.index = {}
+        self.rows.clear()
+        self.index.clear()
 
     # Rebuild index after loading
     me rebuild_index():
@@ -463,29 +436,22 @@ class SdnDatabase:
         if raw_content == "":
             return nil
 
-        var content: text = raw_content
+        var content = raw_content
         if content.starts_with("#sdn-crc32:"):
-            val newline_idx = content.index_of("\n")
+            val newline_idx = content.index_of("\n") ?? -1
             if newline_idx > 0:
                 val header = content.slice(0, newline_idx)
                 val stored_crc_str = header.slice(11, header.len())
-                # Fail-CLOSED: a malformed CRC header must reject the file.
-                # `.to_int() ?? -1` could not do that -- `.to_int()` never
-                # yields nil, so "#sdn-crc32:garbage" parsed as 0 and would
-                # have matched any body whose crc32 is 0.
-                val parsed_crc = try_parse_int(stored_crc_str)
-                if parsed_crc == nil:
-                    return nil
-                val stored_crc: i64 = parsed_crc ?? -1
+                val stored_crc = stored_crc_str.to_int() ?? -1
                 val body = content.slice(newline_idx + 1, content.len())
-                val computed_crc = crc32_text(body)
+                val computed_crc = rt_crc32_text(body)
                 if stored_crc != computed_crc:
                     return nil
                 content = body
 
-        var db = SdnDatabase(path: path, tables: {}, interner: StringInterner(str_to_id: {}, id_to_str: {}, next_id: StringId(value: 0)), modified: false, wal: nil, metrics: nil)
+        val db = SdnDatabase(path: path, tables: {}, interner: StringInterner(str_to_id: {}, id_to_str: {}, next_id: StringId(value: 0)), modified: false, wal: nil, metrics: nil)
 
-        val sections: [text] = content.split("\n\n")
+        val sections = content.split("\n\n")
         for section in sections:
             if section.trim() == "":
                 continue
@@ -560,7 +526,7 @@ class SdnDatabase:
             sections.push(typed_table.to_sdn())
 
         val body = sections.join("\n\n") + "\n\n"
-        val crc = crc32_text(body)
+        val crc = rt_crc32_text(body)
         val content = "#sdn-crc32:{crc}\n" + body
 
         if not atomic_write(self.path, content):
@@ -600,7 +566,7 @@ class SdnDatabase:
 
     # Add row to table (helper for common pattern)
     me add_row_to_table(table_name: text, row: SdnRow) -> bool:
-        val table_opt = self.get_table_mut(table_name)
+        var table_opt = self.get_table_mut(table_name)
         match table_opt:
             Some(table_value):
                 var table = table_value
@@ -708,6 +674,11 @@ fn strip_quotes(value: text) -> text:
 
 # Quote a value if it contains commas (for SDN export).
 fn quote_if_needed(value: text) -> text:
+    # Empty terminal columns must remain explicit.  Emitting an empty token
+    # after `values.join(", ")` leaves a trailing space, which fails repository
+    # whitespace checks; trimming that space would also invalidate the SDN CRC.
+    if value == "":
+        return "\"\""
     if value.contains(","):
         return '"' + value + '"'
     value

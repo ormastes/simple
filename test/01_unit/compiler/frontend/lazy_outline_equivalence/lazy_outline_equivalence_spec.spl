@@ -42,110 +42,28 @@
 
 extern fn rt_file_read_text(path: text) -> text
 
-# ---------------------------------------------------------------------------
-# Lightweight text-based declaration scanner
-# ---------------------------------------------------------------------------
-#
-# `scan_outline(source)` — outline path:
-#   Collects top-level declaration names (fn/class/struct/enum/trait) from
-#   lines that start at column 0 (indent-0). Skips lines inside function
-#   bodies (any line that does NOT start at col 0 and is inside a `fn` block).
-#   This mirrors what the treesitter outline parser does in fast_mode: it
-#   captures function signatures at col-0 but stores function bodies as opaque
-#   payload (BlockSkipPolicy.Skippable for fn bodies).
-#
-# `scan_full(source)` — full path:
-#   Collects top-level declaration names from ALL lines, but still only picks
-#   up lines that start at col 0 with a declaration keyword. This is equivalent
-#   to full-parse collecting the same surface.
-#
-# Both functions return sorted [text] of `keyword:name` tokens so the
-# equivalence assertion is order-independent.
+## Operator workflow
 
-fn is_decl_keyword(word: text) -> bool:
-    word == "fn" or word == "class" or word == "struct" or
-    word == "enum" or word == "trait" or word == "extern"
+1. Run `bin/simple test test/01_unit/compiler/frontend/lazy_outline_equivalence/lazy_outline_equivalence_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the
+   behavior under test.
 
-fn extract_decl_name(line: text) -> text:
-    """Extract 'keyword:name' from a top-level declaration line, or '' if none."""
-    val trimmed = line.trim()
-    # Must start at col 0 (no leading whitespace)
-    if line.len() == 0:
-        return ""
-    val first_char = line.substring(0, 1)
-    if first_char == " " or first_char == "\t":
-        return ""
-    # Skip comment lines
-    if trimmed.starts_with("#"):
-        return ""
-    # Find first word
-    var i: i64 = 0
-    var word_end: i64 = 0
-    while word_end < trimmed.len():
-        val ch = trimmed.substring(word_end, word_end + 1)
-        if ch == " " or ch == "(" or ch == "<" or ch == ":":
-            break
-        word_end = word_end + 1
-    if word_end == 0:
-        return ""
-    val kw = trimmed.substring(0, word_end)
-    # Handle `pub fn`, `export fn`, `extern fn` etc by advancing past modifier
-    var actual_kw = kw
-    var rest_start: i64 = word_end
-    if kw == "pub" or kw == "export" or kw == "extern":
-        # skip whitespace after modifier
-        while rest_start < trimmed.len() and trimmed.substring(rest_start, rest_start + 1) == " ":
-            rest_start = rest_start + 1
-        # grab next word
-        var kw2_end = rest_start
-        while kw2_end < trimmed.len():
-            val ch2 = trimmed.substring(kw2_end, kw2_end + 1)
-            if ch2 == " " or ch2 == "(" or ch2 == "<" or ch2 == ":":
-                break
-            kw2_end = kw2_end + 1
-        if kw2_end > rest_start:
-            val kw2 = trimmed.substring(rest_start, kw2_end)
-            if is_decl_keyword(kw2):
-                actual_kw = kw2
-                rest_start = kw2_end
-            else:
-                return ""
-        else:
-            return ""
-    if not is_decl_keyword(actual_kw):
-        return ""
-    # skip whitespace before name
-    while rest_start < trimmed.len() and trimmed.substring(rest_start, rest_start + 1) == " ":
-        rest_start = rest_start + 1
-    if rest_start >= trimmed.len():
-        return ""
-    # grab name token
-    var name_end = rest_start
-    while name_end < trimmed.len():
-        val ch3 = trimmed.substring(name_end, name_end + 1)
-        if ch3 == "(" or ch3 == "<" or ch3 == ":" or ch3 == " ":
-            break
-        name_end = name_end + 1
-    if name_end <= rest_start:
-        return ""
-    val name = trimmed.substring(rest_start, name_end)
-    actual_kw + ":" + name
+## Compatibility and limitations
 
-fn sort_names(names: [text]) -> [text]:
-    """Insertion sort for deterministic comparison."""
-    var result = names
-    var i: i64 = 1
-    while i < result.len():
-        val key = result[i]
-        var j = i - 1
-        while j >= 0 and result[j] > key:
-            result[j + 1] = result[j]
-            j = j - 1
-        result[j + 1] = key
-        i = i + 1
-    result
+Covers the interpreter and native lanes for the constructs
+asserted here; platform-specific behavior is out of scope.
+"""
 
-fn scan_outline(source: text) -> [text]:
+use std.spec
+
+# doc-path: doc/01_research/local/lazy_outline_equivalence.md
+# doc-path: doc/03_plan/sys_test/lazy_outline_equivalence.md
+# doc-path: doc/04_architecture/lazy_outline_equivalence.md
+# doc-path: doc/05_design/lazy_outline_equivalence.md
+
+# @manual: primary
+
+describe "Executed behavior oracles":
     """
     Outline path: collect top-level declaration names from col-0 lines only.
     Mimics treesitter fast_mode: function bodies (indented lines) are skipped.

@@ -31,7 +31,10 @@ val APKIDX_MAX_DIRECTORY_BYTES: i64 = 16777216
 
 struct PackIndexEntry:
     pack_path: text
+    source_path: text
     file_size: i64
+    source_offset: i64
+    pack_size: i64
     index_bytes: [u8]      # header + directory ONLY, never payload
     dir_size: i64
     module_count: i64
@@ -59,7 +62,8 @@ fn pack_index_cache_new() -> PackIndexCache:
 
 fn _apkidx_error(path: text, code: text, message: text) -> PackIndexEntry:
     var empty: [u8] = []
-    PackIndexEntry(pack_path: path, file_size: 0, index_bytes: empty,
+    PackIndexEntry(pack_path: path, source_path: path, file_size: 0,
+        source_offset: 0, pack_size: 0, index_bytes: empty,
         dir_size: 0, module_count: 0, ok: false, error_code: code, error_message: message)
 
 fn _apkidx_read_u16(data: [u8], offset: i64) -> i64:
@@ -81,18 +85,25 @@ fn _apkidx_read_u64(data: [u8], offset: i64) -> i64:
         i = i + 1
     out
 
-fn pack_index_read(c: PackIndexCache, pack_path: text) -> PackIndexEntry:
-    """Read header + directory from the file, bounded. Never reads payload."""
-    val fsize = pack_file_size(pack_path)
-    if fsize < APKIDX_HEADER_SIZE_V1:
+fn pack_index_read_window(c: PackIndexCache, source_path: text, pack_path: text, source_offset: i64, pack_size: i64) -> PackIndexEntry:
+    """Read one pack's header + directory from a bounded file window.
+
+    `source_path` may be a standalone APK or an outer SMF. `pack_path` is the
+    catalog-visible identity, while `source_offset`/`pack_size` identify the
+    exact embedded `.aspect_pack` payload. No payload chunk is read."""
+    val fsize = pack_file_size(source_path)
+    if source_offset < 0 or pack_size < APKIDX_HEADER_SIZE_V1:
         return _apkidx_error(pack_path, "APKIDX_TRUNCATED_HEADER",
             "pack shorter than the fixed {APKIDX_HEADER_SIZE_V1}-byte header")
+    if fsize <= 0 or source_offset > fsize or pack_size > fsize - source_offset:
+        return _apkidx_error(pack_path, "APKIDX_TRUNCATED_PACK",
+            "pack window [{source_offset}, +{pack_size}) runs past the {fsize}-byte source")
 
-    val header = pack_read_range(pack_path, 0, APKIDX_HEADER_SIZE_V1)
+    val header = pack_read_range(source_path, source_offset, APKIDX_HEADER_SIZE_V1)
     c.index_bytes_read = c.index_bytes_read + header.len()
     if header.len() != APKIDX_HEADER_SIZE_V1:
         return _apkidx_error(pack_path, "APKIDX_HEADER_READ_FAILED",
-            "could not map the pack header of {pack_path}")
+            "could not map the pack header of {source_path}")
 
     val magic = text_to_bytes(APKIDX_MAGIC_V1)
     var i = 0
@@ -113,24 +124,24 @@ fn pack_index_read(c: PackIndexCache, pack_path: text) -> PackIndexEntry:
 
     if module_count <= 0 or module_count > 1048576:
         return _apkidx_error(pack_path, "APKIDX_BAD_GEOMETRY", "unreasonable module_count")
-    if total_size != fsize:
+    if total_size != pack_size:
         return _apkidx_error(pack_path, "APKIDX_TRUNCATED_PACK",
-            "declared total_size {total_size} does not match the {fsize}-byte file")
+            "declared total_size {total_size} does not match the {pack_size}-byte pack window")
 
     # DECLARED-SIZE BOUND. Checked against the cap BEFORE the file, so a header
     # that lies about a huge directory is refused on the declaration alone.
     if dir_size <= 0 or dir_size > APKIDX_MAX_DIRECTORY_BYTES:
         return _apkidx_error(pack_path, "APKIDX_DIRECTORY_TOO_LARGE",
             "declared directory size {dir_size} exceeds the {APKIDX_MAX_DIRECTORY_BYTES}-byte index limit; refusing to map")
-    if APKIDX_HEADER_SIZE_V1 + dir_size > fsize:
+    if APKIDX_HEADER_SIZE_V1 + dir_size > pack_size:
         return _apkidx_error(pack_path, "APKIDX_TRUNCATED_PACK",
             "directory extends past the end of the pack")
 
-    val dir_bytes = pack_read_range(pack_path, APKIDX_HEADER_SIZE_V1, dir_size)
+    val dir_bytes = pack_read_range(source_path, source_offset + APKIDX_HEADER_SIZE_V1, dir_size)
     c.index_bytes_read = c.index_bytes_read + dir_bytes.len()
     if dir_bytes.len() != dir_size:
         return _apkidx_error(pack_path, "APKIDX_DIRECTORY_READ_FAILED",
-            "could not map the pack directory of {pack_path}")
+            "could not map the pack directory of {source_path}")
 
     var index_bytes: [u8] = []
     var h = 0
@@ -142,9 +153,14 @@ fn pack_index_read(c: PackIndexCache, pack_path: text) -> PackIndexEntry:
         index_bytes.push(dir_bytes[d])
         d = d + 1
 
-    PackIndexEntry(pack_path: pack_path, file_size: fsize,
+    PackIndexEntry(pack_path: pack_path, source_path: source_path, file_size: fsize,
+        source_offset: source_offset, pack_size: pack_size,
         index_bytes: index_bytes, dir_size: dir_size, module_count: module_count,
         ok: true, error_code: "", error_message: "")
+
+fn pack_index_read(c: PackIndexCache, pack_path: text) -> PackIndexEntry:
+    """Read a standalone pack's header + directory. Never reads payload."""
+    pack_index_read_window(c, pack_path, pack_path, 0, pack_file_size(pack_path))
 
 fn pack_index_get(c: PackIndexCache, pack_path: text) -> PackIndexEntry:
     """Cached index read, keyed on file SIZE alone.
@@ -170,11 +186,27 @@ fn pack_index_get(c: PackIndexCache, pack_path: text) -> PackIndexEntry:
         c.entries[pack_path] = fresh
     fresh
 
+fn pack_index_get_window(c: PackIndexCache, source_path: text, pack_path: text, source_offset: i64, pack_size: i64) -> PackIndexEntry:
+    """Cached index for a standalone or embedded pack window."""
+    val cached = c.entries.get(pack_path)
+    if cached != nil:
+        val e = cached!
+        if (e.ok and e.source_path == source_path and
+            e.file_size == pack_file_size(source_path) and
+            e.source_offset == source_offset and e.pack_size == pack_size):
+            c.hits = c.hits + 1
+            return e
+    c.misses = c.misses + 1
+    val fresh = pack_index_read_window(c, source_path, pack_path, source_offset, pack_size)
+    if fresh.ok:
+        c.entries[pack_path] = fresh
+    fresh
+
 fn pack_index_invalidate(c: PackIndexCache, pack_path: text) -> bool:
     val cached = c.entries.get(pack_path)
     if cached == nil:
         return false
-    c.entries.remove(pack_path)
+    c.entries = c.entries.remove(pack_path)
     true
 
 fn pack_index_evict_all(c: PackIndexCache) -> i64:
@@ -182,3 +214,6 @@ fn pack_index_evict_all(c: PackIndexCache) -> i64:
     var fresh: Dict<text, PackIndexEntry> = {}
     c.entries = fresh
     n
+
+fn pack_index_cached_count(c: PackIndexCache) -> i64:
+    c.entries.len()

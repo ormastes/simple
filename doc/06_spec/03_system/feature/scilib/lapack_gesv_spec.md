@@ -2,6 +2,29 @@
 
 > `solve(A, b)` solves the linear system Ax = b for x (LAPACK dgesv). Public API is primitive-free: `Matrix<Float64>`, `Vector<Float64>`, `Result<Vector<Float64>, LinalgError>`. The pivot array is fully hidden inside Layer B (T-LAPACK-07: no raw `int*` leak at Layer C).
 
+<!-- sdn-diagram:id=lapack_gesv_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=lapack_gesv_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+lapack_gesv_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=lapack_gesv_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 8 | 8 | 0 | 0 |
@@ -24,7 +47,7 @@
 | Plan | doc/03_plan/agent_tasks/scilib_port_lapack.md |
 | Design | doc/05_design/scilib_port_architecture.md |
 | Source | `test/03_system/feature/scilib/lapack_gesv_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -71,7 +94,9 @@ T-LAPACK-12 (solve Layer C public API), T-LAPACK-15 (gesv interp-mode spec).
 
 #### solves and returns x[0]=1.0
 
-- solves and returns x[0]=1.0
+1. [Float64 new
+2. [Float64 new
+3. [Float64 new
    - Expected: result.is_ok() is true
    - Expected: x.get_f64(Index.new(0)) equals `Float64.new(1.0)`
 
@@ -79,12 +104,10 @@ T-LAPACK-12 (solve Layer C public API), T-LAPACK-15 (gesv interp-mode spec).
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("solves and returns x[0]=1.0")
 # T-LAPACK-07, T-LAPACK-15
 val a = matrix_from_rows([
     [Float64.new(1.0), Float64.new(0.0), Float64.new(0.0)],
@@ -101,19 +124,19 @@ expect(x.get_f64(Index.new(0))).to_equal(Float64.new(1.0))
 
 #### solves and returns x[1]=2.0
 
-- solves and returns x[1]=2.0
+1. [Float64 new
+2. [Float64 new
+3. [Float64 new
    - Expected: x.get_f64(Index.new(1)) equals `Float64.new(2.0)`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("solves and returns x[1]=2.0")
 val a = matrix_from_rows([
     [Float64.new(1.0), Float64.new(0.0), Float64.new(0.0)],
     [Float64.new(2.0), Float64.new(1.0), Float64.new(0.0)],
@@ -128,19 +151,19 @@ expect(x.get_f64(Index.new(1))).to_equal(Float64.new(2.0))
 
 #### solves and returns x[2]=4.0
 
-- solves and returns x[2]=4.0
+1. [Float64 new
+2. [Float64 new
+3. [Float64 new
    - Expected: x.get_f64(Index.new(2)) equals `Float64.new(4.0)`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("solves and returns x[2]=4.0")
 val a = matrix_from_rows([
     [Float64.new(1.0), Float64.new(0.0), Float64.new(0.0)],
     [Float64.new(2.0), Float64.new(1.0), Float64.new(0.0)],
@@ -155,19 +178,19 @@ expect(x.get_f64(Index.new(2))).to_equal(Float64.new(4.0))
 
 #### result vector has length 3
 
-- result vector has length 3
+1. [Float64 new
+2. [Float64 new
+3. [Float64 new
    - Expected: x.len() equals `Index.new(3)`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("result vector has length 3")
 val a = matrix_from_rows([
     [Float64.new(1.0), Float64.new(0.0), Float64.new(0.0)],
     [Float64.new(2.0), Float64.new(1.0), Float64.new(0.0)],
@@ -186,22 +209,13 @@ expect(x.len()).to_equal(Index.new(3))
 
 #### returns x equal to b
 
-- returns x equal to b
-   - Expected: result.is_ok() is true
-   - Expected: x.get_f64(Index.new(0)) equals `Float64.new(7.0)`
-   - Expected: x.get_f64(Index.new(1)) equals `Float64.new(3.0)`
-   - Expected: x.get_f64(Index.new(2)) equals `Float64.new(9.0)`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns x equal to b")
 # T-LAPACK-12: identity shortcut path
 val a = eye_matrix(Index.new(3))
 val b = vector_from([Float64.new(7.0), Float64.new(3.0), Float64.new(9.0)])
@@ -221,19 +235,19 @@ expect(x.get_f64(Index.new(2))).to_equal(Float64.new(9.0))
 
 #### returns an error with Singular variant for rank-deficient A
 
-- returns an error with Singular variant for rank-deficient A
+1. [Float64 new
+2. [Float64 new
+3. [Float64 new
    - Expected: r.is_err() is true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns an error with Singular variant for rank-deficient A")
 # T-LAPACK-07: info != 0 path; pivot wrapper hidden
 val a = matrix_from_rows([
     [Float64.new(1.0), Float64.new(2.0), Float64.new(3.0)],
@@ -250,19 +264,18 @@ expect(r.is_err()).to_equal(true)
 
 #### returns an error for non-square A
 
-- returns an error for non-square A
+1. [Float64 new
+2. [Float64 new
    - Expected: r.is_err() is true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns an error for non-square A")
 # T-LAPACK-12: non-square guard
 val a = matrix_from_rows([
     [Float64.new(1.0), Float64.new(2.0), Float64.new(3.0)],
@@ -278,19 +291,13 @@ expect(r.is_err()).to_equal(true)
 
 #### returns an error when b length does not match A order
 
-- returns an error when b length does not match A order
-   - Expected: r.is_err() is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns an error when b length does not match A order")
 # T-LAPACK-12: A.rows != b.len guard
 val a = eye_matrix(Index.new(3))
 val b = vector_from([Float64.new(1.0), Float64.new(2.0)])
@@ -313,56 +320,8 @@ expect(r.is_err()).to_equal(true)
 
 ## Related Documentation
 
-- **Plan:** `doc/03_plan/agent_tasks/scilib_port_lapack.md`
-- **Design:** `doc/05_design/scilib_port_architecture.md`
+- **Plan:** [doc/03_plan/agent_tasks/scilib_port_lapack.md](doc/03_plan/agent_tasks/scilib_port_lapack.md)
+- **Design:** [doc/05_design/scilib_port_architecture.md](doc/05_design/scilib_port_architecture.md)
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `488fb4cfb4331b3c2593bf7d042f8f16d7316a8390fa44079fc1fe0612967ac8`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `488fb4cfb4331b3c2593bf7d042f8f16d7316a8390fa44079fc1fe0612967ac8`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `488fb4cfb4331b3c2593bf7d042f8f16d7316a8390fa44079fc1fe0612967ac8`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/03_system/feature/scilib/lapack_gesv_spec.spl
-mirror: doc/06_spec/03_system/feature/scilib/lapack_gesv_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/feature/scilib/lapack_gesv_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/feature/scilib/lapack_gesv_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/feature/scilib/lapack_gesv_spec.spl:76:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'solves and returns x[0]=1.0' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/scilib/lapack_gesv_spec.spl:90:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'solves and returns x[1]=2.0' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/scilib/lapack_gesv_spec.spl:102:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'solves and returns x[2]=4.0' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

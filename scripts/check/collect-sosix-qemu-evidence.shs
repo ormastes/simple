@@ -1,7 +1,7 @@
 #!/bin/sh
 # Import one immutable evidence bundle for every SOSIX QEMU matrix cell.
 #
-# Stable input schema (v1/v2): SOURCE/HOST/GUEST/BUNDLE/evidence.env.  See
+# Stable input schema (v1): SOURCE/HOST/GUEST/BUNDLE/evidence.env.  See
 # `--schema` for the closed identity and output-manifest definitions.  The
 # collector never evaluates evidence as shell code.
 set -eu
@@ -13,21 +13,32 @@ usage() {
 
 schema() {
     cat <<'EOF'
-SOSIX QEMU evidence collector schema v2
+SOSIX QEMU evidence collector schema v1
 
 Input location: SOURCE/{linux,windows,macos,freebsd}/{x86_32,x86_64,arm32,arm64,riscv32,riscv64}/BUNDLE/evidence.env
 Required exactly-once scalar keys: schema_version, host, guest, status, reason,
 owner, reviewer, resume_command, source_identity, compiler_identity,
+compiler_identity_scope, compiler_policy_sha256, compiler_policy_value,
+compiler_payload_identity, compiler_image_identity, compiler_alias_identity,
+compiler_manifest_identity,
 kernel_identity, image_identity, qemu_identity, qemu_argv,
-accelerator_identity, firmware_identity, firmware_mode, run_nonce,
+accelerator_identity, firmware_identity, firmware_mode, boot_correlation_marker,
+run_nonce,
 firmware_path, firmware_version, firmware_sha256, firmware_stage_markers,
 transcript_identity, program_identity,
 compiler_in_filesystem, compiler_version_evidence_path,
-compiler_hello_evidence_path, artifact_count. status is
+compiler_hello_evidence_path, compiler_alias_evidence_path,
+compiler_manifest_evidence_path, compiler_designation_scope, artifact_count. status is
 pass|failed|blocked|unsupported. compiler_in_filesystem is true|false. It must
 remain false unless the selected guest media contains the compiler. A true row
 requires distinct, bundle-relative compiler version and compile/run hello
-evidence paths, both present in the declared artifact set. Nonpass rows require
+evidence paths, both present in the declared artifact set. The paths are the
+canonical `compiler-version.txt` and `compiler-hello.txt`; their closed receipt
+lines must bind the row host, guest, and nonce, `/usr/bin/simple`, the canonical
+hello source/output paths, zero exits, target-native execution, and
+`hello-RUN_NONCE` stdout. Every receipt line must occur exactly once in the
+uniquely hash-selected retained transcript, so rehashing forged receipts does
+not change their meaning. Nonpass rows require
 nonempty reason, owner, reviewer, and resume_command; every row requires owner
 and reviewer. artifact_count must be positive. For each 1..artifact_count:
 artifact_I_path is required and bundle-relative; artifact_I_sha256 is optional
@@ -40,31 +51,36 @@ in the unique artifact selected by transcript_identity (`sha256:HEX`). For PASS
 rows, program_identity is also `sha256:HEX` and must select exactly one declared
 artifact, so an unattached label cannot stand in for the filesystem program.
 
-Schema v2 adds `direct-kernel`: no external firmware (`firmware_identity=firmware:none`,
-`firmware_path=none`, `firmware_version=version:none`, `firmware_sha256=none`) and
-exactly one ordered firmware-stage marker, `guest-entry`. The guest must emit
-that literal marker before the nonce-bound workload markers. v1 remains
-accepted for existing UEFI/OpenSBI/board-ROM bundles but cannot use direct-kernel.
-
-Output matrix.env: sosix_qemu_matrix_manifest_version=2,
+Output matrix.env: sosix_qemu_matrix_manifest_version=1,
 sosix_qemu_matrix_row_count=24, then indexed sosix_qemu_matrix_row_I_* fields.
-host, guest, status, evidence_sha256, admission_record_sha256, and
-artifact_count are plain ASCII.
+host, guest, status, evidence_sha256, and artifact_count are plain ASCII.
 reason, evidence_path, resume_command, owner, reviewer, source_identity,
 compiler_identity, kernel_identity, image_identity, qemu_identity, qemu_argv,
 accelerator_identity, firmware_identity, firmware_mode, firmware_path,
 firmware_version, firmware_sha256, firmware_stage_markers, run_nonce,
 transcript_identity, and program_identity use
 an `_b64` suffix and RFC 4648 base64 without line wrapping.
-Each imported row also owns `admission.env`, a closed thirteen-field record of the
-collector-verified manifest version, status, evidence hash, artifact count,
-clean source identity, transcript identity, program identity, firmware identity,
-firmware mode, absolute path, version, digest, and ordered stage markers. Its relative
-path is emitted as `admission_record_path_b64`; the SHA-256 of its exact bytes
-is emitted as `admission_record_sha256`. Callers do not supply admission
+Each imported row also owns `admission.env`, a closed forty-one-field record plus
+exactly nine or thirteen indexed artifact path/hash pairs. It binds the row cell,
+ownership, evidence path/hash, clean source identity, compiler-policy identity,
+QEMU/media/firmware identities, nonce, and compiler evidence fields. Its relative
+path is emitted as `admission_record_path_b64`; callers do not supply admission
 booleans.
 compiler_in_filesystem is plain true|false; compiler_version_evidence_path and
-compiler_hello_evidence_path use `_b64`. evidence_path is
+compiler_hello_evidence_path, compiler_alias_evidence_path, and
+compiler_manifest_evidence_path use `_b64`; compiler_designation_scope is plain
+`live-policy` or `contract-fixture` in both the manifest and admission record.
+Compiler-bearing rows additionally require canonical `compiler-aliases.txt` and
+`compiler-manifest.env` artifacts. The former is a closed target readback for
+`/usr/bin/simple`, `/bin/simple`, `/sys/apps/simple`,
+`/sys/apps/simple_compiler`, `/sys/apps/simple_interpreter`,
+`/sys/apps/simple_loader`, and `/SYS/SIMPLETOOL.SDN`; every readback line must
+occur exactly once in the retained transcript. `/usr/bin/simple` supplies the
+payload digest. The manifest binds that payload, guest image (`guest.img`),
+placement receipt, clean source identity, and run nonce. `compiler_identity` is the
+exact tuple `target-native-simple:payload=...:image=...:alias=...:manifest=...`.
+False rows carry empty compiler lineage fields and cannot be promoted by fixture
+mode. evidence_path is
 relative to the immutable import directory. Rows are sorted by source path,
 which canonically orders host then guest. The manifest feeds the fields of
 SosixQemuMatrixRow after base64 decoding; identity fields are additional
@@ -75,12 +91,19 @@ EOF
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 . "$repo_root/scripts/check/lib/sosix-qemu-lineage.shs"
+. "$repo_root/scripts/check/lib/sosix-qemu-firmware-transcript.shs"
+. "$repo_root/scripts/check/lib/sosix-qemu-compiler-placement.shs"
+SOSIX_QEMU_COMPILER_DESIGNATION_POLICY=$repo_root/scripts/check/lib/sosix-qemu-compiler-designation-v1.tsv
+export SOSIX_QEMU_COMPILER_DESIGNATION_POLICY
+. "$repo_root/scripts/check/lib/sosix-qemu-compiler-designation.shs"
 source_root=
 output=
+compiler_designation_fixture=
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --source-root) [ "$#" -ge 2 ] || usage; source_root=$2; shift 2 ;;
         --output) [ "$#" -ge 2 ] || usage; output=$2; shift 2 ;;
+        --compiler-designation-fixture) [ "$#" -ge 2 ] || usage; compiler_designation_fixture=$2; shift 2 ;;
         --schema) schema; exit 0 ;;
         *) usage ;;
     esac
@@ -113,6 +136,72 @@ optional_field() {
 }
 b64() { printf %s "$1" | base64 | tr -d '\n'; }
 hash_file() { sha256sum "$1" | awk '{print $1}'; }
+inode_key() { stat -Lc '%d:%i' "$1"; }
+
+validate_compiler_receipts() {
+    receipt_host=$1 receipt_guest=$2 receipt_nonce=$3
+    receipt_version_file=$4 receipt_hello_file=$5 receipt_transcript=$6
+    receipt_identity="host=$receipt_host guest=$receipt_guest nonce=$receipt_nonce"
+    receipt_version_prefix="SOSIX_QEMU_COMPILER_VERSION $receipt_identity path=/usr/bin/simple version="
+    receipt_version_suffix=' exit=0 target_native=true'
+
+    [ "$(wc -l < "$receipt_version_file" | tr -d ' ')" -eq 1 ] || return 1
+    receipt_version_line=$(sed -n '1p' "$receipt_version_file")
+    case "$receipt_version_line" in
+        "$receipt_version_prefix"*"$receipt_version_suffix") ;;
+        *) return 1;;
+    esac
+    receipt_version=${receipt_version_line#"$receipt_version_prefix"}
+    receipt_version=${receipt_version%"$receipt_version_suffix"}
+    printf '%s\n' "$receipt_version" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._+-]*$' || return 1
+
+    [ "$(wc -l < "$receipt_hello_file" | tr -d ' ')" -eq 6 ] || return 1
+    [ "$(sed -n '1p' "$receipt_hello_file")" = \
+        "SOSIX_QEMU_HELLO_SOURCE $receipt_identity path=/tmp/sosix-hello.spl source_nonce=$receipt_nonce" ] || return 1
+    [ "$(sed -n '2p' "$receipt_hello_file")" = \
+        "SOSIX_QEMU_HELLO_COMPILE BEGIN $receipt_identity compiler=/usr/bin/simple source=/tmp/sosix-hello.spl output=/tmp/sosix-hello" ] || return 1
+    [ "$(sed -n '3p' "$receipt_hello_file")" = \
+        "SOSIX_QEMU_HELLO_COMPILE END $receipt_identity output=/tmp/sosix-hello exit=0 target_native=true" ] || return 1
+    [ "$(sed -n '4p' "$receipt_hello_file")" = \
+        "SOSIX_QEMU_PROGRAM BEGIN $receipt_identity path=/tmp/sosix-hello" ] || return 1
+    [ "$(sed -n '5p' "$receipt_hello_file")" = \
+        "SOSIX_QEMU_PROGRAM_STDOUT $receipt_identity text=hello-$receipt_nonce" ] || return 1
+    [ "$(sed -n '6p' "$receipt_hello_file")" = \
+        "SOSIX_QEMU_PROGRAM END $receipt_identity exit=0 target_native=true" ] || return 1
+
+    while IFS= read -r receipt_line || [ -n "$receipt_line" ]; do
+        [ "$(grep -Fxc -- "$receipt_line" "$receipt_transcript")" -eq 1 ] || return 1
+    done < "$receipt_version_file"
+    while IFS= read -r receipt_line || [ -n "$receipt_line" ]; do
+        [ "$(grep -Fxc -- "$receipt_line" "$receipt_transcript")" -eq 1 ] || return 1
+    done < "$receipt_hello_file"
+}
+
+validate_compiler_lineage() {
+    lineage_env=$1 lineage_dest=$2 lineage_host=$3 lineage_guest=$4 lineage_nonce=$5 lineage_transcript=$6
+    lineage_source=$(field source_identity "$lineage_env")
+    lineage_payload=$(field compiler_payload_identity "$lineage_env")
+    lineage_image=$(field compiler_image_identity "$lineage_env")
+    lineage_alias=$(field compiler_alias_identity "$lineage_env")
+    lineage_manifest=$(field compiler_manifest_identity "$lineage_env")
+    for lineage_id in "$lineage_payload" "$lineage_image" "$lineage_alias" "$lineage_manifest"; do
+        printf '%s\n' "$lineage_id" | grep -Eq '^sha256:[0-9a-f]{64}$' || return 1
+    done
+    lineage_image_hash=$(hash_file "$lineage_dest/artifacts/guest.img")
+    lineage_alias_hash=$(hash_file "$lineage_dest/artifacts/compiler-aliases.txt")
+    lineage_manifest_hash=$(hash_file "$lineage_dest/artifacts/compiler-manifest.env")
+    [ "$lineage_image" = "sha256:$lineage_image_hash" ] || return 1
+    [ "$lineage_alias" = "sha256:$lineage_alias_hash" ] || return 1
+    [ "$lineage_manifest" = "sha256:$lineage_manifest_hash" ] || return 1
+    sosix_qemu_validate_compiler_placement "$lineage_host" "$lineage_guest" "$lineage_nonce" \
+        "$lineage_image" "$lineage_source" "$lineage_dest/artifacts/compiler-aliases.txt" \
+        "$lineage_dest/artifacts/compiler-manifest.env" "$lineage_transcript" || return 1
+    [ "$lineage_payload" = "$SOSIX_QEMU_COMPILER_PAYLOAD_IDENTITY" ] || return 1
+    [ "$lineage_alias" = "$SOSIX_QEMU_COMPILER_PLACEMENT_IDENTITY" ] || return 1
+    [ "$lineage_manifest" = "$SOSIX_QEMU_COMPILER_MANIFEST_IDENTITY" ] || return 1
+    expected_identity="target-native-simple:payload=$lineage_payload:image=$lineage_image:alias=$lineage_alias:manifest=$lineage_manifest"
+    [ "$(field compiler_identity "$lineage_env")" = "$expected_identity" ] || return 1
+}
 
 list=$(mktemp)
 stage=$(mktemp -d "${TMPDIR:-/tmp}/sosix-qemu-import.XXXXXX")
@@ -121,16 +210,29 @@ find "$source_root" -mindepth 4 -maxdepth 4 -type f -name evidence.env -print | 
 [ "$(wc -l < "$list" | tr -d ' ')" -eq 24 ] || die "expected exactly 24 evidence bundles"
 
 manifest=$stage/matrix.env
-printf '%s\n' 'sosix_qemu_matrix_manifest_version=2' 'sosix_qemu_matrix_row_count=24' > "$manifest"
+printf '%s\n' 'sosix_qemu_matrix_manifest_version=1' 'sosix_qemu_matrix_row_count=24' > "$manifest"
 seen=$stage/seen
 : > "$seen"
 row=0
-nonpass_rows=0
 while IFS= read -r env_file; do
-    relative=${env_file#"$source_root"/}
+    source_env_file=$env_file
+    relative=${source_env_file#"$source_root"/}
     path_host=${relative%%/*}; tail=${relative#*/}; path_guest=${tail%%/*}
     is_host "$path_host" || die "$env_file: unknown path host"
     is_guest "$path_guest" || die "$env_file: unknown path guest"
+    bundle_dir=${source_env_file%/*}
+    dest=$stage/rows/$path_host/$path_guest
+    mkdir -p "$dest/artifacts"
+    [ ! -L "$source_env_file" ] || die "$source_env_file: symlink evidence manifest is not allowed"
+    source_env_hash_before=$(hash_file "$source_env_file")
+    cp "$source_env_file" "$dest/evidence.env"
+    source_env_hash_after=$(hash_file "$source_env_file")
+    imported_env_hash=$(hash_file "$dest/evidence.env")
+    [ "$source_env_hash_before" = "$source_env_hash_after" ] &&
+    [ "$source_env_hash_before" = "$imported_env_hash" ] ||
+        die "$source_env_file: evidence manifest changed during snapshot"
+    # From this point onward the collector reads only the owner-held snapshot.
+    env_file=$dest/evidence.env
     host=$(field host "$env_file"); guest=$(field guest "$env_file")
     [ "$host" = "$path_host" ] || die "$env_file: host relabeling rejected"
     [ "$guest" = "$path_guest" ] || die "$env_file: guest relabeling rejected"
@@ -141,16 +243,23 @@ while IFS= read -r env_file; do
                 k == "status" || k == "reason" || k == "owner" ||
                 k == "reviewer" || k == "resume_command" ||
                 k == "source_identity" || k == "compiler_identity" ||
+                k == "compiler_identity_scope" || k == "compiler_policy_sha256" ||
+                k == "compiler_policy_value" ||
+                k == "compiler_payload_identity" || k == "compiler_image_identity" ||
+                k == "compiler_alias_identity" || k == "compiler_manifest_identity" ||
                 k == "kernel_identity" || k == "image_identity" ||
                 k == "qemu_identity" || k == "qemu_argv" ||
                 k == "accelerator_identity" || k == "firmware_identity" ||
                 k == "firmware_mode" || k == "firmware_path" ||
                 k == "firmware_version" || k == "firmware_sha256" ||
-                k == "firmware_stage_markers" || k == "run_nonce" ||
+                k == "firmware_stage_markers" || k == "boot_correlation_marker" || k == "run_nonce" ||
                 k == "transcript_identity" || k == "program_identity" ||
                 k == "compiler_in_filesystem" ||
                 k == "compiler_version_evidence_path" ||
                 k == "compiler_hello_evidence_path" ||
+                k == "compiler_alias_evidence_path" ||
+                k == "compiler_manifest_evidence_path" ||
+                k == "compiler_designation_scope" ||
                 k == "artifact_count" ||
                 k ~ /^artifact_[0-9]+_(path|sha256)$/) next
         }
@@ -163,34 +272,69 @@ while IFS= read -r env_file; do
     grep -Fx "$cell" "$seen" >/dev/null 2>&1 && die "duplicate cell $cell"
     echo "$cell" >> "$seen"
 
-    version=$(field schema_version "$env_file"); case "$version" in 1|2) ;; *) die "$env_file: unsupported schema";; esac
+    version=$(field schema_version "$env_file"); [ "$version" = 1 ] || die "$env_file: unsupported schema"
     status=$(field status "$env_file")
     case "$status" in pass|failed|blocked|unsupported) ;; *) die "$env_file: invalid status";; esac
+    input_status=$status
     reason=$(field reason "$env_file"); owner=$(field owner "$env_file")
     reviewer=$(field reviewer "$env_file"); resume=$(field resume_command "$env_file")
     [ -n "$owner" ] && [ -n "$reviewer" ] || die "$env_file: missing owner/reviewer"
     if [ "$status" != pass ]; then
         [ -n "$reason" ] && [ -n "$resume" ] || die "$env_file: nonpass requires reason and resume_command"
-        nonpass_rows=$((nonpass_rows + 1))
     fi
     run_nonce=$(field run_nonce "$env_file")
+    boot_correlation_marker=$(field boot_correlation_marker "$env_file")
+    [ -n "$boot_correlation_marker" ] || die "$env_file: empty boot_correlation_marker"
+    printf '%s\n' "$boot_correlation_marker" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$' || die "$env_file: unsafe boot_correlation_marker"
+    [ "$boot_correlation_marker" != "$run_nonce" ] || die "$env_file: boot marker must differ from execution nonce"
     compiler_in_filesystem=$(field compiler_in_filesystem "$env_file")
     case "$compiler_in_filesystem" in true|false) ;; *) die "$env_file: invalid compiler_in_filesystem";; esac
+    expected_compiler_designation=$(sosix_qemu_compiler_designation_fixture \
+        "$path_host" "$path_guest" "$compiler_designation_fixture")
+    [ "$compiler_in_filesystem" = "$expected_compiler_designation" ] || \
+        die "$env_file: compiler designation is not canonical for $path_host/$path_guest"
+    compiler_designation_scope=$(field compiler_designation_scope "$env_file")
+    compiler_identity_scope=$(field compiler_identity_scope "$env_file")
+    compiler_policy_sha256=$(field compiler_policy_sha256 "$env_file")
+    compiler_policy_value=$(field compiler_policy_value "$env_file")
+    canonical_policy_sha256=$(hash_file "$SOSIX_QEMU_COMPILER_DESIGNATION_POLICY")
+    [ "$compiler_policy_sha256" = "$canonical_policy_sha256" ] || die "$env_file: compiler policy identity mismatch"
+    live_compiler_designation=$(sosix_qemu_compiler_designation_live "$path_host" "$path_guest")
+    [ "$compiler_policy_value" = "$live_compiler_designation" ] || die "$env_file: compiler policy cell value mismatch"
+    if [ "$compiler_in_filesystem" = true ] && [ "$compiler_designation_fixture" = "$path_host:$path_guest" ]; then
+        [ "$compiler_designation_scope" = contract-fixture ] || die "$env_file: fixture designation is missing contract-only scope"
+        status=blocked
+        reason=contract-fixture-only
+        resume=contract-fixture-is-not-release-admissible
+    else
+        [ "$compiler_designation_scope" = live-policy ] || die "$env_file: non-live compiler designation scope"
+    fi
     compiler_version_evidence_path=$(field compiler_version_evidence_path "$env_file")
     compiler_hello_evidence_path=$(field compiler_hello_evidence_path "$env_file")
+    compiler_alias_evidence_path=$(field compiler_alias_evidence_path "$env_file")
+    compiler_manifest_evidence_path=$(field compiler_manifest_evidence_path "$env_file")
     if [ "$compiler_in_filesystem" = true ]; then
+        [ "$compiler_identity_scope" = target-filesystem ] || die "$env_file: compiler-bearing row has wrong identity scope"
         [ -n "$compiler_version_evidence_path" ] || die "$env_file: designated compiler row missing version evidence path"
         [ -n "$compiler_hello_evidence_path" ] || die "$env_file: designated compiler row missing hello evidence path"
+        [ -n "$compiler_alias_evidence_path" ] || die "$env_file: designated compiler row missing alias evidence path"
+        [ -n "$compiler_manifest_evidence_path" ] || die "$env_file: designated compiler row missing manifest evidence path"
         [ "$compiler_version_evidence_path" != "$compiler_hello_evidence_path" ] || die "$env_file: designated compiler evidence paths must be distinct"
+        [ "$compiler_version_evidence_path" != "$compiler_alias_evidence_path" ] && [ "$compiler_version_evidence_path" != "$compiler_manifest_evidence_path" ] || die "$env_file: designated compiler evidence paths must be distinct"
     else
-        [ -z "$compiler_version_evidence_path" ] && [ -z "$compiler_hello_evidence_path" ] || die "$env_file: non-designated row carries compiler evidence paths"
+        [ "$compiler_identity_scope" = source-toolchain ] || die "$env_file: compiler-free row has wrong identity scope"
+        case "$(field compiler_identity "$env_file")" in ''|target-native-simple:*) die "$env_file: invalid source-toolchain compiler identity";; esac
+        [ -z "$compiler_version_evidence_path" ] && [ -z "$compiler_hello_evidence_path" ] && [ -z "$compiler_alias_evidence_path" ] && [ -z "$compiler_manifest_evidence_path" ] || die "$env_file: non-designated row carries compiler evidence paths"
     fi
-    for key in source_identity compiler_identity kernel_identity image_identity qemu_identity qemu_argv accelerator_identity firmware_identity firmware_mode firmware_path firmware_version firmware_sha256 firmware_stage_markers transcript_identity program_identity; do
+    for key in source_identity compiler_identity kernel_identity image_identity qemu_identity qemu_argv accelerator_identity firmware_identity firmware_mode firmware_path firmware_version firmware_sha256 firmware_stage_markers boot_correlation_marker transcript_identity program_identity compiler_payload_identity compiler_image_identity compiler_alias_identity compiler_manifest_identity; do
         value=$(field "$key" "$env_file")
-        [ -n "$value" ] || die "$env_file: empty $key"
+        if [ "$compiler_in_filesystem" = true ] || [ "$key" != compiler_payload_identity ] && [ "$key" != compiler_image_identity ] && [ "$key" != compiler_alias_identity ] && [ "$key" != compiler_manifest_identity ]; then
+            [ -n "$value" ] || die "$env_file: empty $key"
+        fi
     done
     [ -n "$run_nonce" ] || die "$env_file: empty run_nonce"
-    if [ "$status" = pass ]; then
+    printf '%s\n' "$run_nonce" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]{15,127}$' || die "$env_file: unsafe run_nonce"
+    if [ "$input_status" = pass ]; then
         firmware_identity=$(field firmware_identity "$env_file")
         firmware_mode=$(field firmware_mode "$env_file")
         firmware_path=$(field firmware_path "$env_file")
@@ -198,21 +342,12 @@ while IFS= read -r env_file; do
         firmware_sha256=$(field firmware_sha256 "$env_file")
         firmware_stage_markers=$(field firmware_stage_markers "$env_file")
         printf '%s\n' "$firmware_identity" | grep -Eq '^firmware:[A-Za-z0-9][A-Za-z0-9._+-]+$' || die "$env_file: invalid firmware_identity"
-        case "$firmware_mode" in uefi-pflash|opensbi-bios|board-rom|direct-kernel) ;; *) die "$env_file: invalid firmware_mode";; esac
-        if [ "$firmware_mode" = direct-kernel ]; then
-            [ "$version" = 2 ] || die "$env_file: direct-kernel requires schema v2"
-            [ "$firmware_identity" = firmware:none ] && [ "$firmware_path" = none ] &&
-                [ "$firmware_version" = version:none ] && [ "$firmware_sha256" = none ] ||
-                die "$env_file: direct-kernel must declare no external firmware"
-        else
-            case "$firmware_path" in /*|[A-Za-z]:\\*|[A-Za-z]:/*) ;; *) die "$env_file: firmware_path must be absolute";; esac
-        fi
+        case "$firmware_mode" in uefi-pflash|opensbi-bios|board-rom) ;; *) die "$env_file: invalid firmware_mode";; esac
+        case "$firmware_path" in /*|[A-Za-z]:\\*|[A-Za-z]:/*) ;; *) die "$env_file: firmware_path must be absolute";; esac
         printf '%s\n' "$firmware_version" | grep -Eq '^version:[A-Za-z0-9][A-Za-z0-9._+-]+$' || die "$env_file: invalid firmware_version"
-        if [ "$firmware_mode" != direct-kernel ]; then
-            printf '%s\n' "$firmware_sha256" | grep -Eq '^sha256:[0-9a-f]{64}$' || die "$env_file: invalid firmware_sha256"
-        fi
+        printf '%s\n' "$firmware_sha256" | grep -Eq '^sha256:[0-9a-f]{64}$' || die "$env_file: invalid firmware_sha256"
         case "$firmware_mode:$firmware_stage_markers" in
-            'uefi-pflash:firmware-entry>firmware-handoff>guest-entry'|'uefi-pflash:BdsDxe: starting Boot>[grub-uefi] multiboot loading>guest-entry'|'opensbi-bios:opensbi-entry>opensbi-handoff>guest-entry'|'board-rom:rom-entry>rom-handoff>guest-entry'|'direct-kernel:guest-entry') ;;
+            'uefi-pflash:firmware-entry>firmware-handoff>guest-entry'|'opensbi-bios:opensbi-entry>opensbi-handoff>guest-entry'|'board-rom:rom-entry>rom-handoff>guest-entry') ;;
             *) die "$env_file: firmware stage markers do not match firmware_mode";;
         esac
     fi
@@ -223,11 +358,14 @@ while IFS= read -r env_file; do
     artifact_count=$(field artifact_count "$env_file")
     case "$artifact_count" in ''|*[!0-9]*) die "$env_file: invalid artifact_count";; esac
     [ "$artifact_count" -gt 0 ] || die "$env_file: empty artifact bundle"
-    if [ "$status" = pass ] && [ "$(field firmware_mode "$env_file")" = direct-kernel ]; then
-        [ "$artifact_count" -eq 8 ] || die "$env_file: direct-kernel PASS requires exactly 8 artifacts"
+    if [ "$input_status" = pass ]; then
+        if [ "$compiler_in_filesystem" = true ]; then
+            [ "$artifact_count" -eq 13 ] || die "$env_file: compiler PASS requires exactly 13 artifacts"
+        else
+            [ "$artifact_count" -eq 9 ] || die "$env_file: compiler-free PASS requires exactly 9 artifacts"
+        fi
     fi
-    bundle_dir=${env_file%/*}
-    if [ "$status" = pass ]; then
+    if [ "$input_status" = pass ]; then
         sosix_qemu_validate_lineage "$env_file" "$bundle_dir" || die "$env_file: source lineage or nonce correlation rejected"
         program_identity=$(field program_identity "$env_file")
         printf '%s\n' "$program_identity" | grep -Eq '^sha256:[0-9a-f]{64}$' || die "$env_file: program_identity must be sha256:<lowercase-hex>"
@@ -236,34 +374,74 @@ while IFS= read -r env_file; do
         printf '%s\n' "$image_identity" | grep -Eq '^sha256:[0-9a-f]{64}$' || die "$env_file: image_identity must be sha256:<lowercase-hex>"
         image_hash=${image_identity#sha256:}
     fi
-    dest=$stage/rows/$host/$guest
-    mkdir -p "$dest/artifacts"
-    cp "$env_file" "$dest/evidence.env"
     artifact_seen=$dest/artifact-paths
+    artifact_inodes=$dest/artifact-inodes
     : > "$artifact_seen"
+    : > "$artifact_inodes"
     i=1
     program_matches=0
     image_matches=0
     transcript_matches=0
     transcript_file=
+    compiler_version_file=
+    compiler_hello_file=
+    compiler_alias_file=
+    compiler_manifest_file=
     while [ "$i" -le "$artifact_count" ]; do
         artifact_path=$(field "artifact_${i}_path" "$env_file")
         expected=$(optional_field "artifact_${i}_sha256" "$env_file")
+        if [ "$input_status" = pass ]; then
+            case "$i" in
+                1) canonical_artifact=host-admission.env;;
+                2) canonical_artifact=qemu.argv;;
+                3) canonical_artifact=qemu.version;;
+                4) canonical_artifact=transcript.log;;
+                5) canonical_artifact=kernel.elf;;
+                6) canonical_artifact=guest.img;;
+                7) canonical_artifact=program.elf;;
+                8) canonical_artifact=firmware.bin;;
+                9) canonical_artifact=required-markers.txt;;
+                10) canonical_artifact=compiler-version.txt;;
+                11) canonical_artifact=compiler-hello.txt;;
+                12) canonical_artifact=compiler-aliases.txt;;
+                13) canonical_artifact=compiler-manifest.env;;
+                *) die "$env_file: artifact index exceeds closed PASS schema";;
+            esac
+            [ "$artifact_path" = "$canonical_artifact" ] || die "$env_file: artifact $i must be $canonical_artifact"
+            [ -n "$expected" ] || die "$env_file: PASS artifact $artifact_path requires sha256"
+        fi
         case "$artifact_path" in ''|/*|*../*|../*|*/..|..|*//*) die "$env_file: unsafe artifact path";; esac
         grep -Fx "$artifact_path" "$artifact_seen" >/dev/null 2>&1 && die "$env_file: duplicate artifact path"
         echo "$artifact_path" >> "$artifact_seen"
         src=$bundle_dir/$artifact_path
         [ -f "$src" ] || die "$env_file: missing artifact $artifact_path"
+        [ ! -L "$src" ] || die "$env_file: symlink artifact is not allowed: $artifact_path"
+        inode=$(inode_key "$src")
+        grep -Fx "$inode" "$artifact_inodes" >/dev/null 2>&1 && die "$env_file: hard-link artifact alias: $artifact_path"
+        echo "$inode" >> "$artifact_inodes"
         actual=$(hash_file "$src")
-        if [ "$status" = pass ] && [ "$actual" = "$program_hash" ]; then
+        if [ "$input_status" = pass ] && [ "$actual" = "$program_hash" ]; then
             program_matches=$((program_matches + 1))
         fi
-        if [ "$status" = pass ] && [ "$actual" = "$image_hash" ]; then
+        if [ "$input_status" = pass ] && [ "$actual" = "$image_hash" ]; then
             image_matches=$((image_matches + 1))
         fi
-        if [ "$status" = pass ] && [ "sha256:$actual" = "$(field transcript_identity "$env_file")" ]; then
+        if { [ "$input_status" = pass ] || [ "$compiler_in_filesystem" = true ]; } &&
+           [ "sha256:$actual" = "$(field transcript_identity "$env_file")" ]; then
             transcript_matches=$((transcript_matches + 1))
-            transcript_file=$src
+            transcript_file=$dest/artifacts/$artifact_path
+        fi
+        if [ "$compiler_in_filesystem" = true ] && [ "$artifact_path" = "$compiler_version_evidence_path" ]; then
+            compiler_version_file=$dest/artifacts/$artifact_path
+        fi
+        if [ "$compiler_in_filesystem" = true ] && [ "$artifact_path" = "$compiler_hello_evidence_path" ]; then
+            compiler_hello_file=$dest/artifacts/$artifact_path
+        fi
+        if [ "$compiler_in_filesystem" = true ] && [ "$artifact_path" = compiler-aliases.txt ]; then
+            compiler_alias_file=$dest/artifacts/$artifact_path
+        fi
+        if [ "$compiler_in_filesystem" = true ] && [ "$artifact_path" = compiler-manifest.env ]; then
+            compiler_manifest_file=$dest/artifacts/$artifact_path
         fi
         if [ -n "$expected" ] && ! printf '%s\n' "$expected" | grep -Eq '^[0-9a-f]{64}$'; then
             die "$env_file: malformed sha256 for $artifact_path"
@@ -271,34 +449,104 @@ while IFS= read -r env_file; do
         [ -z "$expected" ] || [ "$actual" = "$expected" ] || die "$env_file: hash mismatch for $artifact_path"
         mkdir -p "$dest/artifacts/$(dirname -- "$artifact_path")"
         cp "$src" "$dest/artifacts/$artifact_path"
-        [ "$(hash_file "$dest/artifacts/$artifact_path")" = "$actual" ] || die "$env_file: import changed artifact hash"
+        source_after=$(hash_file "$src")
+        retained_hash=$(hash_file "$dest/artifacts/$artifact_path")
+        [ "$source_after" = "$actual" ] && [ "$retained_hash" = "$actual" ] ||
+            die "$env_file: artifact changed during snapshot: $artifact_path"
         i=$((i + 1))
     done
-    if [ "$status" = pass ] && [ "$program_matches" -ne 1 ]; then
+    if [ "$input_status" = pass ] && [ "$program_matches" -ne 1 ]; then
         die "$env_file: program_identity must select exactly one declared artifact"
     fi
-    if [ "$status" = pass ] && [ "$image_matches" -ne 1 ]; then
+    if [ "$input_status" = pass ] && [ "$image_matches" -ne 1 ]; then
         die "$env_file: image_identity must select exactly one declared artifact"
     fi
-    if [ "$status" = pass ]; then
+    if [ "$input_status" = pass ] || [ "$compiler_in_filesystem" = true ]; then
         [ "$transcript_matches" -eq 1 ] || die "$env_file: transcript_identity must select exactly one declared artifact"
-        old_ifs=$IFS; IFS='>'
-        for marker in $firmware_stage_markers; do
-            grep -F "$marker" "$transcript_file" >/dev/null 2>&1 || die "$env_file: firmware stage marker missing from transcript: $marker"
-        done
-        IFS=$old_ifs
+    fi
+    if [ "$input_status" = pass ]; then
+        sosix_qemu_validate_firmware_transcript "$firmware_mode" "$firmware_stage_markers" "$boot_correlation_marker" "$run_nonce" "$transcript_file" || \
+            die "$env_file: ordered firmware transcript rejected"
+        [ "$(field kernel_identity "$env_file")" = "sha256:$(hash_file "$dest/artifacts/kernel.elf")" ] ||
+            die "$env_file: kernel identity does not select kernel.elf"
+        [ "$(field image_identity "$env_file")" = "sha256:$(hash_file "$dest/artifacts/guest.img")" ] ||
+            die "$env_file: image identity does not select guest.img"
+        [ "$(field program_identity "$env_file")" = "sha256:$(hash_file "$dest/artifacts/program.elf")" ] ||
+            die "$env_file: program identity does not select program.elf"
+        [ "$(field transcript_identity "$env_file")" = "sha256:$(hash_file "$dest/artifacts/transcript.log")" ] ||
+            die "$env_file: transcript identity does not select transcript.log"
+        [ "$(field firmware_sha256 "$env_file")" = "sha256:$(hash_file "$dest/artifacts/firmware.bin")" ] ||
+            die "$env_file: firmware identity does not select firmware.bin"
+        qemu_identity=$(field qemu_identity "$env_file")
+        printf '%s\n' "$qemu_identity" | grep -Eq '^sha256:[0-9a-f]{64}:version:.+$' || die "$env_file: malformed qemu_identity"
+        qemu_hash=${qemu_identity#sha256:}; qemu_hash=${qemu_hash%%:version:*}
+        qemu_version=${qemu_identity#*:version:}
+        [ "$(wc -l < "$dest/artifacts/qemu.argv" | tr -d ' ')" -eq 1 ] || die "$env_file: qemu.argv is not one line"
+        [ "$(wc -l < "$dest/artifacts/qemu.version" | tr -d ' ')" -eq 1 ] || die "$env_file: qemu.version is not one line"
+        [ "$(sed -n '1p' "$dest/artifacts/qemu.argv")" = "$(field qemu_argv "$env_file")" ] || die "$env_file: qemu argv receipt mismatch"
+        [ "$(sed -n '1p' "$dest/artifacts/qemu.version")" = "$qemu_version" ] || die "$env_file: qemu version receipt mismatch"
+        host_admission=$dest/artifacts/host-admission.env
+        [ "$(field qemu_sha256 "$host_admission")" = "$qemu_hash" ] || die "$env_file: host admission QEMU hash mismatch"
+        [ "$(field qemu_version "$host_admission")" = "$qemu_version" ] || die "$env_file: host admission QEMU version mismatch"
+        [ "$(field requested_accelerator "$host_admission")" = "$(field accelerator_identity "$env_file")" ] || die "$env_file: host admission accelerator mismatch"
+        [ "$(field host_identity_status "$host_admission")" = pass ] &&
+        [ "$(field accelerator_advertised_status "$host_admission")" = pass ] &&
+        [ "$(field accelerator_probe_status "$host_admission")" = pass ] || die "$env_file: host admission did not pass"
+        marker_previous=0
+        while IFS= read -r required_marker || [ -n "$required_marker" ]; do
+            [ -n "$required_marker" ] || die "$env_file: empty required marker"
+            marker_count=$(grep -Fxc -- "$required_marker" "$transcript_file")
+            [ "$marker_count" -eq 1 ] || die "$env_file: required marker is not an exact unique line"
+            marker_line=$(grep -Fxn -m1 -- "$required_marker" "$transcript_file" | cut -d: -f1)
+            [ "$marker_line" -gt "$marker_previous" ] || die "$env_file: required markers are out of order"
+            marker_previous=$marker_line
+        done < "$dest/artifacts/required-markers.txt"
     fi
     if [ "$compiler_in_filesystem" = true ]; then
         grep -Fx "$compiler_version_evidence_path" "$artifact_seen" >/dev/null 2>&1 || die "$env_file: compiler version evidence is not a declared artifact"
         grep -Fx "$compiler_hello_evidence_path" "$artifact_seen" >/dev/null 2>&1 || die "$env_file: compiler hello evidence is not a declared artifact"
+        [ "$compiler_version_evidence_path" = compiler-version.txt ] || die "$env_file: compiler version evidence path is not canonical"
+        [ "$compiler_hello_evidence_path" = compiler-hello.txt ] || die "$env_file: compiler hello evidence path is not canonical"
+        [ "$compiler_alias_evidence_path" = compiler-aliases.txt ] || die "$env_file: compiler placement evidence path is not canonical"
+        [ "$compiler_manifest_evidence_path" = compiler-manifest.env ] || die "$env_file: compiler manifest evidence path is not canonical"
+        [ "$(field compiler_image_identity "$env_file")" = "sha256:$(hash_file "$dest/artifacts/guest.img")" ] || die "$env_file: compiler image identity mismatch"
+        [ -f "$compiler_alias_file" ] || die "$env_file: compiler alias evidence is not a declared artifact"
+        [ -f "$compiler_manifest_file" ] || die "$env_file: compiler manifest evidence is not a declared artifact"
+        [ "$(field compiler_alias_identity "$env_file")" = "sha256:$(hash_file "$compiler_alias_file")" ] || die "$env_file: compiler alias identity mismatch"
+        [ "$(field compiler_manifest_identity "$env_file")" = "sha256:$(hash_file "$compiler_manifest_file")" ] || die "$env_file: compiler manifest identity mismatch"
+        validate_compiler_receipts "$host" "$guest" "$run_nonce" \
+            "$compiler_version_file" "$compiler_hello_file" "$transcript_file" || \
+            die "$env_file: compiler evidence is not semantically correlated to the retained transcript"
+        validate_compiler_lineage "$env_file" "$dest" "$host" "$guest" "$run_nonce" "$transcript_file" || \
+            die "$env_file: compiler identity is not bound to canonical target-native payload/image/alias/manifest lineage"
     fi
     imported_env_hash=$(hash_file "$dest/evidence.env")
     {
-        echo 'manifest_version=2'
+        echo 'manifest_version=1'
+        echo "host=$host"
+        echo "guest=$guest"
         echo "status=$status"
+        echo "reason=$reason"
+        echo "resume_command=$resume"
+        echo "owner=$owner"
+        echo "reviewer=$reviewer"
+        echo "evidence_path=rows/$host/$guest/evidence.env"
         echo "evidence_sha256=$imported_env_hash"
         echo "artifact_count=$artifact_count"
         echo "source_identity=$(field source_identity "$env_file")"
+        echo "compiler_identity=$(field compiler_identity "$env_file")"
+        echo "compiler_identity_scope=$compiler_identity_scope"
+        echo "compiler_policy_sha256=$compiler_policy_sha256"
+        echo "compiler_policy_value=$compiler_policy_value"
+        echo "compiler_payload_identity=$(field compiler_payload_identity "$env_file")"
+        echo "compiler_image_identity=$(field compiler_image_identity "$env_file")"
+        echo "compiler_alias_identity=$(field compiler_alias_identity "$env_file")"
+        echo "compiler_manifest_identity=$(field compiler_manifest_identity "$env_file")"
+        echo "kernel_identity=$(field kernel_identity "$env_file")"
+        echo "image_identity=$(field image_identity "$env_file")"
+        echo "qemu_identity=$(field qemu_identity "$env_file")"
+        echo "qemu_argv=$(field qemu_argv "$env_file")"
+        echo "accelerator_identity=$(field accelerator_identity "$env_file")"
         echo "transcript_identity=$(field transcript_identity "$env_file")"
         echo "program_identity=$(field program_identity "$env_file")"
         echo "firmware_identity=$(field firmware_identity "$env_file")"
@@ -307,8 +555,23 @@ while IFS= read -r env_file; do
         echo "firmware_version=$(field firmware_version "$env_file")"
         echo "firmware_sha256=$(field firmware_sha256 "$env_file")"
         echo "firmware_stage_markers=$(field firmware_stage_markers "$env_file")"
+        echo "boot_correlation_marker=$(field boot_correlation_marker "$env_file")"
+        echo "run_nonce=$run_nonce"
+        echo "compiler_in_filesystem=$compiler_in_filesystem"
+        echo "compiler_designation_scope=$compiler_designation_scope"
+        echo "compiler_version_evidence_path=$compiler_version_evidence_path"
+        echo "compiler_hello_evidence_path=$compiler_hello_evidence_path"
+        echo "compiler_alias_evidence_path=$compiler_alias_evidence_path"
+        echo "compiler_manifest_evidence_path=$compiler_manifest_evidence_path"
+        admission_i=1
+        while [ "$admission_i" -le "$artifact_count" ]; do
+            admission_path=$(field "artifact_${admission_i}_path" "$env_file")
+            echo "artifact_${admission_i}_path=$admission_path"
+            echo "artifact_${admission_i}_sha256=$(hash_file "$dest/artifacts/$admission_path")"
+            admission_i=$((admission_i + 1))
+        done
     } > "$dest/admission.env"
-    admission_record_hash=$(hash_file "$dest/admission.env")
+    admission_record_sha256=$(hash_file "$dest/admission.env")
     row=$((row + 1))
     prefix=sosix_qemu_matrix_row_$row
     {
@@ -318,23 +581,28 @@ while IFS= read -r env_file; do
         echo "${prefix}_reason_b64=$(b64 "$reason")"
         echo "${prefix}_evidence_path_b64=$(b64 "rows/$host/$guest/evidence.env")"
         echo "${prefix}_admission_record_path_b64=$(b64 "rows/$host/$guest/admission.env")"
-        echo "${prefix}_admission_record_sha256=$admission_record_hash"
         echo "${prefix}_resume_command_b64=$(b64 "$resume")"
         echo "${prefix}_owner_b64=$(b64 "$owner")"
         echo "${prefix}_reviewer_b64=$(b64 "$reviewer")"
         echo "${prefix}_compiler_in_filesystem=$compiler_in_filesystem"
+        echo "${prefix}_compiler_identity_scope=$compiler_identity_scope"
+        echo "${prefix}_compiler_policy_sha256=$compiler_policy_sha256"
+        echo "${prefix}_compiler_policy_value=$compiler_policy_value"
+        echo "${prefix}_compiler_designation_scope=$compiler_designation_scope"
         echo "${prefix}_compiler_version_evidence_path_b64=$(b64 "$compiler_version_evidence_path")"
         echo "${prefix}_compiler_hello_evidence_path_b64=$(b64 "$compiler_hello_evidence_path")"
-        for key in source_identity compiler_identity kernel_identity image_identity qemu_identity qemu_argv accelerator_identity firmware_identity firmware_mode firmware_path firmware_version firmware_sha256 firmware_stage_markers run_nonce transcript_identity program_identity; do
+        echo "${prefix}_compiler_alias_evidence_path_b64=$(b64 "$compiler_alias_evidence_path")"
+        echo "${prefix}_compiler_manifest_evidence_path_b64=$(b64 "$compiler_manifest_evidence_path")"
+        for key in source_identity compiler_identity compiler_payload_identity compiler_image_identity compiler_alias_identity compiler_manifest_identity kernel_identity image_identity qemu_identity qemu_argv accelerator_identity firmware_identity firmware_mode firmware_path firmware_version firmware_sha256 firmware_stage_markers boot_correlation_marker run_nonce transcript_identity program_identity; do
             value=$(field "$key" "$env_file")
             echo "${prefix}_${key}_b64=$(b64 "$value")"
         done
         echo "${prefix}_evidence_sha256=$imported_env_hash"
+        echo "${prefix}_admission_record_sha256=$admission_record_sha256"
         echo "${prefix}_artifact_count=$artifact_count"
     } >> "$manifest"
-    [ "$(hash_file "$dest/admission.env")" = "$admission_record_hash" ] ||
-        die "$env_file: admission record changed after manifest binding"
     rm "$artifact_seen"
+    rm "$artifact_inodes"
 done < "$list"
 
 for host in linux windows macos freebsd; do
@@ -343,24 +611,12 @@ for host in linux windows macos freebsd; do
     done
 done
 
-if [ "$nonpass_rows" -eq 0 ]; then
-    echo 'sosix_qemu_matrix_promotion_status=pass' >> "$manifest"
-else
-    echo 'sosix_qemu_matrix_promotion_status=pending' >> "$manifest"
-fi
-echo "sosix_qemu_matrix_nonpass_row_count=$nonpass_rows" >> "$manifest"
-
 mkdir -p "$output"
 bundle_id=$(hash_file "$manifest" | cut -c1-16)
 echo "sosix_qemu_matrix_bundle_id=$bundle_id" >> "$manifest"
-final=$output/matrix-v2-$bundle_id
+final=$output/matrix-v1-$bundle_id
 [ ! -e "$final" ] || die "destination already exists: $final"
 mv "$stage" "$final"
 trap 'rm -f "$list"' EXIT HUP INT TERM
-if [ "$nonpass_rows" -eq 0 ]; then
-    echo "sosix_qemu_evidence_status=pass"
-else
-    echo "sosix_qemu_evidence_status=pending"
-    echo "sosix_qemu_evidence_reason=nonpass-rows:$nonpass_rows"
-fi
+echo "sosix_qemu_evidence_status=pass"
 echo "sosix_qemu_evidence_manifest=$final/matrix.env"

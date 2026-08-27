@@ -5,7 +5,9 @@
 # Always produces results, even with syntax errors.
 
 use compiler.frontend.core.lexer.*
+use compiler.frontend.treesitter.outline_lexer.{TreeSitter}
 use compiler.frontend.treesitter_types.*
+use compiler.frontend.treesitter.outline_lexer.{TreeSitter}
 use compiler.common.dependency.visibility.{Visibility}
 
 # ============================================================================
@@ -73,6 +75,11 @@ struct HeuristicParseResult:
 # ============================================================================
 
 # Extension to TreeSitter for heuristic mode parsing
+fn heuristic_source_line_count(source: text) -> i64:
+    """Read the fallback parser's owned source buffer without a caller-owned lexer."""
+    val parser = treesitter_new(source)
+    parser.source.split("\n").len()
+
 impl TreeSitter:
     me parse_outline_heuristic() -> OutlineModule:
         """Parse outline using line-based heuristics (error-tolerant).
@@ -252,21 +259,12 @@ impl TreeSitter:
                 end = end + 1
             else:
                 break
-        if end == 0:
-            return "<unknown>"
-        s.substring(0, end)
+        if end == 0: "<unknown>" else: s[:end]
 
     fn heuristic_extract_until_colon(s: text) -> text:
         """Extract text up to (but not including) the trailing colon."""
-        if not s.contains(":"):
-            return s.trim()
         val idx = s.rfind(":")
-        # rfind returns a raw i64 (-1 = miss), NOT an Option: `if val` misbinds it
-        # (it skips a real index and binds on -1). Guard on >= 0 instead. The
-        # contains(":") gate above already guarantees a colon here.
-        if idx >= 0:
-            return s.substring(0, idx).trim()
-        s.trim()
+        if val colon_idx = idx: s[:colon_idx].trim() else: s.trim()
 
     fn heuristic_indent_level(line: text) -> i64:
         """Count leading spaces."""
@@ -326,6 +324,9 @@ impl TreeSitter:
             static_asserts: [],  # Heuristic mode doesn't parse static asserts yet
             inline_blocks: [],  # Heuristic mode doesn't track blocks
             asm_blocks: [],  # Heuristic mode doesn't track inline asm yet
+            friends: [],
+            internal_exports: [],
+            authority_spans: [],
             errors: []  # Heuristic mode is error-tolerant
         )
 
@@ -333,102 +334,91 @@ impl TreeSitter:
     # Conversion Helpers
     # ========================================================================
 
-    me heuristic_item_to_span(item: HeuristicOutlineItem) -> LexSpan:
-        # Heuristic mode has no byte offsets; carry line/col only.
-        LexSpan(start: 0, end_pos: 0, line: item.line, col: item.column)
-
     me heuristic_item_to_function(item: HeuristicOutlineItem) -> FunctionOutline:
         FunctionOutline(
             name: item.name,
+            visibility: self.heuristic_parse_visibility(item.visibility),
             params: [],  # Heuristic mode doesn't parse params
             return_type: nil,
-            visibility: self.heuristic_parse_visibility(item.visibility),
-            is_async: false,
-            is_static: false,
-            is_public: self.heuristic_parse_visibility(item.visibility) == Visibility.Public,
-            is_method: false,
-            is_mutable: false,
-            is_const: false,
-            is_kernel: false,
-            is_extern: false,
-            doc_comment: nil,
-            span: self.heuristic_item_to_span(item),
-            body_span: self.heuristic_item_to_span(item)
+            type_params: [],
+            span: Span(start_line: item.line, start_col: item.column,
+                       end_line: item.end_line, end_col: 0),
+            doc: nil
         )
 
     me heuristic_item_to_class(item: HeuristicOutlineItem) -> ClassOutline:
         ClassOutline(
             name: item.name,
+            visibility: self.heuristic_parse_visibility(item.visibility),
             type_params: [],
             fields: [],
             methods: [],
-            visibility: self.heuristic_parse_visibility(item.visibility),
-            is_public: self.heuristic_parse_visibility(item.visibility) == Visibility.Public,
-            doc_comment: nil,
-            attributes: [],
-            span: self.heuristic_item_to_span(item)
+            span: Span(start_line: item.line, start_col: item.column,
+                       end_line: item.end_line, end_col: 0),
+            doc: nil
         )
 
     me heuristic_item_to_struct(item: HeuristicOutlineItem) -> StructOutline:
         StructOutline(
             name: item.name,
+            visibility: self.heuristic_parse_visibility(item.visibility),
             type_params: [],
             fields: [],
-            visibility: self.heuristic_parse_visibility(item.visibility),
-            is_public: self.heuristic_parse_visibility(item.visibility) == Visibility.Public,
-            doc_comment: nil,
-            attributes: [],
-            span: self.heuristic_item_to_span(item)
+            span: Span(start_line: item.line, start_col: item.column,
+                       end_line: item.end_line, end_col: 0),
+            doc: nil
         )
 
     me heuristic_item_to_enum(item: HeuristicOutlineItem) -> EnumOutline:
         EnumOutline(
             name: item.name,
+            visibility: self.heuristic_parse_visibility(item.visibility),
             type_params: [],
             variants: [],
-            visibility: self.heuristic_parse_visibility(item.visibility),
-            is_public: self.heuristic_parse_visibility(item.visibility) == Visibility.Public,
-            doc_comment: nil,
-            span: self.heuristic_item_to_span(item)
+            span: Span(start_line: item.line, start_col: item.column,
+                       end_line: item.end_line, end_col: 0),
+            doc: nil
         )
 
     me heuristic_item_to_trait(item: HeuristicOutlineItem) -> TraitOutline:
         TraitOutline(
             name: item.name,
+            visibility: self.heuristic_parse_visibility(item.visibility),
             type_params: [],
             methods: [],
             assoc_types: [],
-            visibility: self.heuristic_parse_visibility(item.visibility),
-            is_public: self.heuristic_parse_visibility(item.visibility) == Visibility.Public,
-            doc_comment: nil,
-            span: self.heuristic_item_to_span(item)
+            span: Span(start_line: item.line, start_col: item.column,
+                       end_line: item.end_line, end_col: 0),
+            doc: nil
         )
 
     me heuristic_item_to_impl(item: HeuristicOutlineItem) -> ImplOutline:
         ImplOutline(
-            type_: TypeOutline(
-                kind: TypeOutlineKind.Named(name: item.name, args: []),
-                span: self.heuristic_item_to_span(item)
-            ),
-            trait_: nil,
+            target: item.name,
+            trait_name: nil,
+            type_params: [],
             methods: [],
             assoc_types: [],
-            span: self.heuristic_item_to_span(item)
+            span: Span(start_line: item.line, start_col: item.column,
+                       end_line: item.end_line, end_col: 0),
+            doc: nil
         )
 
     me heuristic_item_to_import(item: HeuristicOutlineItem) -> ImportOutline:
         ImportOutline(
-            module: item.name,
+            module_path: item.name,
             items: [],
             is_lazy: false,
             alias: nil,
-            span: self.heuristic_item_to_span(item)
+            span: Span(start_line: item.line, start_col: item.column,
+                       end_line: item.line, end_col: 0)
         )
 
     me heuristic_item_to_export(item: HeuristicOutlineItem) -> ExportOutline:
         ExportOutline(
-            items: [item.name],
-            span: self.heuristic_item_to_span(item)
+            name: item.name,
+            span: Span(start_line: item.line, start_col: item.column,
+                       end_line: item.line, end_col: 0)
         )
 
     fn heuristic_parse_visibility(vis: text) -> Visibility:

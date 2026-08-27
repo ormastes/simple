@@ -129,7 +129,8 @@ scenarios include:
   invalid algorithm/issuer/key/epoch, malformed signature, expired/revoked
   receipt, and receipt payloads whose authority/workspace/project/snapshot/
   revision/view/normalized-path/selector/scope/ordering/page-limit binding
-  differs from the request;
+  differs from the request; prove that the verified-read grant carries a
+  sealed, trusted worktree binding and that cursor issue cannot derive it;
 - accept one fully authorized canonical read and one next-page cursor in the
   same complete authority/workspace/project/snapshot/revision/view/path/
   selector/scope/ordering/page-limit tuple, then reject cursor reuse across
@@ -306,7 +307,7 @@ limit and limit-plus-one for: frame 1 MiB, headers 32 KiB, JSON depth 16,
 262,144 lexical tokens, 65,536 aggregate object-pair/array-element members,
 method 128 bytes, URI 8 KiB, query 4 KiB, decoded string 256 KiB, aggregate
 arguments 512 KiB, list 100, candidates 1,000, trace depth 8/nodes 2,000,
-response 1 MiB, generated manual 200 lines/about 6,000 tokens, and 16 in-flight
+response 1 MiB, generated manual 200 lines/<=6,000 `spipe-markdown-token-v1@1` tokens, and 16 in-flight
 requests. Expected typed protocol-envelope failures are `frame_too_large`,
 `limit_exceeded`, or `invalid_request`; any attempted read admission is the
 single public `not_found_or_unauthorized` class before protected effects.
@@ -434,7 +435,7 @@ or package smoke gates activated by the actual changed paths.
 
 - **Given** two schema-v1 snapshots with the same workspace/worktree `W-` identities but changed project membership and revision fields
 - **When** both independently migrate to schema v2
-- **Then** record type and legacy UID select identical `WS-`/`WT-` mappings, each migration records its own first v2 snapshot UID, and both v1 snapshots remain unchanged.
+- **Then** record type and legacy UID select identical `WS-`/`W-` mappings, each migration records its own first v2 snapshot UID, and both v1 snapshots remain unchanged.
 
 ### Scenario: Edge authority fails closed
 
@@ -482,7 +483,7 @@ or package smoke gates activated by the actual changed paths.
 
 - **Given** v1 edges and manifests containing workspace/worktree `W-` values
 - **When** typed identity migration precedes edge migration
-- **Then** unique mappings produce `WS-`/`WT-` v2 provenance/endpoints, while missing or ambiguous mappings remain historical with stable reasons.
+- **Then** unique mappings produce `WS-`/`W-` v2 provenance/endpoints, while missing or ambiguous mappings remain historical with stable reasons.
 
 ### Scenario: Delta replay distinguishes identity and conflict
 
@@ -1533,13 +1534,14 @@ raw `ImmutableSnapshotStore` or a duck-typed substitute cannot satisfy it.
 | W5A-12 | Remove one otherwise valid aggregate contributor | Denial before target lookup or ProjectionPort call |
 | W5A-13 | Add an otherwise valid extra contributor or substitute one contributor root | Denial before target lookup or ProjectionPort call |
 | W5A-14 | Present the same contributor records in non-canonical order | Denial before target lookup or ProjectionPort call |
+| W5A-15 | Create `ExpectedReadBindingV1` only from a proven authority view, canonical target/directory, and normalized request; independently mismatch authority instance or manifest digest | Construction/verification denies structural or mismatched input before `AuthorizationPortV1` or ProjectionPort call; the closed tuple preserves both authority claims |
 
 The eventual MCP system spec uses `step("Browse virtual knowledge views")` and
 `check_spipe_virtual_view_safety`; its fail-fast helper remains fail-fast until
 these fourteen cases observe real ports. A Wave 5 URI candidate that proves only
 syntax, receipt signatures, or mocked membership is `NOT-EVIDENCE`.
 
-### 21.1 Seal and alias additions (repair cycle 2)
+### 21.2 Seal and alias additions (repair cycle 2)
 
 W5A additionally injects swapped/tampered inventory bytes, authority-manifest
 root mismatch, and a deliberately cyclic base-snapshot/inventory construction;
@@ -1548,19 +1550,22 @@ foreign-authority alias reuse, and alias-index root tampering. A positive alias
 must use `SnapshotAuthorityPortV1.resolveCanonicalAlias` in the sealed view;
 external registry/path alias lookup is `NOT-EVIDENCE`.
 
-### 21.2 Required additions to W5A evidence
+### 21.1 Required additions to W5A evidence
 
-W5A-01 through W5A-14 additionally require: (a) swapped/tampered inventory
+W5A-01 through W5A-10 additionally require: (a) swapped/tampered inventory
 bytes and sealed-manifest/root mismatch reject before target lookup; (b)
 project UID mismatch is independently rejected; (c) positive manifest-proved
 workspace-root, trace, diagnostics, and directory aggregate cases use the
 defined null-project `workspace_aggregate` scope; (d) project scope rejects
 null project while aggregate scope rejects a supplied project; (e) two genuine
 branded authority instances/views/targets cannot be cross-mixed; and (f) each
-receipt binding field is mutated independently. The worktree negative uses a
-valid receipt whose snapshot tuple belongs to another worktree, proving the
-receipt's intentionally absent worktree field is enforced transitively rather
-than silently ignored.
+`ExpectedReadBindingV1` field, including `authorityInstanceUid` and
+`authorityManifestDigest`, is mutated independently. The worktree negative
+uses a valid receipt whose snapshot tuple belongs to another worktree, proving
+the receipt's intentionally absent worktree field is enforced transitively
+rather than silently ignored; genuine branded cross-instance and
+manifest-digest mismatch negatives prove the two authority claims are equally
+closed rather than adapter-supplied.
 
 ### 21.3 Aggregate-manifest exactness
 
@@ -1573,3 +1578,98 @@ and a reordered equivalent list. Every variation must deny before target
 lookup or ProjectionPort calls; only byte-identical canonical manifest and
 authority tuple can be admitted. The same fixture verifies that a project
 scope containing this field, and an aggregate scope omitting it, reject.
+
+## 22. CursorReceiptV1 authority admission matrix (2026-08-26)
+
+Wave 5 URI v3 is **NOT-EVIDENCE** until a real branded extension of the
+existing AuthorizationPortV1 passes all cases below. Trust/Edge-only behavior,
+a local signer, a mock verifier, or an in-memory receipt map cannot PASS.
+
+| ID | Setup/action | Required oracle |
+|---|---|---|
+| W5C-01 | Verify an authorized read after sealed authority proof, then issue a cursor | `ExpectedReadBindingV1` and opaque read grant contain exactly the sealed `baseSnapshotUid`, `authoritySnapshotUid`, `worktreeUid`, `authorityInstanceUid`, and `authorityManifestDigest` claims; cursor signs all five and every other closed field |
+| W5C-02 | Mutate `authorityKeyId`, `authorityKeyEpoch`, `baseSnapshotUid`, `authoritySnapshotUid`, `authorityInstanceUid`, `authorityManifestDigest`, workspace, project, worktree, revision, target, view, path, selector, scope, order, limit, position, policy, issuer, epoch, or time field independently | Denial before ProjectionPort; same public bounded class |
+| W5C-03 | Substitute Trust, Edge, canonical-read, wrong algorithm, unknown issuer/key, forged receipt, or structural verifier/grant | Domain/brand/allowlist/signature denial; no fallback or disclosure |
+| W5C-04 | Use exact-before, exact-at, and exact-after expiry/revocation; request expiry beyond read grant or TTL | Only `issued <= now < expires` and current durable epoch pass; issue rejects overshoot |
+| W5C-05 | Restart with durable policy and KeyProvider, then verify/issue valid, expired, revoked, and foreign-policy cursors | Pre/post restart parity; no in-memory state; missing active private handle fails closed |
+| W5C-06 | Submit a rotation then apply due transitions before activation, at activation, during grace, and at prior-key revocation | Unique pending/current/grace/revoked transitions and only one durable revocation-epoch advance; old verification only in grace |
+| W5C-07 | Replay same rotation UID with identical bytes, then with changed bytes or stale policy version | Idempotent same-result replay; changed/stale input fails without duplicate durable record |
+| W5C-08 | Continue a positive multipage directory through restart and key grace | Stable ordering with no gap/duplicate; inbound cursor verifies against the same read grant and outbound receipt follows list |
+| W5C-09 | Recompute cursor identity preimage, UID, signing payload, and signature bytes from production fixture | UID excludes UID/signature; signing includes derived UID and excludes signature; canonical bytes are exact |
+| W5C-10 | Force outbound cursor issuance failure after a successful list | Page is discarded, no content leaks, and public response remains `not_found_or_unauthorized` |
+
+The execution ledger records the durable policy fixture and independent review
+receipt. Private telemetry may retain a closed reason such as `stale_cursor`,
+but no test accepts a public distinction between absent, hidden, unauthorized,
+or stale targets.
+
+### 22.1 Production authority/store evidence required before W5A/W5C admission
+
+| ID | Setup/action | Required oracle |
+|---|---|---|
+| W5A-16 | Supply `WT-*`, path-derived, or malformed worktree UID | Reject before registry/store access; only `W-<opaque-base32>` is accepted |
+| W5A-17 | Change registry or snapshot revision between open and final revalidation | Bounded denial; no view, grant, or ProjectionPort call |
+| W5A-18 | Publish project and aggregate through production publisher; supply string/structural permit or caller-selected aggregate | Reader sees either no manifest or fully recomputable roots; aggregate has all and only selected complete contributors; only the non-forgeable publisher permit succeeds |
+| W5A-19 | Clean rebuild versus equivalent incremental commit for artifact, section, directory, aggregate | Byte-identical roots, pages, and projection bytes |
+| W5A-20 | Request limits 0, 101, 1, and 100 | Invalid denies; valid page <=100 entries, <=200 lines, <=6,000 `spipe-markdown-token-v1@1` tokens, authenticated continuation |
+| W5C-11 | Crash at initial policy-directory create and at write/fsync/rename/CAS of each policy, key, issuer, rotation, and revocation record | Restart sees prior complete state or one complete monotonic state, never partial/ambiguous; no acknowledgement precedes durable state |
+| W5C-12 | Replay same operation UID for every record class; alter bytes; use stale policy version | Equal replay idempotent; altered/stale denies without second durable transition |
+
+Fake registry/store, raw fixture manifest, mock projection, or a rejected
+sealed-read implementation is `NOT-EVIDENCE`.
+
+### 22.2 Sealed-publication and durable-policy production oracles
+
+| ID | Setup/action | Required oracle |
+|---|---|---|
+| W5A-21 | Substitute manifest/inventory bytes, or bind a copied/stale registry record after exact open | Canonical roots and live registry/snapshot revalidation deny before target lookup or ProjectionPort |
+| W5A-22 | Forge/serialize publisher permit; omit/add/reorder/substitute an aggregate contributor; provide incomplete root schema | Only commit-root brand publishes; reader admits all-and-only registry-complete ordered schema-valid roots |
+| W5A-23 | Duplicate/unlisted directory child, reorder page, widen limit, change continuation domain/position, or use foreign/malformed token | Bounded denial or sealed deterministic page; no leak, gap, duplicate, or unbounded output |
+| W5A-24 | Make both `issueCursorReceiptV1` and `verifyCursorReceiptV1` independently recompute `continuationDomain` only after AuthorityManifest/TargetInventoryManifest verification; exercise `spipe-markdown-token-v1@1` (Unicode 15.1 separator table) at exact 6,000/6,001 boundaries; mutate signed manifest/target/order/limit inputs | Only canonical derived domain and <=6,000 deterministic tokens pass; no manifest entry/root/digest contains the domain, no new grant/cursor field exists, and mutated existing binding denies before list/render |
+| W5C-13 | Race processes at each policy operation with same/different UID and expected version | One monotonic durable transition; equal replay same result; altered/stale input creates no record |
+| W5C-14 | Crash at temp creation, write, file fsync, rename, parent fsync, or recovery with malformed record | Restart observes old complete state or one schema-valid contiguous prefix; acknowledgement never precedes durability |
+
+These are prerequisites for W5C-01..10 and all URI/MCP/materializer tests.
+
+### 22.3 Commit-path publication prerequisite
+
+The current stores do not supply the production KnowledgeCompiler transaction
+needed for W5A-18/W5A-19. The following production-oracle cases target
+`KnowledgeCompilerCommitPublisherV1`; fixture maps, raw manifests, and a
+standalone authority primitive are `NOT-EVIDENCE`.
+
+| ID | Setup/action | Required oracle |
+|---|---|---|
+| W5A-25 | Commit from exact prior base/publication tuple, then supply caller permit/root/aggregate | Only closure permit publishes; adapters cannot choose contributors or infer prior state |
+| W5A-26 | Commit artifacts, sections, directories; compare clean and incremental | Base/authority snapshots, roots, pages, and projections are byte-identical |
+| W5A-27 | Missing/extra/reordered/substituted/incomplete aggregate contributor | Denial before publication; no partial project/aggregate visibility |
+| W5A-28 | Fault stage/write/**AuthorityPublicationJournalV1 publication-journal atomic rename**/file-fsync/parent-fsync/current-pointer-CAS/ack/restart; concurrently read at every boundary | AuthorityPublicationJournalV1 validates one AuthorityPublicationRecordV1; recovery and concurrent reader see only old complete or new complete dual-scope state, never staged/partial state |
+| W5A-29 | Equal commit-ID/exact tuple/input then altered input, stale revision, or changed expected base/publication UID | Equal replay idempotent; altered/stale denies without publication |
+| W5A-30 | Substitute manifest/inventory/snapshot/revision/section/target/directory root | Revalidation denies before lookup or ProjectionPort |
+| W5A-31 | Supply public journal, `instanceof` lookalike, structural permit, serialized permit, or caller aggregate/root | Only TargetInventoryStoreV1's composition-root closure brand publishes; no write or visible record otherwise |
+| W5A-32 | Replay same commit ID with altered expected IDs or normalized deltas | Exact canonical replay-envelope SHA-256 returns the original durable result; altered envelope denies before write |
+| W5A-33 | Corrupt current record, inventory/manifest object, object hash, project/aggregate root, page root, or exact tuple after publication | Open/recovery deep validation denies before lookup; it never returns a partially checked head |
+| W5A-34 | Kill publisher process or leave writer lock at each journal state/rename/fsync/CAS boundary; start independent recovery process | Recovery resolves stale lock and exposes prior complete or next complete record only, never null/staged/partial |
+| W5A-35 | Compare a clean commit and equivalent delta sequence, then list bounded directory pages with forged/foreign continuations | Byte-identical dual snapshots/inventories/manifests/roots/pages/projections; only sealed ordered <=100-entry/<=200-line/<=6,000-token pages continue |
+
+W5A-25..30 run against real composition-root registry, snapshot, inventory,
+journal, and filesystem owners. They gate W5A-18..24, W5C, URI, MCP, and
+materializer re-attempts.
+W5A-31..35 are additional non-admission gates for the rejected publisher
+implementation; focused or in-memory substitutes do not satisfy them.
+
+### 22.4 Ordered remediation gates (blocking test execution)
+
+| Gate | Must pass before next gate | Mandatory added/retained proof | Explicit non-evidence |
+|---|---|---|---|
+| P2 durable publisher | W5A-25..35 foundation | Same canonical envelope replays; changed revision/expected IDs/deltas deny; independently launched writer race and SIGKILL/recovery prove old-or-new complete state. First-use nested ledger ancestors are all durable; stale unlock revalidates exact observed owner/lock identity before removal. | In-process-only lock/race, timer-only stale detection, path-blind unlink, public permit/journal, or focused unit success. The known `EEXIST` first-use race is a FAIL. |
+| A read authority | P2 PASS | Real `SnapshotAuthorityPortV1.openBoundSnapshot` opens production registry/snapshot state through branded `TargetInventoryStoreV1.openPublishedAuthorityInventoryV1` and rejects every dual-snapshot, manifest, instance, worktree, revision, target, and brand substitution before AuthorizationPort/ProjectionPort. | Fixture manifests, caches, maps, structural views, mocked stores, or public journal access. |
+| U URI/projection | A PASS | Resolver candidate undergoes sealed target proof plus real receipt signature/window/revocation and full receipt/binding comparison; URI hostile matrix and canonical-positive families prove zero pre-admission projection calls and one public denial. | Raw paths, local signers, duck-typed grants, alias-only output, or old rejected URI code. |
+| C cursor/adapters | U PASS | W5C plus bounded-page/cache/materialization cases prove authenticated domain/position/limit and read-only adapters. | Mock ProjectionPort, synthetic cursor state, or adapter-only fixture. |
+
+Every gate additionally requires an exact-scope diff inspection and independent
+highest-capability review PASS. Any failure marks the gate and all successors
+`NON-ADMITTED`; no successor test may be counted as substitute evidence.
+The gates are additive to the normative authority/cursor and raw-snapshot
+contracts, including exact `spipe-markdown-token-v1@1` <=6,000 testing;
+rejected cursor code cannot remove or relax any of those cases.

@@ -1,0 +1,34 @@
+use std.spec.{describe, it, expect}
+use os.kernel.loader.dbd_launch_grants_v1.{SIMPLEOS_DBD_EXECUTABLE_V1}
+use os.kernel.loader.dbd_spawn_recipe_v1.{
+    dbd_spawn_launch_shape_valid_v1, dbd_spawn_recipe_v1, dbd_spawn_recipe_valid_v1
+}
+use os.kernel.types.capability_types.{CapabilityKind}
+
+describe("dedicated DBD filesystem spawn recipe"):
+    it("binds immutable image identity and secret-free launch metadata"):
+        val recipe = dbd_spawn_recipe_v1("dbd-image-hash",
+            SIMPLEOS_DBD_EXECUTABLE_V1, [SIMPLEOS_DBD_EXECUTABLE_V1], [])
+        expect(dbd_spawn_recipe_valid_v1(recipe)).to_equal(true)
+        expect(recipe.spawn_spec.grants.len()).to_equal(10)
+
+    it("rejects aliases extra args and ambient environment"):
+        expect(dbd_spawn_launch_shape_valid_v1("/SERVERS.ELF",
+            [SIMPLEOS_DBD_EXECUTABLE_V1], [])).to_equal(false)
+        expect(dbd_spawn_launch_shape_valid_v1(SIMPLEOS_DBD_EXECUTABLE_V1,
+            [SIMPLEOS_DBD_EXECUTABLE_V1, "--secret=forbidden"], [])).to_equal(false)
+        expect(dbd_spawn_launch_shape_valid_v1(SIMPLEOS_DBD_EXECUTABLE_V1,
+            [SIMPLEOS_DBD_EXECUTABLE_V1], ["PATH=/bin"])).to_equal(false)
+
+    it("does not carry WEB file or HTTP bind power"):
+        val recipe = dbd_spawn_recipe_v1("dbd-image-hash",
+            SIMPLEOS_DBD_EXECUTABLE_V1, [SIMPLEOS_DBD_EXECUTABLE_V1], [])
+        var web_file = false
+        var http_listener = false
+        for grant in recipe.spawn_spec.grants:
+            if grant.requested == CapabilityKind.FileRead(path_prefix: "/SYS/SERVER.HTM"):
+                web_file = true
+            if grant.requested == CapabilityKind.NetListen(port: 8080u16):
+                http_listener = true
+        expect(web_file).to_equal(false)
+        expect(http_listener).to_equal(false)

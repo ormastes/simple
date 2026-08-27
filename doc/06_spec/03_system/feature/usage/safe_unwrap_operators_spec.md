@@ -2,6 +2,29 @@
 
 > opt unwrap or: default_value              # Use default if None
 
+<!-- sdn-diagram:id=safe_unwrap_operators_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=safe_unwrap_operators_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+safe_unwrap_operators_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=safe_unwrap_operators_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 23 | 23 | 0 | 0 |
@@ -21,7 +44,7 @@ opt unwrap or: default_value              # Use default if None
 | Category | Syntax |
 | Status | Implemented |
 | Source | `test/03_system/feature/usage/safe_unwrap_operators_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Syntax
@@ -49,18 +72,13 @@ result unwrap or_return: default_on_err   # Early return with default
 
 #### returns value when Option is Some
 
-- returns value when Option is Some
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns value when Option is Some")
 val opt: Option<i64> = Some(42)
 val result = opt unwrap or: 0
 expect result == 42
@@ -70,18 +88,13 @@ expect result == 42
 
 #### returns default when Option is None
 
-- returns default when Option is None
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns default when Option is None")
 val opt: Option<i64> = None
 val result = opt unwrap or: 0
 expect result == 0
@@ -91,18 +104,13 @@ expect result == 0
 
 #### works with Result Ok
 
-- works with Result Ok
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("works with Result Ok")
 val res: Result<i64, text> = Ok(42)
 val result = res unwrap or: 0
 expect result == 42
@@ -112,18 +120,13 @@ expect result == 42
 
 #### returns default for Result Err
 
-- returns default for Result Err
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns default for Result Err")
 val res: Result<i64, text> = Err("error")
 val result = res unwrap or: -1
 expect result == -1
@@ -133,18 +136,13 @@ expect result == -1
 
 #### evaluates default expression
 
-- evaluates default expression
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("evaluates default expression")
 val opt: Option<i64> = None
 val result = opt unwrap or: 10 + 5
 expect result == 15
@@ -154,18 +152,13 @@ expect result == 15
 
 #### handles complex default expressions
 
-- handles complex default expressions
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("handles complex default expressions")
 val opt: Option<text> = None
 val result = opt unwrap or: "default".upper()
 expect result == "DEFAULT"
@@ -175,18 +168,13 @@ expect result == "DEFAULT"
 
 #### works with string defaults
 
-- works with string defaults
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("works with string defaults")
 val opt: Option<text> = None
 val result = opt unwrap or: "fallback"
 expect result == "fallback"
@@ -196,18 +184,13 @@ expect result == "fallback"
 
 #### preserves value type through unwrap
 
-- preserves value type through unwrap
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("preserves value type through unwrap")
 val opt: Option<i64> = Some(100)
 val result = opt unwrap or: 0
 # Type is still i64
@@ -220,18 +203,13 @@ expect result == 100
 
 #### returns value when Option is Some without calling closure
 
-- returns value when Option is Some without calling closure
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns value when Option is Some without calling closure")
 val opt: Option<i64> = Some(42)
 var called = false
 val result = opt unwrap else: \:
@@ -245,18 +223,13 @@ expect called == false
 
 #### calls closure only when Option is None
 
-- calls closure only when Option is None
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("calls closure only when Option is None")
 val opt: Option<i64> = None
 var called = false
 val result = opt unwrap else: \:
@@ -270,18 +243,13 @@ expect called == true
 
 #### works with Result Ok without evaluating closure
 
-- works with Result Ok without evaluating closure
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("works with Result Ok without evaluating closure")
 val res: Result<i64, text> = Ok(42)
 var called = false
 val result = res unwrap else: \:
@@ -295,18 +263,13 @@ expect called == false
 
 #### evaluates closure for Result Err
 
-- evaluates closure for Result Err
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("evaluates closure for Result Err")
 val res: Result<i64, text> = Err("failed")
 var called = false
 val result = res unwrap else: \:
@@ -320,18 +283,13 @@ expect called == true
 
 #### closure can perform side effects
 
-- closure can perform side effects
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("closure can perform side effects")
 var side_effect = 0
 val opt: Option<i64> = None
 val result = opt unwrap else: \:
@@ -345,18 +303,13 @@ expect side_effect == 100
 
 #### lazy evaluation skips expensive computation when value exists
 
-- lazy evaluation skips expensive computation when value exists
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("lazy evaluation skips expensive computation when value exists")
 val opt: Option<i64> = Some(1)
 var expensive_called = false
 val result = opt unwrap else: \:
@@ -372,18 +325,17 @@ expect expensive_called == false
 
 #### returns value when present
 
-- returns value when present
+1. fn get value or early
+2. expect get value or early
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns value when present")
 fn get_value_or_early() -> i64:
     val opt: Option<i64> = Some(42)
     val value = opt unwrap or_return: 0
@@ -395,18 +347,17 @@ expect get_value_or_early() == 43
 
 #### returns default when None
 
-- returns default when None
+1. fn get value or early
+2. expect get value or early
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns default when None")
 fn get_value_or_early() -> i64:
     val opt: Option<i64> = None
     val value = opt unwrap or_return: 0
@@ -418,18 +369,17 @@ expect get_value_or_early() == 0
 
 #### works with Result
 
-- works with Result
+1. fn parse number or early
+2. expect parse number or early
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("works with Result")
 fn parse_number_or_early() -> i64:
     val res: Result<i64, text> = Ok(42)
     val value = res unwrap or_return: -1
@@ -441,18 +391,17 @@ expect parse_number_or_early() == 84
 
 #### returns default for Result Err
 
-- returns default for Result Err
+1. fn parse number or early
+2. expect parse number or early
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns default for Result Err")
 fn parse_number_or_early() -> i64:
     val res: Result<i64, text> = Err("parse error")
     val value = res unwrap or_return: -1
@@ -466,18 +415,20 @@ expect parse_number_or_early() == -1
 
 #### can chain multiple unwrap operations
 
-- can chain multiple unwrap operations
+1. fn chain result
+2. expect chain result
+3. expect chain result
+4. expect chain result
+5. expect chain result
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("can chain multiple unwrap operations")
 fn chain_result(opt1, opt2):
     val v1 = opt1 unwrap or: 0
     val v2 = opt2 unwrap or: 0
@@ -492,18 +443,13 @@ expect chain_result(None, None) == 0
 
 #### works in nested expressions
 
-- works in nested expressions
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("works in nested expressions")
 val opt: Option<i64> = Some(5)
 val result = (opt unwrap or: 0) * 2 + 10
 expect result == 20
@@ -515,18 +461,13 @@ expect result == 20
 
 #### preserves Option type semantics
 
-- preserves Option type semantics
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("preserves Option type semantics")
 val maybe_value: Option<text> = Some("hello")
 val text_result = maybe_value unwrap or: "world"
 expect text_result == "hello"
@@ -536,18 +477,16 @@ expect text_result == "hello"
 
 #### handles nested Option types
 
-- handles nested Option types
+1. expect inner == Some
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("handles nested Option types")
 val nested: Option<Option<i64>> = Some(Some(42))
 # Unwraps outer layer
 val inner = nested unwrap or: Some(0)
@@ -558,18 +497,13 @@ expect inner == Some(42)
 
 #### preserves Result error information
 
-- preserves Result error information
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("preserves Result error information")
 val result: Result<i64, text> = Err("error message")
 val recovered = result unwrap or: 0
 expect recovered == 0
@@ -589,54 +523,3 @@ expect recovered == 0
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `100a2341daa7c171131058aae087ad03e05fd595298d5f3d7fb3a8b82ef96542`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `100a2341daa7c171131058aae087ad03e05fd595298d5f3d7fb3a8b82ef96542`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `100a2341daa7c171131058aae087ad03e05fd595298d5f3d7fb3a8b82ef96542`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **91/100**; effective score: **91/100**; blockers: **0**.
-
-SSpec documentization score: 91/100
-source: test/03_system/feature/usage/safe_unwrap_operators_spec.spl
-mirror: doc/06_spec/03_system/feature/usage/safe_unwrap_operators_spec.md (current)
-findings: 6 blockers: 0
-  narrative=100 structure=95 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/feature/usage/safe_unwrap_operators_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/feature/usage/safe_unwrap_operators_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/feature/usage/safe_unwrap_operators_spec.spl:45:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'returns value when Option is Some' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/usage/safe_unwrap_operators_spec.spl:52:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'returns default when Option is None' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/usage/safe_unwrap_operators_spec.spl:59:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'works with Result Ok' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/usage/safe_unwrap_operators_spec.spl:207:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'can chain multiple unwrap operations' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-<!-- sspec-maintain:scorecard:end -->

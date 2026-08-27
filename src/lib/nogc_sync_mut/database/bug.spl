@@ -12,7 +12,7 @@
 #   bugdb.add_bug(Bug(...))
 #   bugdb.save()  // Atomic operation
 #
-# For MCP integration, see: std.nogc_async_mut.mcp.bugdb_resource
+# For MCP integration, see: src/app/mcp/bugdb_resource.spl
 
 use nogc_sync_mut.database.core.{SdnDatabase, SdnTable, SdnRow, StringInterner}
 use nogc_sync_mut.database.query
@@ -82,7 +82,38 @@ struct BugStats:
 
 fn load_bug_database(path: text) -> BugDatabase?:
     val db = SdnDatabase.load(path)?
+    ensure_bug_token_usage_table(db)
     Some(BugDatabase(db: db))
+
+fn bug_token_usage_columns() -> [text]:
+    [
+        "bug_id", "category", "provider", "input_tokens", "output_tokens",
+        "cache_read_tokens", "cache_create_tokens", "total_tokens",
+        "source", "knowledge", "recorded_at",
+    ]
+
+# Add missing token-receipt columns without discarding existing rows or
+# extension columns. Loading performs this migration in memory; the caller's
+# normal atomic save persists it together with the requested bug operation.
+fn ensure_bug_token_usage_table(db: SdnDatabase):
+    val canonical = bug_token_usage_columns()
+    val existing_opt = db.get_table("bug_token_usage")
+    if not existing_opt.?:
+        db.set_table("bug_token_usage", SdnTable.new("bug_token_usage", canonical))
+        return
+    val existing = existing_opt!
+    var columns = existing.columns
+    var changed = false
+    for column in canonical:
+        if not columns.contains(column):
+            columns.push(column)
+            changed = true
+    if not changed:
+        return
+    val migrated = SdnTable.new("bug_token_usage", columns)
+    for existing_row in existing.rows:
+        migrated.add_row(existing_row.copy())
+    db.set_table("bug_token_usage", migrated)
 
 fn create_bug_database(path: text) -> BugDatabase:
     val db = SdnDatabase.new(path)
@@ -130,6 +161,10 @@ fn create_bug_database(path: text) -> BugDatabase:
         "content"
     ])
     db.set_table("bug_investigation_logs", log_table)
+
+    db.set_table("bug_token_usage", SdnTable.new(
+        "bug_token_usage", bug_token_usage_columns()
+    ))
 
     BugDatabase(db: db)
 
@@ -236,6 +271,87 @@ class BugDatabase:
 
         # Put table back into database
         self.db.set_table(table_name, table)
+
+    # Append a durable investigation receipt without rewriting the bug row.
+    me add_investigation_log(bug_id: text, content: text) -> bool:
+        if not self.get_bug(bug_id).?:
+            return false
+        var table = self.db.get_table_mut("bug_investigation_logs")?
+        val line_num = self.get_multiline_field("bug_investigation_logs", bug_id).len()
+        val row = SdnRow.empty()
+        row.set("bug_id", bug_id)
+        row.set("line_num", "{line_num}")
+        row.set("content", content)
+        table.add_row(row)
+        self.db.set_table("bug_investigation_logs", table)
+        true
+
+    me add_token_usage(bug_id: text, category: text, provider: text, input_tokens: i64, output_tokens: i64, cache_read_tokens: i64, cache_create_tokens: i64, total_tokens: i64, source: text, knowledge: text, recorded_at: text) -> bool:
+        if not self.get_bug(bug_id).? or category == "" or provider == "" or source == "" or recorded_at == "":
+            return false
+        val all_numeric = input_tokens >= 0 and output_tokens >= 0 and cache_read_tokens >= 0 and cache_create_tokens >= 0 and total_tokens >= 0
+        val all_unavailable = input_tokens == -1 and output_tokens == -1 and cache_read_tokens == -1 and cache_create_tokens == -1 and total_tokens == -1
+        val partial_with_knowledge = knowledge != "none" and knowledge != "" and total_tokens == -1 and
+            input_tokens >= -1 and output_tokens >= -1 and cache_read_tokens >= -1 and cache_create_tokens >= -1
+        if not all_numeric and not all_unavailable and not partial_with_knowledge:
+            return false
+        ensure_bug_token_usage_table(self.db)
+        var table = self.db.get_table_mut("bug_token_usage")?
+        val row = SdnRow.empty()
+        row.set("bug_id", bug_id)
+        row.set("category", category)
+        row.set("provider", provider)
+        row.set("input_tokens", "{input_tokens}")
+        row.set("output_tokens", "{output_tokens}")
+        row.set("cache_read_tokens", "{cache_read_tokens}")
+        row.set("cache_create_tokens", "{cache_create_tokens}")
+        row.set("total_tokens", "{total_tokens}")
+        row.set("source", source)
+        row.set("knowledge", knowledge)
+        row.set("recorded_at", recorded_at)
+        table.add_row(row)
+        self.db.set_table("bug_token_usage", table)
+        true
+
+    fn comparable_token_average(category: text, exclude_bug_id: text) -> i64:
+        val table_opt = self.db.get_table("bug_token_usage")
+        if not table_opt.?:
+            return -1
+        val table = table_opt!
+        var total: i64 = 0
+        var count: i64 = 0
+        for row in table.rows:
+            if (row.get("category") ?? "") == category and (row.get("bug_id") ?? "") != exclude_bug_id:
+                val value = (row.get("total_tokens") ?? "-1").parse_i64() ?? -1
+                val baseline_bug_id = row.get("bug_id") ?? ""
+                val baseline_bug = self.get_bug(baseline_bug_id)
+                if value >= 0 and baseline_bug.? and baseline_bug!.status == BugStatus.Closed:
+                    if total > 9223372036854775807 - value:
+                        return -2
+                    total = total + value
+                    count = count + 1
+        if count == 0:
+            return -1
+        total / count
+
+    fn token_category_for_bug(bug_id: text) -> text:
+        val bug = self.get_bug(bug_id)
+        if not bug.?:
+            return "unknown"
+        val path = bug!.file
+        if path.starts_with("src/compiler"):
+            return "compiler"
+        if path.starts_with("src/runtime"):
+            return "runtime"
+        if path.starts_with("src/lib"):
+            return "library"
+        if path.starts_with("src/app"):
+            return "application"
+        if path.starts_with("src/os"):
+            return "os"
+        if path.starts_with("test/"):
+            return "test"
+        "other"
 
     # Get bug by ID
     fn get_bug(id: text) -> Bug?:
@@ -582,6 +698,54 @@ class BugDatabase:
                     issues.push(issue)
             case None:
                 pass_do_nothing
+
+        val token_table_opt = self.db.get_table("bug_token_usage")
+        match token_table_opt:
+            case Some(token_table):
+                for column in bug_token_usage_columns():
+                    if not token_table.columns.contains(column):
+                        issues.push(DbIssue(
+                            db_name: db_name,
+                            severity: "error",
+                            issue_type: "missing_column",
+                            message: "bug_token_usage is missing required column '{column}'",
+                            auto_fixable: true
+                        ))
+                val orphan_issues = check_orphan_refs(token_table, "bug_id", bug_id_table, "id", db_name)
+                for issue in orphan_issues:
+                    issues.push(issue)
+                for row in token_table.rows:
+                    val token_bug_id = row.get("bug_id") ?? ""
+                    for column in ["input_tokens", "output_tokens", "cache_read_tokens", "cache_create_tokens", "total_tokens"]:
+                        val parsed = row.get_i64(column)
+                        # -1 is the canonical explicit provider-unavailable
+                        # sentinel. Values below -1 and malformed fields are
+                        # invalid; unavailable is not silently rewritten to 0.
+                        if not parsed.? or parsed! < -1:
+                            issues.push(DbIssue(
+                                db_name: db_name,
+                                severity: "error",
+                                issue_type: "invalid_token_count",
+                                message: "Bug {token_bug_id}: {column} must be non-negative or -1 (unavailable)",
+                                auto_fixable: false
+                            ))
+                    val referenced_bug = self.get_bug(token_bug_id)
+                    if referenced_bug.? and referenced_bug!.status != BugStatus.Closed:
+                        issues.push(DbIssue(
+                            db_name: db_name,
+                            severity: "error",
+                            issue_type: "token_receipt_for_open_bug",
+                            message: "Bug {token_bug_id}: completion token receipt requires Closed status",
+                            auto_fixable: false
+                        ))
+            case None:
+                issues.push(DbIssue(
+                    db_name: db_name,
+                    severity: "error",
+                    issue_type: "missing_table",
+                    message: "Expected bug_token_usage table not found in bug database",
+                    auto_fixable: true
+                ))
 
         # Test links (from legacy validation)
         val bugs = self.all_bugs()

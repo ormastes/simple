@@ -7,6 +7,62 @@
 
 use std.common.crypto.sha256.{sha256_text}
 
+pub fn riscv_scalar_semantic_opcode(value: text) -> i64:
+    """Return the frozen nonzero runtime semantic code for a declared scalar operation."""
+    if value == "add": return 1
+    if value == "and": return 2
+    if value == "auipc": return 3
+    if value == "branch_equal": return 4
+    if value == "branch_greater_equal_signed": return 5
+    if value == "branch_greater_equal_unsigned": return 6
+    if value == "branch_less_than_signed": return 7
+    if value == "branch_less_than_unsigned": return 8
+    if value == "branch_not_equal": return 9
+    if value == "breakpoint": return 10
+    if value == "csr_clear_immediate": return 11
+    if value == "csr_read_clear": return 12
+    if value == "csr_read_set": return 13
+    if value == "csr_read_write": return 14
+    if value == "csr_set_immediate": return 15
+    if value == "csr_write_immediate": return 16
+    if value == "divide_signed": return 17
+    if value == "divide_unsigned": return 18
+    if value == "environment_call": return 19
+    if value == "fence": return 20
+    if value == "fence_instruction": return 21
+    if value == "jal": return 22
+    if value == "jalr": return 23
+    if value == "load_byte_signed": return 24
+    if value == "load_byte_unsigned": return 25
+    if value == "load_doubleword": return 26
+    if value == "load_half_signed": return 27
+    if value == "load_half_unsigned": return 28
+    if value == "load_word_signed": return 29
+    if value == "load_word_unsigned": return 30
+    if value == "lui": return 31
+    if value == "multiply_high_signed": return 32
+    if value == "multiply_high_signed_unsigned": return 33
+    if value == "multiply_high_unsigned": return 34
+    if value == "multiply_low": return 35
+    if value == "or": return 36
+    if value == "remainder_signed": return 37
+    if value == "remainder_unsigned": return 38
+    if value == "set_less_than_signed": return 39
+    if value == "set_less_than_unsigned": return 40
+    if value == "shift_left_logical": return 41
+    if value == "shift_left_logical_immediate": return 42
+    if value == "shift_right_arithmetic": return 43
+    if value == "shift_right_arithmetic_immediate": return 44
+    if value == "shift_right_logical": return 45
+    if value == "shift_right_logical_immediate": return 46
+    if value == "store_byte": return 47
+    if value == "store_doubleword": return 48
+    if value == "store_half": return 49
+    if value == "store_word": return 50
+    if value == "subtract": return 51
+    if value == "xor": return 52
+    0
+
 pub class RiscvScalarIsaEntry:
     id: text
     extension: text
@@ -31,6 +87,8 @@ pub class RiscvScalarIsaEntry:
             return "RISCV-ISA-E-WIDTH: scalar ISA operand width must be XLEN (0) or 32"
         if self.writeback_rule == "" or self.memory_effect == "" or self.trap_behavior == "":
             return "RISCV-ISA-E-SEMANTICS: scalar ISA entry requires explicit effect metadata"
+        if riscv_scalar_semantic_opcode(self.semantic_operation) == 0:
+            return "RISCV-ISA-E-SEMANTICS: scalar ISA operation requires a frozen runtime opcode"
         ""
 
     me applies_to_xlen(xlen: u32) -> bool:
@@ -202,8 +260,8 @@ pub fn riscv_scalar_entries_for_isa_profile(isa_profile: text) -> Result<[RiscvS
     remain owned by the compressed database. `Zicsr` and `Zifencei` rows are
     selected only by an explicitly named combined profile; a bare I profile
     must not over-advertise those separate extensions. M rows appear only for
-    an explicit `im` profile, which lets a future multiplier/divider provider
-    be selected at elaboration rather than at instruction-execution time.
+    an explicit `im` profile, while Zmmul admits only its multiply subset.
+    Those choices are fixed at elaboration rather than instruction execution.
     """
     var xlen: u32 = 0
     var include_m = false
@@ -219,6 +277,24 @@ pub fn riscv_scalar_entries_for_isa_profile(isa_profile: text) -> Result<[RiscvS
         include_zifencei = true
     elif isa_profile == "rv64i_zicsr_zifencei":
         xlen = 64
+        include_zicsr = true
+        include_zifencei = true
+    elif isa_profile == "rv32i_zmmul_zicsr_zifencei":
+        xlen = 32
+        include_zicsr = true
+        include_zifencei = true
+    elif isa_profile == "rv64i_zmmul_zicsr_zifencei":
+        xlen = 64
+        include_zicsr = true
+        include_zifencei = true
+    elif isa_profile == "rv32im_zicsr_zifencei":
+        xlen = 32
+        include_m = true
+        include_zicsr = true
+        include_zifencei = true
+    elif isa_profile == "rv64im_zicsr_zifencei":
+        xlen = 64
+        include_m = true
         include_zicsr = true
         include_zifencei = true
     elif isa_profile == "rv32im":
@@ -245,7 +321,8 @@ pub fn riscv_scalar_entries_for_isa_profile(isa_profile: text) -> Result<[RiscvS
         for entry in riscv_scalar_m_entries(): entries.push(entry)
         if xlen == 64:
             for entry in riscv_scalar_m_rv64_word_entries(): entries.push(entry)
-    elif isa_profile == "rv32i_zmmul" or isa_profile == "rv64i_zmmul":
+    elif isa_profile == "rv32i_zmmul" or isa_profile == "rv64i_zmmul" or
+        isa_profile == "rv32i_zmmul_zicsr_zifencei" or isa_profile == "rv64i_zmmul_zicsr_zifencei":
         for entry in riscv_scalar_zmmul_entries():
             if entry.applies_to_xlen(xlen): entries.push(entry)
     val diagnostic = riscv_scalar_database_diagnostic(entries)
@@ -297,7 +374,9 @@ pub class RiscvScalarProviderSelection:
         if self.xlen != expected_xlen:
             return "RISCV-PROVIDER-E-XLEN: scalar provider selection must match its ISA profile XLEN"
         val includes_multiply = self.isa_profile == "rv32im" or self.isa_profile == "rv64im" or
-            self.isa_profile == "rv32i_zmmul" or self.isa_profile == "rv64i_zmmul"
+            self.isa_profile == "rv32im_zicsr_zifencei" or self.isa_profile == "rv64im_zicsr_zifencei" or
+            self.isa_profile == "rv32i_zmmul" or self.isa_profile == "rv64i_zmmul" or
+            self.isa_profile == "rv32i_zmmul_zicsr_zifencei" or self.isa_profile == "rv64i_zmmul_zicsr_zifencei"
         if self.muldiv_provider != "none" and self.muldiv_provider != "iterative" and
             self.muldiv_provider != "pipelined" and self.muldiv_provider != "dsp":
             return "RISCV-PROVIDER-E-MULDIV: scalar provider selection is unsupported"
@@ -407,7 +486,7 @@ pub class RiscvScalarDecoderPlan:
         sha256_text(self.canonical_text())
 
 pub fn riscv_scalar_decoder_plan(isa_profile: text) -> Result<RiscvScalarDecoderPlan, text>:
-    """Freeze the exact scalar rows that a future decoder generator may lower."""
+    """Freeze the exact scalar rows consumed by the strict HWIR decoder generator."""
     val entries = riscv_scalar_entries_for_isa_profile(isa_profile)?
     val xlen: u32 = if isa_profile.starts_with("rv32"): 32 else: 64
     val plan = RiscvScalarDecoderPlan(isa_profile: isa_profile, xlen: xlen, entries: entries)

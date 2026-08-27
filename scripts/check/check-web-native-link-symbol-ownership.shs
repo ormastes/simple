@@ -1,0 +1,46 @@
+#!/bin/sh
+# Classify a retained strict web-server linker log without rebuilding it.
+set -eu
+
+ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+LOG=${1:-"$ROOT_DIR/build/native_probe/web-admitted-20260812/gate-corrective.stdout"}
+ARCHIVE=${2:-"$ROOT_DIR/build/simple-core/libsimple_runtime.a"}
+
+[ -f "$LOG" ] || { echo "FAIL: linker log missing: $LOG" >&2; exit 2; }
+[ -f "$ARCHIVE" ] || { echo "FAIL: runtime archive missing: $ARCHIVE" >&2; exit 2; }
+
+TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/simple-web-link-symbols.XXXXXX")
+trap 'rm -rf "$TMP_DIR"' EXIT HUP INT TERM
+
+sed -n "s/.*undefined reference to [\`‘']\([^\`’']*\)[\`’'].*/\1/p" "$LOG" | sort -u >"$TMP_DIR/undefined"
+nm -g --defined-only "$ARCHIVE" 2>/dev/null | awk 'NF >= 2 { print $NF }' | sed 's/^_//' | sort -u >"$TMP_DIR/archive"
+
+awk '
+    /^rt_(cuda_|rocm_|metal_|vulkan_|engine2d_rocm_)/ { print; next }
+' "$TMP_DIR/undefined" >"$TMP_DIR/optional_gpu"
+awk '
+    /^rt_(cuda_|rocm_|metal_|vulkan_|engine2d_rocm_)/ { next }
+    { print }
+' "$TMP_DIR/undefined" >"$TMP_DIR/non_gpu"
+comm -12 "$TMP_DIR/undefined" "$TMP_DIR/archive" >"$TMP_DIR/archive_owned"
+comm -23 "$TMP_DIR/non_gpu" "$TMP_DIR/archive" >"$TMP_DIR/non_gpu_missing"
+
+total=$(wc -l <"$TMP_DIR/undefined" | tr -d ' ')
+optional_gpu=$(wc -l <"$TMP_DIR/optional_gpu" | tr -d ' ')
+archive_owned=$(wc -l <"$TMP_DIR/archive_owned" | tr -d ' ')
+non_gpu_missing=$(wc -l <"$TMP_DIR/non_gpu_missing" | tr -d ' ')
+
+echo "web_link_unique_total=$total"
+echo "web_link_optional_gpu_runtime=$optional_gpu"
+echo "web_link_selected_archive_owned=$archive_owned"
+echo "web_link_non_gpu_missing=$non_gpu_missing"
+echo "web_link_non_gpu_missing_symbols=$(paste -sd, "$TMP_DIR/non_gpu_missing")"
+
+# This retained failure is admitted only when the classifier catches the
+# runtime-lane mismatch.  A future core-only log with no optional GPU symbols
+# must not be explained away by this gate.
+if [ "$optional_gpu" -eq 0 ]; then
+    echo "FAIL: no optional GPU runtime ownership mismatch found" >&2
+    exit 1
+fi
+echo "PASS: retained web linker symbols classified; rebuild must use host-gpu runtime authority"

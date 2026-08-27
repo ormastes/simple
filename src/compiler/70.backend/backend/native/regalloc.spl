@@ -10,12 +10,12 @@
 # 4. When all registers used, spill longest-lived interval to stack
 # 5. Insert spill/reload instructions
 
-use compiler.backend.native.mach_inst.{MachReg, MachRegKind, virtual_reg, physical_reg, reg_is_virtual, reg_is_physical, reg_id, Operand, OperandKind, op_reg, op_phys, op_mem, MachInst, new_mach_inst, MachBlock, new_mach_block, mach_block_add_inst, MachFunction, new_mach_function, mach_func_add_block, mach_func_set_frame_size, MachModule, new_mach_module, mach_module_add_func, mach_module_add_data, mach_module_add_extern}
+use compiler.backend.native.mach_inst.{MachReg, MachRegKind, virtual_reg, physical_reg, reg_is_virtual, reg_is_physical, reg_id, Operand, OperandKind, op_reg, op_phys, op_mem, op_imm, MachInst, new_mach_inst, MachBlock, new_mach_block, mach_block_add_inst, MachFunction, new_mach_function, mach_func_add_block, mach_func_set_frame_size, MachModule, new_mach_module, mach_module_add_func, mach_module_add_data, mach_module_add_extern}
 use compiler.backend.native.mach_inst.{X86_RAX, X86_RCX, X86_RDX, X86_RBX, X86_RSP, X86_RBP, X86_RSI, X86_RDI, X86_R8, X86_R9, X86_R10, X86_R11, X86_R12, X86_R13, X86_R14, X86_R15, X86_ALLOCATABLE, X86_CALLEE_SAVED}
 use compiler.backend.native.mach_inst.{X86_XMM_ALLOCATABLE, X86_YMM_ALLOCATABLE}
 use compiler.backend.native.mach_inst.{X86_OP_MOV_REG_REG, X86_OP_MOV_REG_MEM, X86_OP_MOV_MEM_REG, X86_OP_SUB_IMM}
-use compiler.backend.native.mach_inst.{AARCH64_SP, AARCH64_X29, AARCH64_CALLEE_SAVED, A64_OP_SUB_IMM, A64_OP_STR, A64_OP_LDR, A64_OP_MOV}
-use compiler.backend.native.mach_inst.{RV_X1, RV_X2, RV_X9, RV_X18, RV_X19, RV_X20, RV_X21, RV_X22, RV_X23, RV_X24, RV_X25, RV_X26, RV_X27, RV_X31, RV_OP_ADDI, RV_OP_ADD, RV_OP_LI, RV_OP_SD, RV_OP_LD}
+use compiler.backend.native.mach_inst.{AARCH64_SP, AARCH64_X29, AARCH64_CALLEE_SAVED, A64_OP_SUB_IMM, A64_OP_ADD_IMM, A64_OP_STR, A64_OP_LDR, A64_OP_MOV}
+use compiler.backend.native.mach_inst.{RV_X1, RV_X2, RV_X8, RV_X9, RV_X18, RV_X19, RV_X20, RV_X21, RV_X22, RV_X23, RV_X24, RV_X25, RV_X26, RV_X27, RV_X31, RV_OP_ADDI, RV_OP_ADD, RV_OP_LI, RV_OP_SD, RV_OP_LD, RV_OP_RET}
 
 # ============================================================================
 # Live Intervals
@@ -88,12 +88,21 @@ fn interval_length(interval: LiveInterval) -> i64:
 # Compute Live Intervals
 # ============================================================================
 
+fn is_jump_opcode(opcode: i64) -> bool:
+    if opcode == 40: return true
+    if opcode == 41: return true
+    if opcode == 42: return true
+    if opcode == 43: return true
+    if opcode == 44: return true
+    if opcode == 45: return true
+    if opcode == 46: return true
+    if opcode == 47: return true
+    if opcode == 48: return true
+    false
+
 fn get_jump_label(inst: MachInst) -> i64:
-    # Every native branch target is an OperandKind.Label, but its operand
-    # position differs by ISA (x86 jcc/B at 0, RV JAL at 1/branch at 2,
-    # A64 CBZ/CBNZ at 1). Symbol calls use Sym and are not CFG back-edges.
-    for operand in inst.operands:
-        match operand.kind:
+    if inst.operands.len() > 0:
+        match inst.operands[0].kind:
             case Label(id): return id
             case _: ()
     -999
@@ -140,27 +149,30 @@ fn compute_live_intervals(func: MachFunction) -> [LiveInterval]:
     # A back-edge is a jump from block B to an earlier block A (lower start_pos).
     # All intervals overlapping the loop body [A_start, B_end] must be extended
     # to cover the full range, so they stay live across loop iterations.
-    # COW-alias fix (2026-08-21): the key set of `intervals` is FIXED from here
-    # on — the back-edge pass only rewrites values at existing keys, never adds
-    # one — so materialize the key array ONCE instead of once per back-edge.
-    val ikeys = intervals.keys()
     for block in func.blocks:
         for inst in block.insts:
-            val target_id = get_jump_label(inst)
-            if target_id != -999 and block_start_pos.contains_key(target_id):
-                val target_start = block_start_pos[target_id]
-                val src_end = block_end_pos[block.block_id]
-                if target_start < block_start_pos[block.block_id]:
-                    # Extend only values already live at the loop header.
-                    # Independent temporaries first defined later in the body
-                    # must retain disjoint ranges or no-spill targets suffer
-                    # false register-pressure failures.
-                    for ik in ikeys:
-                        var iv = intervals[ik]
-                        val live_at_header = iv.start_pos <= target_start and iv.end_pos >= target_start
-                        if live_at_header:
-                            if iv.end_pos < src_end: iv = interval_update_end(iv, src_end)
-                            intervals[ik] = iv
+            if is_jump_opcode(inst.opcode):
+                val target_id = get_jump_label(inst)
+                if target_id != -999:
+                    if block_start_pos.contains_key(target_id):
+                        val target_start = block_start_pos[target_id]
+                        val src_end = block_end_pos[block.block_id]
+                        if target_start < block_start_pos[block.block_id]:
+                            # Back-edge detected: target_start..src_end is the loop
+                            val ikeys = intervals.keys()
+                            for ik in ikeys:
+                                var iv = intervals[ik]
+                                # Only extend intervals that START before the loop header
+                                # and are still alive at the header. This captures loop-carried
+                                # variables (defined before loop, used inside) without extending
+                                # loop-internal temps that are recalculated each iteration.
+                                val needs_extension = iv.start_pos < target_start and iv.end_pos >= target_start
+                                if needs_extension:
+                                    if iv.start_pos > target_start:
+                                        iv = interval_update_start(iv, target_start)
+                                    if iv.end_pos < src_end:
+                                        iv = interval_update_end(iv, src_end)
+                                    intervals[ik] = iv
 
     # Collect intervals into a list
     var result: [LiveInterval] = []
@@ -199,9 +211,6 @@ struct RegAllocResult:
     used_callee_saved: [i64]
 
 fn linear_scan_x86_64(intervals: [LiveInterval], allocatable: [i64]) -> RegAllocResult:
-    linear_scan_with_callee_saved(intervals, allocatable, X86_CALLEE_SAVED)
-
-fn linear_scan_with_callee_saved(intervals: [LiveInterval], allocatable: [i64], callee_saved: [i64]) -> RegAllocResult:
     val sorted = sort_intervals(intervals)
     var assignments: Dict<i64, i64> = {}
     var spills: Dict<i64, i64> = {}
@@ -247,7 +256,7 @@ fn linear_scan_with_callee_saved(intervals: [LiveInterval], allocatable: [i64], 
 
             # Track callee-saved usage
             var is_callee_saved = false
-            for cs_reg in callee_saved:
+            for cs_reg in X86_CALLEE_SAVED:
                 if found_reg == cs_reg:
                     is_callee_saved = true
             if is_callee_saved:
@@ -577,16 +586,15 @@ fn regalloc_function_aarch64(func: MachFunction) -> MachFunction:
     var blocks: [MachBlock] = []
     for block in func.blocks:
         var output: [MachInst] = []
-        val is_prologue = block.block_id == -1
         for source_inst in block.insts:
             val inst = rewrite_inst_no_spill(source_inst, result, "aarch64")
             # The selector's prologue establishes x29, then owns one SUB sp.
             # Extend that allocation once and save used nonvolatile registers.
-            if is_prologue and inst.opcode == A64_OP_SUB_IMM and inst.operands.len() >= 3 and get_phys_reg_id(inst.operands[0]) == AARCH64_SP:
+            if inst.opcode == A64_OP_SUB_IMM and inst.operands.len() >= 3 and get_phys_reg_id(inst.operands[0]) == AARCH64_SP:
                 output.push(new_mach_inst(A64_OP_SUB_IMM, [op_phys(AARCH64_SP), op_phys(AARCH64_SP), op_imm(func.frame_size + save_size)]))
                 for i in 0..result.used_callee_saved.len():
                     output.push(new_mach_inst(A64_OP_STR, [op_phys(result.used_callee_saved[i]), op_mem(physical_reg(AARCH64_SP), i * 8)]))
-            elif not is_prologue and inst.opcode == A64_OP_MOV and inst.operands.len() >= 2 and get_phys_reg_id(inst.operands[0]) == AARCH64_SP and get_phys_reg_id(inst.operands[1]) == AARCH64_X29:
+            elif inst.opcode == A64_OP_MOV and inst.operands.len() >= 2 and get_phys_reg_id(inst.operands[0]) == AARCH64_SP and get_phys_reg_id(inst.operands[1]) == AARCH64_X29:
                 for i in 0..result.used_callee_saved.len():
                     output.push(new_mach_inst(A64_OP_LDR, [op_phys(result.used_callee_saved[i]), op_mem(physical_reg(AARCH64_SP), i * 8)]))
                 output.push(inst)
@@ -602,20 +610,20 @@ fn rv64_operand_is_physical(operand: Operand, id: i64) -> bool:
     match operand.kind:
         case Reg(reg):
             match reg.kind:
-                case Physical(actual): actual == id
+                case Physical(reg_id_): reg_id_ == id
                 case _: false
         case _: false
 
 fn rv64_operand_is_immediate(operand: Operand, value: i64) -> bool:
     match operand.kind:
-        case Imm(actual): actual == value
+        case Imm(immediate): immediate == value
         case _: false
 
 fn rv64_mem_is(operand: Operand, base_id: i64, offset: i64) -> bool:
     match operand.kind:
         case Mem(base, actual_offset):
             match base.kind:
-                case Physical(actual): actual == base_id and actual_offset == offset
+                case Physical(id): id == base_id and actual_offset == offset
                 case _: false
         case _: false
 
@@ -722,21 +730,6 @@ fn regalloc_module(module: MachModule) -> MachModule:
         result = mach_module_add_data(result, entry)
     for sym in module.extern_symbols:
         result = mach_module_add_extern(result, sym)
-    result
-
-fn regalloc_module_riscv64(module: MachModule) -> MachModule:
-    var result = new_mach_module(module.name)
-    for func in module.functions:
-        result = mach_module_add_func(result, regalloc_function_riscv64(func))
-    for entry in module.data_sections: result = mach_module_add_data(result, entry)
-    for sym in module.extern_symbols: result = mach_module_add_extern(result, sym)
-    result
-
-fn regalloc_module_aarch64(module: MachModule) -> MachModule:
-    var result = new_mach_module(module.name)
-    for func in module.functions: result = mach_module_add_func(result, regalloc_function_aarch64(func))
-    for entry in module.data_sections: result = mach_module_add_data(result, entry)
-    for sym in module.extern_symbols: result = mach_module_add_extern(result, sym)
     result
 
 # ============================================================================

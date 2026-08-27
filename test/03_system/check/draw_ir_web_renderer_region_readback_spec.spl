@@ -1,0 +1,68 @@
+# codex-system-test
+# @tag: draw-ir, web, gpu, readback, source-contract
+# @req AC-8
+"""Device-region readback contract.
+
+The façade exposes a typed diagnostic/strict policy. Vulkan alone performs
+the current real rectangular device transfer; CUDA and Metal retain their
+existing whole-device path and software remains an explicit host crop.
+"""
+
+use std.spec.*
+use std.nogc_sync_mut.sffi.io.{file_read_text}
+use std.gc_async_mut.gpu.engine2d.backend.{RegionReadbackPolicy}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+
+fn _source(path: text) -> text:
+    val source = file_read_text(path)
+    expect(source.len()).to_be_greater_than(0)
+    source
+
+fn expect_region_readback():
+    var engine = Engine2D.create_with_backend(4, 3, "cpu")
+    engine.clear(0xff000000u32)
+    engine.draw_rect_filled(1, 1, 2, 1, 0xff11aa44u32)
+
+    val diagnostic = engine.read_pixels_region_with_source(
+        1, 1, 2, 1, RegionReadbackPolicy.DiagnosticRecovery)
+    expect(diagnostic.pixels).to_equal([0xff11aa44u32, 0xff11aa44u32])
+    expect(diagnostic.source).to_equal("host_crop")
+
+    # CPU/host recovery is useful for diagnostics, never a substitute for a
+    # strict GPU-presentation receipt.
+    val strict = engine.read_pixels_region_with_source(
+        1, 1, 2, 1, RegionReadbackPolicy.RequireDeviceRegion)
+    expect(strict.pixels.len()).to_equal(0)
+    expect(strict.source).to_equal("strict_device_region_required")
+    engine.shutdown()
+
+    val facade = _source("src/lib/gc_async_mut/gpu/engine2d/engine.spl")
+    val backend = _source("src/lib/gc_async_mut/gpu/engine2d/backend.spl")
+    val vulkan = _source("src/lib/gc_async_mut/gpu/engine2d/backend_vulkan.spl")
+    val cuda = _source("src/lib/gc_async_mut/gpu/engine2d/backend_cuda.spl")
+    val metal = _source("src/lib/gc_async_mut/gpu/engine2d/backend_metal.spl")
+    val software = _source("src/lib/gc_async_mut/gpu/engine2d/backend_software.spl")
+
+    expect(facade).to_contain("RegionReadbackPolicy.RequireDeviceRegion")
+    expect(facade).to_contain("engine2d_region_readback_required_failure()")
+    expect(backend).to_contain("pub enum RegionReadbackPolicy")
+    expect(backend).to_contain("pub fn engine2d_region_readback_is_device_region")
+    expect(backend).to_contain("pub fn engine2d_region_readback_required_failure")
+    expect(backend).to_contain("DeviceRegionReadback")
+    expect(backend).to_contain("FullDeviceReadback")
+    expect(backend).to_contain("HostCrop")
+    expect(vulkan).to_contain("me read_pixels_region_with_source")
+    expect(vulkan).to_contain("vulkan_sffi_read_buffer_bytes")
+    expect(vulkan).to_contain("byte_offset")
+    # Current CUDA/Metal readbacks stay whole-frame owners; the façade labels
+    # their diagnostic crop as full-device instead of claiming a region copy.
+    expect(cuda).to_contain("me read_pixels_with_source() -> Engine2DReadback")
+    expect(metal).to_contain("fn read_pixels_with_source() -> Engine2DReadback")
+    expect(software).to_contain("me read_pixels_with_source() -> Engine2DReadback")
+
+describe "Draw IR Web renderer device-region readback":
+    # @manual: show
+    # @req AC-8
+    it "returns a real region or an explicit fallback receipt":
+        step("Read back the requested device region")
+        expect_region_readback()

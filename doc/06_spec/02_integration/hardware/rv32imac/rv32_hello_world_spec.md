@@ -2,6 +2,30 @@
 
 > Verifies the SoC boots and produces UART output. Tests the full pipeline from instruction fetch to UART character output.
 
+<!-- sdn-diagram:id=rv32_hello_world_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=rv32_hello_world_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+rv32_hello_world_spec -> std
+rv32_hello_world_spec -> hardware
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=rv32_hello_world_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 10 | 10 | 0 | 0 |
@@ -123,6 +147,9 @@ expect(timer.read(0xBFF8)).to_equal(3)
 
 - generates interrupt when mtime >= mtimecmp
    - Expected: timer.get_mtip(0) is false
+5. timer tick
+6. timer tick
+7. timer tick
    - Expected: timer.get_mtip(0) is true
 
 
@@ -269,6 +296,7 @@ expect(bus.uart.consume_tx()).to_equal(0x41)
 
 - routes Timer addresses correctly
    - Expected: bus.clint.get_mtip(0) is false
+4. bus tick
    - Expected: bus.clint.get_mtip(0) is true
 
 

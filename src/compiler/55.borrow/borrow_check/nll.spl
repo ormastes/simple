@@ -98,12 +98,11 @@ class ControlFlowGraph:
                     succ_block.predecessors = succ_block.predecessors.push(id)
                     self.blocks[succ_id] = succ_block
 
-    fn get_block(id: i64) -> BasicBlock:
-        """Get a block by ID. Explicit tail: mixed return/implicit-tail is
-        miscompiled on the stage4 native lane (returns 0)."""
+    fn get_block(id: i64) -> BasicBlock?:
+        """Get a block by ID."""
         if self.blocks.has(id):
             return self.blocks[id]
-        return BasicBlock.create(id)
+        nil
 
     fn block_entry_point(id: i64) -> i64:
         val block = self.get_block(id)
@@ -166,19 +165,19 @@ class LivenessAnalysis:
 
     me record_use(block_id: i64, var_id: i64):
         """Record a variable use."""
-        var block_uses: [i64] = self.uses[block_id] ?? []
+        var block_uses = self.uses[block_id] ?? []
         if not block_uses.contains(var_id):
             block_uses = block_uses.push(var_id)
         self.uses[block_id] = block_uses
 
     me record_def(block_id: i64, var_id: i64):
         """Record a variable definition."""
-        var block_defs: [i64] = self.defs[block_id] ?? []
+        var block_defs = self.defs[block_id] ?? []
         if not block_defs.contains(var_id):
             block_defs = block_defs.push(var_id)
         self.defs[block_id] = block_defs
 
-    me compute() -> LivenessResult:
+    fn compute() -> LivenessResult:
         """Compute liveness using fixed-point iteration.
 
         Backward dataflow analysis:
@@ -207,16 +206,16 @@ class LivenessAnalysis:
                 # Compute live_out from successors
                 var new_out: [i64] = []
                 for succ_id in block.successors:
-                    val succ_in: [i64] = live_in[succ_id] ?? []
+                    val succ_in = live_in[succ_id] ?? []
                     for var_id in succ_in:
                         if not new_out.contains(var_id):
                             new_out = new_out.push(var_id)
 
                 # Compute live_in
-                val block_uses: [i64] = self.uses[id] ?? []
-                val block_defs: [i64] = self.defs[id] ?? []
+                val block_uses = self.uses[id] ?? []
+                val block_defs = self.defs[id] ?? []
 
-                var new_in: [i64] = block_uses
+                var new_in = block_uses
                 for var_id in new_out:
                     if not block_defs.contains(var_id):
                         if not new_in.contains(var_id):
@@ -267,10 +266,7 @@ pub fn nllerror_format_related(err: NLLError) -> text:
 
 fn nllerror_borrow_conflict(borrow1: Borrow, borrow2: Borrow) -> NLLError:
         NLLError(
-            # place_to_text / borrow_kind_to_text free fns: Place and
-            # BorrowKind have no to_text METHOD — the method calls here
-            # crashed at format time (latent while the checker was starved).
-            message: "cannot borrow `{place_to_text(borrow1.place)}` as {borrow_kind_to_text(borrow1.kind)} because it is also borrowed as {borrow_kind_to_text(borrow2.kind)}",
+            message: "cannot borrow `{borrow1.place.to_text()}` as {borrow1.kind.to_text()} because it is also borrowed as {borrow2.kind.to_text()}",
             has_primary_span: true,
             primary_span: borrow1.borrow_point,
             secondary_spans: [SpanLabel(span: borrow2.borrow_point, label: "first borrow here")],
@@ -281,7 +277,7 @@ fn nllerror_borrow_conflict(borrow1: Borrow, borrow2: Borrow) -> NLLError:
 
 fn nllerror_use_while_borrowed(place: Place, borrow: Borrow, point: i64) -> NLLError:
         NLLError(
-            message: "cannot use `{place_to_text(place)}` because it was mutably borrowed",
+            message: "cannot use `{place.to_text()}` because it was mutably borrowed",
             has_primary_span: true,
             primary_span: point,
             secondary_spans: [SpanLabel(span: borrow.borrow_point, label: "mutable borrow occurs here")],
@@ -292,10 +288,10 @@ fn nllerror_use_while_borrowed(place: Place, borrow: Borrow, point: i64) -> NLLE
 
 fn nllerror_move_while_borrowed(place: Place, borrow: Borrow, point: i64) -> NLLError:
         NLLError(
-            message: "cannot move out of `{place_to_text(place)}` because it is borrowed",
+            message: "cannot move out of `{place.to_text()}` because it is borrowed",
             has_primary_span: true,
             primary_span: point,
-            secondary_spans: [SpanLabel(span: borrow.borrow_point, label: "borrow of `{place_to_text(place)}` occurs here")],
+            secondary_spans: [SpanLabel(span: borrow.borrow_point, label: "borrow of `{place.to_text()}` occurs here")],
             has_help: false,
             help: ""
         )
@@ -338,9 +334,7 @@ class NLLChecker:
 
         # Step 3: Run lifetime inference
         if not self.lifetime_inference.infer():
-            # Direct field reads: accessor methods trap nil-receiver on the stage4
-            # native lane (bug doc 2026-07-23, defect 3).
-            for err in self.lifetime_inference.errors:
+            for err in self.lifetime_inference.get_errors():
                 self.errors = self.errors.push(NLLError(
                     message: err.message,
                     has_primary_span: true,
@@ -351,7 +345,7 @@ class NLLChecker:
                 ))
 
         # Step 4: Check borrow graph for conflicts
-        for err in self.borrow_graph.errors:
+        for err in self.borrow_graph.get_errors():
             self.errors = self.errors.push(NLLError(
                 message: err.message,
                 has_primary_span: true,
@@ -361,11 +355,12 @@ class NLLChecker:
                 help: ""
             ))
 
-        return self.errors.is_empty()
+        self.errors.is_empty()
 
     me check_block(block_id: i64, liveness: LivenessResult):
         """Check a single basic block."""
-        if not self.cfg.blocks.has(block_id):
+        val maybe_block = self.cfg.get_block(block_id)
+        if maybe_block.is_none():
             return
         val block = self.cfg.get_block(block_id)
         val entry_point = self.cfg.block_entry_point(block_id)
@@ -396,10 +391,8 @@ class NLLChecker:
         borrows, uses, and moves at each point.
         """
         # Check for borrow conflicts at this point
-        # Free-function + if-val forms: receiver-transport and box-assuming
-        # .unwrap() are miscompiled on the stage4 native lane (bug doc 2026-07-23).
         val borrow_set = self.borrow_graph.get_or_create_borrows(point)
-        val active = borrowset_active_list(borrow_set.borrows)
+        val active = borrow_set.active_borrows()
         for borrow in active:
             val conflict = borrowset_conflicting_other(borrow_set.borrows, borrow)
             if val conflict_b = conflict:
@@ -413,21 +406,10 @@ class NLLChecker:
             case Return:
                 # On return, all borrows must have ended
                 val borrow_set = self.borrow_graph.get_or_create_borrows(point)
-                val active = borrowset_active_list(borrow_set.borrows)
+                val active = borrow_set.active_borrows()
                 for borrow in active:
-                    # Only a borrow whose REFERENCE escapes via the return value
-                    # can still be active at a return. Nothing in this checker
-                    # ever ends a borrow (`end_borrow` has no callers and
-                    # `propagate_borrows` copies every borrow forward
-                    # unconditionally), so without this gate the arm fired for
-                    # every function containing any `Ref` at all -- notably
-                    # `f(pid, &mut status)`, whose out-parameter borrow is
-                    # consumed by the call and never escapes. See
-                    # `borrow_reference_escapes` for the accepted limits.
-                    if not self.borrow_graph.borrow_reference_escapes(borrow.id):
-                        continue
                     self.errors = self.errors.push(NLLError(
-                        message: "borrow of `{place_to_text(borrow.place)}` may still be active at return",
+                        message: "borrow of `{borrow.place.to_text()}` may still be active at return",
                         has_primary_span: true,
                         primary_span: point,
                         secondary_spans: [SpanLabel(span: borrow.borrow_point, label: "borrow created here")],
@@ -454,17 +436,11 @@ class NLLChecker:
             case Unreachable:
                 pass
 
-    me record_borrow(point: i64, place: Place, kind: BorrowKind, dest_local: i64) -> bool:
-        """Record a borrow and check for conflicts.
-
-        `dest_local` is the reference temp the `Ref` instruction writes to; it
-        is what `check_terminator`'s `Return` arm needs in order to tell an
-        escaping borrow from one that dies inside the function.
-        """
+    me record_borrow(point: i64, place: Place, kind: BorrowKind) -> bool:
+        """Record a borrow and check for conflicts."""
         val borrow = self.borrow_graph.record_borrow(point, place, kind)
         if borrow.is_none():
             return false
-        self.borrow_graph.note_borrow_dest(borrow.unwrap().id, dest_local)
         # Add lifetime constraint
         self.lifetime_inference.env.add_outlives(
             borrow.unwrap().lifetime,
@@ -473,25 +449,13 @@ class NLLChecker:
         )
         true
 
-    me record_returned_local(local_id: i64):
-        """Record a local named by a `Ret` terminator operand."""
-        self.borrow_graph.note_returned_local(local_id)
-
     me record_use(point: i64, place: Place):
         """Record use of a place."""
-        self.borrow_graph.record_use(point, place)
+        self.borrow_graph_record_use(borrow_graph, point, place)
 
     me record_move(point: i64, place: Place):
         """Record move of a place."""
-        self.borrow_graph.record_move(point, place)
-
-    me record_assign(point: i64, place: Place):
-        """Record (re)initialization of a place.
-
-        Kills forward-propagated moved-out state for the place so a
-        re-initialized local is usable again (see BorrowGraph.record_assign).
-        """
-        self.borrow_graph.record_assign(point, place)
+        self.borrow_graph_record_move(borrow_graph, point, place)
 
     fn get_errors() -> [NLLError]:
         """Get all NLL errors."""

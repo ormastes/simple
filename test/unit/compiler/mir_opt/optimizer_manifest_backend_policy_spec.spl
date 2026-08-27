@@ -84,7 +84,7 @@ fn manifest_test_module() -> MirModule:
         instructions: [
             MirInst(kind: MirInstKind.Copy(manifest_test_local(1), manifest_test_local(2)), span: nil)
         ],
-        terminator: MirTerminator.Ret(nil)
+        terminator: MirTerminator.Return(nil)
     )
     MirModule(
         name: "manifest_backend_test_module",
@@ -114,7 +114,6 @@ fn remove_copy_rule() -> PatternRule:
     )
 
 describe "optimizer manifest backend policy for REQ-OPJH-023 REQ-OPJH-024":
-    # @manual scenario evidence
     it "gives manifest-created passes an all-backend default":
         # @req REQ-OPJH-023
         # @req REQ-OPJH-024
@@ -191,9 +190,9 @@ describe "optimizer manifest backend policy for REQ-OPJH-023 REQ-OPJH-024":
             "0.9.0",
             [common, cranelift_only, skip_llvm]
         )
-        expect(manifest_result != nil).to_equal(true)
+        expect(manifest_result.?).to_equal(true)
         val registry_result = dynamic_pass_registry_register(dynamic_pass_registry_new(), manifest_result.unwrap())
-        expect(registry_result != nil).to_equal(true)
+        expect(registry_result.?).to_equal(true)
 
         val registry = registry_result.unwrap()
         val cranelift_names = dynamic_pass_registry_names_for_backend(registry, "cranlift")
@@ -241,9 +240,9 @@ describe "optimizer manifest backend policy for REQ-OPJH-023 REQ-OPJH-024":
             "0.9.0",
             [low, high]
         )
-        expect(manifest_result != nil).to_equal(true)
+        expect(manifest_result.?).to_equal(true)
         val registry_result = dynamic_pass_registry_register(dynamic_pass_registry_new(), manifest_result.unwrap())
-        expect(registry_result != nil).to_equal(true)
+        expect(registry_result.?).to_equal(true)
 
         val registry = registry_result.unwrap()
         val llvm_medium = dynamic_pass_registry_names_for_backend_budget(registry, "llvm-lib", "medium")
@@ -276,17 +275,17 @@ describe "optimizer manifest backend policy for REQ-OPJH-023 REQ-OPJH-024":
             [entry],
             [remove_copy_rule()]
         )
-        expect(manifest_result != nil).to_equal(true)
+        expect(manifest_result.?).to_equal(true)
         val registry_result = dynamic_pass_registry_register(dynamic_pass_registry_new(), manifest_result.unwrap())
-        expect(registry_result != nil).to_equal(true)
+        expect(registry_result.?).to_equal(true)
 
         val registry = registry_result.unwrap()
         val manifest = manifest_result.unwrap()
         val cranelift_result = run_manifest_pattern_rules_for_backend(manifest_test_module(), registry, manifest, "cranlift")
         val llvm_result = run_manifest_pattern_rules_for_backend(manifest_test_module(), registry, manifest, "llvm")
 
-        expect(cranelift_result.functions[SymbolId(id: 1)].blocks[0].instructions.len()).to_equal(0)
-        expect(llvm_result.functions[SymbolId(id: 1)].blocks[0].instructions.len()).to_equal(1)
+        expect(cranelift_result.functions[SymbolId(id: 1)].blocks[0].instructions.len()).to_equal(0)  # oracle: expected value 0 is the behavior asserted by this regression spec
+        expect(llvm_result.functions[SymbolId(id: 1)].blocks[0].instructions.len()).to_equal(1)  # oracle: expected value 1 is the behavior asserted by this regression spec
 
     it "does not run high-cost manifest pattern rules when JIT budget is medium":
         # @req REQ-SSPEC-UNIT
@@ -310,9 +309,9 @@ describe "optimizer manifest backend policy for REQ-OPJH-023 REQ-OPJH-024":
             [entry],
             [remove_copy_rule()]
         )
-        expect(manifest_result != nil).to_equal(true)
+        expect(manifest_result.?).to_equal(true)
         val registry_result = dynamic_pass_registry_register(dynamic_pass_registry_new(), manifest_result.unwrap())
-        expect(registry_result != nil).to_equal(true)
+        expect(registry_result.?).to_equal(true)
 
         val registry = registry_result.unwrap()
         val manifest = manifest_result.unwrap()
@@ -320,27 +319,27 @@ describe "optimizer manifest backend policy for REQ-OPJH-023 REQ-OPJH-024":
         val llvm_high_result = run_manifest_pattern_rules_for_backend_budget(manifest_test_module(), registry, manifest, "llvm", "high")
         val cranelift_high_result = run_manifest_pattern_rules_for_backend_budget(manifest_test_module(), registry, manifest, "cranelift", "high")
 
-        expect(llvm_medium_result.functions[SymbolId(id: 1)].blocks[0].instructions.len()).to_equal(1)
-        expect(llvm_high_result.functions[SymbolId(id: 1)].blocks[0].instructions.len()).to_equal(0)
-        expect(cranelift_high_result.functions[SymbolId(id: 1)].blocks[0].instructions.len()).to_equal(1)
+        expect(llvm_medium_result.functions[SymbolId(id: 1)].blocks[0].instructions.len()).to_equal(1)  # oracle: expected value 1 is the behavior asserted by this regression spec
+        expect(llvm_high_result.functions[SymbolId(id: 1)].blocks[0].instructions.len()).to_equal(0)  # oracle: expected value 0 is the behavior asserted by this regression spec
+        expect(cranelift_high_result.functions[SymbolId(id: 1)].blocks[0].instructions.len()).to_equal(1)  # oracle: expected value 1 is the behavior asserted by this regression spec
 
     it "loads JSON pattern rules and gates execution by backend budget":
         # @req REQ-SSPEC-UNIT
         step("loads JSON pattern rules and gates execution by backend budget")
         val json = "{\"schema_version\":1,\"compiler_abi\":\"simple.opt.mir.v1\",\"name\":\"json_rule_budget_plugin\",\"version\":\"1.0.0\",\"min_compiler_version\":\"0.9.0\",\"passes\":[{\"stable_name\":\"json_rule_high_llvm_pass\",\"aliases\":[],\"scope\":\"function\",\"capability_requires\":[],\"contract\":{\"inputs\":[\"typed_mir\"],\"outputs\":[\"canonical_mir\"],\"purity\":\"pure\"},\"backend_policy\":{\"only\":[\"llvm\"],\"reason\":\"json_llvm_only\"},\"cost_class\":\"high\",\"entry_symbol\":\"json_rule_high_llvm_pass_entry\"}],\"rules\":[{\"name\":\"json_remove_copy\",\"pattern\":{\"inst_count\":1,\"slots\":[{\"kind_tag\":\"Copy\",\"operand_0\":\"$src\",\"operand_1\":null,\"dest\":\"$dest\"}]},\"rewrite\":{\"kind_tag\":\"Remove\",\"dest\":\"$dest\",\"operands\":[]},\"cost_delta\":-1,\"safety\":\"test\"}]}"
         val manifest_result = load_manifest_v1(json)
-        expect(manifest_result != nil).to_equal(true)
+        expect(manifest_result.?).to_equal(true)
         val manifest = manifest_result.unwrap()
-        expect(manifest.rules.len()).to_equal(1)
+        expect(manifest.rules.len()).to_equal(1)  # oracle: expected value 1 is the behavior asserted by this regression spec
 
         val registry_result = dynamic_pass_registry_register(dynamic_pass_registry_new(), manifest)
-        expect(registry_result != nil).to_equal(true)
+        expect(registry_result.?).to_equal(true)
         val registry = registry_result.unwrap()
 
         val llvm_medium_result = run_manifest_pattern_rules_for_backend_budget(manifest_test_module(), registry, manifest, "llvm", "medium")
         val llvm_high_result = run_manifest_pattern_rules_for_backend_budget(manifest_test_module(), registry, manifest, "llvm", "high")
         val cranelift_high_result = run_manifest_pattern_rules_for_backend_budget(manifest_test_module(), registry, manifest, "cranelift", "high")
 
-        expect(llvm_medium_result.functions[SymbolId(id: 1)].blocks[0].instructions.len()).to_equal(1)
-        expect(llvm_high_result.functions[SymbolId(id: 1)].blocks[0].instructions.len()).to_equal(0)
-        expect(cranelift_high_result.functions[SymbolId(id: 1)].blocks[0].instructions.len()).to_equal(1)
+        expect(llvm_medium_result.functions[SymbolId(id: 1)].blocks[0].instructions.len()).to_equal(1)  # oracle: expected value 1 is the behavior asserted by this regression spec
+        expect(llvm_high_result.functions[SymbolId(id: 1)].blocks[0].instructions.len()).to_equal(0)  # oracle: expected value 0 is the behavior asserted by this regression spec
+        expect(cranelift_high_result.functions[SymbolId(id: 1)].blocks[0].instructions.len()).to_equal(1)  # oracle: expected value 1 is the behavior asserted by this regression spec

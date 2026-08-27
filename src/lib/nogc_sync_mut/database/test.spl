@@ -161,25 +161,20 @@ class TestDatabase:
 
     # Start new test run
     me start_run() -> text:
-        val now_micros = time_now_unix_micros()
-        val run_id = "run_{now_micros}"
-        val now = timestamp_to_iso(now_micros)
+        val run_id = "run_{rt_timestamp_now()}"
+        val now = timestamp_to_iso(rt_timestamp_now())
 
         var runs_table_opt = self.db.get_table_mut("test_runs")
         if runs_table_opt == nil:
             return ""
 
-        var runs_table = match runs_table_opt:
-            case Some(table):
-                table
-            case None:
-                return ""
+        var runs_table = runs_table_opt.unwrap()
 
         val row = SdnRow.empty()
         row.set("run_id", run_id)
         row.set("start_time", now)
         row.set("end_time", "")
-        row.set("pid", "{getpid()}")
+        row.set("pid", "{rt_getpid()}")
         row.set("hostname", "localhost")
         row.set("status", run_status_to_string(RunStatus.Running))
         row.set("test_count", "0")
@@ -200,23 +195,17 @@ class TestDatabase:
         if runs_table_opt == nil:
             return false
 
-        var runs_table = match runs_table_opt:
-            case Some(table):
-                table
-            case None:
-                return false
+        var runs_table = runs_table_opt.unwrap()
         var found = false
-        var i = 0
-        while i < runs_table.rows.len():
-            var row = runs_table.rows[i]
+        for (i, current) in runs_table.rows.enumerate():
+            var row = current
             if row.get("run_id") == Some(run_id):
-                val now = timestamp_to_iso(time_now_unix_micros())
+                val now = timestamp_to_iso(rt_timestamp_now())
                 row.set("end_time", now)
                 row.set("status", run_status_to_string(status))
                 runs_table.rows[i] = row
                 found = true
                 break
-            i += 1
         if not found:
             return false
 
@@ -253,21 +242,17 @@ class TestDatabase:
         val runs_table = self.db.get_table("test_runs")?
         var result: [TestRun] = []
         for row in runs_table.valid_rows():
-            match self.row_to_run(row):
-                case Some(run):
-                    result.push(run)
-                case None:
-                    pass
+            val run_opt = self.row_to_run(row)
+            if run_opt.?:
+                result.push(run_opt.unwrap())
         result
 
     fn first_run_id() -> text:
         val runs_table = self.db.get_table("test_runs")?
         for row in runs_table.valid_rows():
-            match row.get("run_id"):
-                case Some(run_id):
-                    return run_id
-                case None:
-                    pass
+            val run_id = row.get("run_id")
+            if run_id.?:
+                return run_id.unwrap()
         ""
 
     # Get recent runs
@@ -293,11 +278,9 @@ class TestDatabase:
         for row in results_table.valid_rows():
             if row.get("run_id") == Some(run_id):
                 val test_name = row.get("test_name")?
-                match self.get_result(test_name, run_id):
-                    case Some(item):
-                        result.push(item)
-                    case None:
-                        pass
+                val item = self.get_result(test_name, run_id)
+                if item.?:
+                    result.push(item.unwrap())
         result
 
     fn stats() -> TestStats:
@@ -390,18 +373,7 @@ class TestDatabase:
                 auto_fixable: false
             ))
         else:
-            val runs_table = match runs_table_opt:
-                case Some(table):
-                    table
-                case None:
-                    issues.push(DbIssue(
-                        db_name: db_name,
-                        severity: "error",
-                        issue_type: "missing_table",
-                        message: "Expected 'test_runs' table not found in test database",
-                        auto_fixable: false
-                    ))
-                    return issues
+            val runs_table = runs_table_opt.unwrap()
 
             # Duplicate run_id check
             val dup_issues = check_duplicate_ids(runs_table, "run_id", db_name)
@@ -463,18 +435,7 @@ class TestDatabase:
                 auto_fixable: false
             ))
         else:
-            val results_table = match results_table_opt:
-                case Some(table):
-                    table
-                case None:
-                    issues.push(DbIssue(
-                        db_name: db_name,
-                        severity: "error",
-                        issue_type: "missing_table",
-                        message: "Expected 'test_results' table not found in test database",
-                        auto_fixable: false
-                    ))
-                    return issues
+            val results_table = results_table_opt.unwrap()
 
             # Valid column check
             val valid_issues = check_valid_column(results_table, db_name)

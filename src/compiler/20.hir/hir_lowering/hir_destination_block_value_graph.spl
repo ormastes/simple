@@ -1,0 +1,51 @@
+# Graph-owned BlockValue authority. Cross-arena references are validated here;
+# registry code must never dispatch directly to the nested SoA store.
+use compiler.hir.hir_lowering.hir_destination_graph.*
+
+impl HirDestinationGraph:
+    me bv_reserve() -> i64: if self.mutable(): self.block_values.reserve() else: -1
+    me bv_write_expr(r: i64, e: i64) -> bool: self.mutable() and self.index_ready(HD_RANGE_EXPR,e) and self.block_values.write_expr(r,e)
+    me bv_write_loss(r: i64, b: i64) -> bool: self.mutable() and self.block_is_ready(b) and self.block_values.write_loss(r,b)
+    me bv_write_nograd(r: i64, b: i64) -> bool: self.mutable() and self.block_is_ready(b) and self.block_values.write_nograd(r,b)
+    me bv_write_text(r: i64,v: text) -> bool: self.mutable() and self.block_values.write_text(r,v)
+    me bv_write_raw(r: i64,v: text) -> bool: self.mutable() and self.block_values.write_raw(r,v)
+    me bv_write_regex(r: i64,v: text) -> bool: self.mutable() and self.block_values.write_regex(r,v)
+    me bv_write_shell(r: i64,v: text,a: i64,n: i64) -> bool: self.mutable() and self.block_values.write_shell(r,v,a,n)
+    me bv_write_shell_command(r: i64,p: text,a: i64,n: i64,d: i64,dn: i64,h: bool,x: i64) -> bool: self.mutable() and self.block_values.write_shell_command(r,p,a,n,d,dn,h,x)
+    me bv_write_redirect(r: i64,k: i64,t: text) -> bool: self.mutable() and self.block_values.write_redirect(r,k,t)
+    me bv_write_sql(r: i64,v: text,k: i64,t: i64,tn: i64,c: i64,cn: i64,p: i64,pn: i64) -> bool: self.mutable() and self.block_values.write_sql(r,v,k,t,tn,c,cn,p,pn)
+    me bv_write_sql_param(r: i64,n: text,p: i64) -> bool: self.mutable() and self.block_values.write_sql_param(r,n,p)
+    me bv_write_json_scalar(r: i64,k: i64,b: bool,n: f64,t: text) -> bool: self.mutable() and self.block_values.write_json_scalar(r,k,b,n,t)
+    me bv_write_json_array(r: i64,a: i64,n: i64) -> bool: self.mutable() and self.block_values.write_json_array(r,a,n)
+    me bv_write_json_field(r: i64,n: text,v: i64) -> bool: self.mutable() and self.block_values.write_json_field(r,n,v)
+    me bv_write_json_object(r: i64,a: i64,n: i64) -> bool: self.mutable() and self.block_values.write_json_object(r,a,n)
+    me bv_write_markdown(r: i64,v: text,a: i64,n: i64) -> bool: self.mutable() and self.block_values.write_markdown(r,v,a,n)
+    me bv_write_markdown_block(r: i64,k: i64,l: i64,o: bool,a: text,b: text,v: i64,n: i64,w: i64,wn: i64) -> bool: self.mutable() and self.block_values.write_markdown_block(r,k,l,o,a,b,v,n,w,wn)
+    me bv_write_markdown_row(r: i64,a: i64,n: i64) -> bool: self.mutable() and self.block_values.write_markdown_table_row(r,a,n)
+    me bv_write_graph(r: i64,v: text,k: i64,a: i64,n: i64,e: i64,en: i64) -> bool: self.mutable() and self.block_values.write_graph(r,v,k,a,n,e,en)
+    me bv_write_graph_node(r: i64,id: text,h: bool,l: text,x: bool,t: i64) -> bool: self.mutable() and self.block_values.write_graph_node(r,id,h,l,x,t)
+    me bv_write_graph_edge(r: i64,a: text,b: text,h: bool,l: i64,x: bool,t: i64) -> bool: self.mutable() and self.block_values.write_graph_edge(r,a,b,h,l,x,t)
+    me bv_register_codec(n: text) -> i64:
+        val receipt = if self.mutable(): self.block_values.register_codec(n) else: -1
+        if receipt < 0: self.block_values.error = true; self.fail("HIR BlockValue codec protocol rejected")
+        receipt
+    me bv_begin_projection(c: i64,n: text,x: i64,g: i64) -> i64:
+        if not self.mutable() or self.checkpoint_count != 0: self.block_values.error = true; self.fail("HIR BlockValue projection cannot begin with checkpoint"); return -1
+        val token = self.block_values.begin_projection(c,n,x,g)
+        if token < 0: self.fail("HIR BlockValue projection protocol rejected")
+        token
+    me bv_commit_custom(r: i64,t: i64,x: i64,g: i64,p: i64) -> bool:
+        if self.mutable() and self.block_values.commit_custom(r,t,x,g,p): return true
+        self.block_values.error = true; self.fail("HIR BlockValue projection commit rejected")
+    me bv_abort_projection(t: i64,x: i64,g: i64) -> bool:
+        if self.mutable() and self.block_values.abort_projection(t,x,g): return true
+        self.block_values.error = true; self.fail("HIR BlockValue projection abort rejected")
+    me bv_write_error(r: i64,m: text) -> bool: self.mutable() and self.block_values.write_error(r,m)
+
+    me bv_cross_refs_valid() -> bool:
+        var i = 0
+        while i < self.block_values.count:
+            if self.block_values.shape[i] == HD_BV_EXPR and not self.index_ready(HD_RANGE_EXPR,self.block_values.i0[i]): return false
+            if (self.block_values.shape[i] == HD_BV_LOSS or self.block_values.shape[i] == HD_BV_NOGRAD) and not self.block_is_ready(self.block_values.i0[i]): return false
+            i = i + 1
+        true

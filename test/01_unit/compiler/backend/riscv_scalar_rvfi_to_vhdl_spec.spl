@@ -1,0 +1,29 @@
+use std.spec.*
+use compiler.backend.backend.riscv_scalar_rvfi_to_vhdl.{
+    compile_strict_rv32_add_rvfi_product}
+
+describe "bounded RV32 ADD RVFI projection":
+    it "derives the standard RVFI surface from canonical retirement outputs":
+        val product = compile_strict_rv32_add_rvfi_product("scalar_add", 0x002081B3)
+        expect(product.diagnostic()).to_equal("")
+        expect(product.emitted.vhdl).to_contain("entity scalar_add_rvfi is")
+        expect(product.emitted.vhdl).to_contain("rvfi_valid <= retire_valid_i")
+        expect(product.emitted.vhdl).to_contain("retire_original_instruction=>rvfi_insn")
+        expect(product.emitted.vhdl).to_contain("retire_pc_before=>rvfi_pc_rdata")
+        expect(product.emitted.vhdl).to_contain("retire_rd_value=>rvfi_rd_wdata")
+        expect(product.emitted.vhdl).to_contain("rvfi_ixl <= \"01\"")
+        expect(product.rvfi_contract_sha256.len()).to_equal(64)
+        expect(product.rtl_sha256.len()).to_equal(64)
+
+    it "captures source-register evidence on the accepted retirement event":
+        val product = compile_strict_rv32_add_rvfi_product("scalar_add_hold", 0x002081B3)
+        expect(product.emitted.vhdl).to_contain("elsif dispatch_accept='1' then")
+        expect(product.emitted.vhdl).to_contain("rs1_reg <= rs1_value")
+        expect(product.emitted.vhdl).to_contain("elsif retire_ready='1' and retire_valid_i='1'")
+        expect(product.emitted.vhdl).to_contain("to_unsigned(1,5)")
+        expect(product.emitted.vhdl).to_contain("to_unsigned(2,5)")
+
+    it "rejects a neighboring SUB encoding outside the proved family":
+        val product = compile_strict_rv32_add_rvfi_product("scalar_sub", 0x402081B3)
+        expect(product.emitted.is_success()).to_equal(false)
+        expect(product.diagnostic()).to_contain("only RV32I ADD")

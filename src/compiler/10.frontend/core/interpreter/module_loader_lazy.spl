@@ -26,7 +26,7 @@
 
 use compiler.core.frontend.{core_frontend_parse_append}
 use compiler.core.ast.{decl_get_name, decl_get_ret_type, decl_get_tag, module_get_decls}
-use compiler.core.interpreter.eval_tables.{func_register_return_type, func_table_lookup, func_table_register}
+use compiler.core.interpreter.eval_tables.{decl_owner_module_set, func_register_return_type, func_table_lookup, func_table_register}
 use compiler.core.interpreter.module_loader_core.{
     is_deferred_module,
     load_module,
@@ -34,7 +34,9 @@ use compiler.core.interpreter.module_loader_core.{
     register_deferred_module
 }
 use compiler.core.interpreter.module_loader_resolve.{resolve_module_path}
-use std.io_runtime.{env_get_opt, file_read_result}
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_env_get(key: text) -> text
 
 # AST declaration tags (mirror of ast.spl / module_loader_core.spl)
 val LAZY_DECL_FN = 1
@@ -44,13 +46,12 @@ val LAZY_DECL_EXTERN_FN = 2
 
 # -1 = not read yet, 0 = disabled, 1 = enabled
 var _lazy_enabled_cache: i64 = -1
-var _lazy_lib_root_cache: text = "@@unset@@"
 
 fn lazy_parse_enabled() -> i64:
     # Read SIMPLE_LAZY_PARSE once and cache the answer.
     if _lazy_enabled_cache >= 0:
         return _lazy_enabled_cache
-    val v = env_get_opt("SIMPLE_LAZY_PARSE") ?? ""
+    val v = rt_env_get("SIMPLE_LAZY_PARSE")
     var enabled = 0
     if v == "1":
         enabled = 1
@@ -103,7 +104,6 @@ fn lazy_loader_reset():
     _lazy_meta["count"] = 0
     _lazy_flags["fallback_depth"] = 0
     _lazy_enabled_cache = -1
-    _lazy_lib_root_cache = "@@unset@@"
 
 fn lazy_module_count() -> i64:
     val n = _lazy_meta["count"] ?? 0
@@ -165,9 +165,7 @@ var _scan_fail_line: i64 = -1
 
 fn lazy_scan_probe(path: text) -> text:
     # Diagnostic helper: scan a file and report the outcome as text.
-    val source = match _lazy_try_read(path):
-        case Ok(content): content
-        case Err(_): return "unreadable: " + path
+    val source = _lazy_try_read(path)
     if source == "":
         return "unreadable: " + path
     _scan_source(source)
@@ -351,15 +349,13 @@ fn _scan_source(source: text):
 
 # ===== Source Reading =====
 
-fn _lazy_try_read(path: text) -> Result<text, text>:
+fn _lazy_try_read(path: text) -> text:
     if path == "":
-        return Err("empty module path")
-    file_read_result(path)
-
-fn _lazy_lib_root() -> text:
-    if _lazy_lib_root_cache == "@@unset@@":
-        _lazy_lib_root_cache = env_get_opt("SIMPLE_LIB") ?? "src"
-    _lazy_lib_root_cache
+        return ""
+    val src = rt_file_read_text(path)
+    if src == nil:
+        return ""
+    src
 
 fn _lazy_std_candidates(module_name: text) -> [text]:
     # Direct stdlib path candidates for std./lib. modules. Used when the
@@ -373,7 +369,11 @@ fn _lazy_std_candidates(module_name: text) -> [text]:
         return cands
     val rest = module_name.substring(4, module_name.len())
     val sub = rest.replace(".", "/") + ".spl"
-    val root = _lazy_lib_root()
+    var root = rt_env_get("SIMPLE_LIB")
+    if root == nil:
+        root = "src"
+    if root == "":
+        root = "src"
     cands.push(root + "/lib/" + sub)
     cands.push(root + "/lib/nogc_async_mut/" + sub)
     cands.push(root + "/lib/nogc_async_immut/" + sub)
@@ -415,28 +415,20 @@ fn load_module_lazy(module_name: text, current_file: text) -> i64:
         return _lazy_load_whole(module_name, current_file)
 
     var resolved = resolve_module_path(module_name, current_file)
-    var source: text? = nil
-    match _lazy_try_read(resolved):
-        case Ok(content):
-            if content != "":
-                source = Some(content)
-        case Err(_): pass
-    if source == nil:
+    var source = _lazy_try_read(resolved)
+    if source == "":
         # Resolver answer unreadable — retry direct stdlib candidates.
         val cands = _lazy_std_candidates(module_name)
         for cand in cands:
-            if source == nil:
-                match _lazy_try_read(cand):
-                    case Ok(attempt):
-                        if attempt != "":
-                            source = Some(attempt)
-                            resolved = cand
-                    case Err(_): pass
-    if source == nil:
+            if source == "":
+                val attempt = _lazy_try_read(cand)
+                if attempt != "":
+                    source = attempt
+                    resolved = cand
+    if source == "":
         return _lazy_load_whole(module_name, current_file)
 
-    val readable_source = source ?? ""
-    _scan_source(readable_source)
+    _scan_source(source)
     if _scan_ok == 0:
         return _lazy_load_whole(module_name, current_file)
     if _scan_fn_names_out.len() == 0:
@@ -465,7 +457,7 @@ fn load_module_lazy(module_name: text, current_file: text) -> i64:
     _lazy_mod_set[module_name] = true
     _lazy_mod_file_map[module_name] = resolved
     _lazy_mod_current_map[module_name] = current_file
-    _lazy_mod_source_map[module_name] = readable_source
+    _lazy_mod_source_map[module_name] = source
     _lazy_mod_fns_map[module_name] = fn_joined
     _lazy_mod_decls_map[module_name] = decl_joined
     val prev_count = _lazy_meta["count"] ?? 0
@@ -532,7 +524,10 @@ fn lazy_force_function(module_name: text, fn_name: text) -> i64:
             val name = decl_get_name(did)
             val ret_type = decl_get_ret_type(did)
             func_table_register(name, did)
+            func_table_register(module_name + "." + name, did)
             func_register_return_type(name, ret_type)
+            func_register_return_type(module_name + "." + name, ret_type)
+            decl_owner_module_set(did, module_name)
             registered = registered + 1
         if tag == LAZY_DECL_EXTERN_FN:
             val ename = decl_get_name(did)

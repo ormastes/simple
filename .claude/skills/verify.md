@@ -126,23 +126,6 @@ For each source file in scope:
    - **Security:** Check input validation, no secrets in code, proper auth
    - **Observability:** Check logging, metrics, tracing
    - **Compatibility:** Check platform-specific code paths
-   - **Formal verification:** RTL/hardware claims require
-     RVFI/riscv-formal/SymbiYosys evidence; generated RISC-V RTL uses
-     `scripts/rtl/check-rvfi-formal-readiness.shs` with `CORE_VHDL` and, when
-     present, `FORMAL_HARNESS`, `FORMAL_SBY`, and `FORMAL_MANIFEST`. Lean claims
-     require `simple gen-lean verify`, `simple verify check`, or a lane-specific
-     Lean wrapper with zero `sorry`/`admit`/untrusted axioms. Use both proof
-     systems when a lane spans RTL plus higher-level Simple/spec behavior.
-     SimpleOS mission-critical release verification must run
-     `sh scripts/check/check-simpleos-mission-critical-release.shs`; matrix
-     readiness is not release completion while that gate reports blocked or
-     failed, and PASS requires `release_blockers=none`. If blocked, run
-     `sh scripts/check/check-simpleos-mission-critical-prereqs.shs` for the host
-     dependency list and
-     `sh scripts/setup/setup-simpleos-formal-env.shs --print-install` for setup
-     commands. Treat `sidecar-contract-failed`, `missing-artifact`, and
-     `sby-run-failed` as release-failing RTL evidence problems, not missing-tool
-     blockers.
 3. Flag NFR targets with no verification mechanism
 4. For GUI/web/2D RenderDoc+Vulkan evidence, start from the macOS top-level
    workflow:
@@ -156,18 +139,11 @@ For each source file in scope:
    Treat browser `RDOC_RENDERDOC_HOOK_CHILDREN=0` and Chromium
    `--in-process-gpu` runs as diagnostic only unless they still produce valid
    browser GPU-process `.rdc` evidence with `RDOC` magic and prove Vulkan active.
-5. For GUI/web/2D rendering-lane implementation, wrapper, benchmark, or
-   platform-agent diffs, run
-   `sh scripts/check/check-rendering-source-coupling.shs`. Use
-   `RENDERING_SOURCE_COUPLING_REVISION=<rev>` for a specific jj change. New raw
-   `rt_*`, direct backend proof/status pokes, or forced backend pass states in
-   rendering-scoped files are FAIL unless routed through an owning facade or the
-   documented RenderDoc helper exception.
-6. Metal/Vulkan/8K claims require matching evidence: native Metal raw readback
+5. Metal/Vulkan/8K claims require matching evidence: native Metal raw readback
    on macOS, `metal-requires-macos` for Linux Metal, the Vulkan gate above for
    Vulkan, and a retained 8K row or explicit blocker in `doc/09_report` /
    `doc/10_metrics` for 8K performance.
-7. For GUI/web queue proof, reject runtime-only evidence. Runtime queue/drain
+6. For GUI/web queue proof, reject runtime-only evidence. Runtime queue/drain
    receipts are necessary but not sufficient; production proof requires
    same-frame backend `device_readback`, a positive backend handle, and matching
    checksum. Synthetic handles, upload-only provenance, and CPU mirrors fail.
@@ -199,9 +175,8 @@ For each source file in scope:
      process docs before final verification
    - `simple_context` or context-mode changes must refresh the MCP/tooling guide,
      generated manuals, and skill/command docs for any new `--sql`/`--db`
-     behavior, `--source-filter`/MCP `source_filter`, file-optional SQL query
-     shape, embedded SQLite facade boundary, explicit absence statuses, and the
-     public-absence guard.
+     behavior, embedded SQLite facade boundary, explicit absence statuses, and
+     the public-absence guard.
 
 5. **Runtime facade boundary:**
    - Run `sh scripts/audit/direct-env-runtime-guard.shs --working` and
@@ -252,9 +227,8 @@ STATUS: FAIL (5 failures must be fixed before release)
   `.claude/agents/spipe/`, or `.gemini/commands/` instructions behind, do not mark verification PASS
 - For `simple_context` or context-mode changes, verify the MCP/tooling guide,
   generated manuals, and skill/command docs mention any new `--sql`/`--db`
-  behavior, `--source-filter`/MCP `source_filter`, file-optional SQL query
-  shape, embedded SQLite facade boundary, and explicit absence statuses. Run
-  `scripts/check/check-llm-tooling-public-absence-rendering.shs`.
+  behavior, embedded SQLite facade boundary, and explicit absence statuses.
+  Run `scripts/check/check-llm-tooling-public-absence-rendering.shs`.
 - Do not mark PASS for scenario-oriented specs whose mirrored `doc/06_spec`
   output reads like raw test mechanics instead of an operator/user manual
 - Do not mark PASS if `direct-env-runtime-guard.shs --working` or `--staged`

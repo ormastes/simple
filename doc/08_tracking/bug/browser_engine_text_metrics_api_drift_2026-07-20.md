@@ -1,7 +1,6 @@
 # browser_engine text-metrics spec: multiple real API gaps (missing fields/fn, nil SFFI)
 
-Status: OPEN (P3)
-Status re-verified 2026-08-17 by source inspection (triage shard 00).
+**Status:** open
 **Found:** 2026-07-20 (whole-suite triage campaign, test/01_unit shard)
 **Area:** `src/lib/gc_async_mut/gpu/browser_engine/**` (contested GPU/browser-engine area)
 

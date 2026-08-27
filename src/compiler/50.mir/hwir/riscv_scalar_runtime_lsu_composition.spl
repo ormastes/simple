@@ -1,0 +1,526 @@
+# Compiler-owned closed composition for the typed pending-provider LSU path.
+
+use std.common.crypto.sha256.{sha256_text}
+use compiler.mir.hwir.types.{CoreConfig, HwClockDomain, HwCombOp, HwConstant,
+    HwCostModel, HwModule, HwModuleDef, HwNodeId, HwOrigin, HwPort, HwSelectOp, HwSignal}
+use compiler.mir.hwir.sequential.{HwSequentialModuleDef}
+use compiler.mir.hwir.riscv_lsu_config.{LsuConfig}
+use compiler.mir.hwir.riscv_scalar_decoder.{strict_riscv_scalar_decoder_hwir}
+use compiler.mir.hwir.riscv_scalar_decoded_uop_interface.{HwScalarDecodedUopInterface,
+    strict_hw_scalar_decoded_uop_interface}
+use compiler.mir.hwir.riscv_scalar_completion_interface.{HwScalarCompletionInterface,
+    strict_hw_scalar_completion_interface}
+use compiler.mir.hwir.riscv_scalar_pending_provider_protocol.{HwScalarPendingProviderProtocol,
+    strict_hw_scalar_pending_provider_protocol}
+use compiler.mir.hwir.riscv_scalar_pending_provider_owner.{strict_riscv_scalar_pending_provider_owner}
+use compiler.mir.hwir.riscv_scalar_runtime_lsu_projection.{strict_riscv_scalar_runtime_lsu_projection}
+use compiler.mir.hwir.riscv_scalar_runtime_lsu_owner.{strict_riscv_scalar_runtime_lsu_owner}
+use compiler.mir.hwir.riscv_scalar_runtime_fence_provider.{strict_riscv_scalar_runtime_fence_provider}
+use lib.hardware.riscv_common.isa.scalar_database.{RiscvScalarDecoderPlan,
+    riscv_scalar_decoder_plan}
+
+pub class HwScalarRuntimeLsuCompositionBinding:
+    source_owner: text
+    source_port: text
+    destination_owner: text
+    destination_port: text
+    bit_width: i32
+
+    me canonical_text() -> text:
+        [self.source_owner, self.source_port, self.destination_owner,
+            self.destination_port, self.bit_width.to_text()].join("|")
+
+fn lsu_comp_port(ports: [HwPort], name: text) -> Option<HwPort>:
+    for port in ports:
+        if port.name == name: return Some(port)
+    nil
+
+fn lsu_comp_add(rows: [HwScalarRuntimeLsuCompositionBinding], source_owner: text,
+    source_port: text, destination_owner: text, destination_port: text,
+    width: i32) -> [HwScalarRuntimeLsuCompositionBinding]:
+    var result = rows
+    result.push(HwScalarRuntimeLsuCompositionBinding(source_owner: source_owner,
+        source_port: source_port, destination_owner: destination_owner,
+        destination_port: destination_port, bit_width: width))
+    result
+
+fn lsu_comp_top_ports(decoded: HwScalarDecodedUopInterface,
+    completion: HwScalarCompletionInterface, bus: LsuConfig,
+    pa: i32, x: i32) -> [HwPort]:
+    var ports = [HwPort.input("clk", "Bits", 1), HwPort.input("rst", "Bits", 1),
+        HwPort.input("dispatch_valid", "Bits", 1),
+        HwPort.input("dispatch_illegal_valid", "Bits", 1),
+        HwPort.input("downstream_ready", "Bits", 1),
+        HwPort.input("bus_request_ready", "Bits", 1),
+        HwPort.input("bus_response_valid", "Bits", 1),
+        HwPort.input("bus_response_id", "Bits", 64),
+        HwPort.input("bus_response_data", "Bits", bus.bus_data_bits),
+        HwPort.input("bus_response_fault", "Bits", 1),
+        HwPort.input("bus_response_cause", "Bits", x),
+        HwPort.input("bus_response_tval", "Bits", x),
+        HwPort.output("dispatch_ready", "Bits", 1), HwPort.output("uop_ready", "Bits", 1),
+        HwPort.output("bus_request_valid", "Bits", 1),
+        HwPort.output("bus_request_id", "Bits", 64),
+        HwPort.output("bus_request_address", "Bits", pa),
+        HwPort.output("bus_request_write", "Bits", 1),
+        HwPort.output("bus_request_byte_mask", "Bits", bus.byte_mask_bits),
+        HwPort.output("bus_request_write_data", "Bits", bus.bus_data_bits),
+        HwPort.output("bus_response_ready", "Bits", 1),
+        HwPort.output("selected_completion_valid", "Bits", 1),
+        HwPort.output("selected_completion_tag", "Bits", 3),
+        HwPort.output("selected_completion_event_id", "Bits", 64),
+        HwPort.output("selected_completion_decode_event_id", "Bits", 64),
+        HwPort.output("protocol_fault", "Bits", 1)]
+    for field in decoded.fields:
+        if field.name != "uop_valid" and field.name != "uop_ready":
+            ports.push(HwPort.input("dispatch_" + field.name, "Bits", field.bit_width))
+    for field in completion.fields:
+        if field.name != "completion_valid" and field.name != "completion_ready":
+            ports.push(HwPort.output("selected_completion_" + field.name,
+                "Bits", field.bit_width))
+    ports
+
+fn lsu_comp_idle(module_name: text, config: CoreConfig,
+    widths: [i32]) -> Result<HwModuleDef, text>:
+    var ports: [HwPort] = []; var constants: [HwConstant] = []; var ops: [HwCombOp] = []
+    var seen: [i32] = []
+    for width in widths:
+        if not seen.contains(width):
+            val name = "zero_" + width.to_text()
+            ports.push(HwPort.output(name, "Bits", width))
+            constants.push(HwConstant.bits(name + "_constant", width, 0))
+            ops.push(HwCombOp.unary("passthrough", name, name + "_constant", width))
+            seen.push(width)
+    val summary = HwModule(name: module_name, profile: config.profile,
+        port_count: ports.len(), signal_count: 0, register_count: 0,
+        memory_count: 0, comb_op_count: ops.len(), clock_domain_count: 1,
+        fallback_function: "", cost: HwCostModel.empty())
+    val module = HwModuleDef(summary: summary, config: config,
+        node_id: HwNodeId.module_root(module_name), origins: [HwOrigin(
+            node_id: HwNodeId.child(module_name, "typed-idle"),
+            source_name: "riscv.scalar.runtime-lsu.non-lsu-lanes-idle")],
+        ports: ports, signals: [], constants: constants, comb_ops: ops,
+        compare_ops: [], select_ops: [], clock_domains: [HwClockDomain.default_domain()])
+    val error = module.shape_diagnostic(); if error != "": return Err(error)
+    Ok(module)
+
+fn lsu_comp_route(module_name: text, config: CoreConfig) -> Result<HwModuleDef, text>:
+    val ports = [HwPort.input("dispatch_valid", "Bits", 1),
+        HwPort.input("decode_legal", "Bits", 1),
+        HwPort.input("illegal_valid", "Bits", 1),
+        HwPort.input("decoded_execution_class", "Bits", 3),
+        HwPort.input("pending_dispatch_ready", "Bits", 1),
+        HwPort.input("pending_uop_ready", "Bits", 1),
+        HwPort.output("lsu_dispatch_valid", "Bits", 1),
+        HwPort.output("lsu_dispatch_tag", "Bits", 3),
+        HwPort.output("dispatch_ready", "Bits", 1),
+        HwPort.output("uop_ready", "Bits", 1)]
+    val ops = [HwCombOp.binary("eq", "class_ok", "decoded_execution_class", "class_lsu", 3),
+        HwCombOp.binary("xor", "not_illegal", "illegal_valid", "one1", 1),
+        HwCombOp.binary("and", "legal_not_illegal", "decode_legal", "not_illegal", 1),
+        HwCombOp.binary("and", "legal_lsu", "legal_not_illegal", "class_ok", 1),
+        HwCombOp.binary("and", "lsu_dispatch_valid", "dispatch_valid", "legal_lsu", 1),
+        HwCombOp.unary("passthrough", "lsu_dispatch_tag", "tag_lsu", 3),
+        HwCombOp.binary("and", "dispatch_ready", "pending_dispatch_ready", "legal_lsu", 1),
+        HwCombOp.binary("and", "uop_ready", "pending_uop_ready", "legal_lsu", 1)]
+    val summary = HwModule(name: module_name, profile: config.profile,
+        port_count: ports.len(), signal_count: 4, register_count: 0,
+        memory_count: 0, comb_op_count: ops.len(), clock_domain_count: 1,
+        fallback_function: "", cost: HwCostModel.empty())
+    val module = HwModuleDef(summary: summary, config: config,
+        node_id: HwNodeId.module_root(module_name), origins: [HwOrigin(
+            node_id: HwNodeId.child(module_name, "lsu-route"),
+            source_name: "riscv.scalar.runtime-lsu.registered-owner-route")],
+        ports: ports, signals: [HwSignal.comb("class_ok", "Bits", 1),
+            HwSignal.comb("not_illegal", "Bits", 1),
+            HwSignal.comb("legal_not_illegal", "Bits", 1),
+            HwSignal.comb("legal_lsu", "Bits", 1)],
+        constants: [HwConstant.bits("class_lsu", 3, 3),
+            HwConstant.bits("tag_lsu", 3, 1), HwConstant.bits("one1", 1, 1)],
+        comb_ops: ops, compare_ops: [], select_ops: [],
+        clock_domains: [HwClockDomain.default_domain()])
+    val error = module.shape_diagnostic(); if error != "": return Err(error)
+    Ok(module)
+
+fn lsu_comp_bindings(top: [HwPort], pending: [HwPort], projection: [HwPort],
+    owner: [HwPort]) -> [HwScalarRuntimeLsuCompositionBinding]:
+    var rows: [HwScalarRuntimeLsuCompositionBinding] = []
+    for name in ["clk", "rst"]:
+        rows = lsu_comp_add(rows, "composition", name, "pending", name, 1)
+        rows = lsu_comp_add(rows, "composition", name, "lsu", name, 1)
+    rows = lsu_comp_add(rows, "composition", "dispatch_valid", "route", "dispatch_valid", 1)
+    rows = lsu_comp_add(rows, "composition", "dispatch_decode_legal", "route", "decode_legal", 1)
+    rows = lsu_comp_add(rows, "composition", "dispatch_illegal_valid", "route", "illegal_valid", 1)
+    rows = lsu_comp_add(rows, "composition", "dispatch_decoded_execution_class",
+        "route", "decoded_execution_class", 3)
+    rows = lsu_comp_add(rows, "route", "lsu_dispatch_valid", "pending", "dispatch_valid", 1)
+    rows = lsu_comp_add(rows, "route", "lsu_dispatch_tag", "pending", "dispatch_tag", 3)
+    rows = lsu_comp_add(rows, "pending", "dispatch_ready", "route", "pending_dispatch_ready", 1)
+    rows = lsu_comp_add(rows, "pending", "uop_ready", "route", "pending_uop_ready", 1)
+    rows = lsu_comp_add(rows, "route", "dispatch_ready", "composition", "dispatch_ready", 1)
+    rows = lsu_comp_add(rows, "route", "uop_ready", "composition", "uop_ready", 1)
+    for port in pending:
+        if port.direction == "in" and port.name.starts_with("dispatch_"):
+            if port.name != "dispatch_valid" and port.name != "dispatch_tag":
+                rows = lsu_comp_add(rows, "composition", port.name, "pending", port.name, port.bit_width)
+    rows = lsu_comp_add(rows, "composition", "downstream_ready", "pending", "downstream_ready", 1)
+    for port in pending:
+        if port.direction == "out" and (port.name.starts_with("selected_completion_") or
+                port.name == "protocol_fault"):
+            rows = lsu_comp_add(rows, "pending", port.name, "composition", port.name, port.bit_width)
+    for port in projection:
+        if port.direction == "in":
+            val source = if port.name == "uop_valid": "lsu_request_valid"
+                else: "lsu_request_" + port.name
+            rows = lsu_comp_add(rows, "pending", source, "projection", port.name, port.bit_width)
+    for port in owner:
+        if port.direction == "in" and port.name.starts_with("bus_"):
+            rows = lsu_comp_add(rows, "composition", port.name, "lsu", port.name, port.bit_width)
+        elif port.direction == "in" and port.name == "completion_ready":
+            rows = lsu_comp_add(rows, "pending", "lsu_completion_ready", "lsu", port.name, 1)
+        elif port.direction == "in" and port.name == "request_valid":
+            rows = lsu_comp_add(rows, "pending", "lsu_request_valid", "lsu", port.name, 1)
+        elif port.direction == "in" and port.name == "request_provider_tag":
+            rows = lsu_comp_add(rows, "pending", "lsu_request_provider_tag", "lsu", port.name, 3)
+        elif port.direction == "in" and port.name == "projection_protocol_fault":
+            rows = lsu_comp_add(rows, "projection", "protocol_fault", "lsu", port.name, 1)
+        elif port.direction == "in" and port.name == "projected_request_write":
+            rows = lsu_comp_add(rows, "projection", "request_write", "lsu", port.name, port.bit_width)
+        elif port.direction == "in" and port.name == "projected_request_byte_mask":
+            rows = lsu_comp_add(rows, "projection", "request_byte_mask", "lsu", port.name, port.bit_width)
+        elif port.direction == "in" and port.name == "projected_request_write_data":
+            rows = lsu_comp_add(rows, "projection", "request_write_data", "lsu", port.name, port.bit_width)
+        elif port.direction == "in" and lsu_comp_port(projection, port.name) != nil:
+            rows = lsu_comp_add(rows, "projection", port.name, "lsu", port.name, port.bit_width)
+        elif port.direction == "in" and port.name.starts_with("request_"):
+            val payload = port.name.slice(8, port.name.len())
+            val source = if payload == "pc_after": "fallthrough_pc" else: payload
+            val pending_name = "lsu_request_" + source
+            if lsu_comp_port(pending, pending_name) != nil:
+                rows = lsu_comp_add(rows, "pending", pending_name, "lsu", port.name, port.bit_width)
+            else:
+                rows = lsu_comp_add(rows, "idle", "zero_" + port.bit_width.to_text(), "lsu", port.name, port.bit_width)
+    for port in owner:
+        if port.direction == "out" and port.name.starts_with("bus_"):
+            rows = lsu_comp_add(rows, "lsu", port.name, "composition", port.name, port.bit_width)
+        elif port.direction == "out" and port.name == "request_ready":
+            rows = lsu_comp_add(rows, "lsu", port.name, "pending", "lsu_request_ready", 1)
+        elif port.direction == "out" and port.name == "request_accept":
+            rows = lsu_comp_add(rows, "lsu", port.name, "pending", "lsu_request_accept", 1)
+        elif port.direction == "out" and port.name == "completion_valid":
+            rows = lsu_comp_add(rows, "lsu", port.name, "pending", "lsu_completion_valid", 1)
+        elif port.direction == "out" and port.name == "completion_provider_tag":
+            rows = lsu_comp_add(rows, "lsu", port.name, "pending", "lsu_completion_tag", 3)
+        elif port.direction == "out" and port.name == "provider_protocol_fault":
+            rows = lsu_comp_add(rows, "lsu", port.name, "pending", "lsu_provider_protocol_fault", 1)
+        elif port.direction == "out" and port.name.starts_with("completion_"):
+            rows = lsu_comp_add(rows, "lsu", port.name, "pending", "lsu_" + port.name, port.bit_width)
+            if port.name == "completion_provider_event_id":
+                rows = lsu_comp_add(rows, "lsu", port.name, "pending", "lsu_completion_event_id", 64)
+            elif port.name == "completion_decode_event_id":
+                rows = lsu_comp_add(rows, "lsu", port.name, "pending", "lsu_completion_decode_event_id", 64)
+    for lane in ["muldiv", "csr", "fence"]:
+        for port in pending:
+            if port.direction == "in" and port.name.starts_with(lane + "_"):
+                rows = lsu_comp_add(rows, "idle", "zero_" + port.bit_width.to_text(),
+                    "pending", port.name, port.bit_width)
+    rows
+
+pub class HwScalarRuntimeLsuComposition:
+    node_id: HwNodeId
+    module_name: text
+    config: CoreConfig
+    bus: LsuConfig
+    plan: RiscvScalarDecoderPlan
+    decoder: HwModuleDef
+    decoded: HwScalarDecodedUopInterface
+    completion: HwScalarCompletionInterface
+    protocol: HwScalarPendingProviderProtocol
+    pending: HwSequentialModuleDef
+    projection: HwModuleDef
+    lsu: HwSequentialModuleDef
+    idle: HwModuleDef
+    route: HwModuleDef
+    top_ports: [HwPort]
+    bindings: [HwScalarRuntimeLsuCompositionBinding]
+
+    me owner_ports(owner: text) -> [HwPort]:
+        if owner == "composition": return self.top_ports
+        if owner == "pending": return self.pending.ports
+        if owner == "projection": return self.projection.ports
+        if owner == "lsu": return self.lsu.ports
+        if owner == "idle": return self.idle.ports
+        if owner == "route": return self.route.ports
+        []
+
+    me local_diagnostic() -> text:
+        var destinations: [text] = []
+        for row in self.bindings:
+            val source = lsu_comp_port(self.owner_ports(row.source_owner), row.source_port)
+            val destination = lsu_comp_port(self.owner_ports(row.destination_owner), row.destination_port)
+            if source == nil or destination == nil:
+                return "HWIR-E-RISCV-RUNTIME-LSU-COMPOSITION-ENDPOINT: binding endpoint is absent"
+            val source_port = source.unwrap(); val destination_port = destination.unwrap()
+            if ((row.source_owner == "composition" and source_port.direction != "in") or
+                (row.source_owner != "composition" and source_port.direction != "out") or
+                (row.destination_owner == "composition" and destination_port.direction != "out") or
+                (row.destination_owner != "composition" and destination_port.direction != "in")):
+                return "HWIR-E-RISCV-RUNTIME-LSU-COMPOSITION-DIRECTION: binding direction is invalid"
+            if source_port.bit_width != row.bit_width or destination_port.bit_width != row.bit_width:
+                return "HWIR-E-RISCV-RUNTIME-LSU-COMPOSITION-WIDTH: binding width is invalid"
+            val key = (row.destination_owner + "." + row.destination_port).lower()
+            if destinations.contains(key):
+                return "HWIR-E-RISCV-RUNTIME-LSU-COMPOSITION-DRIVER: destination has multiple drivers"
+            destinations.push(key)
+        for owner in ["pending", "projection", "lsu", "route"]:
+            for port in self.owner_ports(owner):
+                if port.direction == "in" and not destinations.contains((owner + "." + port.name).lower()):
+                    return "HWIR-E-RISCV-RUNTIME-LSU-COMPOSITION-INPUT: every child input requires a driver"
+        for port in self.top_ports:
+            if port.direction == "out" and not destinations.contains(("composition." + port.name).lower()):
+                return "HWIR-E-RISCV-RUNTIME-LSU-COMPOSITION-TOP: every top output requires a driver"
+        ""
+
+    me diagnostic() -> text:
+        val local = self.local_diagnostic(); if local != "": return local
+        val rebuilt = strict_riscv_scalar_runtime_lsu_composition(self.module_name,
+            self.config, self.bus)
+        if rebuilt.is_err(): return rebuilt.err().unwrap()
+        val canonical = rebuilt.ok().unwrap()
+        if self.structural_sha256() != canonical.structural_sha256():
+            return "HWIR-E-RISCV-RUNTIME-LSU-COMPOSITION-CANONICAL: composition requires exact compiler-owned children and ordered bindings"
+        ""
+
+    me structural_sha256() -> text:
+        var rows = ["hwir-riscv-scalar-runtime-lsu-composition/v1", self.node_id.value,
+            self.module_name, self.config.profile, self.plan.structural_sha256(),
+            self.decoder.structural_sha256(), self.decoded.structural_sha256(),
+            self.completion.structural_sha256(), self.protocol.structural_sha256(),
+            self.pending.structural_sha256(), self.projection.structural_sha256(),
+            self.lsu.structural_sha256(), self.idle.structural_sha256(),
+            self.route.structural_sha256()]
+        for port in self.top_ports:
+            rows.push([port.name, port.direction, port.type_name, port.bit_width.to_text()].join("|"))
+        for binding in self.bindings: rows.push(binding.canonical_text())
+        sha256_text(rows.join("\n"))
+
+pub fn strict_riscv_scalar_runtime_lsu_composition(module_name: text,
+    config: CoreConfig, bus: LsuConfig) -> Result<HwScalarRuntimeLsuComposition, text>:
+    if module_name == "":
+        return Err("HWIR-E-RISCV-RUNTIME-LSU-COMPOSITION-ID: composition requires a module name")
+    val config_error = config.diagnostic(); if config_error != "": return Err(config_error)
+    val bus_error = bus.diagnostic(); if bus_error != "": return Err(bus_error)
+    if config.compressed_decode_profile != "none":
+        return Err("HWIR-E-RISCV-RUNTIME-LSU-COMPOSITION-COMPRESSED: v1 requires four-byte lineage")
+    val plan = riscv_scalar_decoder_plan(config.isa_profile)?
+    val decoder = strict_riscv_scalar_decoder_hwir(module_name + "_decoder", config, plan)?
+    val decoded = strict_hw_scalar_decoded_uop_interface(config, plan, decoder)?
+    val completion = strict_hw_scalar_completion_interface(config, bus)?
+    val protocol = strict_hw_scalar_pending_provider_protocol(config, decoded,
+        decoder, plan, completion)?
+    val pending = strict_riscv_scalar_pending_provider_owner(module_name + "_pending",
+        protocol, decoded, decoder, plan, completion)?
+    val projection = strict_riscv_scalar_runtime_lsu_projection(module_name + "_projection",
+        config, bus, decoded, decoder, plan)?
+    val lsu = strict_riscv_scalar_runtime_lsu_owner(module_name + "_lsu", config, bus)?
+    var idle_widths = [1, 2, 3, 4, 5, 32, 64, config.xlen,
+        config.physical_address_bits, bus.byte_mask_bits, bus.bus_data_bits]
+    for port in pending.ports:
+        if port.direction == "in": idle_widths.push(port.bit_width)
+    val idle = lsu_comp_idle(module_name + "_idle", config, idle_widths)?
+    val route = lsu_comp_route(module_name + "_route", config)?
+    val top_ports = lsu_comp_top_ports(decoded, completion, bus,
+        config.physical_address_bits, config.xlen)
+    val bindings = lsu_comp_bindings(top_ports, pending.ports, projection.ports, lsu.ports)
+    val result = HwScalarRuntimeLsuComposition(node_id: HwNodeId.module_root(module_name),
+        module_name: module_name, config: config, bus: bus, plan: plan,
+        decoder: decoder, decoded: decoded, completion: completion, protocol: protocol,
+        pending: pending, projection: projection, lsu: lsu, idle: idle, route: route,
+        top_ports: top_ports, bindings: bindings)
+    val error = result.local_diagnostic(); if error != "": return Err(error)
+    Ok(result)
+
+# New-only generalized stateful composition.  V1 above remains the LSU-only ABI.
+fn stateful_v2_route(module_name: text, config: CoreConfig) -> Result<HwModuleDef, text>:
+    val ports = [HwPort.input("dispatch_valid", "Bits", 1),
+        HwPort.input("decode_legal", "Bits", 1), HwPort.input("illegal_valid", "Bits", 1),
+        HwPort.input("decoded_execution_class", "Bits", 3),
+        HwPort.input("pending_dispatch_ready", "Bits", 1),
+        HwPort.input("pending_uop_ready", "Bits", 1),
+        HwPort.output("stateful_dispatch_valid", "Bits", 1),
+        HwPort.output("stateful_dispatch_tag", "Bits", 3),
+        HwPort.output("dispatch_ready", "Bits", 1), HwPort.output("uop_ready", "Bits", 1)]
+    val signals = [HwSignal.comb("class_lsu_ok", "Bits", 1),
+        HwSignal.comb("class_fence_ok", "Bits", 1), HwSignal.comb("class_ok", "Bits", 1),
+        HwSignal.comb("not_illegal", "Bits", 1), HwSignal.comb("legal01", "Bits", 1),
+        HwSignal.comb("selected", "Bits", 1)]
+    val ops = [HwCombOp.binary("eq", "class_lsu_ok", "decoded_execution_class", "class_lsu", 3),
+        HwCombOp.binary("eq", "class_fence_ok", "decoded_execution_class", "class_fence", 3),
+        HwCombOp.binary("or", "class_ok", "class_lsu_ok", "class_fence_ok", 1),
+        HwCombOp.binary("xor", "not_illegal", "illegal_valid", "one1", 1),
+        HwCombOp.binary("and", "legal01", "decode_legal", "not_illegal", 1),
+        HwCombOp.binary("and", "selected", "legal01", "class_ok", 1),
+        HwCombOp.binary("and", "stateful_dispatch_valid", "dispatch_valid", "selected", 1),
+        HwCombOp.binary("and", "dispatch_ready", "pending_dispatch_ready", "selected", 1),
+        HwCombOp.binary("and", "uop_ready", "pending_uop_ready", "selected", 1)]
+    val selects = [HwSelectOp.mux("stateful_dispatch_tag", "class_fence_ok", "tag_fence", "tag_lsu", 3)]
+    val summary = HwModule(name: module_name, profile: config.profile,
+        port_count: ports.len(), signal_count: signals.len(), register_count: 0,
+        memory_count: 0, comb_op_count: ops.len() + selects.len(), clock_domain_count: 1,
+        fallback_function: "", cost: HwCostModel.empty())
+    val module = HwModuleDef(summary: summary, config: config,
+        node_id: HwNodeId.module_root(module_name), origins: [HwOrigin(
+            node_id: HwNodeId.child(module_name, "typed-route"),
+            source_name: "riscv.scalar.runtime-stateful-v2.lsu-fence-route")],
+        ports: ports, signals: signals, constants: [HwConstant.bits("class_lsu", 3, 3),
+            HwConstant.bits("class_fence", 3, 7), HwConstant.bits("tag_lsu", 3, 1),
+            HwConstant.bits("tag_fence", 3, 4), HwConstant.bits("one1", 1, 1)],
+        comb_ops: ops, compare_ops: [], select_ops: selects,
+        clock_domains: [HwClockDomain.default_domain()])
+    val error = module.shape_diagnostic(); if error != "": return Err(error)
+    Ok(module)
+
+pub class HwScalarRuntimeStatefulCompositionV2:
+    node_id: HwNodeId
+    module_name: text
+    config: CoreConfig
+    bus: LsuConfig
+    plan: RiscvScalarDecoderPlan
+    decoder: HwModuleDef
+    decoded: HwScalarDecodedUopInterface
+    completion: HwScalarCompletionInterface
+    protocol: HwScalarPendingProviderProtocol
+    pending: HwSequentialModuleDef
+    projection: HwModuleDef
+    lsu: HwSequentialModuleDef
+    fence: HwSequentialModuleDef
+    idle: HwModuleDef
+    route: HwModuleDef
+    top_ports: [HwPort]
+    bindings: [HwScalarRuntimeLsuCompositionBinding]
+
+    me owner_ports(owner: text) -> [HwPort]:
+        if owner == "composition": return self.top_ports
+        if owner == "pending": return self.pending.ports
+        if owner == "projection": return self.projection.ports
+        if owner == "lsu": return self.lsu.ports
+        if owner == "fence": return self.fence.ports
+        if owner == "idle": return self.idle.ports
+        if owner == "route": return self.route.ports
+        []
+
+    me local_diagnostic() -> text:
+        var destinations: [text] = []
+        for row in self.bindings:
+            val source = lsu_comp_port(self.owner_ports(row.source_owner), row.source_port)
+            val destination = lsu_comp_port(self.owner_ports(row.destination_owner), row.destination_port)
+            if source == nil or destination == nil:
+                return "HWIR-E-RISCV-RUNTIME-STATEFUL-V2-ENDPOINT: binding endpoint is absent"
+            val a = source.unwrap(); val b = destination.unwrap()
+            if ((row.source_owner == "composition" and a.direction != "in") or
+                (row.source_owner != "composition" and a.direction != "out") or
+                (row.destination_owner == "composition" and b.direction != "out") or
+                (row.destination_owner != "composition" and b.direction != "in")):
+                return "HWIR-E-RISCV-RUNTIME-STATEFUL-V2-DIRECTION: binding direction is invalid"
+            if a.bit_width != row.bit_width or b.bit_width != row.bit_width:
+                return "HWIR-E-RISCV-RUNTIME-STATEFUL-V2-WIDTH: binding width is invalid"
+            val key = (row.destination_owner + "." + row.destination_port).lower()
+            if destinations.contains(key):
+                return "HWIR-E-RISCV-RUNTIME-STATEFUL-V2-DRIVER: destination has multiple drivers"
+            destinations.push(key)
+        for owner in ["pending", "projection", "lsu", "fence", "route"]:
+            for port in self.owner_ports(owner):
+                if port.direction == "in" and not destinations.contains((owner + "." + port.name).lower()):
+                    return "HWIR-E-RISCV-RUNTIME-STATEFUL-V2-CLOSURE: every child input requires one driver"
+        for port in self.top_ports:
+            if port.direction == "out" and not destinations.contains(("composition." + port.name).lower()):
+                return "HWIR-E-RISCV-RUNTIME-STATEFUL-V2-CLOSURE: every top output requires one driver"
+        ""
+
+    me diagnostic() -> text:
+        val local = self.local_diagnostic(); if local != "": return local
+        val rebuilt = strict_riscv_scalar_runtime_stateful_composition_v2(
+            self.module_name, self.config, self.bus)
+        if rebuilt.is_err(): return rebuilt.err().unwrap()
+        if self.structural_sha256() != rebuilt.ok().unwrap().structural_sha256():
+            return "HWIR-E-RISCV-RUNTIME-STATEFUL-V2-CANONICAL: composition requires exact compiler-owned children and ordered bindings"
+        ""
+
+    me structural_sha256() -> text:
+        var rows = ["hwir-riscv-scalar-runtime-stateful-composition/v2", self.node_id.value,
+            self.module_name, self.config.profile, self.plan.structural_sha256(),
+            self.decoder.structural_sha256(), self.decoded.structural_sha256(),
+            self.completion.structural_sha256(), self.protocol.structural_sha256(),
+            self.pending.structural_sha256(), self.projection.structural_sha256(),
+            self.lsu.structural_sha256(), self.fence.structural_sha256(),
+            self.idle.structural_sha256(), self.route.structural_sha256()]
+        for port in self.top_ports:
+            rows.push([port.name, port.direction, port.type_name, port.bit_width.to_text()].join("|"))
+        for binding in self.bindings: rows.push(binding.canonical_text())
+        sha256_text(rows.join("\n"))
+
+pub fn strict_riscv_scalar_runtime_stateful_composition_v2(module_name: text,
+    config: CoreConfig, bus: LsuConfig) -> Result<HwScalarRuntimeStatefulCompositionV2, text>:
+    if module_name == "": return Err("HWIR-E-RISCV-RUNTIME-STATEFUL-V2-ID: composition requires a module name")
+    val base = strict_riscv_scalar_runtime_lsu_composition(module_name + "_base", config, bus)?
+    val fence = strict_riscv_scalar_runtime_fence_provider(module_name + "_fence", config, base.plan)?
+    val route = stateful_v2_route(module_name + "_route", config)?
+    var top = base.top_ports
+    top.push(HwPort.input("fence_effect_ready", "Bits", 1))
+    for row in [("fence_effect_valid", 1), ("fence_effect_kind", 2),
+            ("fence_effect_fm", 4), ("fence_effect_pred", 4), ("fence_effect_succ", 4)]:
+        top.push(HwPort.output(row[0], "Bits", row[1]))
+    var rows: [HwScalarRuntimeLsuCompositionBinding] = []
+    for row in base.bindings:
+        if row.destination_owner == "route":
+            rows = lsu_comp_add(rows, row.source_owner, row.source_port, row.destination_owner,
+                row.destination_port.replace("decoded_execution_class", "decoded_execution_class"), row.bit_width)
+        elif row.source_owner == "route":
+            val source = if row.source_port == "lsu_dispatch_valid": "stateful_dispatch_valid"
+                elif row.source_port == "lsu_dispatch_tag": "stateful_dispatch_tag" else: row.source_port
+            rows = lsu_comp_add(rows, "route", source, row.destination_owner, row.destination_port, row.bit_width)
+        elif not (row.source_owner == "idle" and row.destination_owner == "pending" and
+                row.destination_port.starts_with("fence_")):
+            rows.push(row)
+    rows = lsu_comp_add(rows, "composition", "clk", "fence", "clk", 1)
+    rows = lsu_comp_add(rows, "composition", "rst", "fence", "rst", 1)
+    for port in fence.ports:
+        if port.direction == "in" and port.name != "clk" and port.name != "rst":
+            if port.name == "fence_effect_ready":
+                rows = lsu_comp_add(rows, "composition", port.name, "fence", port.name, 1)
+            elif port.name == "completion_ready":
+                rows = lsu_comp_add(rows, "pending", "fence_completion_ready", "fence", port.name, 1)
+            elif port.name == "request_valid":
+                rows = lsu_comp_add(rows, "pending", "fence_request_valid", "fence", port.name, 1)
+            elif port.name == "request_provider_tag":
+                rows = lsu_comp_add(rows, "pending", "fence_request_provider_tag", "fence", port.name, 3)
+            else:
+                val pending_name = "fence_request_" + port.name
+                if lsu_comp_port(base.pending.ports, pending_name) != nil:
+                    rows = lsu_comp_add(rows, "pending", pending_name, "fence", port.name, port.bit_width)
+                else:
+                    rows = lsu_comp_add(rows, "idle", "zero_" + port.bit_width.to_text(), "fence", port.name, port.bit_width)
+        elif port.name.starts_with("fence_effect_"):
+            rows = lsu_comp_add(rows, "fence", port.name, "composition", port.name, port.bit_width)
+        elif port.name == "request_ready" or port.name == "request_accept":
+            rows = lsu_comp_add(rows, "fence", port.name, "pending", "fence_" + port.name, port.bit_width)
+        elif port.name == "completion_valid":
+            rows = lsu_comp_add(rows, "fence", port.name, "pending", "fence_completion_valid", 1)
+        elif port.name == "completion_provider_tag":
+            rows = lsu_comp_add(rows, "fence", port.name, "pending", "fence_completion_tag", 3)
+        elif port.name == "provider_protocol_fault":
+            rows = lsu_comp_add(rows, "fence", port.name, "pending", "fence_provider_protocol_fault", 1)
+        elif port.name.starts_with("completion_"):
+            rows = lsu_comp_add(rows, "fence", port.name, "pending", "fence_" + port.name, port.bit_width)
+            if port.name == "completion_provider_event_id":
+                rows = lsu_comp_add(rows, "fence", port.name, "pending", "fence_completion_event_id", 64)
+            elif port.name == "completion_decode_event_id":
+                rows = lsu_comp_add(rows, "fence", port.name, "pending", "fence_completion_decode_event_id", 64)
+    val result = HwScalarRuntimeStatefulCompositionV2(node_id: HwNodeId.module_root(module_name),
+        module_name: module_name, config: config, bus: bus, plan: base.plan,
+        decoder: base.decoder, decoded: base.decoded, completion: base.completion,
+        protocol: base.protocol, pending: base.pending, projection: base.projection,
+        lsu: base.lsu, fence: fence, idle: base.idle, route: route,
+        top_ports: top, bindings: rows)
+    val error = result.local_diagnostic(); if error != "": return Err(error)
+    Ok(result)

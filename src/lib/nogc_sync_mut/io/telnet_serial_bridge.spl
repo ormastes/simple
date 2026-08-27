@@ -29,10 +29,10 @@ extern fn native_tcp_set_read_timeout(handle: i64, ms: i64) -> Result<i64, text>
 extern fn native_tcp_set_nodelay(handle: i64, nodelay: bool) -> Result<i64, text>
 extern fn native_tcp_close(handle: i64) -> i64
 extern fn rt_file_read_bytes(path: text) -> [i64]?
-use std.io_runtime.{file_append_text}
+extern fn rt_file_append_text(path: text, content: text) -> bool
 extern fn rt_bytes_to_text(data: [i64]) -> text
-use std.io_runtime.{thread_sleep}
-use std.io_runtime.{time_now_unix_micros}
+extern fn rt_sleep_ms(ms: i64)
+extern fn rt_time_now_unix_micros() -> i64
 
 # ============================================================================
 # Telnet protocol constants (RFC 854) — BRIDGE_ prefix avoids colliding with
@@ -163,20 +163,16 @@ struct BridgeConfig:
 fn bridge_rx_pending(rx_path: text, rx_offset: i64) -> [i64]:
     """Return capture-file bytes past rx_offset (empty if none/missing)."""
     var fresh: [i64] = []
-    # Unwrap with `??`, not `match Some(_)/None`: the seed interpreter marshals
-    # the SFFI array return Option-wrapped, but the JIT/native engines return
-    # the bare array, so a `Some(_)` arm silently falls through and the match
-    # dies with "match expression exhausted ... for array value". `?? []` is
-    # identity on a bare array and unwraps a Some, so it is correct on every
-    # engine — same convention as shb_reader.spl:44 and sfm/container.spl.
-    # The empty-file case yields an empty array, which the loop below skips,
-    # matching the old `None: pass_do_nothing` behaviour.
-    val all: [i64] = rt_file_read_bytes(rx_path) ?? []
-    val total = all.length()
-    var i = rx_offset
-    while i < total:
-        fresh.push(all[i])
-        i = i + 1
+    val maybe = rt_file_read_bytes(rx_path)
+    match maybe:
+        Some(all):
+            val total = all.length()
+            var i = rx_offset
+            while i < total:
+                fresh.push(all[i])
+                i = i + 1
+        None:
+            pass_do_nothing
     fresh
 
 fn bridge_relay_session(stream: i64, cfg: BridgeConfig, rx_start: i64) -> (i64, i64):
@@ -189,7 +185,7 @@ fn bridge_relay_session(stream: i64, cfg: BridgeConfig, rx_start: i64) -> (i64, 
     # Wall-clock idle tracking: read timeouts on accepted sockets fire
     # instantly in the interpreter (SO_RCVTIMEO not honored), so tick
     # counting would expire idle limits ~1000x too fast. Pace explicitly
-    # with thread_sleep and measure idle by clock.
+    # with rt_sleep_ms and measure idle by clock.
     var last_traffic_us = time_now_unix_micros()
     var done = false
 
@@ -210,7 +206,7 @@ fn bridge_relay_session(stream: i64, cfg: BridgeConfig, rx_start: i64) -> (i64, 
                     if filtered.replies.length() > 0:
                         native_tcp_write(stream, filtered.replies)
                     if filtered.clean.length() > 0:
-                        file_append_text(cfg.tx_path, rt_bytes_to_text(filtered.clean))
+                        rt_file_append_text(cfg.tx_path, rt_bytes_to_text(filtered.clean))
                         traffic = traffic + filtered.clean.length()
             Err(e):
                 # Read timeout — no client bytes this tick
@@ -227,14 +223,14 @@ fn bridge_relay_session(stream: i64, cfg: BridgeConfig, rx_start: i64) -> (i64, 
 
         if traffic == 0:
             if not done:
-                thread_sleep(BRIDGE_POLL_MS)
-                val now = time_now_unix_micros()
+                rt_sleep_ms(BRIDGE_POLL_MS)
+                val now = rt_time_now_unix_micros()
                 val idle_ms = (now - last_traffic_us) / 1000
                 if cfg.idle_limit_ms > 0 and idle_ms >= cfg.idle_limit_ms:
                     done = true
         else:
             relayed = relayed + traffic
-            last_traffic_us = time_now_unix_micros()
+            last_traffic_us = rt_time_now_unix_micros()
 
     (relayed, rx_offset)
 

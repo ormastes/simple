@@ -1,18 +1,16 @@
 # RISC-V 64 User Entry Bridge
 #
-# Validates the scheduler handoff, enters U-mode through the canonical Sv39
-# root, and blocks until the trap vector resumes the saved kernel frame.
+# Mirrors the arm64 probe bridge shape while RV64 filesystem-exec acceptance
+# still validates the handoff frame instead of performing a long-lived live
+# U-mode session for each staged tool app.
 
 use os.kernel.scheduler.scheduler.{Scheduler}
 use os.kernel.types.task_types.{TaskContext}
 use os.kernel.arch.riscv64.trap_model.{create_rv64_user_context}
-use os.kernel.arch.riscv64.interrupt.{Rv64Interrupt, rv64_bind_scheduler_context, rv64_install_scheduler_kernel_satp}
+use os.kernel.arch.riscv64.interrupt.{Rv64Interrupt}
 use os.kernel.arch.riscv64.paging.{vmm_switch_address_space}
 use os.kernel.arch.riscv64.cpu.{csrr_satp, csrw_satp, sfence_vma}
 use os.kernel.log.klog_api.{log_raw_println}
-use std.nogc_async_mut_noalloc.baremetal.riscv.{fence_i}
-
-extern fn _rv64_enter_user(ctx_addr: u64) -> i64
 
 fn dispatch_enter_user_blocking_probe(pid_hint: u64, scheduler: Scheduler) -> i64:
     """Validate the target RV64 user-task handoff state for fs-exec launch."""
@@ -37,7 +35,7 @@ fn dispatch_enter_user_blocking_probe(pid_hint: u64, scheduler: Scheduler) -> i6
 
     val ctx: TaskContext = uctx.unwrap()
     val satp_root = task.address_space
-    if ctx.rip == 0 or ctx.rsp == 0 or satp_root == 0 or (satp_root & 0xFFF) != 0:
+    if ctx.rip == 0 or ctx.rsp == 0 or satp_root == 0:
         log_raw_println("[rv64-user] invalid handoff frame pid={target_pid} rip={ctx.rip} sp={ctx.rsp} satp={satp_root}")
         return -14
 
@@ -60,17 +58,6 @@ fn dispatch_enter_user_blocking(pid_hint: u64, scheduler: Scheduler) -> i64:
         return -22
     val portable: TaskContext = user_context.unwrap()
 
-    # Publish the native frame and supervisor root before the selected
-    # scheduler becomes visible to asynchronous timer dispatch.
-    var rv_context = create_rv64_user_context(portable.rip, portable.rsp, 0)
-    if not rv64_bind_scheduler_context(task.id.id, rv_context):
-        log_raw_println("[rv64-user] scheduler context table is full pid={task.id.id}")
-        return -12
-    val kernel_satp = csrr_satp()
-    if not rv64_install_scheduler_kernel_satp(kernel_satp):
-        log_raw_println("[rv64-user] invalid kernel SATP identity")
-        return -14
-
     sched.schedule()
     val selected = sched.get_current()
     if selected != task.id:
@@ -80,6 +67,8 @@ fn dispatch_enter_user_blocking(pid_hint: u64, scheduler: Scheduler) -> i64:
         log_raw_println("[rv64-user] trap runtime is not installed")
         return -38
 
+    var rv_context = create_rv64_user_context(portable.rip, portable.rsp, 0)
+    val kernel_satp = csrr_satp()
     vmm_switch_address_space(task.address_space)
     # PT_LOAD bytes were written by this hart before the address-space switch.
     fence_i()

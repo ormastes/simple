@@ -8,9 +8,9 @@ use compiler.treesitter.{TreeSitter, OutlineModule, ParseError}
 # LIMITATION: Awaiting tree-sitter satellite SFFI
 import lsp.handlers.verification as verification
 
-use std.io_runtime.{process_run}
-use std.io_runtime.{env_get}
-use std.io_runtime.{file_exists}
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_env_get(name: text) -> text
+extern fn rt_file_exists(path: text) -> bool
 
 # Find all ERROR nodes in the tree
 fn find_error_nodes(tree: Tree) -> [Node]:
@@ -82,7 +82,7 @@ fn collect_compiler_diagnostics(file_path: String) -> [Dict]:
     var stdout = ""
     var stderr = ""
     var code: i64 = 0
-    (stdout, stderr, code) = process_run("/bin/sh", ["-c", "export NO_COLOR=1 TERM=dumb; " + cmd])
+    (stdout, stderr, code) = rt_process_run("/bin/sh", ["-c", "export NO_COLOR=1 TERM=dumb; " + cmd])
     if stdout.trim() == "":
         return diagnostics
     val lines = stdout.split("\n")
@@ -103,28 +103,28 @@ fn collect_compiler_diagnostics(file_path: String) -> [Dict]:
     diagnostics
 
 fn _find_simple_binary() -> text:
-    val env_bin = env_get("SIMPLE_BINARY") ?? ""
+    val env_bin = rt_env_get("SIMPLE_BINARY") ?? ""
     if env_bin != "":
         return env_bin
-    val os_env = env_get("OS") ?? ""
+    val os_env = rt_env_get("OS") ?? ""
     if os_env.contains("Windows"):
-        if file_exists("bin/simple.exe"):
+        if rt_file_exists("bin/simple.exe"):
             return "bin/simple.exe"
-        if file_exists("bin/release/x86_64-pc-windows-msvc/simple.exe"):
+        if rt_file_exists("bin/release/x86_64-pc-windows-msvc/simple.exe"):
             return "bin/release/x86_64-pc-windows-msvc/simple.exe"
-        if file_exists("bin/release/x86_64-pc-windows-gnu/simple.exe"):
+        if rt_file_exists("bin/release/x86_64-pc-windows-gnu/simple.exe"):
             return "bin/release/x86_64-pc-windows-gnu/simple.exe"
-    if file_exists("bin/simple"):
+    if rt_file_exists("bin/simple"):
         return "bin/simple"
-    if file_exists("bin/release/aarch64-apple-darwin-macho/simple"):
+    if rt_file_exists("bin/release/aarch64-apple-darwin-macho/simple"):
         return "bin/release/aarch64-apple-darwin-macho/simple"
-    if file_exists("bin/release/macos-arm64/simple"):
+    if rt_file_exists("bin/release/macos-arm64/simple"):
         return "bin/release/macos-arm64/simple"
-    if file_exists("bin/release/darwin-aarch64/simple"):
+    if rt_file_exists("bin/release/darwin-aarch64/simple"):
         return "bin/release/darwin-aarch64/simple"
-    if file_exists("bin/release/macos-x86_64/simple"):
+    if rt_file_exists("bin/release/macos-x86_64/simple"):
         return "bin/release/macos-x86_64/simple"
-    if file_exists("bin/release/linux-x86_64/simple"):
+    if rt_file_exists("bin/release/linux-x86_64/simple"):
         return "bin/release/linux-x86_64/simple"
     "bin/simple"
 
@@ -200,29 +200,32 @@ fn _parse_compiler_text_diagnostic(line: String) -> Option<Dict>:
     var diag_col = 0
     var diag_msg = line
     var severity = protocol.DiagnosticSeverity.Error
-    val ci = line.index_of(":")
-    if ci >= 0:
-        val after = line.substring(ci + 1)
-        val ci2 = after.index_of(":")
-        if ci2 >= 0:
-            val line_str = after.substring(0, ci2).trim()
-            val line_num = int(line_str)
-            if line_num > 0:
-                diag_line = line_num - 1
-                val after2 = after.substring(ci2 + 1)
-                val ci3 = after2.index_of(":")
-                if ci3 >= 0:
-                    val col_str = after2.substring(0, ci3).trim()
-                    val col_num = int(col_str)
-                    if col_num > 0:
-                        diag_col = col_num - 1
-                    diag_msg = after2.substring(ci3 + 1).trim()
-                else:
-                    diag_msg = after2.trim()
-        else:
+    val colon_idx = line.index_of(":")
+    match colon_idx:
+        Some(ci):
+            val after = line.substring(ci + 1)
+            val second_colon = after.index_of(":")
+            match second_colon:
+                Some(ci2):
+                    val line_str = after.substring(0, ci2).trim()
+                    val line_num = int(line_str)
+                    if line_num > 0:
+                        diag_line = line_num - 1
+                        val after2 = after.substring(ci2 + 1)
+                        val third_colon = after2.index_of(":")
+                        match third_colon:
+                            Some(ci3):
+                                val col_str = after2.substring(0, ci3).trim()
+                                val col_num = int(col_str)
+                                if col_num > 0:
+                                    diag_col = col_num - 1
+                                diag_msg = after2.substring(ci3 + 1).trim()
+                            nil:
+                                diag_msg = after2.trim()
+                nil:
+                    val _x = 0
+        nil:
             val _x = 0
-    else:
-        val _x = 0
     if diag_msg.starts_with("warning"):
         severity = protocol.DiagnosticSeverity.Warning
         diag_msg = diag_msg.replace("warning:", "").trim()
@@ -242,26 +245,26 @@ fn _parse_compiler_text_diagnostic(line: String) -> Option<Dict>:
 # Simple JSON field extraction helper
 fn _json_field(json: String, key: String) -> String:
     val search = "\"" + key + "\":"
-    val idx = json.index_of(search)
-    if idx >= 0:
-        val start = idx + search.len()
-        val after = json.substring(start).trim()
-        if after.starts_with("\""):
-            val after_quote = after.substring(1)
-            # index_of returns a plain i64 (-1 == not found), not an Option.
-            val ei = after_quote.index_of("\"")
-            if ei < 0:
-                return ""
-            return after_quote.substring(0, ei)
-        else:
-            var parts: [String] = []
-            for ch in after:
-                if ch == "," or ch == "}" or ch == "]" or ch == " " or ch == "\n":
-                    break
-                parts.push(ch)
-            return parts.join("")
-    else:
-        return ""
+    val idx_result = json.index_of(search)
+    match idx_result:
+        Some(idx):
+            val start = idx + search.len()
+            val after = json.substring(start).trim()
+            if after.starts_with("\""):
+                val after_quote = after.substring(1)
+                val end_result = after_quote.index_of("\"")
+                match end_result:
+                    Some(ei): return after_quote.substring(0, ei)
+                    nil: return ""
+            else:
+                var parts: [String] = []
+                for ch in after:
+                    if ch == "," or ch == "}" or ch == "]" or ch == " " or ch == "\n":
+                        break
+                    parts.push(ch)
+                return parts.join("")
+        nil:
+            return ""
 
 # Check if a diagnostic is a duplicate (same line, same message prefix)
 fn _is_duplicate(existing: [Dict], new_diag: Dict) -> Bool:

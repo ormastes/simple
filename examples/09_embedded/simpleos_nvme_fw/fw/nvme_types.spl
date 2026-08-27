@@ -27,17 +27,8 @@ val SC_NS_NOT_READY:   i64 = 0x82
 val SC_MEDIA_ERR:      i64 = 0x281   # unrecovered read error (ECC exhausted)
 
 # ── Sentinels ─────────────────────────────────────────────────────────────────
-# Index-handle law (see PRODUCTION_STATUS.md "Index-handle law"): every
-# NULL/invalid-index case is a NAMED constant, never a bare -1. Vocabulary:
-#   UNMAP     — unmapped L2P entry / invalid ppn (FTL map + block-alloc domain)
-#   NO_PPN    — invalid physical page number (alias of UNMAP for ppn returns)
-#   NULL_IDX  — generic invalid index/handle (pool handles, queue/cid/sqid
-#               "none" fields, not-found search results) outside the L2P/ppn
-#               domain above. Same value as UNMAP (kept a literal, not a
-#               val-to-val alias, to match UNMAP/NO_PPN's own convention).
-val UNMAP: i64 = -1      # unmapped L2P entry / invalid ppn
+val UNMAP: i64 = -1      # unmapped L2P entry / invalid handle index
 val NO_PPN: i64 = -1
-val NULL_IDX: i64 = -1   # generic invalid-index / null-handle sentinel
 
 # ── Device geometry ───────────────────────────────────────────────────────────
 val NUM_PLANES:      i64 = 4
@@ -50,8 +41,6 @@ val GC_RESERVE:      i64 = 2      # free blocks the host write path never consum
                                   # held as GC scratch so collection always makes progress
 val WL_THRESHOLD:    i64 = 2      # static wear-leveling fires when max-min erase spread exceeds this
 val READ_DISTURB_THRESHOLD: i64 = 50  # reads on one block before a read-disturb scrub
-val FW_SAFE_I64_LIMIT: i64 = 1000000000000000000
-val FW_OVERFLOW_TEST_SIZE: i64 = 1000000000000000000
 
 # ── NAND op outcome codes (FIL -> caller) ─────────────────────────────────────
 val NAND_OK:        i64 = 0
@@ -83,7 +72,7 @@ struct Handle:
     generation: i64
 
 fn handle_invalid() -> Handle:
-    Handle(pool: NULL_IDX, index: NULL_IDX, generation: NULL_IDX)
+    Handle(pool: -1, index: -1, generation: -1)
 
 fn handle_is_valid(h: Handle) -> bool:
     h.index >= 0
@@ -91,17 +80,16 @@ fn handle_is_valid(h: Handle) -> bool:
 # ── A decoded host NVMe command ───────────────────────────────────────────────
 struct NvmeCmd:
     cid:     i64   # command id
-    nsid:    i64   # namespace id (single namespace model: 1)
     opcode:  i64
     lba:     i64
     nblocks: i64
     data:    i64   # simulated single-byte payload stand-in
 
 fn cmd_make(cid: i64, opcode: i64, lba: i64, nblocks: i64, data: i64) -> NvmeCmd:
-    NvmeCmd(cid: cid, nsid: 1, opcode: opcode, lba: lba, nblocks: nblocks, data: data)
+    NvmeCmd(cid: cid, opcode: opcode, lba: lba, nblocks: nblocks, data: data)
 
-fn cmd_make_nsid(cid: i64, nsid: i64, opcode: i64, lba: i64, nblocks: i64, data: i64) -> NvmeCmd:
-    NvmeCmd(cid: cid, nsid: nsid, opcode: opcode, lba: lba, nblocks: nblocks, data: data)
+fn cid_valid(cid: i64) -> bool:
+    cid >= 0 and cid <= 65535
 
 fn cid_valid(cid: i64) -> bool:
     cid >= 0 and cid <= 65535
@@ -115,9 +103,6 @@ struct NvmeCpl:
 fn cpl_make(cid: i64, status: i64, data: i64) -> NvmeCpl:
     NvmeCpl(cid: cid, status: status, data: data)
 
-fn cpl_status_valid(status: i64) -> bool:
-    status == SC_SUCCESS or status == SC_INVALID_OPCODE or status == SC_INVALID_FIELD or status == SC_INTERNAL or status == SC_LBA_RANGE or status == SC_NS_NOT_READY or status == SC_MEDIA_ERR
-
 # ── Physical page address helpers (ppn <-> block/page) ────────────────────────
 fn ppn_block(ppn: i64) -> i64:
     ppn / PAGES_PER_BLOCK
@@ -127,12 +112,6 @@ fn ppn_page(ppn: i64) -> i64:
 
 fn block_first_ppn(blk: i64) -> i64:
     blk * PAGES_PER_BLOCK
-
-fn ppn_in_range(ppn: i64) -> bool:
-    ppn >= 0 and ppn < NUM_PAGES
-
-fn block_in_range(blk: i64) -> bool:
-    blk >= 0 and blk < NUM_BLOCKS
 
 # 1 if the bool is true, else 0 (for asserting bool results with expect_eq).
 fn bool_to_int(b: bool) -> i64:

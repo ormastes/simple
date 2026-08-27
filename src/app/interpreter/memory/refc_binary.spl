@@ -406,7 +406,7 @@ impl SharedHeap:
             if not block2.?:
                 return AllocResult.OutOfMemory
 
-        val (offset, _) = block ?? (self.next_offset, size)
+        value (offset, _) = block ?? (self.next_offset, size)
 
         # Create binary
         val id = self.next_binary_id
@@ -437,10 +437,11 @@ impl SharedHeap:
         Sub-binaries don't allocate new data - they reference a slice
         of the parent binary's data. The parent is kept alive via refcount.
         """
-        if not self.binaries.contains_key(parent_id):
+        val parent = self.binaries.get(parent_id)
+        if not parent.?:
             return AllocResult.ParentNotFound
 
-        var parent_binary = self.binaries[parent_id]
+        var parent_binary = parent.unwrap()
 
         if offset + length > parent_binary.length:
             return AllocResult.InvalidRange
@@ -465,14 +466,15 @@ impl SharedHeap:
     fn find_free_block(size: i64) -> (i64, i64)?:
         """Find a free block that can fit the requested size."""
         for i in 0..self.free_blocks.len():
-            val (offset, block_size) = self.free_blocks[i]
+            value (offset, block_size) = self.free_blocks[i]
             if block_size >= size:
                 return Some((offset, block_size))
         nil
     me incref(binary_id: i64) -> bool:
         """Increment reference count for a binary."""
-        if self.binaries.contains_key(binary_id):
-            var b = self.binaries[binary_id]
+        val binary = self.binaries.get(binary_id)
+        if binary.?:
+            var b = binary.unwrap()
             b.incref()
             self.stats.total_incref = self.stats.total_incref + 1
             true
@@ -480,8 +482,9 @@ impl SharedHeap:
             false
     me decref(binary_id: i64) -> bool:
         """Decrement reference count. May trigger deallocation."""
-        if self.binaries.contains_key(binary_id):
-            var b = self.binaries[binary_id]
+        val binary = self.binaries.get(binary_id)
+        if binary.?:
+            var b = binary.unwrap()
             val new_count = b.decref()
             self.stats.total_decref = self.stats.total_decref + 1
 
@@ -492,10 +495,11 @@ impl SharedHeap:
             false
     me deallocate(binary_id: i64):
         """Deallocate a binary (internal use)."""
-        if not self.binaries.contains_key(binary_id):
+        val binary = self.binaries.get(binary_id)
+        if not binary.?:
             return
 
-        val b = self.binaries[binary_id]
+        val b = binary.unwrap()
 
         # If sub-binary, decref parent
         if b.is_sub_binary and b.parent_id.?:
@@ -547,8 +551,8 @@ impl SharedHeap:
         var current = self.free_blocks[0]
 
         for i in 1..self.free_blocks.len():
-            val (offset, size) = self.free_blocks[i]
-            val (curr_offset, curr_size) = current
+            value (offset, size) = self.free_blocks[i]
+            value (curr_offset, curr_size) = current
 
             if curr_offset + curr_size == offset:
                 # Adjacent - merge
@@ -570,8 +574,9 @@ impl SharedHeap:
         self.stats.defrag_count = self.stats.defrag_count + 1
     me pin(binary_id: i64) -> bool:
         """Pin a binary to prevent garbage collection."""
-        if self.binaries.contains_key(binary_id):
-            var b = self.binaries[binary_id]
+        val binary = self.binaries.get(binary_id)
+        if binary.?:
+            var b = binary.unwrap()
             if not b.is_pinned:
                 b.pin()
                 self.stats.pinned_count = self.stats.pinned_count + 1
@@ -580,8 +585,9 @@ impl SharedHeap:
             false
     me unpin(binary_id: i64) -> bool:
         """Unpin a binary to allow garbage collection."""
-        if self.binaries.contains_key(binary_id):
-            var b = self.binaries[binary_id]
+        val binary = self.binaries.get(binary_id)
+        if binary.?:
+            var b = binary.unwrap()
             if b.is_pinned:
                 b.unpin()
                 self.stats.pinned_count = self.stats.pinned_count - 1
@@ -590,19 +596,18 @@ impl SharedHeap:
             false
     fn get(binary_id: i64) -> RefcBinary?:
         """Get a binary by ID."""
-        if self.binaries.contains_key(binary_id):
-            return Some(self.binaries[binary_id])
-        nil
+        self.binaries.get(binary_id)
     fn get_ref(binary_id: i64) -> BinaryRef?:
         """Get a BinaryRef for a binary."""
-        if self.binaries.contains_key(binary_id):
-            val b = self.binaries[binary_id]
+        val binary = self.binaries.get(binary_id)
+        if binary.?:
+            val b = binary.unwrap()
             Some(BinaryRef__new(b.id, 0, b.length))
         else:
             nil
     fn contains(binary_id: i64) -> bool:
         """Check if binary exists in heap."""
-        self.binaries.contains_key(binary_id)
+        self.binaries.get(binary_id).?
     fn get_stats() -> SharedHeapStats:
         """Get heap statistics."""
         self.stats

@@ -127,25 +127,27 @@ fn intel_anv_capture_tools_present() -> bool:
     val (stdout, stderr, exit_code) = process_run_bounded("sh", ["-c", probe_cmd], 5000, 4096)
     exit_code == 0
 
-describe("board Vulkan Intel Gen12 submit/readback (hardware-gated)"):
+describe "board Vulkan Intel Gen12 submit/readback (hardware-gated)":
     # TODO(hw-gated): capture a real anv command-stream via INTEL_DEBUG=bat once an Intel GPU is available — see doc/08_tracking/bug/cmdstream_boundary_no_intel_gpu_on_capture_host_2026-08-11.md
-    skip_if(fn(): not intel_i915_gpu_present(), "No Intel i915 GPU present on this host — see doc/08_tracking/bug/cmdstream_boundary_no_intel_gpu_on_capture_host_2026-08-11.md")(
-        "proves the Gen12 encoder against real i915 hardware, not just self-comparison",
-        fn():
-            step("confirm the Gen12 encoder/adapter/comparator pipeline is internally consistent before comparing to real hardware")
-            val dwords_a = encode_minimal_gen12_batch()
-            val dwords_b = encode_minimal_gen12_batch()
-            val packets_a = decode_dword_stream_to_packets(dwords_a).unwrap()
-            val packets_b = decode_dword_stream_to_packets(dwords_b).unwrap()
-            assert_true(cmd_stream_structural_equal(packets_a, packets_b))
-            assert_equal(cmd_stream_first_divergence(packets_a, packets_b), -1)
+    it "proves the Gen12 encoder against real i915 hardware, not just self-comparison":
+        # @req REQ-SSPEC-SYSTEM REQ-BOARD-VULKAN-SUBMIT-INTEL
+        # @capture(bit_table)
+        step("probe for a real Intel i915 GPU and skip honestly when absent")
+        if not intel_i915_gpu_present():
+            return "skip: No Intel i915 GPU present on this host — see doc/08_tracking/bug/cmdstream_boundary_no_intel_gpu_on_capture_host_2026-08-11.md"
+        step("confirm the Gen12 encoder/adapter/comparator pipeline is internally consistent before comparing to real hardware")
+        val dwords_a = encode_minimal_gen12_batch()
+        val dwords_b = encode_minimal_gen12_batch()
+        val packets_a = decode_dword_stream_to_packets(dwords_a).unwrap()
+        val packets_b = decode_dword_stream_to_packets(dwords_b).unwrap()
+        assert_true(cmd_stream_structural_equal(packets_a, packets_b))
+        assert_equal(cmd_stream_first_divergence(packets_a, packets_b), -1)  # oracle: two independent minimal batches decode to structurally identical streams
 
-            step("probe for anv capture tooling now that a real GPU is present")
-            val tools_present = intel_anv_capture_tools_present()
-            if not tools_present:
-                step("capture tooling still absent even with real hardware — this is a distinct, more specific finding than GPU absence, not fabricated around")
-                assert_false(tools_present)
-            else:
-                step("TODO(hw-gated): capture a real anv command-stream via INTEL_DEBUG=bat and compare it against encode_minimal_gen12_batch() output via the adapter/comparator, replacing this synthetic self-comparison")
-                assert_true(tools_present)
-    )
+        step("probe for anv capture tooling now that a real GPU is present")
+        val tools_present = intel_anv_capture_tools_present()
+        if not tools_present:
+            step("capture tooling still absent even with real hardware — this is a distinct, more specific finding than GPU absence, not fabricated around")
+            assert_false(tools_present)
+        else:
+            step("TODO(hw-gated): capture a real anv command-stream via INTEL_DEBUG=bat and compare it against encode_minimal_gen12_batch() output via the adapter/comparator, replacing this synthetic self-comparison")
+            assert_true(tools_present)

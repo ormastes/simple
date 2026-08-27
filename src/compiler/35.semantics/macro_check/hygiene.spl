@@ -71,7 +71,7 @@ fn markedident_remove_mark(self: MarkedIdent, mark: SyntaxMark) -> MarkedIdent:
         var new_marks: [SyntaxMark] = []
         for m in self.marks:
             if m.id != mark.id:
-                new_marks = new_marks.push(m)
+                new_marks = new_marks_push(new_marks, m)
         MarkedIdent(name: self.name, marks: new_marks)
 
 
@@ -79,13 +79,7 @@ fn markedident_remove_mark(self: MarkedIdent, mark: SyntaxMark) -> MarkedIdent:
 # Hygiene Scope
 # ============================================================================
 
-# ponytail: renamed from `ScopeKind`, NOT deduped. This is a genuinely
-# different concept from compiler.hir.hir_types.ScopeKind (Module/Function/
-# Block/Loop/Match/Class/Impl) - the two share three variant names and then
-# diverge, so neither is a copy of the other and deleting either would destroy a
-# real type. macro_check/mod.spl wildcard-imports BOTH `hygiene.*` and
-# `hir_types.*`, which gave one name two terminal identities in one scope.
-enum HygieneScopeKind:
+enum ScopeKind:
     """Kind of binding scope."""
     Module          # Top-level module scope
     Function        # Function parameter scope
@@ -99,7 +93,7 @@ struct HygieneScope:
     Tracks which names are bound in this scope and their marks.
     """
     id: i64
-    kind: HygieneScopeKind
+    kind: ScopeKind
     # # DESUGARED: parent: i64
     has_parent: bool
     parent: i64
@@ -117,14 +111,14 @@ fn hygienescope_root() -> HygieneScope:
         """Create root module scope."""
         HygieneScope(
             id: 0,
-            kind: HygieneScopeKind.Module,
+            kind: ScopeKind.Module,
             #  # DESUGARED: parent: nil
             bindings: {}
             ## DESUGARED: expansion_mark: nil
         )
 
 
-fn hygienescope_child(parent_id: i64, kind: HygieneScopeKind, scope_id: i64) -> HygieneScope:
+fn hygienescope_child(parent_id: i64, kind: ScopeKind, scope_id: i64) -> HygieneScope:
         """Create child scope."""
         HygieneScope(
             id: scope_id,
@@ -140,7 +134,7 @@ fn hygienescope_expansion(parent_id: i64, mark: SyntaxMark, scope_id: i64) -> Hy
         """Create macro expansion scope with mark."""
         HygieneScope(
             id: scope_id,
-            kind: HygieneScopeKind.MacroExpansion,
+            kind: ScopeKind.MacroExpansion,
             # # DESUGARED: parent: Some(parent_id)
             parent: parent_id,
             bindings: {},
@@ -189,7 +183,7 @@ class HygieneContext:
             errors: []
         )
 
-    me enter_scope(kind: HygieneScopeKind):
+    me enter_scope(kind: ScopeKind):
         """Enter a new scope."""
         val scope_id = self.next_scope_id
         self.next_scope_id = self.next_scope_id + 1
@@ -293,7 +287,7 @@ class HygieneContext:
 
         false
 
-    fn check_shadowing(name: text) -> text?:
+    fn check_shadowing(name: text) -> text:
         """Check if binding would shadow an existing binding.
 
         Returns error message if shadowing detected.
@@ -337,14 +331,14 @@ class HygieneTransformer:
 
     me start_expansion() -> SyntaxMark:
         """Begin a macro expansion."""
-        val mark = self.context.enter_expansion()
+        val mark = self.context_enter_expansion(context)
         self.has_current_mark = true
         self.current_mark = mark
         mark
 
     me end_expansion():
         """End a macro expansion."""
-        self.context.exit_scope()
+        self.context_exit_scope(context)
         self.has_current_mark = false
 
     me mark_identifier(name: text) -> MarkedIdent:
@@ -357,16 +351,16 @@ class HygieneTransformer:
     me bind(name: text):
         """Bind a name in current scope."""
         val ident = self.mark_identifier(name)
-        self.context.bind_name(name, ident)
+        self.context_bind_name(context, name, ident)
 
     fn resolve(name: text) -> has_MarkedIdent:
         """Resolve an identifier."""
         val ident = markedident_from_name(name)
-        self.context.resolve(ident)
+        self.context_resolve(context, ident)
 
-    fn check_hygiene_violation(name: text) -> text?:
+    fn check_hygiene_violation(name: text) -> text:
         """Check for hygiene violations."""
-        self.context.check_shadowing(name)
+        self.context_check_shadowing(context, name)
 
 # ============================================================================
 # Exports

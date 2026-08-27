@@ -1,0 +1,624 @@
+# Lossless non-control expression payload writers.
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_lowering.hir_destination_graph.*
+
+impl HirDestinationGraph:
+    # WRITER-VALIDATOR-PARITY-TABLE:
+    # interpolation/call/named/dict writers -> same-named aux_payload_valid arms
+    # if/match/catch/with/comp writers -> control aux arms
+    # param/type-param/function metadata writers -> metadata aux arms
+    # enum/pattern/custom writers -> exact tuple/struct/custom aux arms
+    # asm/spec/version/arm writers -> exact ASM aux arms
+    # VHDL/doc/GPU/contract writers -> corresponding metadata aux arms
+    me require_expr(i: i64) -> bool: self.index_ready(HD_RANGE_EXPR, i)
+    me require_type(i: i64) -> bool: self.index_ready(HD_RANGE_TYPE, i)
+    me require_aux(i: i64) -> bool: self.index_ready(HD_RANGE_AUX, i)
+
+    me reserve_aux(span: Span) -> i64:
+        if not self.mutable(): self.fail("HIR auxiliary reservation after freeze"); return -1
+        val s = self.reserve_span(span); if s < 0: return -1
+        val i = self.aux_count
+        if i + 1 > self.aux_capacity:
+            val target = self.next_capacity(self.aux_capacity, i + 1)
+            while self.aux_ready.len() < target:
+                self.aux_ready.push(false); self.aux_shape.push(0); self.aux_span.push(-1)
+                self.aux_i0.push(-1); self.aux_i1.push(-1); self.aux_i2.push(-1); self.aux_i3.push(-1)
+                self.aux_i4.push(-1); self.aux_i5.push(-1); self.aux_b0.push(false); self.aux_b1.push(false)
+                self.aux_t0.push(""); self.aux_t1.push(""); self.aux_r0_start.push(-1); self.aux_r0_len.push(0)
+            self.aux_capacity = target
+        self.aux_ready[i] = false; self.aux_shape[i] = 0; self.aux_span[i] = s
+        self.aux_i0[i] = -1; self.aux_i1[i] = -1; self.aux_i2[i] = -1; self.aux_i3[i] = -1
+        self.aux_i4[i] = -1; self.aux_i5[i] = -1; self.aux_b0[i] = false; self.aux_b1[i] = false
+        self.aux_t0[i] = ""; self.aux_t1[i] = ""; self.aux_r0_start[i] = -1; self.aux_r0_len[i] = 0
+        self.aux_count = i + 1
+        i
+
+    me aux_writable(i: i64) -> bool: self.mutable() and i >= 0 and i < self.aux_count and not self.aux_ready[i]
+
+    # DIRECT-CALL-INVARIANT: every shape is explicitly admitted here. No caller
+    # can publish an arbitrary tag or bypass child/presence/domain validation.
+    me aux_payload_valid(i: i64, shape: i64) -> bool:
+        if shape == HD_AUX_INTERPOLATION: return self.require_expr(self.aux_i0[i]) and (self.aux_b0[i] or self.aux_t0[i] == "")
+        if shape == HD_AUX_CALL_ARG: return self.require_expr(self.aux_i0[i]) and (self.aux_b0[i] or self.aux_t0[i] == "")
+        if shape == HD_AUX_NAMED_EXPR: return self.require_expr(self.aux_i0[i])
+        if shape == HD_AUX_NAMED_PATTERN: return self.index_ready(HD_RANGE_PATTERN, self.aux_i0[i])
+        if shape == HD_AUX_DICT_ENTRY: return self.require_expr(self.aux_i0[i]) and self.require_expr(self.aux_i1[i])
+        if shape == HD_AUX_IF_ARM: return self.require_expr(self.aux_i0[i]) and self.block_is_ready(self.aux_i1[i])
+        if shape == HD_AUX_MATCH_ARM: return self.index_ready(HD_RANGE_PATTERN, self.aux_i0[i]) and (if self.aux_b0[i]: self.require_expr(self.aux_i1[i]) else: self.aux_i1[i] == -1) and self.block_is_ready(self.aux_i2[i])
+        if shape == HD_AUX_CATCH: return (if self.aux_b0[i]: self.index_ready(HD_RANGE_PATTERN, self.aux_i0[i]) else: self.aux_i0[i] == -1) and (if self.aux_b1[i]: self.require_type(self.aux_i1[i]) else: self.aux_i1[i] == -1) and self.block_is_ready(self.aux_i2[i])
+        if shape == HD_AUX_WITH_ITEM: return self.require_expr(self.aux_i0[i]) and (if self.aux_b0[i]: self.aux_i1[i] >= 0 else: self.aux_i1[i] == -1)
+        if shape == HD_AUX_COMP_FOR: return self.aux_i0[i] >= 0 and self.require_expr(self.aux_i1[i])
+        if shape == HD_AUX_COMP_IF: return self.require_expr(self.aux_i0[i])
+        if shape == HD_AUX_TEXT: return self.aux_i0[i] == -1 and self.aux_i1[i] == -1 and self.aux_i2[i] == -1 and self.aux_i3[i] == -1 and self.aux_i4[i] == -1 and self.aux_i5[i] == -1 and not self.aux_b0[i] and not self.aux_b1[i] and self.aux_t1[i] == "" and self.aux_r0_start[i] == -1 and self.aux_r0_len[i] == 0
+        if shape == HD_AUX_MODULE_IMPORT:
+            val import_glob = self.aux_b0[i]
+            val import_local = self.aux_i4[i]
+            return self.aux_i0[i] >= -1 and self.aux_i1[i] >= 0 and
+                self.aux_i2[i] >= -1 and self.aux_i3[i] >= 0 and
+                self.aux_i3[i] <= 1 and self.aux_t0[i] != "" and
+                (if import_glob:
+                    self.aux_i2[i] == -1 and self.aux_t1[i] == "" and
+                        import_local == -1 and not self.aux_b1[i]
+                else:
+                    self.aux_i2[i] >= 0 and self.aux_t1[i] != "" and
+                        self.require_aux(import_local) and
+                        self.aux_shape[import_local] == HD_AUX_TEXT) and
+                self.aux_i5[i] == -1 and self.aux_r0_start[i] == -1 and
+                self.aux_r0_len[i] == 0
+        if shape == HD_AUX_MODULE_EXPORT:
+            val export_glob = self.aux_b0[i]
+            val export_local = self.aux_i4[i]
+            return self.aux_i0[i] >= -1 and self.aux_i1[i] >= 0 and
+                self.aux_t0[i] != "" and
+                (if export_glob:
+                    self.aux_t1[i] != "" and export_local == -1 and
+                        not self.aux_b1[i]
+                else:
+                    self.aux_t1[i] != "" and
+                        self.require_aux(export_local) and
+                        self.aux_shape[export_local] == HD_AUX_TEXT) and
+                self.aux_i2[i] == -1 and self.aux_i3[i] == -1 and
+                self.aux_i5[i] == -1 and self.aux_r0_start[i] == -1 and
+                self.aux_r0_len[i] == 0
+        if shape == HD_AUX_SYMBOL_REF: return self.aux_i0[i] >= 0
+        if shape == HD_AUX_PARAM: return self.aux_i0[i] >= 0 and self.aux_t0[i] != "" and self.require_type(self.aux_i1[i]) and (if self.aux_b0[i]: self.require_expr(self.aux_i2[i]) else: self.aux_i2[i] == -1)
+        if shape == HD_AUX_TYPE_PARAM: return self.aux_i0[i] >= 0 and self.aux_t0[i] != "" and self.range_is_ready(HD_RANGE_TYPE, self.aux_r0_start[i], self.aux_r0_len[i]) and (if self.aux_b0[i]: self.require_type(self.aux_i1[i]) else: self.aux_i1[i] == -1)
+        if shape == HD_AUX_ENUM_TUPLE: return self.range_is_ready(HD_RANGE_EXPR, self.aux_r0_start[i], self.aux_r0_len[i])
+        if shape == HD_AUX_ENUM_STRUCT: return self.range_matches(HD_RANGE_AUX, HD_AUX_RANGE_NAMED_EXPR, self.aux_r0_start[i], self.aux_r0_len[i])
+        if shape == HD_AUX_PATTERN_TUPLE: return self.range_is_ready(HD_RANGE_PATTERN, self.aux_r0_start[i], self.aux_r0_len[i])
+        if shape == HD_AUX_PATTERN_STRUCT: return self.range_matches(HD_RANGE_AUX, HD_AUX_RANGE_NAMED_PATTERN, self.aux_r0_start[i], self.aux_r0_len[i])
+        if shape == HD_AUX_CUSTOM_VALUE: return self.aux_i0[i] >= HD_BLOCK_VALUE_EXPR and self.aux_i0[i] <= HD_BLOCK_VALUE_ERROR and (self.aux_r0_len[i] == 0 or self.range_matches(HD_RANGE_AUX, HD_AUX_RANGE_CUSTOM, self.aux_r0_start[i], self.aux_r0_len[i]))
+        if shape == HD_AUX_ASM_CONSTRAINT: return self.aux_i0[i] >= 0 and self.aux_i0[i] <= 3 and self.aux_i1[i] >= 0 and self.aux_i1[i] <= 3 and (if self.aux_i1[i] == 1: self.aux_t1[i] != "" else: self.aux_t1[i] == "") and self.require_expr(self.aux_i2[i]) and (if self.aux_b0[i]: self.require_expr(self.aux_i3[i]) else: self.aux_i3[i] == -1)
+        if shape == HD_AUX_ASM: return self.range_matches(HD_RANGE_AUX, HD_AUX_RANGE_ASM_CONSTRAINT, self.aux_i0[i], self.aux_i1[i]) and self.range_matches(HD_RANGE_AUX, HD_AUX_RANGE_TEXT, self.aux_i2[i], self.aux_i3[i]) and self.range_matches(HD_RANGE_AUX, HD_AUX_RANGE_TEXT, self.aux_i4[i], self.aux_i5[i]) and self.range_matches(HD_RANGE_AUX, HD_AUX_RANGE_TEXT, self.aux_r0_start[i], self.aux_r0_len[i])
+        if shape == HD_AUX_ASM_VERSION: return self.aux_i0[i] >= 0 and self.aux_t0[i] != "" and self.aux_i1[i] == -1 and self.aux_r0_start[i] == -1
+        if shape == HD_AUX_ASM_SPEC: return self.range_matches(HD_RANGE_AUX, HD_AUX_RANGE_TEXT, self.aux_i0[i], self.aux_i1[i]) and (self.aux_i2[i] == -1 or (self.require_aux(self.aux_i2[i]) and self.aux_shape[self.aux_i2[i]] == HD_AUX_TEXT)) and (self.aux_i3[i] == -1 or (self.require_aux(self.aux_i3[i]) and self.aux_shape[self.aux_i3[i]] == HD_AUX_TEXT)) and (self.aux_i4[i] == -1 or (self.require_aux(self.aux_i4[i]) and self.aux_shape[self.aux_i4[i]] == HD_AUX_TEXT)) and self.aux_i5[i] == -1 and self.range_matches(HD_RANGE_AUX, HD_AUX_RANGE_ASM_VERSION, self.aux_r0_start[i], self.aux_r0_len[i])
+        if shape == HD_AUX_ASM_ARM:
+            if (self.aux_i2[i] != 0 and self.aux_i2[i] != 1) or (self.aux_i3[i] != 0 and self.aux_i3[i] != 1): return false
+            val has_body = self.aux_i2[i] == 1; val compile_error = self.aux_i3[i] == 1
+            val spec_valid = if self.aux_b0[i]: self.require_aux(self.aux_i0[i]) and self.aux_shape[self.aux_i0[i]] == HD_AUX_ASM_SPEC else: self.aux_i0[i] == -1
+            val body_valid = if has_body: self.require_aux(self.aux_i1[i]) and self.aux_shape[self.aux_i1[i]] == HD_AUX_ASM else: self.aux_i1[i] == -1
+            return spec_valid and body_valid and has_body != compile_error and (if compile_error: self.aux_t0[i] != "" else: self.aux_t0[i] == "")
+        if shape == HD_AUX_FUNCTION_ATTR: return self.aux_i0[i] >= 0 and self.aux_i0[i] <= HD_ATTR_FLAGS_ALL and self.aux_i1[i] >= 0 and self.aux_i1[i] <= 4 and self.aux_i2[i] >= 0 and self.aux_i2[i] <= 10 and self.aux_i3[i] >= 0 and self.aux_i4[i] >= 0 and self.aux_i5[i] >= 0 and (self.aux_b0[i] or self.aux_t0[i] == "") and not self.aux_b1[i] and self.aux_r0_start[i] == -1
+        if shape == HD_AUX_EXPORT_ATTR: return self.aux_i0[i] == -1 and self.aux_i1[i] == -1 and self.aux_i2[i] == -1 and self.aux_i3[i] == -1 and self.aux_i4[i] == -1 and self.aux_i5[i] == -1 and not self.aux_b1[i] and self.aux_t1[i] == "" and self.aux_r0_start[i] == -1 and self.aux_r0_len[i] == 0
+        if shape == HD_AUX_DRIVER_MANIFEST: return self.aux_i0[i] >= 0 and self.aux_i0[i] <= 1 and self.aux_i1[i] >= 0 and self.aux_i2[i] >= 0 and self.range_matches(HD_RANGE_AUX, HD_AUX_RANGE_SYMBOL_REF, self.aux_r0_start[i], self.aux_r0_len[i]) and self.aux_i3[i] == -1 and not self.aux_b0[i] and not self.aux_b1[i]
+        if shape == HD_AUX_VHDL_METADATA: return self.range_matches(HD_RANGE_AUX, HD_AUX_RANGE_VHDL_GENERIC, self.aux_i0[i], self.aux_i1[i]) and (if self.aux_b1[i]: self.require_aux(self.aux_i2[i]) and self.aux_shape[self.aux_i2[i]] == HD_AUX_VHDL_CLOCKED else: self.aux_i2[i] == -1) and self.range_matches(HD_RANGE_AUX, HD_AUX_RANGE_VHDL_RETURN, self.aux_i3[i], self.aux_i4[i]) and (self.aux_i5[i] == 0 or self.aux_i5[i] == 1)
+        if shape == HD_AUX_DOC: return self.aux_i0[i] == -1 and self.aux_i1[i] == -1 and self.aux_i2[i] == -1 and self.aux_i3[i] == -1 and self.aux_i4[i] == -1 and self.aux_i5[i] == -1 and not self.aux_b0[i] and not self.aux_b1[i] and self.aux_t1[i] == "" and self.aux_r0_start[i] == -1 and self.aux_r0_len[i] == 0
+        if shape == HD_AUX_GPU: return self.aux_i0[i] == -1 and self.aux_i1[i] == -1 and self.aux_i2[i] == -1 and self.aux_i3[i] == -1 and self.aux_i4[i] == -1 and self.aux_i5[i] == -1 and not self.aux_b0[i] and not self.aux_b1[i] and self.aux_r0_start[i] == -1 and self.aux_r0_len[i] == 0
+        if shape == HD_AUX_CONTRACT: return self.aux_i0[i] >= 0 and self.aux_i0[i] <= 1 and self.range_matches(HD_RANGE_AUX, HD_AUX_RANGE_CONTRACT_CLAUSE, self.aux_r0_start[i], self.aux_r0_len[i]) and self.aux_i1[i] == -1 and self.aux_i2[i] == -1 and self.aux_i3[i] == -1 and self.aux_i4[i] == -1 and self.aux_i5[i] == -1 and not self.aux_b0[i] and not self.aux_b1[i] and self.aux_t1[i] == ""
+        if shape == HD_AUX_CONTRACT_CLAUSE: return self.aux_i0[i] >= 0 and self.aux_i0[i] <= 4 and self.require_expr(self.aux_i1[i]) and self.aux_i2[i] == -1 and self.aux_i3[i] == -1 and self.aux_i4[i] == -1 and self.aux_i5[i] == -1 and not self.aux_b0[i] and not self.aux_b1[i] and self.aux_t1[i] == "" and self.aux_r0_start[i] == -1
+        if shape == HD_AUX_GENERIC_TEMPLATE: return self.aux_i0[i] == -1 and self.aux_i1[i] == -1 and self.aux_i2[i] == -1 and self.aux_i3[i] == -1 and self.aux_i4[i] == -1 and self.aux_i5[i] == -1 and not self.aux_b1[i] and self.aux_t0[i] == "" and self.aux_t1[i] == "" and self.aux_r0_start[i] == -1 and self.aux_r0_len[i] == 0
+        if shape == HD_AUX_METHOD_RESOLUTION:
+            val resolution = self.aux_i0[i]
+            if resolution == HD_RESOLUTION_UNRESOLVED: return self.aux_i1[i] == -1 and self.aux_i2[i] == -1 and self.aux_i3[i] == -1
+            if resolution == HD_RESOLUTION_FREE: return self.aux_i1[i] >= 0 and self.aux_i2[i] == -1 and self.aux_i3[i] == -1
+            if resolution == HD_RESOLUTION_INSTANCE or resolution == HD_RESOLUTION_TRAIT or resolution == HD_RESOLUTION_STATIC: return self.aux_i1[i] >= 0 and self.aux_i2[i] >= 0 and self.aux_i3[i] == -1
+            if resolution == HD_RESOLUTION_QUALIFIED_FREE: return self.aux_i1[i] >= 0 and self.aux_i2[i] == -1 and self.aux_i3[i] >= 0 and self.aux_i3[i] < self.module_count and self.module_generation[self.aux_i3[i]] == self.generation
+            if resolution == HD_RESOLUTION_QUALIFIED_INSTANCE or resolution == HD_RESOLUTION_QUALIFIED_TRAIT or resolution == HD_RESOLUTION_QUALIFIED_STATIC: return self.aux_i1[i] >= 0 and self.aux_i2[i] >= 0 and self.aux_i3[i] >= 0 and self.aux_i3[i] < self.module_count and self.module_generation[self.aux_i3[i]] == self.generation
+            return false
+        if shape == HD_AUX_VHDL_GENERIC: return self.aux_t0[i] != "" and self.aux_t1[i] != "" and self.require_aux(self.aux_i0[i]) and self.aux_shape[self.aux_i0[i]] == HD_AUX_TEXT and self.aux_i1[i] == -1 and self.aux_r0_start[i] == -1
+        if shape == HD_AUX_VHDL_CLOCKED: return self.aux_i0[i] >= 0 and self.aux_i0[i] <= 1 and self.aux_i1[i] >= 0 and self.aux_i1[i] <= 2 and (self.aux_b0[i] or self.aux_t1[i] == "") and (self.aux_i2[i] == 0 or self.aux_i2[i] == 1) and self.range_matches(HD_RANGE_AUX, HD_AUX_RANGE_TEXT, self.aux_i3[i], self.aux_i4[i]) and self.require_aux(self.aux_i5[i]) and self.aux_shape[self.aux_i5[i]] == HD_AUX_TEXT
+        if shape == HD_AUX_VHDL_RETURN: return self.aux_t0[i] != "" and self.aux_t1[i] != "" and self.aux_i0[i] == -1 and self.aux_r0_start[i] == -1
+        if shape == HD_AUX_TENSOR_SUFFIX:
+            val flags = self.aux_i4[i]
+            return (if self.aux_b0[i]: self.aux_i0[i] >= 0 and self.aux_i0[i] <= 11 else: self.aux_i0[i] == -1) and (if self.aux_b1[i]: self.aux_i1[i] >= 0 and self.aux_i1[i] <= 1 and (if self.aux_i1[i] == 0: self.aux_i2[i] == -1 else: self.aux_i2[i] >= 0) else: self.aux_i1[i] == -1 and self.aux_i2[i] == -1) and flags >= 0 and flags <= 7 and (if flags >= 4: self.aux_i3[i] >= 0 and self.aux_i3[i] <= 1 else: self.aux_i3[i] == -1) and self.aux_i5[i] == -1 and self.aux_t1[i] == "" and self.aux_r0_start[i] == -1 and self.aux_r0_len[i] == 0
+        false
+
+    me publish_aux(i: i64, shape: i64) -> bool:
+        if not self.aux_writable(i) or shape < HD_AUX_INTERPOLATION or shape > HD_AUX_TENSOR_SUFFIX or not self.aux_payload_valid(i, shape): return self.fail("HIR auxiliary publication rejected")
+        self.aux_shape[i] = shape; self.aux_ready[i] = true
+        true
+
+    me write_interpolation(i: i64, expr: i64, has_format: bool, format: text) -> bool:
+        if not self.aux_writable(i) or not self.require_expr(expr): return self.fail("HIR interpolation expression is not ready")
+        self.aux_i0[i] = expr; self.aux_b0[i] = has_format; self.aux_t0[i] = if has_format: format else: ""
+        self.publish_aux(i, HD_AUX_INTERPOLATION)
+
+    me write_call_arg(i: i64, has_name: bool, name: text, value: i64) -> bool:
+        if not self.aux_writable(i) or not self.require_expr(value): return self.fail("HIR call argument value is not ready")
+        self.aux_b0[i] = has_name; self.aux_t0[i] = if has_name: name else: ""; self.aux_i0[i] = value
+        self.publish_aux(i, HD_AUX_CALL_ARG)
+
+    me write_named_expr(i: i64, name: text, value: i64) -> bool:
+        if not self.aux_writable(i) or not self.require_expr(value): return self.fail("HIR named expression value is not ready")
+        self.aux_t0[i] = name; self.aux_i0[i] = value; self.publish_aux(i, HD_AUX_NAMED_EXPR)
+
+    me write_dict_entry(i: i64, key: i64, value: i64) -> bool:
+        if not self.aux_writable(i) or not self.require_expr(key) or not self.require_expr(value): return self.fail("HIR dict entry is not ready")
+        self.aux_i0[i] = key; self.aux_i1[i] = value; self.publish_aux(i, HD_AUX_DICT_ENTRY)
+
+    me write_if_arm(i: i64, cond: i64, block: i64) -> bool:
+        if not self.aux_writable(i) or not self.require_expr(cond) or not self.block_is_ready(block): return self.fail("HIR if arm is not ready")
+        self.aux_i0[i] = cond; self.aux_i1[i] = block; self.publish_aux(i, HD_AUX_IF_ARM)
+
+    me write_match_arm(i: i64, pattern: i64, has_guard: bool, guard: i64, block: i64) -> bool:
+        if not self.aux_writable(i) or not self.index_ready(HD_RANGE_PATTERN, pattern) or not self.block_is_ready(block): return self.fail("HIR match arm is not ready")
+        if has_guard and not self.require_expr(guard): return self.fail("HIR match guard is not ready")
+        self.aux_i0[i] = pattern; self.aux_b0[i] = has_guard; self.aux_i1[i] = if has_guard: guard else: -1; self.aux_i2[i] = block
+        self.publish_aux(i, HD_AUX_MATCH_ARM)
+
+    me write_catch(i: i64, has_pattern: bool, pattern: i64, has_type: bool, type_index: i64, block: i64) -> bool:
+        if not self.aux_writable(i) or not self.block_is_ready(block): return self.fail("HIR catch block is not ready")
+        if has_pattern and not self.index_ready(HD_RANGE_PATTERN, pattern): return self.fail("HIR catch pattern is not ready")
+        if has_type and not self.require_type(type_index): return self.fail("HIR catch type is not ready")
+        self.aux_b0[i] = has_pattern; self.aux_i0[i] = if has_pattern: pattern else: -1
+        self.aux_b1[i] = has_type; self.aux_i1[i] = if has_type: type_index else: -1; self.aux_i2[i] = block
+        self.publish_aux(i, HD_AUX_CATCH)
+
+    me write_with_item(i: i64, context: i64, has_target: bool, target_symbol: i64) -> bool:
+        if not self.aux_writable(i) or not self.require_expr(context): return self.fail("HIR with-item context is not ready")
+        if has_target and target_symbol < 0: return self.fail("HIR with-item target is invalid")
+        if not has_target and target_symbol != -1: return self.fail("HIR absent with-item target is not inert")
+        self.aux_i0[i] = context; self.aux_b0[i] = has_target; self.aux_i1[i] = if has_target: target_symbol else: -1
+        self.publish_aux(i, HD_AUX_WITH_ITEM)
+
+    me write_comp_for(i: i64, symbol: i64, iter: i64) -> bool:
+        if not self.aux_writable(i) or not self.require_expr(iter): return self.fail("HIR comprehension iterator is not ready")
+        self.aux_i0[i] = symbol; self.aux_i1[i] = iter; self.publish_aux(i, HD_AUX_COMP_FOR)
+
+    me write_comp_if(i: i64, cond: i64) -> bool:
+        if not self.aux_writable(i) or not self.require_expr(cond): return self.fail("HIR comprehension condition is not ready")
+        self.aux_i0[i] = cond; self.publish_aux(i, HD_AUX_COMP_IF)
+
+    # TensorSuffix is scalar-only. Flags: bit0 trainable, bit1 pinned,
+    # bit2 backend-present. Device 0=CPU/-1 id, 1=CUDA/nonnegative id.
+    me write_tensor_suffix(i: i64, has_dtype: bool, dtype: i64, has_device: bool, device_kind: i64, device_id: i64, trainable: bool, pinned: bool, has_backend: bool, backend: i64, raw: text) -> bool:
+        if not self.aux_writable(i): return self.fail("HIR tensor suffix is not writable")
+        if has_dtype and (dtype < 0 or dtype > 11): return self.fail("HIR tensor dtype is invalid")
+        if not has_dtype and dtype != -1: return self.fail("HIR absent tensor dtype is not inert")
+        if has_device and (device_kind < 0 or device_kind > 1 or (device_kind == 0 and device_id != -1) or (device_kind == 1 and device_id < 0)): return self.fail("HIR tensor device is invalid")
+        if not has_device and (device_kind != -1 or device_id != -1): return self.fail("HIR absent tensor device is not inert")
+        if has_backend and (backend < 0 or backend > 1): return self.fail("HIR tensor backend is invalid")
+        if not has_backend and backend != -1: return self.fail("HIR absent tensor backend is not inert")
+        self.aux_b0[i] = has_dtype; self.aux_i0[i] = if has_dtype: dtype else: -1
+        self.aux_b1[i] = has_device; self.aux_i1[i] = if has_device: device_kind else: -1; self.aux_i2[i] = if has_device: device_id else: -1
+        self.aux_i3[i] = if has_backend: backend else: -1; self.aux_i4[i] = (if trainable: 1 else: 0) + (if pinned: 2 else: 0) + (if has_backend: 4 else: 0); self.aux_t0[i] = raw
+        self.publish_aux(i, HD_AUX_TENSOR_SUFFIX)
+
+    me write_text_aux(i: i64, value: text) -> bool:
+        if not self.aux_writable(i): return self.fail("HIR text auxiliary is not writable")
+        self.aux_t0[i] = value; self.publish_aux(i, HD_AUX_TEXT)
+
+    me write_symbol_aux(i: i64, symbol: i64) -> bool:
+        if not self.aux_writable(i) or symbol < 0: return self.fail("HIR symbol auxiliary is not writable")
+        self.aux_i0[i] = symbol; self.publish_aux(i, HD_AUX_SYMBOL_REF)
+
+    # Module routes are scalar and lossless. A target of -1 is unresolved,
+    # while target_name preserves which unresolved route this row denotes.
+    # The local spelling is a typed text-row reference, keeping this row
+    # scalar while exposing each spelling independently to readers.
+    me write_module_import_aux(i: i64, target: i64, declaration_offset: i64,
+        item_offset: i64, target_name: text, source_name: text,
+        local_name_aux: i64, is_glob: bool, has_alias: bool, is_lazy: bool
+    ) -> bool:
+        if (not self.aux_writable(i) or target < -1 or
+            declaration_offset < 0 or item_offset < -1 or target_name == "" or
+            (is_glob and item_offset != -1) or
+            (not is_glob and (item_offset < 0 or source_name == "" or
+                not self.index_ready(HD_RANGE_AUX, local_name_aux) or
+                self.aux_shape[local_name_aux] != HD_AUX_TEXT)) or
+            (is_glob and local_name_aux != -1) or
+            (has_alias and is_glob)):
+            return self.fail("HIR module import route is invalid")
+        self.aux_i0[i] = target; self.aux_i1[i] = declaration_offset
+        self.aux_i2[i] = item_offset; self.aux_i3[i] = if is_lazy: 1 else: 0
+        self.aux_t0[i] = target_name; self.aux_t1[i] = source_name
+        self.aux_i4[i] = local_name_aux
+        self.aux_b0[i] = is_glob; self.aux_b1[i] = has_alias
+        self.publish_aux(i, HD_AUX_MODULE_IMPORT)
+
+    me write_module_export_aux(i: i64, target: i64, route_offset: i64,
+        target_name: text, source_name: text, local_name_aux: i64,
+        is_glob: bool, has_alias: bool
+    ) -> bool:
+        if (not self.aux_writable(i) or target < -1 or route_offset < 0 or
+            target_name == "" or
+            (not is_glob and (source_name == "" or
+                not self.index_ready(HD_RANGE_AUX, local_name_aux) or
+                self.aux_shape[local_name_aux] != HD_AUX_TEXT)) or
+            (is_glob and (local_name_aux != -1 or has_alias))):
+            return self.fail("HIR module export route is invalid")
+        self.aux_i0[i] = target; self.aux_i1[i] = route_offset
+        self.aux_t0[i] = target_name; self.aux_t1[i] = source_name
+        self.aux_i4[i] = local_name_aux
+        self.aux_b0[i] = is_glob; self.aux_b1[i] = has_alias
+        self.publish_aux(i, HD_AUX_MODULE_EXPORT)
+
+    me write_param_aux(i: i64, symbol: i64, type_index: i64, has_default: bool, default_expr: i64, mutable: bool, name: text) -> bool:
+        if not self.aux_writable(i) or symbol < 0 or name == "" or not self.require_type(type_index): return self.fail("HIR parameter type is not ready")
+        if has_default and not self.require_expr(default_expr): return self.fail("HIR parameter default is not ready")
+        self.aux_i0[i] = symbol; self.aux_i1[i] = type_index; self.aux_b0[i] = has_default
+        self.aux_i2[i] = if has_default: default_expr else: -1; self.aux_b1[i] = mutable; self.aux_t0[i] = name
+        self.publish_aux(i, HD_AUX_PARAM)
+
+    me write_type_param_metadata(i: i64, symbol: i64, name: text, bounds: i64, bound_count: i64, has_default: bool, default_type: i64) -> bool:
+        if not self.aux_writable(i) or symbol < 0 or name == "" or not self.range_is_ready(HD_RANGE_TYPE, bounds, bound_count): return self.fail("HIR type parameter bounds are not ready")
+        if has_default and not self.require_type(default_type): return self.fail("HIR type parameter default is not ready")
+        self.aux_i0[i] = symbol; self.aux_t0[i] = name; self.aux_r0_start[i] = bounds; self.aux_r0_len[i] = bound_count
+        self.aux_b0[i] = has_default; self.aux_i1[i] = if has_default: default_type else: -1; self.publish_aux(i, HD_AUX_TYPE_PARAM)
+
+    me write_function_attr_metadata(i: i64, flags: i64, has_section: bool, section: text, optimization_level: i64, optimization_backend: i64, unroll: i64, pipeline: i64, memory_banks: i64, rt_error: text) -> bool:
+        if not self.aux_writable(i) or flags < 0 or flags > HD_ATTR_FLAGS_ALL or optimization_level < 0 or optimization_level > 4 or optimization_backend < 0 or optimization_backend > 10: return self.fail("HIR function attribute domain is invalid")
+        if unroll < 0 or pipeline < 0 or memory_banks < 0: return self.fail("HIR function FPGA attribute is invalid")
+        self.aux_i0[i] = flags; self.aux_b0[i] = has_section; self.aux_t0[i] = if has_section: section else: ""
+        self.aux_i1[i] = optimization_level; self.aux_i2[i] = optimization_backend; self.aux_i3[i] = unroll
+        self.aux_i4[i] = pipeline; self.aux_i5[i] = memory_banks; self.aux_t1[i] = rt_error; self.publish_aux(i, HD_AUX_FUNCTION_ATTR)
+
+    me write_export_metadata(i: i64, export_c: bool, export_name: text) -> bool:
+        if not self.aux_writable(i): return self.fail("HIR export metadata is not writable")
+        self.aux_b0[i] = export_c; self.aux_t0[i] = export_name; self.publish_aux(i, HD_AUX_EXPORT_ATTR)
+
+    me write_driver_metadata(i: i64, kind: i64, driver_class: i64, vendor: i64, device_ids: i64, device_count: i64, version: text, abi: text) -> bool:
+        if not self.aux_writable(i) or kind < 0 or kind > 1 or driver_class < 0 or vendor < 0 or not self.range_matches(HD_RANGE_AUX, HD_AUX_RANGE_SYMBOL_REF, device_ids, device_count): return self.fail("HIR driver metadata is invalid")
+        self.aux_i0[i] = kind; self.aux_i1[i] = driver_class; self.aux_i2[i] = vendor; self.aux_r0_start[i] = device_ids; self.aux_r0_len[i] = device_count
+        self.aux_t0[i] = version; self.aux_t1[i] = abi; self.publish_aux(i, HD_AUX_DRIVER_MANIFEST)
+
+    me write_vhdl_metadata(i: i64, hardware: bool, generics: i64, generic_count: i64, has_clocked: bool, clocked_aux: i64, returns: i64, return_count: i64, flatten: bool) -> bool:
+        if not self.aux_writable(i) or not self.range_matches(HD_RANGE_AUX, HD_AUX_RANGE_VHDL_GENERIC, generics, generic_count) or not self.range_matches(HD_RANGE_AUX, HD_AUX_RANGE_VHDL_RETURN, returns, return_count): return self.fail("HIR VHDL ranges are not ready")
+        if has_clocked and (not self.require_aux(clocked_aux) or self.aux_shape[clocked_aux] != HD_AUX_VHDL_CLOCKED): return self.fail("HIR VHDL clock metadata is not ready")
+        self.aux_b0[i] = hardware; self.aux_i0[i] = generics; self.aux_i1[i] = generic_count
+        self.aux_b1[i] = has_clocked; self.aux_i2[i] = if has_clocked: clocked_aux else: -1
+        self.aux_i3[i] = returns; self.aux_i4[i] = return_count; self.aux_i5[i] = if flatten: 1 else: 0; self.publish_aux(i, HD_AUX_VHDL_METADATA)
+
+    me write_vhdl_generic(i: i64, name: text, type_text: text, default_text_aux: i64) -> bool:
+        if not self.aux_writable(i) or not self.require_aux(default_text_aux) or self.aux_shape[default_text_aux] != HD_AUX_TEXT: return self.fail("HIR VHDL generic default is not ready")
+        self.aux_t0[i] = name; self.aux_t1[i] = type_text; self.aux_i0[i] = default_text_aux; self.publish_aux(i, HD_AUX_VHDL_GENERIC)
+
+    me write_vhdl_clocked(i: i64, clock: text, reset: text, has_reset: bool, polarity: i64, synchrony: i64, domain_text_aux: i64, valid: bool, errors: i64, error_count: i64) -> bool:
+        if not self.aux_writable(i) or polarity < 0 or polarity > 1 or synchrony < 0 or synchrony > 2 or not self.range_matches(HD_RANGE_AUX, HD_AUX_RANGE_TEXT, errors, error_count): return self.fail("HIR VHDL clock metadata is invalid")
+        if not self.require_aux(domain_text_aux) or self.aux_shape[domain_text_aux] != HD_AUX_TEXT: return self.fail("HIR VHDL clock domain is not ready")
+        if not has_reset and reset != "": return self.fail("HIR absent VHDL reset text is not inert")
+        self.aux_t0[i] = clock; self.aux_t1[i] = reset; self.aux_b0[i] = has_reset; self.aux_i0[i] = polarity; self.aux_i1[i] = synchrony
+        self.aux_i2[i] = if valid: 1 else: 0; self.aux_i3[i] = errors; self.aux_i4[i] = error_count; self.aux_r0_start[i] = -1; self.aux_r0_len[i] = 0
+        self.aux_i5[i] = domain_text_aux; self.publish_aux(i, HD_AUX_VHDL_CLOCKED)
+
+    me write_vhdl_return(i: i64, label: text, type_text: text) -> bool:
+        if not self.aux_writable(i): return self.fail("HIR VHDL return metadata is not writable")
+        self.aux_t0[i] = label; self.aux_t1[i] = type_text; self.publish_aux(i, HD_AUX_VHDL_RETURN)
+
+    me write_doc_metadata(i: i64, doc: text) -> bool:
+        if not self.aux_writable(i): return self.fail("HIR doc metadata is not writable")
+        self.aux_t0[i] = doc; self.publish_aux(i, HD_AUX_DOC)
+
+    me write_gpu_metadata(i: i64, target: text, backend_order: text) -> bool:
+        if not self.aux_writable(i): return self.fail("HIR GPU metadata is not writable")
+        self.aux_t0[i] = target; self.aux_t1[i] = backend_order; self.publish_aux(i, HD_AUX_GPU)
+
+    me write_contract_clause_metadata(i: i64, kind: i64, predicate: i64, binding: text) -> bool:
+        if not self.aux_writable(i) or kind < 0 or kind > 4 or not self.require_expr(predicate): return self.fail("HIR contract clause is invalid")
+        self.aux_i0[i] = kind; self.aux_i1[i] = predicate; self.aux_t0[i] = binding; self.publish_aux(i, HD_AUX_CONTRACT_CLAUSE)
+
+    me write_contract_metadata(i: i64, clauses: i64, clause_count: i64, proof_uses: text, outcome: i64) -> bool:
+        if not self.aux_writable(i) or outcome < 0 or outcome > 1 or not self.range_matches(HD_RANGE_AUX, HD_AUX_RANGE_CONTRACT_CLAUSE, clauses, clause_count): return self.fail("HIR contract metadata is invalid")
+        self.aux_r0_start[i] = clauses; self.aux_r0_len[i] = clause_count; self.aux_t0[i] = proof_uses; self.aux_i0[i] = outcome; self.publish_aux(i, HD_AUX_CONTRACT)
+
+    me write_generic_template_metadata(i: i64, enabled: bool) -> bool:
+        if not self.aux_writable(i): return self.fail("HIR generic-template metadata is not writable")
+        self.aux_b0[i] = enabled; self.publish_aux(i, HD_AUX_GENERIC_TEMPLATE)
+
+    me write_method_resolution(i: i64, shape: i64, symbol0: i64, symbol1: i64) -> bool:
+        if not self.aux_writable(i) or shape < HD_RESOLUTION_INSTANCE or shape > HD_RESOLUTION_UNRESOLVED: return self.fail("HIR method resolution shape is invalid")
+        if shape == HD_RESOLUTION_UNRESOLVED and (symbol0 != -1 or symbol1 != -1): return self.fail("HIR unresolved method receipt is not inert")
+        if shape == HD_RESOLUTION_FREE and (symbol0 < 0 or symbol1 != -1): return self.fail("HIR free-function resolution arity is invalid")
+        if (shape == HD_RESOLUTION_INSTANCE or shape == HD_RESOLUTION_TRAIT or shape == HD_RESOLUTION_STATIC) and (symbol0 < 0 or symbol1 < 0): return self.fail("HIR method resolution symbol arity is invalid")
+        self.aux_i0[i] = shape; self.aux_i1[i] = symbol0; self.aux_i2[i] = symbol1; self.publish_aux(i, HD_AUX_METHOD_RESOLUTION)
+
+    me write_qualified_method_resolution(i: i64, shape: i64, defining_module: i64, symbol0: i64, symbol1: i64) -> bool:
+        if not self.aux_writable(i) or defining_module < 0 or defining_module >= self.module_count or self.module_generation[defining_module] != self.generation: return self.fail("HIR qualified method receipt module is invalid")
+        if shape == HD_RESOLUTION_QUALIFIED_FREE and (symbol0 < 0 or symbol1 != -1): return self.fail("HIR qualified free-function receipt arity is invalid")
+        if (shape == HD_RESOLUTION_QUALIFIED_INSTANCE or shape == HD_RESOLUTION_QUALIFIED_TRAIT or shape == HD_RESOLUTION_QUALIFIED_STATIC) and (symbol0 < 0 or symbol1 < 0): return self.fail("HIR qualified method receipt arity is invalid")
+        if shape < HD_RESOLUTION_QUALIFIED_INSTANCE or shape > HD_RESOLUTION_QUALIFIED_STATIC: return self.fail("HIR qualified method receipt shape is invalid")
+        self.aux_i0[i] = shape; self.aux_i1[i] = symbol0; self.aux_i2[i] = symbol1; self.aux_i3[i] = defining_module
+        self.publish_aux(i, HD_AUX_METHOD_RESOLUTION)
+
+    me write_named_pattern(i: i64, name: text, pattern: i64) -> bool:
+        if not self.aux_writable(i) or not self.index_ready(HD_RANGE_PATTERN, pattern): return self.fail("HIR named pattern is not ready")
+        self.aux_t0[i] = name; self.aux_i0[i] = pattern; self.publish_aux(i, HD_AUX_NAMED_PATTERN)
+
+    me write_enum_payload_aux(i: i64, struct_form: bool, start: i64, count: i64) -> bool:
+        if not self.aux_writable(i): return self.fail("HIR enum payload is not writable")
+        val kind = if struct_form: HD_RANGE_AUX else: HD_RANGE_EXPR
+        if not self.range_is_ready(kind, start, count): return self.fail("HIR enum payload range is not ready")
+        self.aux_r0_start[i] = start; self.aux_r0_len[i] = count
+        self.publish_aux(i, if struct_form: HD_AUX_ENUM_STRUCT else: HD_AUX_ENUM_TUPLE)
+
+    me write_pattern_payload_aux(i: i64, struct_form: bool, start: i64, count: i64) -> bool:
+        if not self.aux_writable(i): return self.fail("HIR pattern payload is not writable")
+        val kind = if struct_form: HD_RANGE_AUX else: HD_RANGE_PATTERN
+        if not self.range_is_ready(kind, start, count): return self.fail("HIR pattern payload range is not ready")
+        self.aux_r0_start[i] = start; self.aux_r0_len[i] = count
+        self.publish_aux(i, if struct_form: HD_AUX_PATTERN_STRUCT else: HD_AUX_PATTERN_TUPLE)
+
+    me write_custom_value_aux(i: i64, kind_shape: i64, scalar0: i64, scalar1: i64, text0: text, text1: text, start: i64, count: i64) -> bool:
+        # Legacy ABI retained only to fail closed: its scalar/reference payload
+        # cannot prove a typed projection and must never publish an owner row.
+        self.fail("legacy BlockValue scalar transport rejected; use typed BlockValue writers")
+
+    me write_asm_constraint(i: i64, name: text, kind_shape: i64, location_shape: i64, location_text: text, value: i64, has_output: bool, output: i64) -> bool:
+        if not self.aux_writable(i) or not self.require_expr(value): return self.fail("HIR asm constraint value is not ready")
+        if kind_shape < 0 or kind_shape > 3 or location_shape < 0 or location_shape > 3: return self.fail("HIR asm operand domain is invalid")
+        if location_shape != 1 and location_text != "": return self.fail("HIR asm register text is not inert")
+        if has_output and not self.require_expr(output): return self.fail("HIR asm output value is not ready")
+        self.aux_t0[i] = name; self.aux_t1[i] = location_text; self.aux_i0[i] = kind_shape; self.aux_i1[i] = location_shape
+        self.aux_i2[i] = value; self.aux_b0[i] = has_output; self.aux_i3[i] = if has_output: output else: -1
+        self.publish_aux(i, HD_AUX_ASM_CONSTRAINT)
+
+    me write_asm(i: i64, template: text, volatile: bool, constraint_start: i64, constraint_count: i64, clobber_start: i64, clobber_count: i64, abi_start: i64, abi_count: i64, option_start: i64, option_count: i64) -> bool:
+        if not self.aux_writable(i) or not self.range_matches(HD_RANGE_AUX, HD_AUX_RANGE_ASM_CONSTRAINT, constraint_start, constraint_count): return self.fail("HIR asm constraints are not ready")
+        if not self.range_matches(HD_RANGE_AUX, HD_AUX_RANGE_TEXT, clobber_start, clobber_count) or not self.range_matches(HD_RANGE_AUX, HD_AUX_RANGE_TEXT, abi_start, abi_count) or not self.range_matches(HD_RANGE_AUX, HD_AUX_RANGE_TEXT, option_start, option_count): return self.fail("HIR asm text ranges are not ready")
+        self.aux_t0[i] = template; self.aux_b0[i] = volatile
+        self.aux_i0[i] = constraint_start; self.aux_i1[i] = constraint_count
+        self.aux_i2[i] = clobber_start; self.aux_i3[i] = clobber_count
+        self.aux_i4[i] = abi_start; self.aux_i5[i] = abi_count
+        self.aux_r0_start[i] = option_start; self.aux_r0_len[i] = option_count
+        self.publish_aux(i, HD_AUX_ASM)
+
+    me write_asm_version(i: i64, op: text, version: i64) -> bool:
+        if not self.aux_writable(i): return self.fail("HIR asm version is not writable")
+        self.aux_t0[i] = op; self.aux_i0[i] = version
+        self.publish_aux(i, HD_AUX_ASM_VERSION)
+
+    me write_asm_spec(i: i64, arch_start: i64, arch_count: i64, os_text_aux: i64, abi_text_aux: i64, backend_text_aux: i64, version_start: i64, version_count: i64) -> bool:
+        if not self.aux_writable(i): return self.fail("HIR asm spec is not writable")
+        if not self.range_matches(HD_RANGE_AUX, HD_AUX_RANGE_TEXT, arch_start, arch_count) or not self.range_matches(HD_RANGE_AUX, HD_AUX_RANGE_ASM_VERSION, version_start, version_count): return self.fail("HIR asm spec range is not ready")
+        if os_text_aux >= 0 and not self.require_aux(os_text_aux): return self.fail("HIR asm spec os is not ready")
+        if abi_text_aux >= 0 and not self.require_aux(abi_text_aux): return self.fail("HIR asm spec abi is not ready")
+        if backend_text_aux >= 0 and not self.require_aux(backend_text_aux): return self.fail("HIR asm spec backend is not ready")
+        self.aux_i0[i] = arch_start; self.aux_i1[i] = arch_count; self.aux_i2[i] = os_text_aux
+        self.aux_i3[i] = abi_text_aux; self.aux_i4[i] = backend_text_aux
+        self.aux_r0_start[i] = version_start; self.aux_r0_len[i] = version_count
+        self.publish_aux(i, HD_AUX_ASM_SPEC)
+
+    me write_asm_arm(i: i64, has_spec: bool, spec: i64, wildcard: bool, has_body: bool, body: i64, compile_error: bool, message: text) -> bool:
+        if not self.aux_writable(i): return self.fail("HIR asm arm is not writable")
+        if has_spec and not self.require_aux(spec): return self.fail("HIR asm arm spec is not ready")
+        if has_body and not self.require_aux(body): return self.fail("HIR asm arm body is not ready")
+        if has_spec and self.aux_shape[spec] != HD_AUX_ASM_SPEC: return self.fail("HIR asm arm spec shape is invalid")
+        if has_body and self.aux_shape[body] != HD_AUX_ASM: return self.fail("HIR asm arm body shape is invalid")
+        if not has_spec and spec != -1: return self.fail("HIR absent asm spec is not inert")
+        if not has_body and body != -1: return self.fail("HIR absent asm body is not inert")
+        if compile_error == has_body: return self.fail("HIR asm arm must contain exactly one body form")
+        if compile_error and message == "": return self.fail("HIR asm compile-error message is required")
+        if not compile_error and message != "": return self.fail("HIR asm body message is not inert")
+        self.aux_b0[i] = has_spec; self.aux_i0[i] = if has_spec: spec else: -1; self.aux_b1[i] = wildcard
+        self.aux_i1[i] = if has_body: body else: -1; self.aux_i2[i] = if has_body: 1 else: 0
+        self.aux_i3[i] = if compile_error: 1 else: 0; self.aux_t0[i] = if compile_error: message else: ""
+        self.publish_aux(i, HD_AUX_ASM_ARM)
+
+    me write_expr_range_payload(i: i64, shape: i64, kind0: i64, start0: i64, len0: i64, kind1: i64, start1: i64, len1: i64) -> bool:
+        if not self.expr_writable(i): return self.fail("HIR ranged expression row is not writable")
+        if shape != HD_EXPR_ARRAY and shape != HD_EXPR_TUPLE and shape != HD_EXPR_DICT and shape != HD_EXPR_SET: return self.fail_expr(i, "HIR generic ranged writer shape is rejected")
+        if shape == HD_EXPR_DICT and (kind0 != HD_RANGE_AUX or not self.range_matches(HD_RANGE_AUX, HD_AUX_RANGE_DICT_ENTRY, start0, len0)): return self.fail_expr(i, "HIR dictionary ranged mapping is invalid")
+        if shape != HD_EXPR_DICT and (kind0 != HD_RANGE_EXPR or not self.range_is_ready(HD_RANGE_EXPR, start0, len0)): return self.fail_expr(i, "HIR collection ranged mapping is invalid")
+        if kind1 != HD_RANGE_AUX: return self.fail_expr(i, "HIR inert secondary range kind is invalid")
+        if len1 != 0 or start1 != -1: return self.fail_expr(i, "HIR ranged expression secondary payload is not inert")
+        if len0 > 0 and not self.range_is_ready(kind0, start0, len0): return self.fail_expr(i, "HIR primary payload range is not ready")
+        if len1 > 0 and not self.range_is_ready(kind1, start1, len1): return self.fail_expr(i, "HIR secondary payload range is not ready")
+        self.expr_r0_start[i] = start0; self.expr_r0_len[i] = len0
+        self.expr_r1_start[i] = start1; self.expr_r1_len[i] = len1
+        self.finalize_expr(i, shape)
+
+    me write_array(i: i64, start: i64, count: i64, has_elem_type: bool, elem_type: i64) -> bool:
+        if not self.expr_writable(i): return self.fail("HIR array row is not writable")
+        if has_elem_type and not self.require_type(elem_type): return self.fail_expr(i, "HIR array element type is not ready")
+        self.expr_b0[i] = has_elem_type; self.expr_i0[i] = if has_elem_type: elem_type else: -1
+        self.write_expr_range_payload(i, HD_EXPR_ARRAY, HD_RANGE_EXPR, start, count, HD_RANGE_AUX, -1, 0)
+
+    me write_array_repeat(i: i64, value: i64, count: i64, has_elem_type: bool, elem_type: i64) -> bool:
+        if not self.expr_writable(i) or not self.require_expr(value) or not self.require_expr(count): return self.fail_expr(i, "HIR array-repeat child is not ready")
+        if has_elem_type and not self.require_type(elem_type): return self.fail_expr(i, "HIR array-repeat type is not ready")
+        self.expr_i0[i] = value; self.expr_i1[i] = count; self.expr_b0[i] = has_elem_type; self.expr_i2[i] = if has_elem_type: elem_type else: -1
+        self.finalize_expr(i, HD_EXPR_ARRAY_REPEAT)
+
+    me write_tuple(i: i64, start: i64, count: i64) -> bool:
+        self.write_expr_range_payload(i, HD_EXPR_TUPLE, HD_RANGE_EXPR, start, count, HD_RANGE_AUX, -1, 0)
+
+    me write_dict(i: i64, entry_start: i64, entry_count: i64, key_type: i64, has_value_type: bool, value_type: i64) -> bool:
+        if not self.expr_writable(i): return self.fail("HIR dictionary row is not writable")
+        if not self.range_matches(HD_RANGE_AUX, HD_AUX_RANGE_DICT_ENTRY, entry_start, entry_count): return self.fail_expr(i, "HIR dictionary entries are not ready")
+        if not self.require_type(key_type) or (has_value_type and not self.require_type(value_type)): return self.fail_expr(i, "HIR dict type is not ready")
+        self.expr_i0[i] = key_type; self.expr_b0[i] = has_value_type; self.expr_i1[i] = if has_value_type: value_type else: -1
+        self.write_expr_range_payload(i, HD_EXPR_DICT, HD_RANGE_AUX, entry_start, entry_count, HD_RANGE_AUX, -1, 0)
+
+    me write_set(i: i64, start: i64, count: i64, has_elem_type: bool, elem_type: i64) -> bool:
+        if not self.expr_writable(i): return self.fail("HIR set row is not writable")
+        if has_elem_type and not self.require_type(elem_type): return self.fail_expr(i, "HIR set type is not ready")
+        self.expr_b0[i] = has_elem_type; self.expr_i0[i] = if has_elem_type: elem_type else: -1
+        self.write_expr_range_payload(i, HD_EXPR_SET, HD_RANGE_EXPR, start, count, HD_RANGE_AUX, -1, 0)
+
+    me write_field(i: i64, base: i64, field: text, has_resolved: bool, resolved_symbol: i64) -> bool:
+        if not self.expr_writable(i) or not self.require_expr(base): return self.fail_expr(i, "HIR field base is not ready")
+        if has_resolved and resolved_symbol < 0: return self.fail_expr(i, "HIR resolved field symbol is invalid")
+        if not has_resolved and resolved_symbol != -1: return self.fail_expr(i, "HIR unresolved field symbol is not inert")
+        self.expr_i0[i] = base; self.expr_t0[i] = field; self.expr_b0[i] = has_resolved; self.expr_i1[i] = if has_resolved: resolved_symbol else: -1
+        self.finalize_expr(i, HD_EXPR_FIELD)
+
+    me write_resolved_field(i: i64, base: i64, field: text, defining_module: i64, resolved_symbol: i64) -> bool:
+        if not self.expr_writable(i) or not self.require_expr(base): return self.fail_expr(i, "HIR resolved field base is not ready")
+        if field == "" or defining_module < 0 or defining_module >= self.module_count or self.module_generation[defining_module] != self.generation or resolved_symbol < 0: return self.fail_expr(i, "HIR resolved field receipt is invalid")
+        self.expr_i0[i] = base; self.expr_i1[i] = resolved_symbol; self.expr_i2[i] = defining_module
+        self.expr_t0[i] = field; self.expr_b0[i] = true
+        self.finalize_expr(i, HD_EXPR_RESOLVED_FIELD)
+
+    me write_index(i: i64, base: i64, index: i64) -> bool:
+        if not self.expr_writable(i) or not self.require_expr(base) or not self.require_expr(index): return self.fail_expr(i, "HIR index child is not ready")
+        self.expr_i0[i] = base; self.expr_i1[i] = index; self.finalize_expr(i, HD_EXPR_INDEX)
+
+    me write_tuple_index(i: i64, base: i64, index: i64) -> bool:
+        if not self.expr_writable(i) or not self.require_expr(base): return self.fail_expr(i, "HIR tuple-index base is not ready")
+        self.expr_i0[i] = base; self.expr_i1[i] = index; self.finalize_expr(i, HD_EXPR_TUPLE_INDEX)
+
+    me write_optional_chain(i: i64, base: i64, field: text) -> bool:
+        if not self.expr_writable(i) or not self.require_expr(base): return self.fail_expr(i, "HIR optional-chain base is not ready")
+        self.expr_i0[i] = base; self.expr_t0[i] = field; self.finalize_expr(i, HD_EXPR_OPTIONAL_CHAIN)
+
+    me write_null_coalesce(i: i64, left: i64, right: i64) -> bool:
+        if not self.expr_writable(i) or not self.require_expr(left) or not self.require_expr(right): return self.fail_expr(i, "HIR null-coalesce child is not ready")
+        self.expr_i0[i] = left; self.expr_i1[i] = right; self.finalize_expr(i, HD_EXPR_NULL_COALESCE)
+
+    me write_single_expr(i: i64, shape: i64, child: i64) -> bool:
+        if not self.expr_writable(i) or not self.require_expr(child): return self.fail_expr(i, "HIR unary-payload child is not ready")
+        if shape != HD_EXPR_EXISTS and shape != HD_EXPR_UNWRAP and shape != HD_EXPR_THROW and shape != HD_EXPR_TRY and shape != HD_EXPR_AWAIT and shape != HD_EXPR_SPAWN: return self.fail_expr(i, "HIR unary-payload shape is invalid")
+        self.expr_i0[i] = child; self.finalize_expr(i, shape)
+
+    me write_call(i: i64, callee: i64, arg_start: i64, arg_count: i64, type_start: i64, type_count: i64) -> bool:
+        if not self.expr_writable(i) or not self.require_expr(callee): return self.fail_expr(i, "HIR call callee is not ready")
+        if not self.range_matches(HD_RANGE_AUX, HD_AUX_RANGE_CALL_ARG, arg_start, arg_count) or not self.range_is_ready(HD_RANGE_TYPE, type_start, type_count): return self.fail_expr(i, "HIR call range is not ready")
+        self.expr_i0[i] = callee; self.expr_r0_start[i] = arg_start; self.expr_r0_len[i] = arg_count
+        self.expr_r1_start[i] = type_start; self.expr_r1_len[i] = type_count
+        self.finalize_expr(i, HD_EXPR_CALL)
+
+    me write_method_call(i: i64, receiver: i64, method: text, arg_start: i64, arg_count: i64, resolution_aux: i64) -> bool:
+        if not self.expr_writable(i) or not self.require_expr(receiver) or not self.range_matches(HD_RANGE_AUX, HD_AUX_RANGE_CALL_ARG, arg_start, arg_count): return self.fail_expr(i, "HIR method-call payload is not ready")
+        if not self.require_aux(resolution_aux) or self.aux_shape[resolution_aux] != HD_AUX_METHOD_RESOLUTION: return self.fail_expr(i, "HIR method resolution is not ready")
+        self.expr_i0[i] = receiver; self.expr_i1[i] = resolution_aux; self.expr_t0[i] = method
+        self.expr_r0_start[i] = arg_start; self.expr_r0_len[i] = arg_count
+        self.finalize_expr(i, HD_EXPR_METHOD_CALL)
+
+    me write_static_call(i: i64, type_index: i64, method: text, arg_start: i64, arg_count: i64, resolution_aux: i64) -> bool:
+        if not self.expr_writable(i) or not self.require_type(type_index) or not self.range_matches(HD_RANGE_AUX, HD_AUX_RANGE_CALL_ARG, arg_start, arg_count): return self.fail_expr(i, "HIR static-call payload is not ready")
+        if not self.require_aux(resolution_aux) or self.aux_shape[resolution_aux] != HD_AUX_METHOD_RESOLUTION: return self.fail_expr(i, "HIR static resolution is not ready")
+        self.expr_i0[i] = type_index; self.expr_i1[i] = resolution_aux; self.expr_t0[i] = method
+        self.expr_r0_start[i] = arg_start; self.expr_r0_len[i] = arg_count
+        self.finalize_expr(i, HD_EXPR_STATIC_CALL)
+
+    me write_lambda(i: i64, param_start: i64, param_count: i64, body: i64, capture_start: i64, capture_count: i64) -> bool:
+        if not self.expr_writable(i) or not self.require_expr(body): return self.fail_expr(i, "HIR lambda body is not ready")
+        if not self.range_matches(HD_RANGE_AUX, HD_AUX_RANGE_VALUE_PARAM, param_start, param_count) or not self.range_matches(HD_RANGE_AUX, HD_AUX_RANGE_SYMBOL_REF, capture_start, capture_count): return self.fail_expr(i, "HIR lambda range is not ready")
+        self.expr_i0[i] = body; self.expr_r0_start[i] = param_start; self.expr_r0_len[i] = param_count
+        self.expr_r1_start[i] = capture_start; self.expr_r1_len[i] = capture_count
+        self.finalize_expr(i, HD_EXPR_LAMBDA)
+
+    me write_host_gpu(i: i64, lane_code: i64, payload_size: i64, marker: i64, block: i64) -> bool:
+        if not self.expr_writable(i) or lane_code < 0 or payload_size < 0 or not self.require_expr(marker) or block < 0 or block >= self.block_count or not self.block_ready[block]: return self.fail_expr(i, "HIR host-GPU payload is not ready")
+        self.expr_i0[i] = lane_code; self.expr_i1[i] = payload_size; self.expr_i2[i] = marker; self.expr_i3[i] = block
+        self.finalize_expr(i, HD_EXPR_HOST_GPU)
+
+    me write_return_rich(i: i64, has_value: bool, value: i64) -> bool:
+        if not self.expr_writable(i) or (has_value and not self.require_expr(value)): return self.fail_expr(i, "HIR rich return value is not ready")
+        self.expr_has_type[i] = false; self.expr_type[i] = -1
+        self.expr_b0[i] = has_value; self.expr_i0[i] = if has_value: value else: -1; self.expr_t0[i] = ""
+        self.finalize_expr(i, HD_EXPR_RETURN)
+
+    me write_return_bootstrap_unit(i: i64, has_value: bool, value: i64, unit_type: i64) -> bool:
+        if not self.expr_writable(i) or not self.require_type(unit_type) or self.type_shape[unit_type] != HD_TYPE_UNIT: return self.fail_expr(i, "HIR bootstrap return Unit type is not ready")
+        if has_value and not self.require_expr(value): return self.fail_expr(i, "HIR bootstrap return value is not ready")
+        self.expr_has_type[i] = true; self.expr_type[i] = unit_type
+        self.expr_b0[i] = has_value; self.expr_i0[i] = if has_value: value else: -1; self.expr_t0[i] = ""
+        self.finalize_expr(i, HD_EXPR_RETURN)
+
+    me write_break(i: i64, label: text, has_value: bool, value: i64) -> bool:
+        if not self.expr_writable(i) or (has_value and not self.require_expr(value)): return self.fail_expr(i, "HIR break value is not ready")
+        self.expr_b0[i] = has_value; self.expr_i0[i] = if has_value: value else: -1; self.expr_t0[i] = label; self.finalize_expr(i, HD_EXPR_BREAK)
+
+    me write_yield(i: i64, has_value: bool, value: i64) -> bool:
+        if not self.expr_writable(i) or (has_value and not self.require_expr(value)): return self.fail_expr(i, "HIR yield value is not ready")
+        self.expr_b0[i] = has_value; self.expr_i0[i] = if has_value: value else: -1; self.expr_t0[i] = ""; self.finalize_expr(i, HD_EXPR_YIELD)
+
+    me write_continue(i: i64, has_label: bool, label: text) -> bool:
+        if not self.expr_writable(i): return self.fail("HIR continue row is not writable")
+        self.expr_b0[i] = has_label; self.expr_t0[i] = if has_label: label else: ""; self.finalize_expr(i, HD_EXPR_CONTINUE)
+
+    me write_struct_lit(i: i64, type_index: i64, field_start: i64, field_count: i64) -> bool:
+        if not self.expr_writable(i): return self.fail("HIR struct-literal row is not writable")
+        if not self.require_type(type_index) or not self.range_matches(HD_RANGE_AUX, HD_AUX_RANGE_NAMED_EXPR, field_start, field_count): return self.fail_expr(i, "HIR struct literal payload is not ready")
+        self.expr_i0[i] = type_index; self.expr_r0_start[i] = field_start; self.expr_r0_len[i] = field_count
+        self.finalize_expr(i, HD_EXPR_STRUCT)
+
+    me write_enum_lit(i: i64, type_index: i64, variant: text, has_payload: bool, payload_aux: i64) -> bool:
+        if not self.expr_writable(i): return self.fail("HIR enum-literal row is not writable")
+        if not self.require_type(type_index) or (has_payload and not self.require_aux(payload_aux)): return self.fail_expr(i, "HIR enum literal payload is not ready")
+        if has_payload and self.aux_shape[payload_aux] != HD_AUX_ENUM_TUPLE and self.aux_shape[payload_aux] != HD_AUX_ENUM_STRUCT: return self.fail_expr(i, "HIR enum literal payload shape is invalid")
+        if not has_payload and payload_aux != -1: return self.fail_expr(i, "HIR absent enum payload is not inert")
+        self.expr_i0[i] = type_index; self.expr_t0[i] = variant; self.expr_b0[i] = has_payload; self.expr_i1[i] = if has_payload: payload_aux else: -1
+        self.finalize_expr(i, HD_EXPR_ENUM)
+
+    me write_cast_like(i: i64, shape: i64, value: i64, target: i64) -> bool:
+        if not self.expr_writable(i) or not self.require_expr(value) or not self.require_type(target): return self.fail_expr(i, "HIR cast payload is not ready")
+        if shape != HD_EXPR_CAST and shape != HD_EXPR_AS: return self.fail_expr(i, "HIR cast shape is invalid")
+        self.expr_i0[i] = value; self.expr_i1[i] = target; self.finalize_expr(i, shape)
+
+    me write_range(i: i64, start_expr: i64, end_expr: i64, inclusive: bool, has_step: bool, step: i64) -> bool:
+        if not self.expr_writable(i) or not self.require_expr(start_expr) or not self.require_expr(end_expr): return self.fail_expr(i, "HIR range bound is not ready")
+        if has_step and not self.require_expr(step): return self.fail_expr(i, "HIR range step is not ready")
+        self.expr_i0[i] = start_expr; self.expr_i1[i] = end_expr; self.expr_b0[i] = inclusive
+        self.expr_b1[i] = has_step; self.expr_b2[i] = true; self.expr_b3[i] = true; self.expr_i2[i] = if has_step: step else: -1
+        self.finalize_expr(i, HD_EXPR_RANGE)
+
+    me write_optional_range(i: i64, has_start: bool, start_expr: i64, has_end: bool, end_expr: i64, inclusive: bool, has_step: bool, step: i64) -> bool:
+        if not self.expr_writable(i): return self.fail_expr(i, "HIR optional range row is not writable")
+        if has_start and not self.require_expr(start_expr): return self.fail_expr(i, "HIR optional range start is not ready")
+        if not has_start and start_expr != -1: return self.fail_expr(i, "HIR absent range start is not inert")
+        if has_end and not self.require_expr(end_expr): return self.fail_expr(i, "HIR optional range end is not ready")
+        if not has_end and end_expr != -1: return self.fail_expr(i, "HIR absent range end is not inert")
+        if has_step and not self.require_expr(step): return self.fail_expr(i, "HIR optional range step is not ready")
+        if not has_step and step != -1: return self.fail_expr(i, "HIR absent range step is not inert")
+        self.expr_b2[i] = has_start; self.expr_i0[i] = if has_start: start_expr else: -1
+        self.expr_b3[i] = has_end; self.expr_i1[i] = if has_end: end_expr else: -1
+        self.expr_b0[i] = inclusive; self.expr_b1[i] = has_step; self.expr_i2[i] = if has_step: step else: -1
+        self.finalize_expr(i, HD_EXPR_RANGE)
+
+    me write_comprehension(i: i64, kind_shape: i64, value: i64, clause_start: i64, clause_count: i64) -> bool:
+        if not self.expr_writable(i) or not self.require_expr(value) or not self.range_matches(HD_RANGE_AUX, HD_AUX_RANGE_COMP_CLAUSE, clause_start, clause_count): return self.fail_expr(i, "HIR comprehension payload is not ready")
+        if kind_shape < 0 or kind_shape > 3: return self.fail_expr(i, "HIR comprehension kind is invalid")
+        self.expr_i0[i] = kind_shape; self.expr_i1[i] = value; self.expr_r0_start[i] = clause_start; self.expr_r0_len[i] = clause_count
+        self.finalize_expr(i, HD_EXPR_COMPREHENSION)
+
+    me write_dict_comprehension(i: i64, key: i64, value: i64, clauses: i64, clause_count: i64) -> bool:
+        if not self.expr_writable(i) or not self.require_expr(key) or not self.require_expr(value) or not self.range_matches(HD_RANGE_AUX, HD_AUX_RANGE_COMP_CLAUSE, clauses, clause_count): return self.fail_expr(i, "HIR dictionary comprehension payload is not ready")
+        self.expr_i0[i] = key; self.expr_i1[i] = value; self.expr_r0_start[i] = clauses; self.expr_r0_len[i] = clause_count
+        self.finalize_expr(i, HD_EXPR_DICT_COMPREHENSION)
+
+    me write_array_suffix(i: i64, elements: i64, count: i64, suffix_aux: i64) -> bool:
+        if not self.expr_writable(i) or not self.range_is_ready(HD_RANGE_EXPR, elements, count) or not self.require_aux(suffix_aux) or self.aux_shape[suffix_aux] != HD_AUX_TENSOR_SUFFIX: return self.fail_expr(i, "HIR tensor-suffix array payload is not ready")
+        self.expr_i0[i] = suffix_aux; self.expr_r0_start[i] = elements; self.expr_r0_len[i] = count
+        self.finalize_expr(i, HD_EXPR_ARRAY_SUFFIX)
+
+    me write_kernel_launch(i: i64, kernel: i64, grid: i64, block: i64, args: i64, arg_count: i64) -> bool:
+        if not self.expr_writable(i) or not self.require_expr(kernel) or not self.require_expr(grid) or not self.require_expr(block) or not self.range_matches(HD_RANGE_AUX, HD_AUX_RANGE_CALL_ARG, args, arg_count): return self.fail_expr(i, "HIR kernel launch payload is not ready")
+        self.expr_i0[i] = kernel; self.expr_i1[i] = grid; self.expr_i2[i] = block; self.expr_r0_start[i] = args; self.expr_r0_len[i] = arg_count
+        self.finalize_expr(i, HD_EXPR_KERNEL_LAUNCH)
+
+    me write_gpu_intrinsic(i: i64, kind: i64, has_dimension: bool, dimension: i64, args: i64, arg_count: i64) -> bool:
+        if not self.expr_writable(i) or kind < 0 or kind > 32 or not self.range_is_ready(HD_RANGE_EXPR, args, arg_count): return self.fail_expr(i, "HIR GPU intrinsic payload is invalid")
+        if kind <= 4 and (not has_dimension or dimension < 0): return self.fail_expr(i, "HIR GPU dimension is required")
+        if kind > 4 and (has_dimension or dimension != -1): return self.fail_expr(i, "HIR GPU dimension is not inert")
+        self.expr_i0[i] = kind; self.expr_b0[i] = has_dimension; self.expr_i1[i] = if has_dimension: dimension else: -1
+        self.expr_r0_start[i] = args; self.expr_r0_len[i] = arg_count; self.finalize_expr(i, HD_EXPR_GPU_INTRINSIC)
+
+    me write_custom_block(i: i64, kind: text, block_value_row: i64) -> bool:
+        if not self.expr_writable(i) or block_value_row < 0 or block_value_row >= self.block_values.count or not self.block_values.ready[block_value_row]: return self.fail_expr(i, "HIR typed BlockValue payload is not ready")
+        self.expr_t0[i] = kind; self.expr_i0[i] = block_value_row; self.finalize_expr(i, HD_EXPR_CUSTOM_BLOCK)
+
+    me write_inline_asm(i: i64, asm_aux: i64) -> bool:
+        if not self.expr_writable(i) or not self.require_aux(asm_aux) or self.aux_shape[asm_aux] != HD_AUX_ASM: return self.fail_expr(i, "HIR inline asm payload is not ready")
+        self.expr_i0[i] = asm_aux; self.finalize_expr(i, HD_EXPR_INLINE_ASM)
+
+    me write_inline_asm_match(i: i64, start: i64, count: i64) -> bool:
+        if not self.expr_writable(i) or not self.range_matches(HD_RANGE_AUX, HD_AUX_RANGE_ASM_ARM, start, count): return self.fail_expr(i, "HIR asm-match arms are not ready")
+        self.expr_r0_start[i] = start; self.expr_r0_len[i] = count; self.finalize_expr(i, HD_EXPR_INLINE_ASM_MATCH)
+
+    me write_type_test(i: i64, value: i64, type_name: text) -> bool:
+        if not self.expr_writable(i) or not self.require_expr(value): return self.fail_expr(i, "HIR type-test value is not ready")
+        self.expr_i0[i] = value; self.expr_t0[i] = type_name; self.finalize_expr(i, HD_EXPR_TYPE_TEST)
+
+export HirDestinationGraph

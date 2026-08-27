@@ -157,6 +157,20 @@ val result = testing.with_timeout(
 
 ---
 
+## In-Development Tag
+
+```simple
+# @tag:in-development
+# Tracks: <TODO id / bug record / plan row>     # MANDATORY
+```
+
+Expected to FAIL, SKIPPED in whole-suite runs, COUNTED in the summary, selected
+by `simple test --tag in-development`. **Never** for a regression, an
+undiagnosed failure, or an unavailable host (use `skip(name, reason)` /
+`pending(name)`). Delete the tag the moment the spec passes. Not yet enforced at
+`origin/main` @ `3ccf808f6f2` — full rules and status:
+`doc/07_guide/infra/testing.md` § Tags and Filtering.
+
 ## Common Patterns
 
 ### Pattern: Test with Option
@@ -448,3 +462,18 @@ testing.with_cleanup(\: setup(), \x: teardown(x), \x: test(x))
 ---
 
 **Happy Testing! 🎉**
+
+## In-development dev ids
+
+| Want | Type |
+|------|------|
+| Mark a spec as WIP in a named workstream | `# @tag: in-development, dev-id-<id>` |
+| List workstream ids with spec counts | `bin/simple tags --dev-ids` |
+| List one workstream's specs | `bin/simple tags --dev-id <id>` |
+| Run exactly one workstream | `bin/simple test $(bin/simple tags --dev-id <id> --paths)` |
+| Run all in-development specs | `bin/simple test $(bin/simple tags --in-development --paths)` |
+| Run with WIP excluded | `bin/simple test $(bin/simple tags --no-in-development --paths)` |
+
+In-development specs are **included by default**; `--no-in-development` is the
+opt-in switch that excludes them. Guide:
+`doc/07_guide/testing/tags_and_in_development.md`.

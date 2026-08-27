@@ -1,0 +1,279 @@
+# Mission-critical post-initialization allocation closure proof (REQ-011).
+#
+# This is deliberately a typed-HIR pass, not the compatibility source scanner.
+# It builds one bounded adjacency table for the compilation, then walks every
+# @no_alloc / @rt(hal) steady-state root.  All control-flow arms are represented
+# by effect_block_callees, so error, timeout and shutdown calls cannot disappear
+# merely because they are not on the success path.
+
+use compiler.hir.hir.*
+use compiler.semantics.effect_validation.{effect_fn_names, effect_block_callees}
+
+val CRITICAL_ALLOC_MAX_FUNCTIONS: i64 = 65536
+val CRITICAL_ALLOC_MAX_EDGES: i64 = 1048576
+
+struct CriticalAllocNodeV1:
+    name: text
+    module_name: text
+    callees: [text]
+    is_steady_root: bool
+    is_init_boundary: bool
+    direct_alloc_detail: text
+    line: i64
+
+struct CriticalAllocFindingV1:
+    root: text
+    offender: text
+    detail: text
+    line: i64
+
+fn critical_alloc_closure_check_v1(
+    nodes: [CriticalAllocNodeV1], max_functions: i64, max_edges: i64
+) -> [CriticalAllocFindingV1]:
+    """Bounded, cycle-safe whole-entry-closure proof.
+
+    The arrays are sized once per root and indices are reused; no recursive
+    compiler stack or per-edge path copies are created.  A malformed/oversize
+    graph fails closed with a finding rather than truncating the proof.
+    """
+    var findings: [CriticalAllocFindingV1] = []
+    if nodes.len() > max_functions:
+        findings.push(CriticalAllocFindingV1(root: "<compilation>", offender: "<graph>",
+            detail: "analysis limit exceeded: functions", line: 0))
+        return findings
+    # One index makes every edge lookup expected O(1); never rescan all nodes
+    # per edge. Duplicate symbol identities make the graph ambiguous and are
+    # rejected before any root is claimed proven.
+    var index: Dict<text, i64> = {}
+    var edge_count: i64 = 0
+    var node_idx: i64 = 0
+    for node in nodes:
+        if index.has(node.name):
+            findings.push(CriticalAllocFindingV1(root: "<compilation>",
+                offender: node.name, detail: "ambiguous duplicate function identity", line: node.line))
+            return findings
+        index[node.name] = node_idx
+        node_idx = node_idx + 1
+        edge_count = edge_count + node.callees.len()
+        if edge_count > max_edges:
+            findings.push(CriticalAllocFindingV1(root: "<compilation>", offender: "<graph>",
+                detail: "analysis limit exceeded: call edges", line: 0))
+            return findings
+
+    for root_node in nodes:
+        if not root_node.is_steady_root or root_node.is_init_boundary:
+            continue
+        var seen: [bool] = []
+        var work: [i64] = []
+        for _ in nodes:
+            seen.push(false)
+        val root_idx = index[root_node.name]
+        seen[root_idx] = true
+        work.push(root_idx)
+        var cursor: i64 = 0
+        while cursor < work.len():
+            val idx = work[cursor]
+            cursor = cursor + 1
+            val node = nodes[idx]
+            if node.direct_alloc_detail != "":
+                findings.push(CriticalAllocFindingV1(root: root_node.name,
+                    offender: node.name, detail: node.direct_alloc_detail, line: node.line))
+            for callee in node.callees:
+                if not index.has(callee):
+                    findings.push(CriticalAllocFindingV1(root: root_node.name,
+                        offender: callee, detail: "callee allocation effect is unknown", line: node.line))
+                else:
+                    val ci = index[callee]
+                    if not seen[ci]:
+                        seen[ci] = true
+                        work.push(ci)
+    findings
+
+fn critical_alloc_expr_detail(expr: HirExpr) -> text:
+    match expr.kind:
+        case HirExprKind.ArrayLit(_, _): "array literal"
+        case HirExprKind.ArrayRepeat(_, _, _): "repeated array literal"
+        case HirExprKind.DictLit(_, _, _): "dictionary literal"
+        case HirExprKind.SetLit(_, _): "set literal"
+        case HirExprKind.StringLit(_, interpolations):
+            match interpolations:
+                Some(parts): if parts.len() > 0: "interpolated string" else: ""
+                nil: ""
+        case HirExprKind.Lambda(_, _, captures):
+            if captures.len() > 0: "capturing closure" else: ""
+        case HirExprKind.TupleLit(elements):
+            for element in elements:
+                val detail = critical_alloc_expr_detail(element)
+                if detail != "": return detail
+            ""
+        case HirExprKind.Call(callee, args, _):
+            val callee_detail = critical_alloc_expr_detail(callee)
+            if callee_detail != "": return callee_detail
+            for arg in args:
+                val detail = critical_alloc_expr_detail(arg.value)
+                if detail != "": return detail
+            ""
+        case HirExprKind.MethodCall(receiver, _, args, _):
+            val receiver_detail = critical_alloc_expr_detail(receiver)
+            if receiver_detail != "": return receiver_detail
+            for arg in args:
+                val detail = critical_alloc_expr_detail(arg.value)
+                if detail != "": return detail
+            ""
+        case HirExprKind.StaticCall(_, _, args, _):
+            for arg in args:
+                val detail = critical_alloc_expr_detail(arg.value)
+                if detail != "": return detail
+            ""
+        case HirExprKind.Binary(_, left, right):
+            val left_detail = critical_alloc_expr_detail(left)
+            if left_detail != "": left_detail else: critical_alloc_expr_detail(right)
+        case HirExprKind.Unary(_, operand): critical_alloc_expr_detail(operand)
+        case HirExprKind.Field(base, _, _): critical_alloc_expr_detail(base)
+        case HirExprKind.Index(base, index):
+            val base_detail = critical_alloc_expr_detail(base)
+            if base_detail != "": base_detail else: critical_alloc_expr_detail(index)
+        case HirExprKind.OptionalChain(base, _): critical_alloc_expr_detail(base)
+        case HirExprKind.NullCoalesce(left, right):
+            val left_detail = critical_alloc_expr_detail(left)
+            if left_detail != "": left_detail else: critical_alloc_expr_detail(right)
+        case HirExprKind.Unwrap(base): critical_alloc_expr_detail(base)
+        case HirExprKind.StructLit(_, fields):
+            for field in fields:
+                val detail = critical_alloc_expr_detail(field[1])
+                if detail != "": return detail
+            ""
+        case HirExprKind.EnumLit(_, _, payload):
+            match payload:
+                Some(inner):
+                    match inner:
+                        case HirEnumPayload.Tuple(values):
+                            for value in values:
+                                val detail = critical_alloc_expr_detail(value)
+                                if detail != "": return detail
+                        case HirEnumPayload.Struct(fields):
+                            for field in fields:
+                                val detail = critical_alloc_expr_detail(field[1])
+                                if detail != "": return detail
+                nil:
+                    pass_do_nothing("enum construction has no payload")
+            ""
+        case HirExprKind.Cast(value, _): critical_alloc_expr_detail(value)
+        case HirExprKind.As(value, _): critical_alloc_expr_detail(value)
+        case HirExprKind.Range(start, end, _, step):
+            val start_detail = critical_alloc_expr_detail(start)
+            if start_detail != "": return start_detail
+            val end_detail = critical_alloc_expr_detail(end)
+            if end_detail != "": return end_detail
+            match step:
+                Some(value): critical_alloc_expr_detail(value)
+                nil: ""
+        case HirExprKind.Comprehension(_, _, _): "comprehension"
+        case HirExprKind.With(items, body):
+            for item in items:
+                val detail = critical_alloc_expr_detail(item.context_expr)
+                if detail != "": return detail
+            critical_alloc_block_detail(body)
+        case HirExprKind.Await(value): critical_alloc_expr_detail(value)
+        case HirExprKind.Yield(value):
+            match value:
+                Some(inner): critical_alloc_expr_detail(inner)
+                nil: ""
+        case HirExprKind.Block(block): critical_alloc_block_detail(block)
+        case HirExprKind.UnsafeBlock(block): critical_alloc_block_detail(block)
+        case HirExprKind.If(cond, then_, else_):
+            val cond_detail = critical_alloc_expr_detail(cond)
+            if cond_detail != "": return cond_detail
+            val then_detail = critical_alloc_block_detail(then_)
+            if then_detail != "": return then_detail
+            match else_:
+                Some(block): critical_alloc_block_detail(block)
+                nil: ""
+        case HirExprKind.IfChain(arms, else_):
+            for arm in arms:
+                val cond_detail = critical_alloc_expr_detail(arm.cond)
+                if cond_detail != "": return cond_detail
+                val arm_detail = critical_alloc_block_detail(arm.then_)
+                if arm_detail != "": return arm_detail
+            match else_:
+                Some(block): critical_alloc_block_detail(block)
+                nil: ""
+        case HirExprKind.MatchCase(scrutinee, arms):
+            val scrutinee_detail = critical_alloc_expr_detail(scrutinee)
+            if scrutinee_detail != "": return scrutinee_detail
+            for arm in arms:
+                val arm_detail = critical_alloc_block_detail(arm.body)
+                if arm_detail != "": return arm_detail
+            ""
+        case HirExprKind.Loop(body, _): critical_alloc_block_detail(body)
+        case HirExprKind.While(cond, body, _):
+            val cond_detail = critical_alloc_expr_detail(cond)
+            if cond_detail != "": cond_detail else: critical_alloc_block_detail(body)
+        case HirExprKind.For(_, iter, body, _):
+            val iter_detail = critical_alloc_expr_detail(iter)
+            if iter_detail != "": iter_detail else: critical_alloc_block_detail(body)
+        case HirExprKind.Return(value):
+            match value:
+                Some(inner): critical_alloc_expr_detail(inner)
+                nil: ""
+        case HirExprKind.Throw(value): critical_alloc_expr_detail(value)
+        case HirExprKind.Try(value): critical_alloc_expr_detail(value)
+        case HirExprKind.HostGpuLane(_, _, marker, body):
+            val marker_detail = critical_alloc_expr_detail(marker)
+            if marker_detail != "": marker_detail else: critical_alloc_block_detail(body)
+        case HirExprKind.LossBlock(body): critical_alloc_block_detail(body)
+        case HirExprKind.NogradBlock(body): critical_alloc_block_detail(body)
+        case _:
+            ""
+
+fn critical_alloc_block_detail(block: HirBlock) -> text:
+    for stmt in block.stmts:
+        match stmt.kind:
+            case HirStmtKind.Expr(expr):
+                val detail = critical_alloc_expr_detail(expr)
+                if detail != "": return detail
+            case HirStmtKind.Let(_, _, expr):
+                val detail = critical_alloc_expr_detail(expr)
+                if detail != "": return detail
+            case HirStmtKind.Assign(_, _, expr):
+                val detail = critical_alloc_expr_detail(expr)
+                if detail != "": return detail
+            case HirStmtKind.Block(inner):
+                val detail = critical_alloc_block_detail(inner)
+                if detail != "": return detail
+            case _:
+                pass_do_nothing("statement has no allocation-bearing expression")
+    if block.has:
+        return critical_alloc_expr_detail(block.value)
+    ""
+
+fn critical_alloc_nodes_from_hir_v1(modules: Dict<text, HirModule>) -> [CriticalAllocNodeV1]:
+    val fn_names = effect_fn_names(modules)
+    var nodes: [CriticalAllocNodeV1] = []
+    for module_name in modules.keys():
+        for function_ in modules[module_name].functions.values():
+            var detail = critical_alloc_block_detail(function_.body)
+            if detail == "" and function_.func_attr.is_alloc:
+                detail = "callee is declared @alloc"
+            if detail == "" and function_.is_extern and function_.func_attr.is_no_alloc == false:
+                detail = "external callee lacks @no_alloc proof"
+            nodes.push(CriticalAllocNodeV1(
+                name: function_.name,
+                module_name: module_name,
+                callees: effect_block_callees(function_.body, fn_names),
+                is_steady_root: function_.func_attr.is_no_alloc or function_.func_attr.has_rt_hal,
+                is_init_boundary: function_.func_attr.is_boot,
+                direct_alloc_detail: detail,
+                line: function_.span.line
+            ))
+    nodes
+
+fn critical_alloc_format_v1(finding: CriticalAllocFindingV1) -> text:
+    "error[E-RT-HAL-014]: post-init allocation closure root '" + finding.root
+        + "' reaches '" + finding.offender + "': " + finding.detail
+        + " (line " + finding.line.to_text() + ")"
+
+export CriticalAllocNodeV1, CriticalAllocFindingV1
+export CRITICAL_ALLOC_MAX_FUNCTIONS, CRITICAL_ALLOC_MAX_EDGES
+export critical_alloc_closure_check_v1, critical_alloc_nodes_from_hir_v1
+export critical_alloc_format_v1

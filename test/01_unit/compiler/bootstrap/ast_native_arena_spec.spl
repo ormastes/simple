@@ -1,10 +1,3 @@
-"""
-## Purpose and audience
-Purpose: Prove that bootstrap native AST arena isolation.
-Audience: compiler and tooling engineers who maintain this spec.
-"""
-# @req: REQ-COMPILER-BOOTSTRAP-001 — stable requirement identity for this spec.
-
 # Bootstrap native AST arena isolation regression.
 #
 # @cover src/compiler/10.frontend/core/ast_stmt.spl
@@ -14,20 +7,16 @@ Audience: compiler and tooling engineers who maintain this spec.
 
 use compiler.core.ast.{ast_reset, decl_get_body, module_decl_at}
 use compiler.core.ast_expr.{
-    EXPR_INT_LIT, expr_call, expr_count, expr_get_args, expr_get_int, expr_get_tag,
-    expr_int_lit, expr_tag
+    EXPR_INT_LIT, expr_count, expr_get_int, expr_get_tag, expr_int_lit, expr_tag
 }
-use compiler.frontend.core._AstExpr.nodes.{expr_call_named}
-use compiler.frontend.core._AstExpr.accessors.{expr_get_arg_names}
 use compiler.core.ast_stmt.{
-    STMT_EXPR, stmt_block_stmt, stmt_count, stmt_expr_stmt, stmt_get_body,
-    stmt_get_expr, stmt_get_tag, stmt_tag
+    STMT_EXPR, stmt_count, stmt_expr_stmt, stmt_get_expr, stmt_get_tag, stmt_tag
 }
-use compiler.core.types.{named_type_fields, named_type_find}
+use compiler.core.types.{named_type_find}
 use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
 use compiler.frontend.parser_types.*
 use compiler.frontend.parser_types_expr.{Expr, ExprKind}
-use std.io_runtime.{read_file_text}
+use std.nogc_sync_mut.io.file_ops.{rt_file_read_text}
 
 extern fn rt_env_get(key: text) -> text
 extern fn rt_env_set(key: text, value: text) -> bool
@@ -54,24 +43,20 @@ fn expect_current_native_arena(value: i64):
     expect(expr_count()).to_equal(expr_tag.len())
 
     val body = decl_get_body(module_decl_at(0))
-    expect(body.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
+    expect(body.len()).to_equal(1)
     val stmt_id = body[0]
-    expect(stmt_id).to_equal(0)  # oracle: 0 — named expected value from the requirement
+    expect(stmt_id).to_equal(0)
     expect(stmt_id).to_be_less_than(stmt_count())
     expect(stmt_get_tag(stmt_id)).to_equal(STMT_EXPR)
 
     val expr_id = stmt_get_expr(stmt_id)
-    expect(expr_id).to_equal(0)  # oracle: 0 — named expected value from the requirement
+    expect(expr_id).to_equal(0)
     expect(expr_id).to_be_less_than(expr_count())
     expect(expr_get_tag(expr_id)).to_equal(EXPR_INT_LIT)
     expect(expr_get_int(expr_id)).to_equal(value)
 
-use std.spec.step
-
 describe "bootstrap native AST arena isolation":
     it "replaces shared empty slots without mutating sibling nodes":
-        step("Verify: replaces shared empty slots without mutating sibling nodes")
-        # @req: REQ-COMPILER-BOOTSTRAP-001
         ast_reset()
         defer:
             ast_reset()
@@ -79,14 +64,14 @@ describe "bootstrap native AST arena isolation":
         val argument = expr_int_lit(2, 0)
         val call = expr_call(callee, [argument], 0)
         val named_call = expr_call_named(callee, [argument], ["value"], 0)
-        expect(expr_get_args(callee).len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
-        expect(expr_get_args(argument).len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(expr_get_args(callee).len()).to_equal(0)
+        expect(expr_get_args(argument).len()).to_equal(0)
         expect(expr_get_args(call)).to_equal([argument])
         expect(expr_get_arg_names(named_call)).to_equal(["value"])
 
         val plain_stmt = stmt_expr_stmt(callee, 0)
         val block_stmt = stmt_block_stmt([plain_stmt], 0)
-        expect(stmt_get_body(plain_stmt).len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(stmt_get_body(plain_stmt).len()).to_equal(0)
         expect(stmt_get_body(block_stmt)).to_equal([plain_stmt])
 
     it "reuses arena buffers and caches hot expression and statement mode flags":
@@ -103,13 +88,8 @@ describe "bootstrap native AST arena isolation":
         expect(expr_source.contains("\n    expr_tag = []\n")).to_equal(false)
         expect(stmt_source.contains("\n    stmt_tag = []\n")).to_equal(false)
         expect(module_source).to_contain("decl_body_stmts_flat.clear()")
-        expect(decl_source).to_contain("decl_params.push(decl_empty_i64)")
-        expect(decl_source).to_contain("decl_param_names.push(decl_empty_text)")
-        expect(decl_source.contains("decl_params.push([])")).to_equal(false)
         expect(stmt_source).to_contain("stmt_gpu_grid_exprs.clear()")
         expect(stmt_source).to_contain("stmt_gpu_block_exprs.clear()")
-        expect(stmt_source).to_contain("stmt_body.push(stmt_empty_i64)")
-        expect(stmt_source.contains("stmt_body.push([])")).to_equal(false)
         expect(expr_source).to_contain("var expr_env_mirror_slot: [bool]")
         expect(expr_source).to_contain("fn expr_mode_slots_refresh()")
         expect(expr_source).to_contain("return expr_env_mirror_slot[0]")
@@ -127,12 +107,11 @@ describe "bootstrap native AST arena isolation":
         expect(stmt_source).to_contain("return stmt_env_mirror_slot[0]")
         expect(decl_source).to_contain("rt_env_get_i64(\"SIMPLE_NATIVE_ARENA_DECLS\", 0)")
         expect(module_source).to_contain("rt_env_get_i64(\"SIMPLE_NATIVE_ARENA_DECLS\", 0)")
-        expect(type_source).to_contain("span_pool_start = []")
-        expect(type_source.contains("clear_i64_pool(span_pool_start)")).to_equal(false)
+        expect(type_source).to_contain("span_pool_start = clear_i64_pool(span_pool_start)")
+        expect(type_source.contains("\n    span_pool_start = []\n")).to_equal(false)
         expect(bridge_source).to_contain("reset_all_pools()\n    parser_init_with_path(source, path)")
 
     it "ignores stale env IDs and tags across sequential module resets":
-        step("Verify: ignores stale env IDs and tags across sequential module resets")
         val old_bootstrap = rt_env_get("SIMPLE_BOOTSTRAP") ?? ""
         val old_native_arena = rt_env_get("SIMPLE_NATIVE_ARENA_DECLS") ?? ""
         val old_stmt_count = rt_env_get("SIMPLE_BOOTSTRAP_STMT_COUNT") ?? ""
@@ -193,7 +172,6 @@ describe "bootstrap native AST arena isolation":
         expect(rt_env_get("SIMPLE_BOOTSTRAP_EXPR_0_I") ?? "").to_equal("99")
 
     it "preserves an unknown written return type name":
-        step("Verify: preserves an unknown written return type name")
         val parsed = parse_and_build_module("fn make() -> SiblingRecord:\n    nil\nfn boxed() -> SiblingBox<i64>:\n    nil\nstruct SiblingRecord:\n    value: i64\n", "named/bootstrap_main.spl")
         val make = parsed.functions["make"] ?? panic("missing make")
         val boxed = parsed.functions["boxed"] ?? panic("missing boxed")
@@ -204,7 +182,6 @@ describe "bootstrap native AST arena isolation":
         expect(named_type_fields(named_type_find("SiblingRecord")).len()).to_equal(1)
 
     it "preserves interpreter bootstrap env mirrors when native arena is disabled":
-        step("Verify: preserves interpreter bootstrap env mirrors when native arena is disabled")
         val old_bootstrap = rt_env_get("SIMPLE_BOOTSTRAP") ?? ""
         val old_native_arena = rt_env_get("SIMPLE_NATIVE_ARENA_DECLS") ?? ""
         val old_stmt_count = rt_env_get("SIMPLE_BOOTSTRAP_STMT_COUNT") ?? ""
@@ -230,8 +207,8 @@ describe "bootstrap native AST arena isolation":
 
         val expr_id = expr_int_lit(7, 0)
         val stmt_id = stmt_expr_stmt(expr_id, 0)
-        expect(expr_id).to_equal(0)  # oracle: 0 — named expected value from the requirement
-        expect(stmt_id).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(expr_id).to_equal(0)
+        expect(stmt_id).to_equal(0)
         expect(rt_env_get("SIMPLE_BOOTSTRAP_EXPR_COUNT") ?? "").to_equal("1")
         expect(rt_env_get("SIMPLE_BOOTSTRAP_STMT_COUNT") ?? "").to_equal("1")
 
@@ -239,7 +216,7 @@ describe "bootstrap native AST arena isolation":
         expect(rt_env_set("SIMPLE_BOOTSTRAP_STMT_0_EXPR", "77")).to_equal(true)
         expect(rt_env_set("SIMPLE_BOOTSTRAP_EXPR_0_TAG", "5")).to_equal(true)
         expect(rt_env_set("SIMPLE_BOOTSTRAP_EXPR_0_I", "88")).to_equal(true)
-        expect(stmt_get_tag(stmt_id)).to_equal(5)  # oracle: 5 — named expected value from the requirement
-        expect(stmt_get_expr(stmt_id)).to_equal(77)  # oracle: 77 — named expected value from the requirement
-        expect(expr_get_tag(expr_id)).to_equal(5)  # oracle: 5 — named expected value from the requirement
-        expect(expr_get_int(expr_id)).to_equal(88)  # oracle: 88 — named expected value from the requirement
+        expect(stmt_get_tag(stmt_id)).to_equal(5)
+        expect(stmt_get_expr(stmt_id)).to_equal(77)
+        expect(expr_get_tag(expr_id)).to_equal(5)
+        expect(expr_get_int(expr_id)).to_equal(88)

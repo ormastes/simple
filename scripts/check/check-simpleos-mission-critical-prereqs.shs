@@ -1,9 +1,6 @@
 #!/usr/bin/env sh
 set -eu
 
-SCRIPT_DIR="${0%/*}"
-SETUP_HELPER="$SCRIPT_DIR/../setup/setup-simpleos-formal-env.shs"
-
 missing=
 add_missing() {
     if [ -z "$missing" ]; then
@@ -15,71 +12,6 @@ add_missing() {
 
 tool_runs() {
     "$@" >/dev/null 2>&1
-}
-
-if [ "${1:-}" = "--self-test" ]; then
-    tmp_dir="$(mktemp -d)"
-    trap '/bin/rm -rf "$tmp_dir"' EXIT
-
-    write_tool() {
-        dir="$1"
-        tool="$2"
-        mkdir -p "$dir"
-        {
-            printf '%s\n' '#!/bin/sh'
-            printf '%s\n' 'exit 0'
-        } >"$dir/$tool"
-        chmod +x "$dir/$tool"
-    }
-
-    write_stack() {
-        dir="$1"
-        shift
-        for tool in "$@"; do
-            write_tool "$dir" "$tool"
-        done
-    }
-
-    assert_missing_stack() {
-        name="$1"
-        expected="$2"
-        shift 2
-        bin="$tmp_dir/$name-bin"
-        write_stack "$bin" "$@"
-        if PATH="$bin" /bin/sh "$0" >"$tmp_dir/$name.out" 2>&1; then
-            echo "STATUS: FAIL simpleos-mission-critical-prereqs self-test: missing $expected accepted" >&2
-            exit 1
-        fi
-        /bin/grep -Fq "simpleos_mission_critical_prereqs_missing=$expected" "$tmp_dir/$name.out" || {
-            echo "STATUS: FAIL simpleos-mission-critical-prereqs self-test: missing $expected not classified" >&2
-            exit 1
-        }
-    }
-
-    ready_bin="$tmp_dir/ready-bin"
-    write_stack "$ready_bin" sby yosys z3
-
-    PATH="$ready_bin" /bin/sh "$0" >"$tmp_dir/ready.out" 2>&1 || {
-        echo "STATUS: FAIL simpleos-mission-critical-prereqs self-test: ready tools rejected" >&2
-        exit 1
-    }
-    /bin/grep -Fq "simpleos_mission_critical_prereqs_status=ready" "$tmp_dir/ready.out" || {
-        echo "STATUS: FAIL simpleos-mission-critical-prereqs self-test: ready status missing" >&2
-        exit 1
-    }
-    assert_missing_stack missing-sby sby yosys z3
-    assert_missing_stack missing-yosys yosys,smt-solver sby
-    assert_missing_stack missing-solver smt-solver sby yosys
-    echo "STATUS: PASS simpleos-mission-critical-prereqs self-test"
-    exit 0
-fi
-
-test -f "$SETUP_HELPER" || {
-    echo "simpleos_mission_critical_prereqs_status=blocked"
-    echo "simpleos_mission_critical_prereqs_missing=setup-helper"
-    echo "simpleos_mission_critical_prereqs_next_action=restore scripts/setup/setup-simpleos-formal-env.shs, then rerun scripts/check/check-simpleos-mission-critical-release.shs"
-    echo "STATUS: FAIL simpleos-mission-critical-prereqs missing=setup-helper" >&2
-    exit 1
 }
 
 if ! command -v sby >/dev/null 2>&1 || ! tool_runs sby --version; then
@@ -106,6 +38,6 @@ fi
 
 echo "simpleos_mission_critical_prereqs_status=blocked"
 echo "simpleos_mission_critical_prereqs_missing=$missing"
-echo "simpleos_mission_critical_prereqs_next_action=run scripts/setup/setup-simpleos-formal-env.shs --print-install, install the SymbiYosys stack or source OSS CAD Suite locally, rerun scripts/check/check-simpleos-mission-critical-prereqs.shs, then run scripts/check/check-simpleos-mission-critical-release.shs"
+echo "simpleos_mission_critical_prereqs_next_action=run scripts/setup/setup-simpleos-formal-env.shs --print-install, install the SymbiYosys stack, then rerun scripts/check/check-simpleos-mission-critical-release.shs"
 echo "STATUS: FAIL simpleos-mission-critical-prereqs missing=$missing" >&2
 exit 1

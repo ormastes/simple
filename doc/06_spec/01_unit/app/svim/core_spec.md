@@ -2,6 +2,30 @@
 
 > Validates the foundational shared editor core used by host TUI first and
 
+<!-- sdn-diagram:id=core_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=core_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+core_spec -> std
+core_spec -> app
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=core_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 25 | 25 | 0 | 0 |
@@ -20,7 +44,7 @@ Validates the foundational shared editor core used by host TUI first and
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/svim/core_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 Validates the foundational shared editor core used by host TUI first and
@@ -33,22 +57,20 @@ commands, registers, splits/tabpages, quickfix flow, and RPC control.
 
 #### applies insert and delete edits without flattening the model
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- applies insert and delete edits without flattening the model
+1. var table = PieceTable from text
+2. table insert
+3. expect table to text
+4. table delete
+5. expect table to text
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("applies insert and delete edits without flattening the model")
 var table = PieceTable.from_text("abc")
 table.insert(1, "XY")
 expect table.to_text() to_equal "aXYbc"
@@ -62,18 +84,17 @@ expect table.to_text() to_equal "aXc"
 
 #### moves extmark-like anchors across multiline inserts
 
-- moves extmark-like anchors across multiline inserts
+1. var tracker = AnchorTracker new
+2. tracker apply insert
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("moves extmark-like anchors across multiline inserts")
 var tracker = AnchorTracker.new()
 val id = tracker.create(0, 1, true)
 tracker.apply_insert(0, 1, "ZZ\nQ")
@@ -86,18 +107,17 @@ expect pos.col to_equal 1
 
 #### clamps anchors into deleted ranges
 
-- clamps anchors into deleted ranges
+1. var tracker = AnchorTracker new
+2. tracker apply delete
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("clamps anchors into deleted ranges")
 var tracker = AnchorTracker.new()
 val id = tracker.create(2, 5, true)
 tracker.apply_delete(1, 3, 3, 2)
@@ -112,18 +132,20 @@ expect pos.col to_equal 3
 
 #### inserts text in insert mode and tracks cursor
 
-- inserts text in insert mode and tracks cursor
+1. var session = SvimSession new
+2. session execute named
+3. session execute named
+4. expect active buffer text
+5. expect session current cursor
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("inserts text in insert mode and tracks cursor")
 var session = SvimSession.new()
 session.execute_named("set-mode", "insert", 1, "")
 session.execute_named("insert-text", "hello", 1, "")
@@ -135,18 +157,25 @@ expect session.current_cursor().col to_equal 5
 
 #### supports line yank delete and put through registers
 
-- supports line yank delete and put through registers
+1. var session = SvimSession new
+2. session execute named
+3. session execute named
+4. session execute named
+5. session execute named
+6. session execute named
+7. session execute named
+8. session execute named
+9. session execute named
+10. expect active buffer text
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("supports line yank delete and put through registers")
 var session = SvimSession.new()
 session.execute_named("set-mode", "insert", 1, "")
 session.execute_named("insert-text", "alpha\nbeta", 1, "")
@@ -163,18 +192,22 @@ expect active_buffer_text(session) to_equal "alpha\nalpha\n"
 
 #### supports undo and redo for text edits
 
-- supports undo and redo for text edits
+1. var session = SvimSession new
+2. session execute named
+3. session execute named
+4. session execute named
+5. expect active buffer text
+6. session execute named
+7. expect active buffer text
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("supports undo and redo for text edits")
 var session = SvimSession.new()
 session.execute_named("set-mode", "insert", 1, "")
 session.execute_named("insert-text", "abc", 1, "")
@@ -188,18 +221,23 @@ expect active_buffer_text(session) to_equal "abc"
 
 #### supports operator-pending word deletion with counts
 
-- supports operator-pending word deletion with counts
+1. var session = SvimSession new
+2. session execute named
+3. session execute named
+4. session execute named
+5. session execute named
+6. session execute
+7. expect active buffer text
+8. expect session current cursor
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("supports operator-pending word deletion with counts")
 var session = SvimSession.new()
 session.execute_named("set-mode", "insert", 1, "")
 session.execute_named("insert-text", "alpha beta gamma", 1, "")
@@ -214,18 +252,24 @@ expect session.current_cursor().col to_equal 0
 
 #### supports operator-pending word yank and text objects
 
-- supports operator-pending word yank and text objects
+1. var session = SvimSession new
+2. session execute named
+3. session execute named
+4. session execute named
+5. session execute named
+6. session execute
+7. session execute named
+8. session execute
+9. expect active buffer text
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("supports operator-pending word yank and text objects")
 var session = SvimSession.new()
 session.execute_named("set-mode", "insert", 1, "")
 session.execute_named("insert-text", "alpha beta gamma", 1, "")
@@ -244,18 +288,17 @@ expect active_buffer_text(session) to_equal "alpha  gamma"
 
 #### supports split windows over the same buffer
 
-- supports split windows over the same buffer
+1. var session = SvimSession new
+2. expect session tabs[session current tab index] window ids len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("supports split windows over the same buffer")
 var session = SvimSession.new()
 val result = session.execute_named("split-window", "", 1, "")
 expect result.ok to_equal true
@@ -266,18 +309,17 @@ expect session.tabs[session.current_tab_index].window_ids.len() to_equal 2
 
 #### supports opening a new tabpage from the current buffer
 
-- supports opening a new tabpage from the current buffer
+1. var session = SvimSession new
+2. expect session tabs len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("supports opening a new tabpage from the current buffer")
 var session = SvimSession.new()
 val result = session.execute_named("new-tab", "", 1, "")
 expect result.ok to_equal true
@@ -288,18 +330,18 @@ expect session.tabs.len() to_equal 2
 
 #### builds quickfix items from diagnostics and jumps to them
 
-- builds quickfix items from diagnostics and jumps to them
+1. var session = SvimSession new
+2. session replace simple diagnostics
+3. expect session quickfix items len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("builds quickfix items from diagnostics and jumps to them")
 var session = SvimSession.new()
 val buffer_id = session.active_buffer()?.id ?? BufferId(value: 0)
 session.replace_simple_diagnostics(buffer_id, [0], [0], ["error"], ["boom"])
@@ -313,18 +355,24 @@ expect jump.message to_equal "boom"
 
 #### cycles quickfix entries through shared commands and commandline aliases
 
-- cycles quickfix entries through shared commands and commandline aliases
+1. var session = SvimSession new
+2. session execute named
+3. session execute named
+4. session execute named
+5. session replace simple diagnostics
+6. expect session current cursor
+7. expect session current cursor
+8. expect session current cursor
+9. expect session current cursor
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("cycles quickfix entries through shared commands and commandline aliases")
 var session = SvimSession.new()
 session.execute_named("set-mode", "insert", 1, "")
 session.execute_named("insert-text", "line zero\nline one with content", 1, "")
@@ -347,18 +395,17 @@ expect session.current_cursor().col to_equal 0
 
 #### handles rpc snapshot and command requests through the shared session api
 
-- handles rpc snapshot and command requests through the shared session api
+1. var session = SvimSession new
+2. session execute named
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("handles rpc snapshot and command requests through the shared session api")
 var session = SvimSession.new()
 session.execute_named("set-mode", "insert", 1, "")
 val cmd = session.handle_rpc_text("1", "svim.command", "insert-text:rpc")
@@ -372,18 +419,20 @@ expect snap.result_json to_contain "rpc"
 
 #### moves the cursor for search-forward commands
 
-- moves the cursor for search-forward commands
+1. var session = SvimSession new
+2. session execute named
+3. session execute named
+4. session execute named
+5. expect session current cursor
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("moves the cursor for search-forward commands")
 var session = SvimSession.new()
 session.execute_named("set-mode", "insert", 1, "")
 session.execute_named("insert-text", "alpha beta", 1, "")
@@ -397,18 +446,21 @@ expect session.current_cursor().col to_equal 6
 
 #### records repeat-search state through the shared command surface
 
-- records repeat-search state through the shared command surface
+1. var session = SvimSession new
+2. session execute named
+3. session execute named
+4. session execute named
+5. session execute commandline
+6. expect session current cursor
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("records repeat-search state through the shared command surface")
 var session = SvimSession.new()
 session.execute_named("set-mode", "insert", 1, "")
 session.execute_named("insert-text", "alpha beta alpha", 1, "")
@@ -423,18 +475,21 @@ expect session.last_search_direction to_equal 1
 
 #### tracks visual selection endpoints in the shared session
 
-- tracks visual selection endpoints in the shared session
+1. var session = SvimSession new
+2. session execute named
+3. session execute named
+4. session execute named
+5. session execute named
+6. expect svim snapshot text
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("tracks visual selection endpoints in the shared session")
 var session = SvimSession.new()
 session.execute_named("set-mode", "insert", 1, "")
 session.execute_named("insert-text", "hello", 1, "")
@@ -452,18 +507,21 @@ expect svim_snapshot_text(session) to_contain "selection"
 
 #### yanks a visual selection into the active register
 
-- yanks a visual selection into the active register
+1. var session = SvimSession new
+2. session execute named
+3. session execute named
+4. session execute named
+5. session execute named
+6. session execute named
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("yanks a visual selection into the active register")
 var session = SvimSession.new()
 session.execute_named("set-mode", "insert", 1, "")
 session.execute_named("insert-text", "hello", 1, "")
@@ -478,18 +536,23 @@ expect session.mode_state.mode to_equal SvimMode.Normal
 
 #### deletes a visual selection through the shared edit path
 
-- deletes a visual selection through the shared edit path
+1. var session = SvimSession new
+2. session execute named
+3. session execute named
+4. session execute named
+5. session execute named
+6. session execute named
+7. expect active buffer text
+8. expect session current cursor
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("deletes a visual selection through the shared edit path")
 var session = SvimSession.new()
 session.execute_named("set-mode", "insert", 1, "")
 session.execute_named("insert-text", "hello", 1, "")
@@ -505,18 +568,28 @@ expect session.mode_state.mode to_equal SvimMode.Normal
 
 #### handles forward visual selections with the same yank and delete semantics
 
-- handles forward visual selections with the same yank and delete semantics
+1. var session = SvimSession new
+2. session execute named
+3. session execute named
+4. session execute named
+5. session execute named
+6. session execute named
+7. session execute named
+8. session execute named
+9. session execute named
+10. session execute named
+11. session execute named
+12. expect active buffer text
+13. expect session current cursor
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("handles forward visual selections with the same yank and delete semantics")
 var session = SvimSession.new()
 session.execute_named("set-mode", "insert", 1, "")
 session.execute_named("insert-text", "hello", 1, "")
@@ -537,18 +610,27 @@ expect session.current_cursor().col to_equal 0
 
 #### replaces a visual selection with register content on put
 
-- replaces a visual selection with register content on put
+1. var session = SvimSession new
+2. session execute named
+3. session execute named
+4. session execute named
+5. session execute named
+6. session execute named
+7. session execute named
+8. session execute named
+9. session execute named
+10. session execute named
+11. expect active buffer text
+12. expect session current cursor
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("replaces a visual selection with register content on put")
 var session = SvimSession.new()
 session.execute_named("set-mode", "insert", 1, "")
 session.execute_named("insert-text", "hello", 1, "")
@@ -568,18 +650,22 @@ expect session.mode_state.mode to_equal SvimMode.Normal
 
 #### supports jump-back after a search move
 
-- supports jump-back after a search move
+1. var session = SvimSession new
+2. session execute named
+3. session execute named
+4. session execute named
+5. session execute named
+6. session execute named
+7. expect session current cursor
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("supports jump-back after a search move")
 var session = SvimSession.new()
 session.execute_named("set-mode", "insert", 1, "")
 session.execute_named("insert-text", "alpha beta", 1, "")
@@ -593,18 +679,20 @@ expect session.current_cursor().col to_equal 0
 
 #### cycles between buffers through shared commands
 
-- cycles between buffers through shared commands
+1. var session = SvimSession new
+2. session focus buffer
+3. expect
+4. session execute named
+5. expect
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("cycles between buffers through shared commands")
 var session = SvimSession.new()
 val second = session.open_text("/tmp/second.txt", "two")
 session.focus_buffer(second)
@@ -617,18 +705,22 @@ expect (session.active_buffer()?.path ?? "") to_equal ""
 
 #### saves a buffer to disk and reopens it through the shared session
 
-- saves a buffer to disk and reopens it through the shared session
+1. var session = SvimSession new
+2. session execute named
+3. session execute named
+4. session execute named
+5. expect rt file read text
+6. var reopened = SvimSession new
+7. expect active buffer text
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("saves a buffer to disk and reopens it through the shared session")
 val path = "/tmp/svim_core_spec_save.txt"
 val _ = rt_file_delete(path)
 var session = SvimSession.new()
@@ -651,18 +743,13 @@ val _cleanup = rt_file_delete(path)
 
 #### parses count-aware motions
 
-- parses count-aware motions
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("parses count-aware motions")
 val cmd = svim_parse_normal_command("3j")
 expect cmd.name to_equal "move-down"
 expect cmd.count to_equal 3
@@ -672,18 +759,33 @@ expect cmd.count to_equal 3
 
 #### parses shorthand editor commands
 
-- parses shorthand editor commands
+1. expect svim parse normal command
+2. expect svim parse normal command
+3. expect svim parse normal command
+4. expect svim parse normal command
+5. expect svim parse normal command
+6. expect svim parse normal command
+7. expect svim parse normal command
+8. expect svim parse normal command
+9. expect svim parse normal command
+10. expect svim parse normal command
+11. expect svim parse normal command
+12. expect svim parse normal command
+13. expect svim parse normal command
+14. expect svim parse normal command
+15. expect svim parse normal command
+16. expect svim parse normal command
+17. expect svim parse normal command
+18. expect svim parse normal command
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("parses shorthand editor commands")
 expect svim_parse_normal_command("dd").name to_equal "delete-line"
 expect svim_parse_normal_command(":w").name to_equal "commandline"
 expect svim_parse_normal_command("/term").payload to_equal "term"
@@ -718,51 +820,3 @@ expect svim_parse_normal_command("yaw").payload to_equal "aw"
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-UNIT`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `4cd749ac251084795a10a5a3e787129fe8d3a6aeabacaa2191982cba2197fae4`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `4cd749ac251084795a10a5a3e787129fe8d3a6aeabacaa2191982cba2197fae4`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `4cd749ac251084795a10a5a3e787129fe8d3a6aeabacaa2191982cba2197fae4`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/01_unit/app/svim/core_spec.spl
-mirror: doc/06_spec/01_unit/app/svim/core_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/app/svim/core_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/app/svim/core_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/app/svim/core_spec.spl:33:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'applies insert and delete edits without flattening the model' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/svim/core_spec.spl:44:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'moves extmark-like anchors across multiline inserts' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/svim/core_spec.spl:54:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'clamps anchors into deleted ranges' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

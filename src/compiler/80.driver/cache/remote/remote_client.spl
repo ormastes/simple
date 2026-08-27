@@ -1,144 +1,175 @@
-# Remote client — READ-ONLY lookup against the trusted remote-main cache
-# namespace. Design §14.2 "On a remote hit" verification order:
+# Remote cache client — PROTOCOL + a local-filesystem FAKE.
 #
-#   1. Fetch action mapping.
-#   2. Validate namespace, schema, and exact ActionDigest.
-#   3. Validate promotion/provenance policy.
-#   4. Fetch the immutable result manifest.
-#   5. Verify its digest.
-#   6. Verify every referenced artifact digest while materializing it into
-#      the machine CAS.
-#   7. Validate target, compiler schema, dependency interface roots, AOP
-#      roots, and block-manifest roots.
-#   8. Publish a local action mapping only after the closure is complete.
+# This is deliberately NOT a network backend. It defines the seam that C1's
+# `cas_store.spl` stub will be wired to, plus an in-tree fake so the whole
+# admission/promotion path is testable without a server.
 #
-# First-milestone scope, per contract: remote READ-ONLY. This module has no
-# write/publish-to-remote entry point at all — `RemoteTransport` exposes only
-# fetch operations. Step 8 above ("publish a local action mapping") writes
-# to the LOCAL machine cache, not to the remote namespace, and is out of
-# scope for this file (that is C1's tier_router territory); this module
-# stops at "verified remote artifacts are ready to hand to a local
-# publisher" and returns that as data.
+# The protocol has exactly four operations, and only ONE of them writes:
 #
-# The network transport is an injectable interface (`RemoteTransport`) so
-# tests exercise this module against a local fake — no real network in this
-# milestone, per contract.
+#   remote_get_action   -> RemoteActionEntry
+#   remote_has_blob     -> bool
+#   remote_put_blob     -> RemoteResult   [CAS, content-addressed]
+#   remote_put_action   -> RemoteResult   [MAPPING, policy-gated]
+#
+# PROMOTION COPIES ONLY ACTION-MAPPING REFERENCES. CAS blobs are immutable and
+# already shared, so promotion never re-uploads bytes — see `remote_promote`.
+#
+# Best-effort rule (§15.4): a failed remote write must NOT fail the local build.
+# `RemoteResult.fatal` is set only when a RELEASE lane could not persist required
+# provenance evidence.
 
-use compiler.driver.cache.remote.remote_policy.{ProducerClass, remote_read_main_allowed}
+use compiler.driver.cache.remote.namespace_policy.{
+    CacheNamespace, NamespacePolicy,
+    cache_namespace_path, namespace_policy_may_read, namespace_policy_may_write,
+    policy_requires_strict_verification,
+    NS_MAIN, NS_BRANCH
+}
 
-# Exact-key remote lookup input. `expected_schema_version` and
-# `expected_action_digest` are what step 2 validates against what comes
-# back — a mismatch is a hard reject, never a "close enough" acceptance.
-struct RemoteLookupRequest:
-    namespace: text              # e.g. "remote/<repo-id>/main"
+use std.fs.{File, Dir, read_file}
+
+# ============================================================================
+# Protocol values
+# ============================================================================
+
+val REMOTE_BACKEND_LOCAL_FAKE = "local_fs_fake"
+val REMOTE_BACKEND_NONE = "none"
+
+struct RemoteResult:
+    ok: bool
+    fatal: bool         # true only when a release lane lost required evidence
+    reason: text
+
+fn remote_result_ok() -> RemoteResult:
+    RemoteResult(ok: true, fatal: false, reason: "")
+
+# Best-effort failure: local build stays successful.
+fn remote_result_soft_fail(reason: text) -> RemoteResult:
+    RemoteResult(ok: false, fatal: false, reason: reason)
+
+fn remote_result_fatal(reason: text) -> RemoteResult:
+    RemoteResult(ok: false, fatal: true, reason: reason)
+
+# One stored action mapping. `receipt_digest` is the provenance handle; the
+# mapping is meaningless to a main-namespace reader without it.
+struct RemoteActionEntry:
+    found: bool
     action_digest: text
-    expected_schema_version: i64
-
-# What a remote fetch call returns, before any verification — untrusted
-# until every check below passes.
-struct RemoteActionMapping:
-    namespace: text
-    action_digest: text
-    schema_version: i64
     result_manifest_digest: text
-    receipt_digest: text?        # PromotionReceiptDigest, for trusted namespaces
+    receipt_digest: text
 
-struct RemoteResultManifest:
-    digest: text                 # claimed digest, verified against recompute
-    action_digest: text
-    artifact_digests: [text]
-    dependency_manifest: text
-    aop_group_roots: [text]
-    block_manifest_root: text?
+fn remote_action_entry_missing() -> RemoteActionEntry:
+    RemoteActionEntry(found: false, action_digest: "", result_manifest_digest: "", receipt_digest: "")
 
-struct RemoteArtifact:
-    digest: text                 # claimed digest, verified against recompute
-    bytes: text
+# ============================================================================
+# Client
+# ============================================================================
 
-# Injectable transport — fetch-only. There is intentionally no `put`/`push`/
-# `publish` method on this trait: a transport that cannot write cannot be
-# misused to write, regardless of caller bugs.
-trait RemoteTransport:
-    fn fetch_action_mapping(request: RemoteLookupRequest) -> RemoteActionMapping?
-    fn fetch_result_manifest(digest: text) -> RemoteResultManifest?
-    fn fetch_artifact(digest: text) -> RemoteArtifact?
-    fn recompute_digest(content: text) -> text   # sha256 or fake, per test/prod wiring
+struct RemoteCacheClient:
+    backend: text
+    root: text                  # local-fs fake root; a real backend ignores it
+    policy: NamespacePolicy
 
-# Outcome of a full verified lookup. `Verified` carries everything a local
-# publisher (C1's tier_router, out of this agent's scope) needs to publish a
-# LOCAL machine-cache mapping. Every rejection variant names which step of
-# the §14.2 sequence failed, for diagnosability.
-enum RemoteLookupResult:
-    Miss
-    Verified(RemoteResultManifest, [RemoteArtifact])
-    RejectedPolicyDenied
-    RejectedActionDigestMismatch
-    RejectedSchemaVersionMismatch
-    RejectedManifestDigestMismatch
-    RejectedManifestActionMismatch
-    RejectedArtifactDigestMismatch(text)
+fn remote_client_local_fake(root: text, policy: NamespacePolicy) -> RemoteCacheClient:
+    RemoteCacheClient(backend: REMOTE_BACKEND_LOCAL_FAKE, root: root, policy: policy)
 
-# Step-ordered verified lookup. `producer` gates step 3 (promotion/provenance
-# policy) via remote_policy.spl — a producer class without read-main rights
-# never even issues a fetch.
-fn remote_lookup_verified(transport: RemoteTransport, request: RemoteLookupRequest, producer: ProducerClass) -> RemoteLookupResult:
-    # Step 3 gate, checked before any fetch: a producer without read rights
-    # gets no data at all, not merely an unused one.
-    if not remote_read_main_allowed(producer):
-        return RemoteLookupResult.RejectedPolicyDenied
+fn remote_client_disabled(policy: NamespacePolicy) -> RemoteCacheClient:
+    RemoteCacheClient(backend: REMOTE_BACKEND_NONE, root: "", policy: policy)
 
-    # Step 1: fetch action mapping.
-    val mapping_opt = transport.fetch_action_mapping(request)
-    val mapping = match mapping_opt:
-        case Some(m): m
-        case nil: return RemoteLookupResult.Miss
+# Digests are 64 hex chars; a short one is a caller bug and gets its own shard.
+fn remote_shard_head(digest: text) -> text:
+    if digest.len() < 2:
+        return "__"
+    digest.substring(0, 2)
 
-    # Step 2: validate namespace, schema, and exact ActionDigest.
-    if mapping.namespace != request.namespace:
-        return RemoteLookupResult.RejectedPolicyDenied
-    if mapping.action_digest != request.action_digest:
-        return RemoteLookupResult.RejectedActionDigestMismatch
-    if mapping.schema_version != request.expected_schema_version:
-        return RemoteLookupResult.RejectedSchemaVersionMismatch
+fn remote_shard_path(root: text, kind: text, digest: text) -> text:
+    root + "/" + kind + "/sha256/" + remote_shard_head(digest) + "/" + digest
 
-    # Step 4: fetch the immutable result manifest.
-    val manifest_opt = transport.fetch_result_manifest(mapping.result_manifest_digest)
-    val manifest = match manifest_opt:
-        case Some(m): m
-        case nil: return RemoteLookupResult.Miss
+fn remote_action_path(client: RemoteCacheClient, ns: CacheNamespace, action_digest: text) -> text:
+    client.root + "/" + cache_namespace_path(ns) + "/sha256/" + remote_shard_head(action_digest) + "/" + action_digest
 
-    # Step 5: verify its digest — the manifest's OWN claimed digest must
-    # equal the digest the action index pointed us at, AND the manifest's
-    # internal action_digest must match the one we asked for.
-    if manifest.digest != mapping.result_manifest_digest:
-        return RemoteLookupResult.RejectedManifestDigestMismatch
-    if manifest.action_digest != request.action_digest:
-        return RemoteLookupResult.RejectedManifestActionMismatch
+# ----------------------------------------------------------------------------
+# Reads
+# ----------------------------------------------------------------------------
 
-    # Step 6: verify every referenced artifact digest while materializing.
-    var artifacts: [RemoteArtifact] = []
-    for artifact_digest in manifest.artifact_digests:
-        val artifact_opt = transport.fetch_artifact(artifact_digest)
-        val artifact = match artifact_opt:
-            case Some(a): a
-            case nil: return RemoteLookupResult.RejectedArtifactDigestMismatch(artifact_digest)
-        val recomputed = transport.recompute_digest(artifact.bytes)
-        if recomputed != artifact_digest:
-            return RemoteLookupResult.RejectedArtifactDigestMismatch(artifact_digest)
-        if artifact.digest != artifact_digest:
-            return RemoteLookupResult.RejectedArtifactDigestMismatch(artifact_digest)
-        artifacts.push(artifact)
+fn remote_get_action(client: RemoteCacheClient, ns: CacheNamespace, action_digest: text) -> RemoteActionEntry:
+    if client.backend == REMOTE_BACKEND_NONE:
+        return remote_action_entry_missing()
+    if not namespace_policy_may_read(client.policy, ns.kind):
+        return remote_action_entry_missing()
+    val path = remote_action_path(client, ns, action_digest)
+    if not File.exists(path):
+        return remote_action_entry_missing()
+    val body = read_file(path)
+    val parts = body.split("|")
+    if parts.len() < 3:
+        return remote_action_entry_missing()
+    RemoteActionEntry(found: true, action_digest: parts[0], result_manifest_digest: parts[1], receipt_digest: parts[2])
 
-    # Step 7 (target/schema/dependency/AOP/block-manifest root validation) is
-    # deferred to the local publisher, which has the full local context
-    # (target profile, compiler schema) to compare against — this module
-    # only proves the fetched bytes are exactly what the remote index
-    # claims. Step 8 (publish locally) is likewise the local publisher's
-    # job, out of this agent's scope; this function returns `Verified` with
-    # everything needed to do it, and performs no local or remote write
-    # itself.
-    RemoteLookupResult.Verified(manifest, artifacts)
+fn remote_has_blob(client: RemoteCacheClient, digest: text) -> bool:
+    if client.backend == REMOTE_BACKEND_NONE:
+        return false
+    File.exists(remote_shard_path(root: client.root, kind: "cas", digest: digest))
 
-export RemoteLookupRequest, RemoteActionMapping, RemoteResultManifest, RemoteArtifact
-export RemoteTransport, RemoteLookupResult
-export remote_lookup_verified
+# ----------------------------------------------------------------------------
+# Writes
+# ----------------------------------------------------------------------------
+
+fn remote_put_blob(client: RemoteCacheClient, digest: text, content: text) -> RemoteResult:
+    if client.backend == REMOTE_BACKEND_NONE:
+        return remote_result_soft_fail("remote backend disabled")
+    val path = remote_shard_path(root: client.root, kind: "cas", digest: digest)
+    val dir = client.root + "/cas/sha256/" + remote_shard_head(digest)
+    if not Dir.create_all(dir):
+        return remote_result_soft_fail("cannot create cas shard dir")
+    if File.exists(path):
+        return remote_result_ok()
+    if not File.write(path, content):
+        return remote_result_soft_fail("cas write failed")
+    remote_result_ok()
+
+# The single policy-gated write. Namespace authority is checked HERE, so no
+# caller can reach the main namespace by constructing a path by hand.
+fn remote_put_action(client: RemoteCacheClient, ns: CacheNamespace, entry: RemoteActionEntry) -> RemoteResult:
+    if client.backend == REMOTE_BACKEND_NONE:
+        return remote_result_soft_fail("remote backend disabled")
+    if not namespace_policy_may_write(client.policy, ns.kind):
+        return remote_result_soft_fail("namespace policy forbids writing the " + ns.kind + " namespace as role " + client.policy.role)
+    if ns.kind == NS_MAIN and entry.receipt_digest == "":
+        return remote_result_soft_fail("main namespace mapping requires a signed promotion receipt")
+    val path = remote_action_path(client, ns, entry.action_digest)
+    val dir = client.root + "/" + cache_namespace_path(ns) + "/sha256/" + remote_shard_head(entry.action_digest)
+    if not Dir.create_all(dir):
+        return remote_result_soft_fail("cannot create action shard dir")
+    val body = entry.action_digest + "|" + entry.result_manifest_digest + "|" + entry.receipt_digest
+    if not File.write(path, body):
+        # §15.4: ordinary cache capacity is not a correctness requirement, so a
+        # lost mapping is soft — EXCEPT on a release lane, where the provenance
+        # evidence itself failed to persist.
+        if policy_requires_strict_verification(client.policy.role):
+            return remote_result_fatal("release lane could not persist the action mapping for " + entry.action_digest)
+        return remote_result_soft_fail("action mapping write failed")
+    remote_result_ok()
+
+# ----------------------------------------------------------------------------
+# Promotion transport
+# ----------------------------------------------------------------------------
+# Copies the MAPPING only. It never touches `cas/` — the blobs the branch entry
+# points at are content-addressed and already visible to main readers.
+#
+# NOTE: a present, digest-verified blob proves only that the bytes hash to the
+# digest. It says NOTHING about which action produced them. The mapping this
+# function copies is the trusted claim, and it is admitted only by
+# `promotion_gate_admit`.
+fn remote_promote(client: RemoteCacheClient, from_ns: CacheNamespace, to_ns: CacheNamespace, action_digest: text, receipt_digest: text) -> RemoteResult:
+    if to_ns.kind != NS_MAIN and to_ns.kind != NS_BRANCH:
+        return remote_result_soft_fail("promotion target must be a shared namespace")
+    val src = remote_get_action(client, from_ns, action_digest)
+    if not src.found:
+        return remote_result_soft_fail("source mapping not found in " + from_ns.kind + " namespace")
+    val promoted = RemoteActionEntry(
+        found: true,
+        action_digest: src.action_digest,
+        result_manifest_digest: src.result_manifest_digest,
+        receipt_digest: receipt_digest
+    )
+    remote_put_action(client, to_ns, promoted)

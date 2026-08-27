@@ -13,33 +13,9 @@
 
 REQ-SOS-TD-001..004: fail-closed production desktop/toolchain evidence.
 
-## At a Glance
+## Procedure
 
-| Field | Value |
-|-------|-------|
-| Category | Hardware & OS |
-| Status | Active |
-| Source | `test/03_system/os/simpleos_toolchain_deployment_desktop_boot_spec.spl` |
-| Updated | 2026-08-26 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-REQ-SOS-TD-001..004: fail-closed production desktop/toolchain evidence.
-
-## Scenarios
-
-### REQ-SOS-TD-001..004: SimpleOS deployment desktop toolchain
-
-#### boots one admitted production image and runs guest-built Hello World
-
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
+### Prepare the toolchain deployment image
 
 ```simple
 # @req REQ-SSPEC-SYSTEM
@@ -66,14 +42,13 @@ Reproduction: this block contains the complete executable scenario source.
 
 Requirements covered by the scenarios in this manual:
 
-- `REQ-SSPEC-SYSTEM`
-- `REQ-SOS-TD-001..004`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `bdaf1ae03b113e1cd1e24a8d93046776c7e106c65551422f8b78f577be2ce7f6`; maintenance tool `1`, rules `ssdoc-rules/1`.
+| Requirement | Executable owner | Evidence |
+|---|---|---|
+| REQ-SOS-TD-001 | prepare step | admitted producer and target payload identity |
+| REQ-004 / REQ-SOS-TD-002 | manifest checker | embedded manifest and image receipt |
+| REQ-SOS-TD-003 / NFR-005 | desktop checker | OVMF/GRUB/QEMU/desktop/framebuffer receipt |
+| REQ-005 / REQ-007 | guest checker | exact commands, ELF, output, and rc |
+| REQ-SOS-TD-004 | all helpers | frozen names, steps, and fail-closed behavior |
 
 Source SHA-256: `bdaf1ae03b113e1cd1e24a8d93046776c7e106c65551422f8b78f577be2ce7f6`.
 <!-- sspec-maintain:provenance:end -->

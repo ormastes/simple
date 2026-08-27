@@ -19,10 +19,7 @@ use os.kernel.loader.executable_launch_arguments_v1.{
 use os.kernel.loader.spawn_authority.{
     spawn_authority_check_spawn, spawn_authority_spawn_caps
 }
-use os.kernel.loader.spawn_recipes.{
-    spawn_recipe_is_migrated, spawn_recipe_seed_parent_caps,
-    spawn_recipe_launch_contract_valid
-}
+use os.kernel.loader.spawn_recipes.{spawn_recipe_launch_contract_valid}
 use os.kernel.types.capability_types.{CapabilitySet}
 use os.kernel.arch_adapt.arm32_user_mapping.{
     Arm32UserPageTableStateV1, Arm32UserPageTableErrorV1,
@@ -47,11 +44,6 @@ use os.kernel.scheduler.process_execution_observation.{
 }
 
 extern fn serial_println(msg: text)
-
-fn _arm32_parent_caps_v1(caller: i64, recipe: i64) -> CapabilitySet:
-    if not spawn_recipe_is_migrated(recipe): return CapabilitySet.empty()
-    val owner = if caller < 0: 0u64 else: caller.to_u64()
-    spawn_recipe_seed_parent_caps(recipe, owner)
 
 pub(package) fn arm32_fs_exec_spawn_authenticated_with_launch_v1(
     scheduler: Scheduler,
@@ -106,12 +98,10 @@ pub(package) fn arm32_fs_exec_spawn_authenticated_with_launch_v1(
     val mapped = arm32_user_page_table_prepare_with_launch_v1(
         preparation.identity, preparation.image_handle, consumer,
         source.unwrap(), entry_point, launch)
-    if mapped.state != Arm32UserPageTableStateV1.MappedBlocked or
-        mapped.error != Arm32UserPageTableErrorV1.None:
+    if mapped.state != Arm32UserPageTableStateV1.MappedBlocked or mapped.error != Arm32UserPageTableErrorV1.None:
         return FsExecAuthenticatedRunResultV1(exit_code: -8, evidence: nil, scheduler: scheduler)
     val reserved = arm32_user_page_table_reserve_adoption_v1(mapped)
-    if reserved.state != Arm32UserPageTableStateV1.AdoptionReserved or
-        reserved.error != Arm32UserPageTableErrorV1.None:
+    if reserved.state != Arm32UserPageTableStateV1.AdoptionReserved or reserved.error != Arm32UserPageTableErrorV1.None:
         _ = arm32_user_page_table_destroy_v1(mapped)
         return FsExecAuthenticatedRunResultV1(exit_code: -13, evidence: nil, scheduler: scheduler)
 
@@ -130,9 +120,8 @@ pub(package) fn arm32_fs_exec_spawn_authenticated_with_launch_v1(
     var owner = adopted.scheduler
     owner.exit_task_by_id(child, exit_code.to_i32())
     val collected = owner.wait_for_collect(TaskId(id: 0u64), child, false)
-    if wait_collect_result_error(collected) != 0 or
-        wait_collect_result_pid(collected) != child.id or
-        wait_collect_result_status(collected) != exit_code.to_i32():
+    val collection_mismatch = wait_collect_result_error(collected) != 0 or wait_collect_result_pid(collected) != child.id or wait_collect_result_status(collected) != exit_code.to_i32()
+    if collection_mismatch:
         _ = scheduler_execution_discard_terminal_v2(child.id)
         return FsExecAuthenticatedRunResultV1(exit_code: -10, evidence: nil, scheduler: owner)
     val delivered = scheduler_execution_compare_and_deliver_reaped_v2(

@@ -3,6 +3,9 @@
 use std.common.sdn.parser.{parse_with_issues}
 use std.common.sdn.value.{SdnValue}
 use std.nogc_sync_mut.composition.types.{SimpleAppRecordV1, SimpleInterfaceGroupRecordV1, SimpleProviderRecordV1, SimpleBindingRecordV1, SimpleCliCommandRecordV1, SimpleCompositionImageV1}
+use std.nogc_sync_mut.composition.sci_extension_router.{sci_empty_route_section_view_v1}
+use std.nogc_sync_mut.composition.sci_generator.{SciRouteSourceV1}
+use std.nogc_sync_mut.composition.cli_option_route.{cli_namespace_shape_valid_v1, CLI_AVAILABILITY_REQUIRED, CLI_AVAILABILITY_OPTIONAL, CLI_MISSING_ERROR, CLI_MISSING_WARN_SKIP, CLI_MISSING_SILENT_SKIP}
 
 fn _source_text(value: SdnValue, key: text) -> Result<text, text>:
     match value.get(key):
@@ -346,6 +349,57 @@ fn parse_composition_source_v1(source: text) -> Result<SimpleCompositionImageV1,
                 providers: _sort_providers(providers),
                 bindings: _sort_bindings(bindings),
                 commands: _sort_commands(commands),
+                cli_option_route_view: sci_empty_route_section_view_v1(),
                 bytes: [],
                 composition_digest: ""
             ))
+
+fn _extension_availability(value: text) -> Result<i64, text>:
+    if value == "" or value == "required": return Ok(CLI_AVAILABILITY_REQUIRED)
+    if value == "optional": return Ok(CLI_AVAILABILITY_OPTIONAL)
+    Err("composition-error: invalid-extension-availability: " + value)
+
+fn _extension_missing_policy(value: text) -> Result<i64, text>:
+    if value == "" or value == "error": return Ok(CLI_MISSING_ERROR)
+    if value == "warn_skip": return Ok(CLI_MISSING_WARN_SKIP)
+    if value == "silent_skip": return Ok(CLI_MISSING_SILENT_SKIP)
+    Err("composition-error: invalid-extension-missing-policy: " + value)
+
+# Projection for canonical SCI section 10. The one-based binding index is
+# authority data: it prevents a runtime provider-id lookup from choosing a
+# different service owned by the same provider.
+fn composition_cli_extension_routes_v1(source: text) -> Result<[SciRouteSourceV1], text>:
+    val image = parse_composition_source_v1(source)?
+    match parse_with_issues(source):
+        case Err(e): return Err("composition-error: parse: " + e)
+        case Ok(parsed):
+            if parsed.1.len() > 0: return Err("composition-error: duplicate-source-key: " + parsed.1[0].path)
+            val value = match parsed.0.get("cli_extensions"):
+                case None: return Ok([])
+                case Some(v): v
+            val entries = match value.as_array():
+                case None: return Err("composition-error: invalid-field: cli_extensions must be an array")
+                case Some(v): v
+            var out: [SciRouteSourceV1] = []
+            var i = 0
+            while i < entries.len():
+                val ns = _source_text(entries[i], "namespace")?
+                val provider = _source_text(entries[i], "provider")?
+                if not cli_namespace_shape_valid_v1(ns): return Err("composition-error: invalid-extension-namespace: " + ns)
+                var j = 0
+                while j < out.len():
+                    if out[j].key == ns: return Err("composition-error: duplicate-extension-namespace: " + ns)
+                    j = j + 1
+                val availability = _extension_availability(_source_optional_text(entries[i], "availability")?)?
+                val policy = _extension_missing_policy(_source_optional_text(entries[i], "missing_policy")?)?
+                var binding_index = -1
+                j = 0
+                while j < image.bindings.len():
+                    if image.bindings[j].provider_id == provider:
+                        if binding_index >= 0: return Err("composition-error: ambiguous-extension-binding: " + provider)
+                        binding_index = j
+                    j = j + 1
+                if binding_index < 0: return Err("composition-error: unresolved-extension-provider: " + provider)
+                out.push(SciRouteSourceV1(key: ns, route_kind: 10, command_id: availability, target: provider, component_count: policy, flags: binding_index + 1))
+                i = i + 1
+            Ok(out)

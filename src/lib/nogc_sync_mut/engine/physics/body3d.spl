@@ -1,0 +1,228 @@
+# Physics System — Internal 3D Rigid Body
+#
+# Internal rigid body used by PhysicsWorld3D. NOT exported to users directly.
+# Implements semi-implicit Euler integration with linear and angular damping.
+# Uses quaternion-based rotation with Vec3 angular velocity and diagonal inertia tensor.
+#
+# Usage (internal only):
+#   var body = InternalBody3D.create_dynamic(Vec3(x: 0.0, y: 5.0, z: 0.0), 1.0)
+#   body.apply_force(Vec3(x: 0.0, y: -9.81, z: 0.0))
+#   body.integrate(0.016)
+
+use std.common.engine.math3d.{Vec3, Quaternion}
+
+# ============================================================================
+# InternalBody3D
+# ============================================================================
+
+class InternalBody3D:
+    position: Vec3
+    velocity: Vec3
+    force: Vec3
+    mass: f64
+    inv_mass: f64
+    rotation: Quaternion
+    angular_velocity: Vec3
+    torque: Vec3
+    inertia: Vec3           # Diagonal of inertia tensor
+    inv_inertia: Vec3
+    linear_damping: f64
+    angular_damping: f64
+    is_static_body: bool
+    is_kinematic: bool
+    gravity_scale: f64
+
+impl InternalBody3D:
+
+    # ------------------------------------------------------------------
+    # Static constructors
+    # ------------------------------------------------------------------
+
+    static fn create_dynamic(pos: Vec3, mass: f64) -> InternalBody3D:
+        val im = 1.0 / mass
+        val inertia_val = mass * 0.4
+        val ii = 1.0 / inertia_val
+        InternalBody3D(
+            position: pos,
+            velocity: Vec3.zero(),
+            force: Vec3.zero(),
+            mass: mass,
+            inv_mass: im,
+            rotation: Quaternion.identity(),
+            angular_velocity: Vec3.zero(),
+            torque: Vec3.zero(),
+            inertia: Vec3(x: inertia_val, y: inertia_val, z: inertia_val),
+            inv_inertia: Vec3(x: ii, y: ii, z: ii),
+            linear_damping: 0.01,
+            angular_damping: 0.01,
+            is_static_body: false,
+            is_kinematic: false,
+            gravity_scale: 1.0
+        )
+
+    static fn create_static(pos: Vec3) -> InternalBody3D:
+        InternalBody3D(
+            position: pos,
+            velocity: Vec3.zero(),
+            force: Vec3.zero(),
+            mass: 0.0,
+            inv_mass: 0.0,
+            rotation: Quaternion.identity(),
+            angular_velocity: Vec3.zero(),
+            torque: Vec3.zero(),
+            inertia: Vec3.zero(),
+            inv_inertia: Vec3.zero(),
+            linear_damping: 0.0,
+            angular_damping: 0.0,
+            is_static_body: true,
+            is_kinematic: false,
+            gravity_scale: 0.0
+        )
+
+    static fn create_kinematic(pos: Vec3) -> InternalBody3D:
+        InternalBody3D(
+            position: pos,
+            velocity: Vec3.zero(),
+            force: Vec3.zero(),
+            mass: 0.0,
+            inv_mass: 0.0,
+            rotation: Quaternion.identity(),
+            angular_velocity: Vec3.zero(),
+            torque: Vec3.zero(),
+            inertia: Vec3.zero(),
+            inv_inertia: Vec3.zero(),
+            linear_damping: 0.0,
+            angular_damping: 0.0,
+            is_static_body: false,
+            is_kinematic: true,
+            gravity_scale: 0.0
+        )
+
+    # ------------------------------------------------------------------
+    # Integration — Semi-implicit Euler with quaternion rotation
+    # ------------------------------------------------------------------
+
+    me integrate(dt: f64):
+        if self.is_static_body or self.is_kinematic:
+            self.force = Vec3.zero()
+            self.torque = Vec3.zero()
+            return
+
+        # Linear: a = F * inv_mass
+        val ax = self.force.x * self.inv_mass
+        val ay = self.force.y * self.inv_mass
+        val az = self.force.z * self.inv_mass
+
+        # v += a * dt
+        val new_vx = self.velocity.x + ax * dt
+        val new_vy = self.velocity.y + ay * dt
+        val new_vz = self.velocity.z + az * dt
+
+        # Apply linear damping: v *= (1 - damping * dt)
+        val damp = 1.0 - self.linear_damping * dt
+        val dvx = new_vx * damp
+        val dvy = new_vy * damp
+        val dvz = new_vz * damp
+        self.velocity = Vec3(x: dvx, y: dvy, z: dvz)
+
+        # p += v * dt
+        val px = self.position.x + self.velocity.x * dt
+        val py = self.position.y + self.velocity.y * dt
+        val pz = self.position.z + self.velocity.z * dt
+        self.position = Vec3(x: px, y: py, z: pz)
+
+        # Angular: alpha = torque * inv_inertia (component-wise for diagonal tensor)
+        val alpha_x = self.torque.x * self.inv_inertia.x
+        val alpha_y = self.torque.y * self.inv_inertia.y
+        val alpha_z = self.torque.z * self.inv_inertia.z
+
+        # omega += alpha * dt
+        var omega_x = self.angular_velocity.x + alpha_x * dt
+        var omega_y = self.angular_velocity.y + alpha_y * dt
+        var omega_z = self.angular_velocity.z + alpha_z * dt
+
+        # Apply angular damping
+        val ang_damp = 1.0 - self.angular_damping * dt
+        omega_x = omega_x * ang_damp
+        omega_y = omega_y * ang_damp
+        omega_z = omega_z * ang_damp
+        self.angular_velocity = Vec3(x: omega_x, y: omega_y, z: omega_z)
+
+        # Quaternion integration:
+        # dq = 0.5 * Quaternion(omega.x, omega.y, omega.z, 0) * rotation
+        val omega_quat = Quaternion(
+            x: 0.5 * omega_x * dt,
+            y: 0.5 * omega_y * dt,
+            z: 0.5 * omega_z * dt,
+            w: 0.0
+        )
+        val dq = omega_quat.mul(self.rotation)
+        val new_rot = Quaternion(
+            x: self.rotation.x + dq.x,
+            y: self.rotation.y + dq.y,
+            z: self.rotation.z + dq.z,
+            w: self.rotation.w + dq.w
+        )
+        self.rotation = new_rot.normalize()
+
+        # Clear forces
+        self.force = Vec3.zero()
+        self.torque = Vec3.zero()
+
+    # ------------------------------------------------------------------
+    # Force / Impulse application
+    # ------------------------------------------------------------------
+
+    me apply_force(f: Vec3):
+        self.force = self.force.add(f)
+
+    me apply_impulse(impulse: Vec3):
+        val dx = impulse.x * self.inv_mass
+        val dy = impulse.y * self.inv_mass
+        val dz = impulse.z * self.inv_mass
+        self.velocity = Vec3(
+            x: self.velocity.x + dx,
+            y: self.velocity.y + dy,
+            z: self.velocity.z + dz
+        )
+
+    me apply_torque_impulse(t: Vec3):
+        self.angular_velocity = Vec3(
+            x: self.angular_velocity.x + t.x * self.inv_inertia.x,
+            y: self.angular_velocity.y + t.y * self.inv_inertia.y,
+            z: self.angular_velocity.z + t.z * self.inv_inertia.z
+        )
+
+    me clear_forces():
+        self.force = Vec3.zero()
+        self.torque = Vec3.zero()
+
+    # ------------------------------------------------------------------
+    # Inertia setters for specific shapes
+    # ------------------------------------------------------------------
+
+    me set_inertia_sphere(mass: f64, radius: f64):
+        val i_val = 0.4 * mass * radius * radius
+        self.inertia = Vec3(x: i_val, y: i_val, z: i_val)
+        if i_val > 0.0:
+            val inv = 1.0 / i_val
+            self.inv_inertia = Vec3(x: inv, y: inv, z: inv)
+        else:
+            self.inv_inertia = Vec3.zero()
+
+    me set_inertia_box(mass: f64, hx: f64, hy: f64, hz: f64):
+        val factor = mass / 12.0
+        val ix = factor * (4.0 * hy * hy + 4.0 * hz * hz)
+        val iy = factor * (4.0 * hx * hx + 4.0 * hz * hz)
+        val iz = factor * (4.0 * hx * hx + 4.0 * hy * hy)
+        self.inertia = Vec3(x: ix, y: iy, z: iz)
+        var inv_ix = 0.0
+        var inv_iy = 0.0
+        var inv_iz = 0.0
+        if ix > 0.0:
+            inv_ix = 1.0 / ix
+        if iy > 0.0:
+            inv_iy = 1.0 / iy
+        if iz > 0.0:
+            inv_iz = 1.0 / iz
+        self.inv_inertia = Vec3(x: inv_ix, y: inv_iy, z: inv_iz)

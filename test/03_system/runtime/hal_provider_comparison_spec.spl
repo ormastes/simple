@@ -1,0 +1,96 @@
+# codex-system-test
+# @feature mcdc_hal_runtime_hardening
+# @req REQ-009 REQ-010 REQ-011 REQ-012 REQ-013 REQ-014 REQ-015 NFR-005 NFR-006 NFR-007 NFR-010
+# @evidence-class source-contract
+
+use std.spec.*
+use std.common.structural.hal_provider.*
+
+fn provider_capacity() -> HalCapacityV1:
+    hal_capacity_v1(128, 128, 16, 1024, 8, 1024, 1024, 2000)
+
+fn provider_operation(preferred: HalProviderKind = HalProviderKind.PureSimple) -> HalOperationV1:
+    hal_operation_v1_default_critical(101, 7, 16777215, 11, 12,
+        HalSideEffectPolicy.PlanThenCommit, provider_capacity(), 13, 14, preferred)
+
+fn provider_request() -> HalProviderRequestV1:
+    hal_provider_request_v1(101, 7, 9, 0, 64, 128, 16)
+
+fn provider_lane(provider: HalProviderKind, digest: i64,
+                 present: bool = true, reaped: bool = true) -> HalProviderLaneV1:
+    val ordinal = hal_provider_kind_to_i64(provider)
+    hal_provider_lane_v1(provider, present, true, reaped, true,
+        hal_isolation_receipt_v1(provider, 7, 100 + ordinal, 200 + ordinal,
+            0, 0, 0, true, true),
+        hal_provider_result_v1(provider, 7, HalStatusV1.Ok, 0,
+            digest, 20, 30, 40, 64, 128, 16, 16,
+            HalOverflowKindV1.None, -1, 0, 5))
+
+describe "isolated deterministic rt(hal) provider comparison":
+    it "should default to critical assurance and the safe compare mode":
+        step("Run the selected assurance mode")
+        val operation = provider_operation()
+        expect(hal_assurance_to_i64(operation.assurance_floor)).to_equal(HAL_ASSURANCE_CRITICAL)
+        expect(hal_run_mode_to_i64(hal_default_run_mode())).to_equal(
+            hal_run_mode_to_i64(HalRunMode.AlphaCompare))
+
+    it "should deterministically compare isolated Pure C and Rust lanes":
+        val receipt = hal_orchestrate_provider_receipts_v1(
+            provider_operation(), provider_request(), HalRunMode.AlphaCompare,
+            provider_lane(HalProviderKind.PureSimple, 10),
+            provider_lane(HalProviderKind.C, 10),
+            provider_lane(HalProviderKind.Rust, 10))
+        step("Compare the bounded oracle")
+        expect(receipt.admitted_mask).to_equal(7)
+        expect(receipt.difference_pair_mask).to_equal(0)
+        expect(receipt.commit_allowed).to_be(true)
+        expect(receipt.selected_provider).to_equal(HalProviderKind.PureSimple)
+
+    it "should stop alpha commit on any normalized difference":
+        val receipt = hal_orchestrate_provider_receipts_v1(
+            provider_operation(), provider_request(), HalRunMode.AlphaCompare,
+            provider_lane(HalProviderKind.PureSimple, 10),
+            provider_lane(HalProviderKind.C, 11),
+            provider_lane(HalProviderKind.Rust, 10))
+        expect(receipt.status).to_equal(HalOrchestrationStatusV1.Diverged)
+        expect(receipt.difference_pair_mask).to_be_greater_than(0)
+        expect(receipt.commit_allowed).to_be(false)
+
+    it "should allow beta preferred commit while retaining bounded divergence":
+        val receipt = hal_orchestrate_provider_receipts_v1(
+            provider_operation(HalProviderKind.C), provider_request(),
+            HalRunMode.BetaCompare,
+            provider_lane(HalProviderKind.PureSimple, 10),
+            provider_lane(HalProviderKind.C, 11),
+            provider_lane(HalProviderKind.Rust, 10))
+        expect(receipt.difference_pair_mask).to_be_greater_than(0)
+        expect(receipt.commit_allowed).to_be(true)
+        expect(receipt.selected_provider).to_equal(HalProviderKind.C)
+
+    it "should execute only the preferred provider in normal mode":
+        val receipt = hal_orchestrate_provider_receipts_v1(
+            provider_operation(HalProviderKind.Rust), provider_request(),
+            HalRunMode.NormalPreferred,
+            provider_lane(HalProviderKind.PureSimple, 0, false),
+            provider_lane(HalProviderKind.C, 0, false),
+            provider_lane(HalProviderKind.Rust, 10))
+        expect(receipt.expected_mask).to_equal(4)
+        expect(receipt.received_mask).to_equal(4)
+        expect(receipt.commit_allowed).to_be(true)
+
+    it "should reject unreaped or misplaced provider receipts":
+        val receipt = hal_orchestrate_provider_receipts_v1(
+            provider_operation(), provider_request(), HalRunMode.AlphaCompare,
+            provider_lane(HalProviderKind.C, 10),
+            provider_lane(HalProviderKind.C, 10, true, false),
+            provider_lane(HalProviderKind.Rust, 10))
+        expect(receipt.status).to_equal(HalOrchestrationStatusV1.InvalidReceipt)
+        expect(receipt.rejected_mask).to_be_greater_than(0)
+        expect(receipt.commit_allowed).to_be(false)
+
+    it "should reject post-seal allocation and capacity overflow":
+        val storage = hal_sealed_storage_v1(128, 128, 16, 1024,
+            8, 1024, 1024, 1, true)
+        val oversized = hal_provider_request_v1(101, 7, 9, 96, 64, 128, 16)
+        expect(hal_sealed_storage_v1_admits(storage, provider_operation())).to_be(false)
+        expect(hal_provider_request_v1_well_formed(oversized)).to_be(false)

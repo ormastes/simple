@@ -1,7 +1,6 @@
 # `check-native-trailing-default-param.shs` fails at `Widget.stat(2)` — MIR lowering error: undefined variable Widget
 
 - **Filed:** 2026-08-17
-- **Status:** OPEN
 - **Status:** RESOLVED 2026-08-17 for the error this row names — the widened static-receiver guard is in `method_calls_literals.spl` and `undefined variable Widget` no longer appears in the guard output. The guard is still RED for an unrelated reason (native-build worker timeout); see `native_trailing_default_param_guard_three_stage_red_2026-08-17.md` Cause 2.
 - **Severity:** P1 — blocks pushes for every lane (guard is on the pre-push roster)
 - **Class:** MIR lowering of a static/associated method call on a class name

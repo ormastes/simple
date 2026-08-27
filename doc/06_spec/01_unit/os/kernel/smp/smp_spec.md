@@ -2,6 +2,30 @@
 
 > The SMP scaffold owns logical CPU discovery, AP startup bookkeeping, online CPU state, pending IPI masks, and the preemption disable counter used by scheduler and green-carrier wakeup paths. These tests exercise the interpreter-safe public API rather than importing private constants or mutating per-CPU globals directly.
 
+<!-- sdn-diagram:id=smp_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=smp_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+smp_spec -> std
+smp_spec -> os
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=smp_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 14 | 14 | 0 | 0 |
@@ -61,6 +85,7 @@ the named IPI accessors used by scheduler-facing code.
 ## Scenarios
 
 ### smp_init
+_Verify that smp_init sets up the per-CPU table with BSP online and all APs offline._
 
 #### BSP alone is online after init
 
@@ -417,8 +442,8 @@ expect smp_ipi_call_func().to_equal(0x8u32)
 
 ## Related Documentation
 
-- **Plan:** `doc/03_plan/sys_test/multicore_green.md`
-- **Research:** `doc/01_research/local/multicore_green.md`
+- **Plan:** [doc/03_plan/sys_test/multicore_green.md](doc/03_plan/sys_test/multicore_green.md)
+- **Research:** [doc/01_research/local/multicore_green.md](doc/01_research/local/multicore_green.md)
 
 
 </details>

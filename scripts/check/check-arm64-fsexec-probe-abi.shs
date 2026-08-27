@@ -1,0 +1,26 @@
+#!/bin/sh
+set -eu
+
+builder=scripts/os/build_simpleos_fs_exec_probe.shs
+handler=examples/09_embedded/simple_os/arch/arm64/boot/baremetal_stubs.c
+arm=$(awk '/^ arm64\)/{inside=1} inside{print} /^ ;;/{if(inside)exit}' "$builder")
+
+[ "$(printf '%s\n' "$arm" | grep -Fc 'mov x8,#60; svc #0')" -eq 1 ] || { echo 'FAIL: ARM64 probe must issue exactly one stdout SVC' >&2; exit 1; }
+printf '%s\n' "$arm" | grep -Fq 'mov x0,#37; mov x8,#0; svc #0' || { echo 'FAIL: ARM64 probe lacks exit37 SVC' >&2; exit 1; }
+if printf '%s\n' "$arm" | grep -Eq 'ldrb|subs x20|adrp x19'; then echo 'FAIL: ARM64 probe retains byte-stream stdout ABI' >&2; exit 1; fi
+printf '%s\n' "$arm" | grep -Fq 'nonce: .ascii "$placeholder"' || { echo 'FAIL: ARM64 payload identity nonce slot absent' >&2; exit 1; }
+
+grep -Fq 'a1 != arm64_user_stdout_len' "$handler" || { echo 'FAIL: handler exact-length validation absent' >&2; exit 1; }
+grep -Fq 'rt_arm64_user_as_translate(' "$handler" || { echo 'FAIL: handler user-pointer translation absent' >&2; exit 1; }
+grep -Fq '!= arm64_user_stdout_bytes[i]' "$handler" || { echo 'FAIL: handler expected-byte validation absent' >&2; exit 1; }
+
+if [ "$#" -gt 0 ]; then
+    elf=$1
+    code=$(llvm-objdump -d "$elf" | awk '/<_start>:/ {inside=1} inside{print} inside && /wfe/{exit}')
+    [ "$(printf '%s\n' "$code" | grep -c 'svc')" -eq 2 ] || { echo 'FAIL: linked probe must contain stdout+exit SVC only' >&2; exit 1; }
+    if printf '%s\n' "$code" | grep -Eq 'ldrb|subs[[:space:]]+x20'; then echo 'FAIL: linked probe retains byte loop' >&2; exit 1; fi
+    printf '%s\n' "$code" | grep -Eq 'mov[[:space:]]+x8, #0x3c' || { echo 'FAIL: linked probe lacks syscall60' >&2; exit 1; }
+    printf '%s\n' "$code" | grep -Eq 'mov[[:space:]]+x0, #0x25' || { echo 'FAIL: linked probe lacks exit37' >&2; exit 1; }
+fi
+
+echo 'PASS: ARM64 FSEXEC probe uses strict one-shot pointer+length stdout ABI'

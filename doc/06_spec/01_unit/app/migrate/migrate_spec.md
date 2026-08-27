@@ -1,6 +1,29 @@
-# Migrate Specification
+# Migrate Unit Tests
 
-> Tests covering Migration Types, Migration Plan, Migration Execution, Common Migrations.
+> 1. check
+
+<!-- sdn-diagram:id=migrate_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=migrate_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+migrate_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=migrate_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -9,7 +32,18 @@
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Migrate Specification
+# Migrate Unit Tests
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Feature IDs | #APP-MIGRATE-001 |
+| Category | App \| Migrate |
+| Status | Implemented |
+| Source | `test/01_unit/app/migrate/migrate_spec.spl` |
+| Updated | 2026-06-01 |
+| Generator | `simple spipe-docgen` (Simple) |
 
 ## Scenarios
 
@@ -17,22 +51,16 @@
 
 #### syntax migration
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- syntax migration
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("syntax migration")
 val kind = "syntax"
 check(kind == "syntax")
 ```
@@ -41,18 +69,16 @@ check(kind == "syntax")
 
 #### API migration
 
-- API migration
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("API migration")
 val kind = "api"
 check(kind == "api")
 ```
@@ -61,18 +87,16 @@ check(kind == "api")
 
 #### import path migration
 
-- import path migration
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("import path migration")
 val kind = "import"
 check(kind == "import")
 ```
@@ -81,18 +105,16 @@ check(kind == "import")
 
 #### deprecation migration
 
-- deprecation migration
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("deprecation migration")
 val kind = "deprecation"
 check(kind == "deprecation")
 ```
@@ -103,18 +125,16 @@ check(kind == "deprecation")
 
 #### plan has steps
 
-- plan has steps
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("plan has steps")
 val steps = 3
 check(steps > 0)
 ```
@@ -123,18 +143,16 @@ check(steps > 0)
 
 #### plan has dry-run option
 
-- plan has dry-run option
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("plan has dry-run option")
 val dry_run = true
 check(dry_run)
 ```
@@ -143,18 +161,16 @@ check(dry_run)
 
 #### plan shows affected files
 
-- plan shows affected files
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("plan shows affected files")
 val files = 10
 check(files > 0)
 ```
@@ -163,18 +179,16 @@ check(files > 0)
 
 #### plan estimates changes
 
-- plan estimates changes
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("plan estimates changes")
 val changes = 50
 check(changes > 0)
 ```
@@ -185,18 +199,16 @@ check(changes > 0)
 
 #### backup before migration
 
-- backup before migration
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("backup before migration")
 val backed_up = true
 check(backed_up)
 ```
@@ -205,18 +217,16 @@ check(backed_up)
 
 #### apply changes atomically
 
-- apply changes atomically
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("apply changes atomically")
 val atomic = true
 check(atomic)
 ```
@@ -225,18 +235,16 @@ check(atomic)
 
 #### rollback on failure
 
-- rollback on failure
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("rollback on failure")
 val can_rollback = true
 check(can_rollback)
 ```
@@ -245,18 +253,17 @@ check(can_rollback)
 
 #### report results
 
-- report results
+1. check
+2. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("report results")
 val migrated = 10
 val skipped = 2
 val failed = 0
@@ -270,18 +277,16 @@ check(failed == 0)
 
 #### rename function
 
-- rename function
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("rename function")
 val old_name = "old_fn"
 val new_name = "new_fn"
 check(old_name != new_name)
@@ -291,18 +296,16 @@ check(old_name != new_name)
 
 #### change import path
 
-- change import path
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("change import path")
 val old_path = "std.old_module"
 val new_path = "std.new_module"
 check(old_path != new_path)
@@ -312,18 +315,16 @@ check(old_path != new_path)
 
 #### update constructor syntax
 
-- update constructor syntax
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("update constructor syntax")
 val old_syntax = "Type.new()"
 val new_syntax = "Type()"
 check(old_syntax != new_syntax)
@@ -333,42 +334,22 @@ check(old_syntax != new_syntax)
 
 #### add type annotation
 
-- add type annotation
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("add type annotation")
 val before = "val x = 42"
 val after = "val x: i64 = 42"
 check(after.contains("i64"))
 ```
 
 </details>
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Application |
-| Status | Active |
-| Source | `test/01_unit/app/migrate/migrate_spec.spl` |
-| Updated | 2026-08-26 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering Migration Types, Migration Plan, Migration Execution, Common Migrations.
-- Migration Types
-- Migration Plan
-- Migration Execution
-- Common Migrations
 
 ## Scenario Summary
 
@@ -382,51 +363,3 @@ Tests covering Migration Types, Migration Plan, Migration Execution, Common Migr
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-UNIT`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `bd59b68317d7c95ebed935171bb35598ebfb398c669347deaaa4b47af9117e28`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `bd59b68317d7c95ebed935171bb35598ebfb398c669347deaaa4b47af9117e28`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `bd59b68317d7c95ebed935171bb35598ebfb398c669347deaaa4b47af9117e28`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/01_unit/app/migrate/migrate_spec.spl
-mirror: doc/06_spec/01_unit/app/migrate/migrate_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/app/migrate/migrate_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/app/migrate/migrate_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/app/migrate/migrate_spec.spl:20:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'syntax migration' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/migrate/migrate_spec.spl:26:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'API migration' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/migrate/migrate_spec.spl:32:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'import path migration' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

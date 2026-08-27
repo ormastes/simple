@@ -9,7 +9,6 @@ transition and kept with the authenticated transport facts that produced it.
 
 use os.sosix.core.capability_ref.SosixBufferRef
 use os.sosix.fs.registered_buffer_client_v1.{
-    SOSIX_FS_CLIENT_MAX_REGISTERED_BUFFER_BYTES_V1,
     SOSIX_FS_CLIENT_MEMORY_OWNED_COPY_V1,
     SosixFsClientRegistrationReceiptV1
 }
@@ -86,8 +85,6 @@ pub fn sosix_fs_service_register_owned_buffer_v1(
         return _reject_v1("unauthenticated-buffer-registration", registry)
     if buffer.generation == 0 or bytes.len() == 0:
         return _reject_v1("invalid-buffer-registration", registry)
-    if bytes.len().to_u64() > SOSIX_FS_CLIENT_MAX_REGISTERED_BUFFER_BYTES_V1:
-        return _reject_v1("buffer-too-large", registry)
     val known_access = SOSIX_FS_SERVICE_BUFFER_READ_V1 | SOSIX_FS_SERVICE_BUFFER_WRITE_V1
     if access == 0 or (access & ~known_access) != 0:
         return _reject_v1("invalid-buffer-access", registry)
@@ -131,8 +128,6 @@ pub fn sosix_fs_service_refresh_owned_buffer_v1(
 ) -> SosixFsBufferRegistryTransitionV1:
     if not _facts_valid_v1(facts):
         return _reject_v1("unauthenticated-buffer-refresh", registry)
-    if bytes.len().to_u64() > SOSIX_FS_CLIENT_MAX_REGISTERED_BUFFER_BYTES_V1:
-        return _reject_v1("buffer-too-large", registry)
     var entries = registry.buffers
     var index = 0u64
     while index < entries.len().to_u64():
@@ -194,26 +189,22 @@ fn _entry_matches_plan_v1(entry: SosixFsBufferEntryV1, plan: SosixFsServiceDispa
         entry.ref_.slot == plan.buffer_slot and
         entry.ref_.generation == plan.buffer_generation and
         entry.registration_id == plan.buffer_registration_id and
-        entry.byte_length <= SOSIX_FS_CLIENT_MAX_REGISTERED_BUFFER_BYTES_V1 and
         entry.byte_length == entry.bytes.len().to_u64()
 
 pub fn sosix_fs_service_lookup_dispatch_buffer_v1(
     registry: SosixFsServiceRegistryV1, plan: SosixFsServiceDispatchPlanV1
 ) -> SosixFsServiceBufferLookupV1:
     var matches = 0u32
-    var match_index = registry.buffers.len().to_u64()
-    var index = 0u64
-    while index < registry.buffers.len().to_u64():
-        if _entry_matches_plan_v1(registry.buffers[index], plan):
+    var found: [u8] = []
+    for entry in registry.buffers:
+        if _entry_matches_plan_v1(entry, plan):
             matches = matches + 1
-            match_index = index
-        index = index + 1
+            found = _copy_owned_bytes_v1(entry.bytes)
     if matches != 1:
         val reason = if matches == 0: "stale-dispatch-buffer" else: "ambiguous-dispatch-buffer"
         return SosixFsServiceBufferLookupV1(accepted: false, reason: reason, bytes: [])
     SosixFsServiceBufferLookupV1(
-        accepted: true, reason: "dispatch-buffer-ready",
-        bytes: _copy_owned_bytes_v1(registry.buffers[match_index].bytes))
+        accepted: true, reason: "dispatch-buffer-ready", bytes: found)
 
 pub fn sosix_fs_service_commit_dispatch_buffer_v1(
     registry: SosixFsServiceRegistryV1, plan: SosixFsServiceDispatchPlanV1,
@@ -221,8 +212,6 @@ pub fn sosix_fs_service_commit_dispatch_buffer_v1(
 ) -> SosixFsBufferRegistryTransitionV1:
     if not plan.ready:
         return _reject_v1("dispatch-plan-not-ready", registry)
-    if bytes.len().to_u64() > SOSIX_FS_CLIENT_MAX_REGISTERED_BUFFER_BYTES_V1:
-        return _reject_v1("buffer-too-large", registry)
     var entries = registry.buffers
     var match_index = entries.len().to_u64()
     var matches = 0u32

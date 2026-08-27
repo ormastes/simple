@@ -1,8 +1,7 @@
 # GUI Web 2D retained Metal/SIMD WM perf evidence gap
 
 - **Date:** 2026-07-06
-- Status: OPEN (P2)
-- Status re-verified 2026-08-17 by source inspection (triage shard 01).
+- **Status:** open
 - **Severity:** high
 - **Area:** GUI Web 2D, Engine2D Metal/SIMD, hosted WM, SimpleOS/QEMU WM
 

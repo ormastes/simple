@@ -2,6 +2,7 @@
 
 use std.fs_driver.mount_table.{MountTable, ExecuteOpenBinding}
 use std.fs_driver.types.{ExecuteTrust}
+use os.services.vfs.executable_read_v1.{vfs_open_authenticated_executable_v1}
 use os.kernel.loader.authenticated_media_reader.{authenticated_media_read_text_v1}
 use os.kernel.loader.authenticated_media_parser.{
     authenticated_media_field_v1, authenticated_media_u64_field_v1,
@@ -16,15 +17,18 @@ use std.common.contracts.execution.simpleos_executable_admission_v1.{
 use os.kernel.loader.executable_admission_pipeline.{
     ExecutableLoaderVerificationInputsV1, ExecutableLoaderCryptographicProofV1,
     executable_loader_admit_authenticated_open_binding_v1,
-    executable_loader_authority_owner_initialize
+    executable_loader_authority_owner_initialize, executable_loader_revoke
 }
 use os.kernel.loader.executable_crypto_authority.{
     ExecutableTrustedSignerV1, executable_loader_trust_roots_initialize
 }
 use os.kernel.loader.executable_load_plan_v1.{executable_load_consumer_new_v1}
 use os.kernel.loader.arm64_fs_exec_spawn.{arm64_fs_exec_spawn_authenticated_v1}
-use os.kernel.loader.spawn_recipes.{SPAWN_RECIPE_APP_LAUNCHER}
+use os.kernel.loader.spawn_recipes.{
+    SPAWN_RECIPE_AUTHENTICATED_SERVER, spawn_recipe_seed_parent_caps
+}
 use os.kernel.scheduler.scheduler_types.{Scheduler}
+use os.kernel.types.capability_types.{CapabilitySet}
 use os.kernel.loader.arm64_authenticated_media_policy.{arm64_authenticated_media_root_matches_pin_v1}
 use arm64_auth_trust_config.{
     arm64_authenticated_pinned_key_id_v1,
@@ -32,12 +36,14 @@ use arm64_auth_trust_config.{
     arm64_authenticated_pinned_public_key_hash_v1
 }
 
-pub fn arm64_authenticated_media_execute_server_v1(
-    scheduler: Scheduler, table: MountTable
+fn _arm64_authenticated_media_execute_server_v1(
+    scheduler: Scheduler, table: MountTable, caller: i64,
+    caller_caps: CapabilitySet?, argv: [text], envp: [text]
 ) -> i64:
     """Execute `/SERVERS.ELF` only from one authenticated execute-open snapshot."""
     var owner = table
-    val opened = owner.open_for_execute("/SERVERS.ELF", ExecuteTrust.Trusted)
+    val opened = vfs_open_authenticated_executable_v1(
+        owner, "/SERVERS.ELF", ExecuteTrust.Trusted)
     if opened.is_err(): return -13
     val binding: ExecuteOpenBinding = opened.unwrap()
     val manifest_record = authenticated_media_read_text_v1(owner, "/SERVER.MAN", 8192)
@@ -124,9 +130,21 @@ pub fn arm64_authenticated_media_execute_server_v1(
         ExecutableLoaderCryptographicProofV1(
             signer_key_id: key_id, signature: signature_bytes))
     if admitted.is_err(): return -13
+    # A cap-less compatibility caller cannot prove its launch ceiling.  Let
+    # the retired ABI revoke the opaque token; never reconstruct a pouch here.
+    if caller_caps.?:
+        return arm64_fs_exec_spawn_authenticated_with_launch_v1(
+            scheduler, owner, authorities.unwrap(), admitted.unwrap().authority_token,
+            executable_load_consumer_new_v1("simpleos", "aarch64", "simpleos"),
+            admitted.unwrap().entry_point, caller, caller_caps.unwrap(), "/SERVERS.ELF",
+            argv, envp, SPAWN_RECIPE_APP_LAUNCHER).exit_code
     arm64_fs_exec_spawn_authenticated_v1(
         scheduler, owner, authorities.unwrap(), admitted.unwrap().authority_token,
         executable_load_consumer_new_v1("simpleos", "aarch64", "simpleos"),
-        admitted.unwrap().entry_point, 0, "/SERVERS.ELF", SPAWN_RECIPE_APP_LAUNCHER)
+        admitted.unwrap().entry_point, 0,
+        spawn_recipe_seed_parent_caps(SPAWN_RECIPE_AUTHENTICATED_SERVER, 0u64),
+        "/SERVERS.ELF",
+        SPAWN_RECIPE_AUTHENTICATED_SERVER)
 
 export arm64_authenticated_media_execute_server_v1
+export arm64_authenticated_media_execute_server_with_caps_v1

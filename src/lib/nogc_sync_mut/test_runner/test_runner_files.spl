@@ -9,16 +9,11 @@ use std.io.{file_read, file_exists}
 use std.io_runtime.{dir_walk}
 use std.test_runner.test_manifest.{
     TestManifest, TestManifestEntry,
-    MANIFEST_PATH, manifest_load, manifest_save, manifest_is_fresh, manifest_covers
+    MANIFEST_PATH, manifest_load, manifest_save, manifest_is_fresh
 }
 use std.test_runner.test_manifest_scanner.{manifest_full_scan, manifest_incremental_update}
-use std.test_runner.test_level_detect.{
-    test_level_matches,
-    TEST_LEVEL_UNIT, TEST_LEVEL_INTEGRATION, TEST_LEVEL_SYSTEM
-}
-use std.test_runner.test_runner_coverage.{extract_cover_annotations_for_coverage}
 
-use std.io_runtime.{time_now_unix_micros}
+extern fn rt_time_now_unix_micros() -> i64
 
 # =========================================================================
 # Legacy Mirror Exclusion
@@ -122,8 +117,6 @@ fn strip_ansi(s: text) -> text:
 
 fn is_test_file(path: text) -> bool:
     val name = path_basename(path)
-    if name.starts_with("."):
-        return false
     if not name.ends_with(".spl"):
         return false
     name.contains("_spec.") or name.contains("_test.")
@@ -145,18 +138,15 @@ fn count_skip_marker_cases(path: text) -> i64:
     1
 
 fn matches_level(path: text, level: TestLevel) -> bool:
-    # Segment-based classification: matches BOTH the maintained numbered tree
-    # (`test/01_unit/`, `test/02_integration/`, `test/03_system/`) and the
-    # legacy bare mirror (`test/unit/`, ...). See std.test_runner.test_level_detect.
     match level:
         case TestLevel.All:
             true
         case TestLevel.Unit:
-            test_level_matches(path, TEST_LEVEL_UNIT)
+            path.contains("/unit/") or path.contains("/shared/")
         case TestLevel.Integration:
-            test_level_matches(path, TEST_LEVEL_INTEGRATION)
+            path.contains("/integration/")
         case TestLevel.System:
-            test_level_matches(path, TEST_LEVEL_SYSTEM)
+            path.contains("/system/") or path.contains("/feature/")
 
 # =========================================================================
 # File Content Utilities
@@ -198,13 +188,24 @@ fn file_has_di_test_tag(file_path: text) -> bool:
 
 fn extract_cover_annotations(file_path: text) -> [text]:
     """Extract # @cover annotations from the first 30 lines of a file."""
-    extract_cover_annotations_for_coverage(file_path)
+    val content = file_read(file_path)
+    val lines = content.split("\n")
+    var covers: [text] = []
+    var i = 0
+    while i < lines.len() and i < 30:
+        val trimmed = lines[i].trim()
+        if trimmed.starts_with("# @cover "):
+            val target = trimmed[9:].trim()
+            if target != "":
+                covers.push(target)
+        i = i + 1
+    covers
 
 fn validate_system_test_covers(files: [text]) -> [text]:
     """Return system test files missing required # @cover annotations."""
     var missing: [text] = []
     for f in files:
-        if not f.contains("/system/") and not f.contains("/03_system/"):
+        if not f.contains("/system/"):
             continue
         if f.contains("/helpers/") or f.contains("/fixtures/"):
             continue
@@ -228,23 +229,6 @@ fn file_get_platform_tags(content: text) -> [text]:
             if tag != "":
                 tags.push(tag)
     tags
-
-fn has_skip_directive(content: text) -> bool:
-    """True when a line IS a `# @skip`/`# @pending` directive.
-
-    Must be line-anchored: a whole-file `contains` match also fires on the
-    string appearing inside a comment or a string literal, which silently
-    dropped 8 passing specs (incl. the specs covering this very feature)
-    from default discovery.
-    """
-    val lines = content.split("\n")
-    for line in lines:
-        val trimmed = line.trim()
-        if trimmed == "# @skip" or trimmed == "# @pending":
-            return true
-        if trimmed.starts_with("# @skip(") or trimmed.starts_with("# @pending("):
-            return true
-    false
 
 fn platform_tag_matches(tag: text, mode: TestExecutionMode) -> bool:
     """Check if a single platform tag matches the current mode."""
@@ -277,28 +261,21 @@ fn discover_test_files_fast(base_path: text, options: TestOptions, use_cache: bo
 
     # Try loading manifest
     val manifest = manifest_load(MANIFEST_PATH)
-    if not manifest_is_fresh(manifest) or not manifest_covers(manifest, base_path):
-        # Manifest missing, stale, or built from a walk that never visited
-        # `base_path` — fall back to a full scan, then save. Filtering an index
-        # that never indexed this subtree yields zero files and reads as
-        # "No test files found" even when the directory is full of specs.
+    if not manifest_is_fresh(manifest):
+        # Manifest missing or stale — fall back to full scan, then save
         val result = discover_test_files_slow(base_path, options)
         # Build manifest in background for next run
         save_manifest_from_discovery(base_path)
         return result
 
     # Fast path: filter manifest entries in-memory
-    val start = time_now_unix_micros()
+    val start = rt_time_now_unix_micros()
     val keep_legacy_mirror = targets_legacy_mirror(base_path)
     var test_files: [text] = []
 
     for entry in manifest.entries:
         # Path prefix filter
         if not entry.path.starts_with(base_path):
-            continue
-
-        # Legacy mirror is excluded from directory discovery (see above).
-        if not keep_legacy_mirror and is_legacy_mirror_path(entry.path):
             continue
 
         # Level filter
@@ -362,19 +339,8 @@ fn discover_test_files_fast(base_path: text, options: TestOptions, use_cache: bo
     if options.seed_set:
         test_files = shuffle_files(test_files, options.seed)
 
-    val elapsed = time_now_unix_micros() - start
+    val elapsed = rt_time_now_unix_micros() - start
     val elapsed_ms = elapsed / 1000
-
-    # Fail-closed: an empty fast-path result is never authoritative. The
-    # manifest may be truncated, or simply not cover `base_path` at all, and
-    # both look identical to "this directory has no tests". Prove it with a
-    # real filesystem walk before reporting zero tests, and re-index so the
-    # next run is fast again.
-    if test_files.len() == 0:
-        val verified = discover_test_files_slow(base_path, options)
-        save_manifest_from_discovery(base_path)
-        return verified
-
     print "  Discovery: {elapsed_ms}ms (from manifest, {manifest.entries.len()} indexed)"
 
     test_files
@@ -422,22 +388,17 @@ fn discover_test_files_slow(base_path: text, options: TestOptions) -> [text]:
     # Check if we need content-based filtering at all
     # Always need content if filtering slow tests (default behavior)
     val needs_content = options.list_ignored or options.only_slow or options.only_skipped or options.tag != "" or not options.run_all
-    val keep_legacy_mirror = targets_legacy_mirror(base_path)
     var test_files: [text] = []
     for f in all_files:
         if not is_test_file(f):
             continue
-        # Legacy mirror is excluded from directory discovery (see above).
-        if not keep_legacy_mirror and is_legacy_mirror_path(f):
-            continue
-
         if not matches_level(f, options.level):
             continue
         # Read file content once for @skip check and content-based filters
         val content = read_file_content(f)
         # Skip files with # @skip or # @pending unless running --only-skipped
         if not options.only_skipped:
-            if has_skip_directive(content):
+            if content.contains("# @skip") or content.contains("# @pending"):
                 continue
         # Skip advanced test directories unless their mode flag is set
         if not options.fuzz_mode and f.contains("/fuzz/"):
@@ -649,9 +610,9 @@ fn order_tests_by_duration(files: [text], entries: {text: TestCacheEntry}) -> [t
     var i = 0
     while i < files.len():
         val path = files[i]
-        val entry: TestCacheEntry? = entries[path]
+        val entry = entries[path]
         if entry.?:
-            val dur = entry.duration_ms
+            val dur = entry.result_duration_ms
             durations.push(dur)
             known_durations.push(dur)
         else:

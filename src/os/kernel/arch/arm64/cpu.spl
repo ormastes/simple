@@ -1,8 +1,8 @@
 # ARM64 CPU Primitives — AArch64 System Register Access
 #
-# Implements AArch64 system register operations as capability-confined inline
-# assembly. ARM64 uses system registers (accessed via MSR/MRS) instead of x86
-# MSRs or RISC-V CSRs.
+# Wraps AArch64 system register operations via extern functions
+# (implemented in assembly or C runtime). ARM64 uses system registers
+# (accessed via MSR/MRS) instead of x86 MSRs or RISC-V CSRs.
 #
 # Key system registers:
 #   CurrentEL     — Current exception level (EL0-EL3)
@@ -15,15 +15,33 @@
 #   DAIF          — Interrupt mask bits (Debug, SError, IRQ, FIQ)
 #   MPIDR_EL1     — Multiprocessor Affinity Register (CPU ID)
 
-use os.kernel.smp.cpu_topology_identity_owner_v1.{
-    CpuHardwareIdentityKindV1,
-}
-use os.kernel.smp.cpu_identity_runtime_surface_v1.{
-    cpu_identity_runtime_resolve_or_unresolved_v1,
-}
+# ============================================================================
+# AArch64 System Register Access (extern — implemented in asm/C runtime)
+# ============================================================================
+
+extern fn rt_arm64_mrs_currentel() -> u64
+extern fn rt_arm64_msr_vbar_el1(value: u64)
+extern fn rt_arm64_msr_ttbr0_el1(value: u64)
+extern fn rt_arm64_msr_ttbr1_el1(value: u64)
+extern fn rt_arm64_mrs_ttbr0_el1() -> u64
+extern fn rt_arm64_mrs_ttbr1_el1() -> u64
+extern fn rt_arm64_msr_tcr_el1(value: u64)
+extern fn rt_arm64_msr_mair_el1(value: u64)
+extern fn rt_arm64_msr_sctlr_el1(value: u64)
+extern fn rt_arm64_mrs_sctlr_el1() -> u64
+extern fn rt_arm64_isb()
+extern fn rt_arm64_dsb()
+extern fn rt_arm64_dmb()
+extern fn rt_arm64_wfi()
+extern fn rt_arm64_wfe()
+extern fn rt_arm64_tlbi_alle1()
+extern fn rt_arm64_tlbi_vae1(vaddr: u64)
+extern fn rt_arm64_daif_set(mask: u64)
+extern fn rt_arm64_daif_clr(mask: u64)
+extern fn rt_arm64_mrs_mpidr_el1() -> u64
 
 # ============================================================================
-# System Register Primitive Functions
+# System Register Wrapper Functions
 # ============================================================================
 
 fn mrs_currentel() -> u64:
@@ -31,13 +49,7 @@ fn mrs_currentel() -> u64:
 
     Values: 0x00=EL0, 0x04=EL1, 0x08=EL2, 0x0C=EL3.
     """
-    var value: u64 = 0
-    unsafe(capabilities: [inline_asm]):
-        asm volatile(
-            "mrs {result}, CurrentEL",
-            result = out(reg) value
-        )
-    value
+    rt_arm64_mrs_currentel()
 
 fn current_el() -> u64:
     """Return the current exception level as a number (0-3)."""
@@ -45,86 +57,39 @@ fn current_el() -> u64:
 
 fn msr_vbar_el1(value: u64):
     """Set VBAR_EL1 — Exception Vector Base Address for EL1."""
-    unsafe(capabilities: [inline_asm]):
-        asm volatile(
-            "msr VBAR_EL1, {operand}",
-            operand = in(reg) value
-        )
+    rt_arm64_msr_vbar_el1(value)
 
 fn msr_ttbr0_el1(value: u64):
     """Set TTBR0_EL1 — Translation Table Base Register 0 (user space)."""
-    unsafe(capabilities: [inline_asm]):
-        asm volatile(
-            "msr TTBR0_EL1, {operand}",
-            operand = in(reg) value,
-            clobber("memory")
-        )
+    rt_arm64_msr_ttbr0_el1(value)
 
 fn msr_ttbr1_el1(value: u64):
     """Set TTBR1_EL1 — Translation Table Base Register 1 (kernel space)."""
-    unsafe(capabilities: [inline_asm]):
-        asm volatile(
-            "msr TTBR1_EL1, {operand}",
-            operand = in(reg) value,
-            clobber("memory")
-        )
+    rt_arm64_msr_ttbr1_el1(value)
 
 fn mrs_ttbr0_el1() -> u64:
     """Read TTBR0_EL1 — current user-space page table base."""
-    var value: u64 = 0
-    unsafe(capabilities: [inline_asm]):
-        asm volatile(
-            "mrs {result}, TTBR0_EL1",
-            result = out(reg) value
-        )
-    value
+    rt_arm64_mrs_ttbr0_el1()
 
 fn mrs_ttbr1_el1() -> u64:
     """Read TTBR1_EL1 — current kernel-space page table base."""
-    var value: u64 = 0
-    unsafe(capabilities: [inline_asm]):
-        asm volatile(
-            "mrs {result}, TTBR1_EL1",
-            result = out(reg) value
-        )
-    value
+    rt_arm64_mrs_ttbr1_el1()
 
 fn msr_tcr_el1(value: u64):
     """Set TCR_EL1 — Translation Control Register."""
-    unsafe(capabilities: [inline_asm]):
-        asm volatile(
-            "msr TCR_EL1, {operand}",
-            operand = in(reg) value,
-            clobber("memory")
-        )
+    rt_arm64_msr_tcr_el1(value)
 
 fn msr_mair_el1(value: u64):
     """Set MAIR_EL1 — Memory Attribute Indirection Register."""
-    unsafe(capabilities: [inline_asm]):
-        asm volatile(
-            "msr MAIR_EL1, {operand}",
-            operand = in(reg) value,
-            clobber("memory")
-        )
+    rt_arm64_msr_mair_el1(value)
 
 fn msr_sctlr_el1(value: u64):
     """Set SCTLR_EL1 — System Control Register (MMU, caches, alignment)."""
-    unsafe(capabilities: [inline_asm]):
-        asm volatile(
-            "msr SCTLR_EL1, {operand}",
-            operand = in(reg) value,
-            clobber("memory")
-        )
+    rt_arm64_msr_sctlr_el1(value)
 
 fn mrs_sctlr_el1() -> u64:
     """Read SCTLR_EL1 — current system control register value."""
-    var value: u64 = 0
-    unsafe(capabilities: [inline_asm]):
-        asm volatile(
-            "mrs {result}, SCTLR_EL1",
-            result = out(reg) value
-        )
-    value
+    rt_arm64_mrs_sctlr_el1()
 
 fn isb():
     """Instruction Synchronization Barrier.
@@ -133,11 +98,7 @@ fn isb():
     before subsequent instructions execute. Required after writing
     system registers that affect instruction execution.
     """
-    unsafe(capabilities: [inline_asm]):
-        asm volatile(
-            "isb",
-            clobber("memory")
-        )
+    rt_arm64_isb()
 
 fn dsb():
     """Data Synchronization Barrier (full system).
@@ -146,11 +107,7 @@ fn dsb():
     subsequent memory accesses. Required before TLB invalidation
     and after page table modifications.
     """
-    unsafe(capabilities: [inline_asm]):
-        asm volatile(
-            "dsb sy",
-            clobber("memory")
-        )
+    rt_arm64_dsb()
 
 fn dmb():
     """Data Memory Barrier (full system).
@@ -158,38 +115,22 @@ fn dmb():
     Ensures ordering of memory accesses but doesn't wait for
     completion. Lighter weight than DSB.
     """
-    unsafe(capabilities: [inline_asm]):
-        asm volatile(
-            "dmb sy",
-            clobber("memory")
-        )
+    rt_arm64_dmb()
 
 fn wfi():
     """Wait For Interrupt — halt CPU until interrupt fires."""
-    unsafe(capabilities: [inline_asm]):
-        asm volatile(
-            "wfi",
-            clobber("memory")
-        )
+    rt_arm64_wfi()
 
 fn wfe():
     """Wait For Event — halt CPU until event fires."""
-    unsafe(capabilities: [inline_asm]):
-        asm volatile(
-            "wfe",
-            clobber("memory")
-        )
+    rt_arm64_wfe()
 
 fn tlbi_alle1():
     """Invalidate all TLB entries at EL1.
 
     Must be followed by DSB + ISB to ensure completion.
     """
-    unsafe(capabilities: [inline_asm]):
-        asm volatile(
-            "tlbi alle1",
-            clobber("memory")
-        )
+    rt_arm64_tlbi_alle1()
 
 fn tlbi_vae1(vaddr: u64):
     """Invalidate TLB entry for a single virtual address at EL1.
@@ -197,42 +138,29 @@ fn tlbi_vae1(vaddr: u64):
     The address should be the page-aligned VA shifted right by 12.
     Must be followed by DSB + ISB to ensure completion.
     """
-    val operand = vaddr >> 12
-    unsafe(capabilities: [inline_asm]):
-        asm volatile(
-            "tlbi vae1, {operand}",
-            operand = in(reg) operand,
-            clobber("memory")
-        )
+    rt_arm64_tlbi_vae1(vaddr >> 12)
 
-fn daif_set_all():
-    """Mask all DAIF exception classes with the architectural immediate."""
-    unsafe(capabilities: [inline_asm]):
-        asm volatile(
-            "msr DAIFSet, #15",
-            clobber("memory")
-        )
+# DAIF mask bits
+val DAIF_D: u64 = 1 << 3   # Debug exceptions
+val DAIF_A: u64 = 1 << 2   # SError (asynchronous abort)
+val DAIF_I: u64 = 1 << 1   # IRQ
+val DAIF_F: u64 = 1 << 0   # FIQ
+val DAIF_ALL: u64 = 0xF    # All interrupt types
 
-fn daif_clear_irq_fiq():
-    """Unmask IRQ and FIQ with the architectural immediate."""
-    unsafe(capabilities: [inline_asm]):
-        asm volatile(
-            "msr DAIFClr, #3",
-            clobber("memory")
-        )
+fn daif_set(mask: u64):
+    """Set (mask/disable) DAIF interrupt bits. MSR DAIFSet, #mask."""
+    rt_arm64_daif_set(mask)
+
+fn daif_clr(mask: u64):
+    """Clear (unmask/enable) DAIF interrupt bits. MSR DAIFClr, #mask."""
+    rt_arm64_daif_clr(mask)
 
 fn mrs_mpidr_el1() -> u64:
     """Read MPIDR_EL1 — Multiprocessor Affinity Register.
 
     Bits [7:0] = Aff0 (core ID within cluster).
     """
-    var value: u64 = 0
-    unsafe(capabilities: [inline_asm]):
-        asm volatile(
-            "mrs {result}, MPIDR_EL1",
-            result = out(reg) value
-        )
-    value
+    rt_arm64_mrs_mpidr_el1()
 
 # ============================================================================
 # Arm64Cpu — HAL-Compatible CPU Interface
@@ -249,9 +177,8 @@ struct Arm64Cpu:
 
 impl Arm64Cpu:
     fn cpu_id() -> u64:
-        """Resolve the full current MPIDR through the boot-sealed census."""
-        cpu_identity_runtime_resolve_or_unresolved_v1(
-            CpuHardwareIdentityKindV1.ArmMpidr, mrs_mpidr_el1())
+        """Return current CPU core ID from MPIDR_EL1 Aff0 field."""
+        mrs_mpidr_el1() & 0xFF
 
     fn cpu_address_width() -> u64:
         """Return virtual address width in bits (64 for AArch64)."""
@@ -259,11 +186,11 @@ impl Arm64Cpu:
 
     fn cpu_enable_interrupts():
         """Enable IRQ and FIQ interrupts (clear DAIF I and F bits)."""
-        daif_clear_irq_fiq()
+        daif_clr(DAIF_I | DAIF_F)
 
     fn cpu_disable_interrupts():
         """Disable all maskable interrupts (set all DAIF bits)."""
-        daif_set_all()
+        daif_set(DAIF_ALL)
 
     fn cpu_halt():
         """Halt CPU until next interrupt (WFI)."""
@@ -271,7 +198,7 @@ impl Arm64Cpu:
 
     fn cpu_halt_loop():
         """Disable interrupts and halt forever."""
-        daif_set_all()
+        daif_set(DAIF_ALL)
         while true:
             wfi()
 

@@ -1,7 +1,6 @@
 ---
 id: interp_module_global_stale_read_in_spec_blocks_2026-07-05
-Status: OPEN (P2)
-Status re-verified 2026-08-17 by source inspection (triage shard 01).
+status: OPEN
 severity: medium
 discovered: 2026-07-05
 discovered_by: std.diag (easy-debug-infra P0) implementation + spec work
@@ -59,27 +58,3 @@ be spec-tested to expose read accessors for all mutable state.
 
 Interpreter-specific: spec `it` block execution context vs module-function
 execution context for shared module-level `var` storage.
-
-## Relationship to sspec_it_block_loses_cross_module_class_mutation (checked, NOT the same bug)
-
-2026-07-17 (lane S30): while root-causing and fixing
-`doc/08_tracking/bug/sspec_it_block_loses_cross_module_class_mutation_2026-07-17.md`
-("cross-module `mut`-param class mutation lost inside `it` blocks"), that
-doc's task explicitly asked whether it shares a root cause with this one. It
-does not, despite both surfacing as "an `it` block loses a mutation":
-
-- This bug is about a **module-level `var`** read directly by bare
-  identifier from an `it`-block closure, going stale relative to
-  `MODULE_GLOBALS` synchronization timing for that closure's environment.
-- The other bug is about the **call-dispatch table** (`FUNCTION_OVERLOADS`)
-  routing a cross-module function call through the wrong interpreter
-  execution path (overload-resolution) whenever that name ends up
-  registered more than once — which silently skipped `mut`-parameter
-  write-back for the callee's *own local parameter binding*, independent of
-  any module-level `var`.
-
-Different subsystems (`MODULE_GLOBALS` env-refresh timing vs
-`FUNCTION_OVERLOADS` call dispatch), different fix locations, no shared
-mechanism. The other bug's fix does not resolve this one; this bug remains
-**open**. If you land a fix here, check back against the other doc's Root
-Cause section rather than assuming they merge.

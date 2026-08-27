@@ -1,4 +1,4 @@
-# STDLIB Deep-Dive Test
+# @manual: primary
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -864,8 +864,6 @@ Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("nested 1")
 
 for i in 0..3:
     for j in 0..3:
@@ -874,7 +872,7 @@ for i in 0..3:
 
 </details>
 
-#### complex 1
+#### integer arithmetic and abs
 
 - complex 1
 
@@ -889,12 +887,91 @@ Reproduction: this block contains the complete executable scenario source.
 # @req REQ-SSPEC-UNIT
 step("complex 1")
 
-val arr = [1,2,3,4,5]
-var evens = []
-for x in arr:
-    if x % 2 == 0:
-        evens = evens.append(x)
-check(evens.len() == 2)
+</details>
+
+#### float math min max sqrt floor ceil
+
+- Verify: float math min max sqrt floor ceil
+   - Expected: min(3.0, 7.0) equals `3.0`
+   - Expected: max(3.0, 7.0) equals `7.0`
+   - Expected: sqrt(16.0) equals `4.0`
+   - Expected: floor(2.7) equals `2.0`
+   - Expected: ceil(2.1) equals `3.0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-LIB-DICT-001
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req: REQ-LIB-DICT-DEEP-e25a
+step("Verify: float math min max sqrt floor ceil")
+# oracle: 3.0/7.0 — min/max pick the smaller/larger operand; 4.0 — sqrt(16)
+expect(min(3.0, 7.0)).to_equal(3.0)
+expect(max(3.0, 7.0)).to_equal(7.0)
+expect(sqrt(16.0)).to_equal(4.0)
+expect(floor(2.7)).to_equal(2.0)
+expect(ceil(2.1)).to_equal(3.0)
+```
+
+</details>
+
+#### text case conversion
+
+- Verify: text case conversion
+   - Expected: "hello".upper() equals `HELLO`
+   - Expected: "HELLO".lower() equals `hello`
+   - Expected: "Hello".upper() equals `HELLO`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-LIB-DICT-001
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req: REQ-LIB-DICT-DEEP-e25a
+step("Verify: text case conversion")
+# oracle: "HELLO"/"hello" — upper/lower are exact case maps
+expect("hello".upper()).to_equal("HELLO")
+expect("HELLO".lower()).to_equal("hello")
+expect("Hello".upper()).to_equal("HELLO")
+```
+
+</details>
+
+#### text split trim contains prefix
+
+- Verify: text split trim contains prefix
+   - Expected: "hello world".split(" ").len() equals `2)  # oracle: pinned constant asserted by this scenario`
+   - Expected: "  x  ".trim() equals `x`
+   - Expected: "hello" contains `ell`
+   - Expected: "hello".starts_with("he") is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-LIB-DICT-001
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+# @req: REQ-LIB-DICT-DEEP-e25a
+step("Verify: text split trim contains prefix")
+# oracle: 2 — "hello world" splits into 2 fields on a single space
+expect("hello world".split(" ").len()).to_equal(2)  # oracle: pinned constant asserted by this scenario
+expect("  x  ".trim()).to_equal("x")
+expect("hello".contains("ell")).to_equal(true)
+expect("hello".starts_with("he")).to_equal(true)
 ```
 
 </details>

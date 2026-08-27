@@ -3,7 +3,7 @@
 use std.tiny.common.status.{TinyStatus, TINY_ERR_CAPACITY, TINY_ERR_INVALID}
 use std.tiny.common.types.{TinyHandle, TinyRect}
 use std.tiny.pane.model.{TinyResolvedPane}
-use std.tiny.web.css.{TinyCssReceipt, TinyWebComputedStyle, TINY_CSS_DISPLAY_INLINE, TINY_CSS_DISPLAY_NONE, tiny_css_apply, tiny_css_parse}
+use std.tiny.web.css.{TinyCssArena, TinyCssReceipt, TinyWebComputedStyle, TINY_CSS_DISPLAY_INLINE, TINY_CSS_DISPLAY_NONE, tiny_css_apply}
 use std.tiny.web.model.{TinyWebNode, TinyWebReceipt, tiny_web_resolved_pane, TINY_WEB_BUTTON, TINY_WEB_INPUT, TINY_WEB_SPAN, TINY_WEB_TEXT}
 
 class TinyWebLayoutResult:
@@ -13,113 +13,168 @@ class TinyWebLayoutResult:
     panes: [TinyResolvedPane]
     styles: [TinyWebComputedStyle]
     rendered: [bool]
+    node_count: i32
+    pane_count: i32
+    style_count: i32
+    rendered_count: i32
     content_height: i32
 
-fn _tiny_web_layout_failure(status: TinyStatus, css_status: TinyStatus, nodes: [TinyWebNode]) -> TinyWebLayoutResult:
-    TinyWebLayoutResult(status: status, css_status: css_status, nodes: nodes, panes: [], styles: [], rendered: [], content_height: 0)
+class TinyWebLayoutArena:
+    nodes: [TinyWebNode]
+    panes: [TinyResolvedPane]
+    styles: [TinyWebComputedStyle]
+    rendered: [bool]
+    node_count: i32
+    pane_count: i32
+    style_count: i32
+    rendered_count: i32
+    capacity: i32
+    allocation_count: i32
+    reuse_count: i32
+
+    static fn bounded(capacity: i32) -> TinyWebLayoutArena:
+        var nodes: [TinyWebNode] = []
+        var panes: [TinyResolvedPane] = []
+        var styles: [TinyWebComputedStyle] = []
+        var rendered: [bool] = []
+        var index = 0
+        while index < capacity:
+            nodes.push(TinyWebNode.empty())
+            panes.push(TinyResolvedPane.empty())
+            styles.push(TinyWebComputedStyle.empty())
+            rendered.push(false)
+            index = index + 1
+        TinyWebLayoutArena(
+            nodes: nodes, panes: panes, styles: styles, rendered: rendered,
+            node_count: 0, pane_count: 0, style_count: 0, rendered_count: 0,
+            capacity: capacity, allocation_count: 4, reuse_count: 0,
+        )
+
+    me reset():
+        self.node_count = 0
+        self.pane_count = 0
+        self.style_count = 0
+        self.rendered_count = 0
+        self.reuse_count = self.reuse_count + 1
+
+    fn result(status: TinyStatus, css_status: TinyStatus, content_height: i32) -> TinyWebLayoutResult:
+        TinyWebLayoutResult(
+            status: status, css_status: css_status, nodes: self.nodes,
+            panes: self.panes, styles: self.styles, rendered: self.rendered,
+            node_count: self.node_count, pane_count: self.pane_count,
+            style_count: self.style_count, rendered_count: self.rendered_count,
+            content_height: content_height,
+        )
+
+    me layout(document: TinyWebReceipt, css: TinyCssReceipt, viewport: TinyRect, line_height: i32) -> TinyWebLayoutResult:
+        self.reset()
+        if not document.status.is_ok() and document.unsupported_count == 0:
+            return self.result(document.status, css.status, 0)
+        if not css.status.is_ok(): return self.result(css.status, css.status, 0)
+        if viewport.width <= 0 or viewport.height <= 0 or line_height <= 0:
+            return self.result(TinyStatus.error(TINY_ERR_INVALID, line_height), css.status, 0)
+        if document.node_count > self.capacity:
+            return self.result(TinyStatus.error(TINY_ERR_CAPACITY, document.node_count), css.status, 0)
+        if document.node_count == 0:
+            return self.result(TinyStatus.error(TINY_ERR_INVALID, 0), css.status, 0)
+        var copy_index = 0
+        while copy_index < document.node_count:
+            self.nodes[copy_index] = document.nodes[copy_index]
+            copy_index = copy_index + 1
+        self.node_count = document.node_count
+        var style_index = 0
+        while style_index < self.node_count:
+            var style = TinyWebComputedStyle.for_node(self.nodes[style_index])
+            if self.nodes[style_index].parent_index >= 0 and self.nodes[style_index].parent_index < self.style_count:
+                val parent_style = self.styles[self.nodes[style_index].parent_index]
+                style.color = parent_style.color
+                style.font_size = parent_style.font_size
+                style.line_height = parent_style.line_height
+            style = tiny_css_apply(self.nodes[style_index], css, style)
+            var visible = style.display != TINY_CSS_DISPLAY_NONE
+            if self.nodes[style_index].parent_index >= 0 and self.nodes[style_index].parent_index < self.rendered_count:
+                visible = visible and self.rendered[self.nodes[style_index].parent_index]
+            self.styles[style_index] = style
+            self.rendered[style_index] = visible
+            self.style_count = self.style_count + 1
+            self.rendered_count = self.rendered_count + 1
+            style_index = style_index + 1
+        var root = self.nodes[0]
+        root.bounds = viewport
+        self.nodes[0] = root
+        var cursor_y = viewport.y
+        var cursor_x = viewport.x
+        var layout_index = 1
+        while layout_index < self.node_count:
+            if not self.rendered[layout_index]:
+                var hidden = self.nodes[layout_index]
+                hidden.bounds = TinyRect.empty()
+                self.nodes[layout_index] = hidden
+                layout_index = layout_index + 1
+                continue
+            val kind = self.nodes[layout_index].kind
+            val style = self.styles[layout_index]
+            val indent = (self.nodes[layout_index].depth - 1) * 4
+            var available_width = viewport.width - indent - style.margin * 2
+            if available_width < 0: available_width = 0
+            var width = if style.width >= 0 and style.width < available_width: style.width else: available_width
+            if style.width >= 0 and available_width == 0: width = 0
+            val resolved_line_height = if style.line_height > 0: style.line_height else: line_height
+            if style.display == TINY_CSS_DISPLAY_INLINE or kind == TINY_WEB_SPAN or kind == TINY_WEB_TEXT:
+                val glyph_width = if style.font_size > 1: (style.font_size + 1) / 2 else: 1
+                val estimated = if self.nodes[layout_index].text_value.len() > 0: self.nodes[layout_index].text_value.len() * glyph_width else: glyph_width
+                val available = viewport.x + viewport.width - cursor_x
+                var used = if estimated < available: estimated else: available
+                if style.width >= 0 and style.width < used: used = style.width
+                if used < 0: used = 0
+                var node = self.nodes[layout_index]
+                node.bounds = TinyRect(x: cursor_x + style.margin, y: cursor_y + style.margin, width: used + style.padding * 2 + style.border * 2, height: resolved_line_height + style.padding * 2 + style.border * 2)
+                self.nodes[layout_index] = node
+                cursor_x = cursor_x + node.bounds.width + style.margin * 2
+            else:
+                if cursor_x != viewport.x: cursor_y = cursor_y + line_height
+                cursor_x = viewport.x
+                var height = if kind == TINY_WEB_BUTTON or kind == TINY_WEB_INPUT: resolved_line_height + 8 else: resolved_line_height
+                if style.height >= 0: height = style.height
+                var node = self.nodes[layout_index]
+                node.bounds = TinyRect(
+                    x: viewport.x + indent + style.margin, y: cursor_y + style.margin,
+                    width: width + style.padding * 2 + style.border * 2,
+                    height: height + style.padding * 2 + style.border * 2,
+                )
+                self.nodes[layout_index] = node
+                cursor_y = cursor_y + node.bounds.height + style.margin * 2
+            layout_index = layout_index + 1
+        if cursor_x != viewport.x: cursor_y = cursor_y + line_height
+        var child_index = self.node_count - 1
+        while child_index > 0:
+            val parent_index = self.nodes[child_index].parent_index
+            if self.rendered[child_index] and parent_index > 0 and parent_index < self.node_count and self.rendered[parent_index] and self.styles[parent_index].width < 0 and self.styles[parent_index].height < 0:
+                val child_bounds = self.nodes[child_index].bounds
+                var parent_node = self.nodes[parent_index]
+                val left = if parent_node.bounds.x < child_bounds.x: parent_node.bounds.x else: child_bounds.x
+                val top = if parent_node.bounds.y < child_bounds.y: parent_node.bounds.y else: child_bounds.y
+                val right = if parent_node.bounds.right() > child_bounds.right(): parent_node.bounds.right() else: child_bounds.right()
+                val bottom = if parent_node.bounds.bottom() > child_bounds.bottom(): parent_node.bounds.bottom() else: child_bounds.bottom()
+                parent_node.bounds = TinyRect(x: left, y: top, width: right - left, height: bottom - top)
+                self.nodes[parent_index] = parent_node
+            child_index = child_index - 1
+        var pane_index = 0
+        while pane_index < self.node_count:
+            var parent = TinyResolvedPane.root(TinyHandle.invalid(), viewport, viewport, 0, 0, 0)
+            if self.nodes[pane_index].parent_index >= 0 and self.nodes[pane_index].parent_index < self.pane_count:
+                parent = self.panes[self.nodes[pane_index].parent_index]
+            self.panes[pane_index] = tiny_web_resolved_pane(self.nodes[pane_index], pane_index, parent, viewport)
+            self.pane_count = self.pane_count + 1
+            pane_index = pane_index + 1
+        self.result(TinyStatus.ok(), css.status, cursor_y - viewport.y)
 
 fn tiny_web_layout_with_css(document: TinyWebReceipt, css: TinyCssReceipt, viewport: TinyRect, line_height: i32, max_layout_boxes: i32) -> TinyWebLayoutResult:
-    if not document.status.is_ok() and document.unsupported_count == 0:
-        return _tiny_web_layout_failure(document.status, css.status, document.nodes)
-    if not css.status.is_ok():
-        return _tiny_web_layout_failure(css.status, css.status, document.nodes)
-    if viewport.width <= 0 or viewport.height <= 0 or line_height <= 0:
-        return _tiny_web_layout_failure(TinyStatus.error(TINY_ERR_INVALID, line_height), css.status, document.nodes)
-    if document.nodes.len() > max_layout_boxes:
-        return _tiny_web_layout_failure(TinyStatus.error(TINY_ERR_CAPACITY, document.nodes.len()), css.status, document.nodes)
-    if document.nodes.len() == 0:
-        return _tiny_web_layout_failure(TinyStatus.error(TINY_ERR_INVALID, 0), css.status, document.nodes)
-    var nodes = document.nodes
-    var styles: [TinyWebComputedStyle] = []
-    var rendered: [bool] = []
-    var style_index = 0
-    while style_index < nodes.len():
-        var style = TinyWebComputedStyle.for_node(nodes[style_index])
-        if nodes[style_index].parent_index >= 0 and nodes[style_index].parent_index < styles.len():
-            val parent_style = styles[nodes[style_index].parent_index]
-            style.color = parent_style.color
-            style.font_size = parent_style.font_size
-            style.line_height = parent_style.line_height
-        # Matching declarations on this node override inherited values.
-        style = tiny_css_apply(nodes[style_index], css, style)
-        var visible = style.display != TINY_CSS_DISPLAY_NONE
-        if nodes[style_index].parent_index >= 0 and nodes[style_index].parent_index < rendered.len():
-            visible = visible and rendered[nodes[style_index].parent_index]
-        styles.push(style)
-        rendered.push(visible)
-        style_index = style_index + 1
-    var root = nodes[0]
-    root.bounds = viewport
-    nodes[0] = root
-    var cursor_y = viewport.y
-    var cursor_x = viewport.x
-    for i in 1..nodes.len():
-        if not rendered[i]:
-            var hidden = nodes[i]
-            hidden.bounds = TinyRect.empty()
-            nodes[i] = hidden
-            continue
-        val kind = nodes[i].kind
-        val style = styles[i]
-        val indent = (nodes[i].depth - 1) * 4
-        var available_width = viewport.width - indent - style.margin * 2
-        if available_width < 0: available_width = 0
-        var width = if style.width >= 0 and style.width < available_width: style.width else: available_width
-        if style.width >= 0 and available_width == 0: width = 0
-        val resolved_line_height = if style.line_height > 0: style.line_height else: line_height
-        if style.display == TINY_CSS_DISPLAY_INLINE or kind == TINY_WEB_SPAN or kind == TINY_WEB_TEXT:
-            val glyph_width = if style.font_size > 1: (style.font_size + 1) / 2 else: 1
-            val estimated = if nodes[i].text_value.len() > 0: nodes[i].text_value.len() * glyph_width else: glyph_width
-            val available = viewport.x + viewport.width - cursor_x
-            var used = if estimated < available: estimated else: available
-            if style.width >= 0 and style.width < used: used = style.width
-            if used < 0: used = 0
-            var node = nodes[i]
-            node.bounds = TinyRect(x: cursor_x + style.margin, y: cursor_y + style.margin, width: used + style.padding * 2 + style.border * 2, height: resolved_line_height + style.padding * 2 + style.border * 2)
-            nodes[i] = node
-            cursor_x = cursor_x + node.bounds.width + style.margin * 2
-        else:
-            if cursor_x != viewport.x: cursor_y = cursor_y + line_height
-            cursor_x = viewport.x
-            var height = if kind == TINY_WEB_BUTTON or kind == TINY_WEB_INPUT: resolved_line_height + 8 else: resolved_line_height
-            if style.height >= 0: height = style.height
-            var node = nodes[i]
-            node.bounds = TinyRect(
-                x: viewport.x + indent + style.margin, y: cursor_y + style.margin,
-                width: width + style.padding * 2 + style.border * 2,
-                height: height + style.padding * 2 + style.border * 2,
-            )
-            nodes[i] = node
-            cursor_y = cursor_y + node.bounds.height + style.margin * 2
-    if cursor_x != viewport.x: cursor_y = cursor_y + line_height
-    # Block records are laid out in document order above. Grow non-root parent
-    # boxes around their descendants before projecting the shared pane tree so
-    # hierarchical clipping never discards admitted child content.
-    var child_index = nodes.len() - 1
-    while child_index > 0:
-        val parent_index = nodes[child_index].parent_index
-        if rendered[child_index] and parent_index > 0 and parent_index < nodes.len() and rendered[parent_index] and styles[parent_index].width < 0 and styles[parent_index].height < 0:
-            val child_bounds = nodes[child_index].bounds
-            var parent_node = nodes[parent_index]
-            val left = if parent_node.bounds.x < child_bounds.x: parent_node.bounds.x else: child_bounds.x
-            val top = if parent_node.bounds.y < child_bounds.y: parent_node.bounds.y else: child_bounds.y
-            val right = if parent_node.bounds.right() > child_bounds.right(): parent_node.bounds.right() else: child_bounds.right()
-            val bottom = if parent_node.bounds.bottom() > child_bounds.bottom(): parent_node.bounds.bottom() else: child_bounds.bottom()
-            parent_node.bounds = TinyRect(x: left, y: top, width: right - left, height: bottom - top)
-            nodes[parent_index] = parent_node
-        child_index = child_index - 1
-    var panes: [TinyResolvedPane] = []
-    var i = 0
-    while i < nodes.len():
-        var parent = TinyResolvedPane.root(
-            TinyHandle.invalid(), viewport, viewport, 0, 0, 0
-        )
-        if nodes[i].parent_index >= 0 and nodes[i].parent_index < panes.len():
-            parent = panes[nodes[i].parent_index]
-        panes.push(tiny_web_resolved_pane(nodes[i], i, parent, viewport))
-        i = i + 1
-    TinyWebLayoutResult(status: TinyStatus.ok(), css_status: css.status, nodes: nodes, panes: panes, styles: styles, rendered: rendered, content_height: cursor_y - viewport.y)
+    var arena = TinyWebLayoutArena.bounded(max_layout_boxes)
+    arena.layout(document, css, viewport, line_height)
 
 fn tiny_web_layout(document: TinyWebReceipt, viewport: TinyRect, line_height: i32, max_layout_boxes: i32) -> TinyWebLayoutResult:
-    val css = tiny_css_parse(document.style_source, max_layout_boxes, max_layout_boxes)
-    tiny_web_layout_with_css(document, css, viewport, line_height, max_layout_boxes)
+    var css_arena = TinyCssArena.bounded(max_layout_boxes)
+    val css = css_arena.parse(document.style_source, max_layout_boxes)
+    var layout_arena = TinyWebLayoutArena.bounded(max_layout_boxes)
+    layout_arena.layout(document, css, viewport, line_height)

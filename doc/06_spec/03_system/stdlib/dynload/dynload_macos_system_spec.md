@@ -1,6 +1,31 @@
-# TODO(dynload-system-tests): switch to gcc -shared + file_read_bytes
+# Dynload Macos System Specification
 
-> macOS Dynamic Loading System Test.
+> 1. dylib registry reset for test
+
+<!-- sdn-diagram:id=dynload_macos_system_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=dynload_macos_system_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+dynload_macos_system_spec -> std
+dynload_macos_system_spec -> os
+dynload_macos_system_spec -> test
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=dynload_macos_system_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -9,26 +34,7 @@
 <details>
 <summary>Full Scenario Manual</summary>
 
-# TODO(dynload-system-tests): switch to gcc -shared + file_read_bytes
-
-macOS Dynamic Loading System Test.
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Feature IDs | #DYNLOAD-SYS-011 to #DYNLOAD-SYS-012 |
-| Category | Infrastructure / System Test |
-| Status | Active |
-| Source | `test/03_system/stdlib/dynload/dynload_macos_system_spec.spl` |
-| Updated | 2026-08-26 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-macOS Dynamic Loading System Test.
-
-Exercises the dylib_registry ELF cross-load pipeline on macOS. Since
-no Mach-O loader exists, this verifies that the ELF registry works
-cross-platform. Gated by is_macos() -- prints SKIP on other platforms.
+# Dynload Macos System Specification
 
 ## Scenarios
 
@@ -38,20 +44,20 @@ cross-platform. Gated by is_macos() -- prints SKIP on other platforms.
 
 #### registers and resolves ELF64 on macOS
 
-- registers and resolves ELF64 on macOS
+1. dylib registry reset for test
    - Expected: dylib_registry_symbol(handle, "_start") equals `0x400000`
    - Expected: dylib_registry_close(handle) equals `0`
+2. dylib registry reset for test
+3. print
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("registers and resolves ELF64 on macOS")
 if is_macos():
     dylib_registry_reset_for_test()
     val handle = dylib_registry_register("/lib/cross.so", make_elf64_exec())
@@ -67,20 +73,20 @@ else:
 
 #### resolves main entry symbol on macOS
 
-- resolves main entry symbol on macOS
+1. dylib registry reset for test
    - Expected: dylib_registry_symbol(handle, "main") equals `0x400000`
    - Expected: dylib_registry_close(handle) equals `0`
+2. dylib registry reset for test
+3. print
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("resolves main entry symbol on macOS")
 if is_macos():
     dylib_registry_reset_for_test()
     val handle = dylib_registry_register("/lib/mac.so", make_elf64_exec())
@@ -94,6 +100,22 @@ else:
 
 </details>
 
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Other |
+| Status | Active |
+| Source | `test/03_system/stdlib/dynload/dynload_macos_system_spec.spl` |
+| Updated | 2026-06-01 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Tests covering:
+- Dynload macOS System
+- ELF cross-load via registry
+
 ## Scenario Summary
 
 | Metric | Count |
@@ -106,51 +128,3 @@ else:
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `28eac42eeabdf6f97ac6eb23ab211fadc1e9578f62812ef5b6905b6a3dbf45fa`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `28eac42eeabdf6f97ac6eb23ab211fadc1e9578f62812ef5b6905b6a3dbf45fa`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `28eac42eeabdf6f97ac6eb23ab211fadc1e9578f62812ef5b6905b6a3dbf45fa`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **90/100**; effective score: **90/100**; blockers: **0**.
-
-SSpec documentization score: 90/100
-source: test/03_system/stdlib/dynload/dynload_macos_system_spec.spl
-mirror: doc/06_spec/03_system/stdlib/dynload/dynload_macos_system_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=80
-  traceability=100 evidence=80 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/stdlib/dynload/dynload_macos_system_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/stdlib/dynload/dynload_macos_system_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/stdlib/dynload/dynload_macos_system_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-20): 2 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/03_system/stdlib/dynload/dynload_macos_system_spec.spl:43:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'registers and resolves ELF64 on macOS' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/stdlib/dynload/dynload_macos_system_spec.spl:56:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'resolves main entry symbol on macOS' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

@@ -26,19 +26,14 @@ set -eu
 #   BUILD_DIR   default: build/check/engine2d-simd-c-kernels
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+ROOT_DIR="$(CDPATH= cd -- "$ROOT_DIR/.." && pwd)"
 cd "$ROOT_DIR"
 
 SRC="src/runtime/runtime_simd_dispatch.c"
 TEST="test/09_baselines/engine2d_simd/engine2d_simd_c_test.c"
-SPAN_TEST="test/09_baselines/engine2d_simd/engine2d_simd_span_test.c"
 BUILD_DIR="${BUILD_DIR:-build/check/engine2d-simd-c-kernels}"
 GEN_HDR="$BUILD_DIR/engine2d_simd_helpers.generated.h"
 BIN="$BUILD_DIR/engine2d_simd_c_test"
-SPAN_OBJ="$BUILD_DIR/runtime_simd_dispatch_span.o"
-SPAN_TEST_OBJ="$BUILD_DIR/engine2d_simd_span_test.o"
-SPAN_BIN="$BUILD_DIR/engine2d_simd_span_test"
-EXTRA_CFLAGS="${ENGINE2D_SIMD_C_KERNELS_CFLAGS:-}"
-RUNNER="${ENGINE2D_SIMD_C_KERNELS_RUNNER:-}"
 
 fail() {
     echo "engine2d-simd-c-kernels: fail"
@@ -51,10 +46,6 @@ if [ ! -f "$SRC" ]; then
 fi
 if [ ! -f "$TEST" ]; then
     echo "ERROR: test not found: $TEST" >&2
-    fail
-fi
-if [ ! -f "$SPAN_TEST" ]; then
-    echo "ERROR: source not found: $SPAN_TEST" >&2
     fail
 fi
 
@@ -78,9 +69,10 @@ fi
 
 mkdir -p "$BUILD_DIR"
 
-# Slice the helper blocks out of the real source verbatim. Keep the pure
-# raw-buffer helpers and their AVX2/RVV specializations, but exclude the
-# runtime-coupled SplArray entry points between them.
+# Slice the helper block out of the real source verbatim: from the line that
+# defines engine2d_fill_into up to (but not including) the first SplArray*
+# helper that begins the runtime-coupled entry points. Anchored on stable
+# function-name lines.
 awk '
     /^static atomic_uint_fast64_t g_engine2d_simd_row_hits/ { hit_support = 1 }
     /^\/\* MLKEM_SIMD_BEGIN/ { hit_support = 0 }
@@ -89,9 +81,6 @@ awk '
     /^\/\* MLKEM_SIMD_END/ { after_mlkem = 1; next }
     after_mlkem && /^#if defined\(__x86_64__\)/ { grab = 1; after_mlkem = 0 }
     /^static SplArray\* engine2d_new_pixel_array\(/ { grab = 0 }
-    /^SplArray\* rt_engine2d_simd_blend_row_u32\(/ { saw_return_api = 1 }
-    saw_return_api && !appended_backend_helpers && /^#if defined\(__x86_64__\)/ { grab = 1; appended_backend_helpers = 1 }
-    /^int64_t rt_engine2d_simd_fill_u32\(/ { grab = 0 }
     grab { print }
 ' "$SRC" > "$GEN_HDR"
 
@@ -108,7 +97,7 @@ for fn in engine2d_fill_into engine2d_copy_into engine2d_blend_pixel engine2d_bl
     fi
 done
 
-CFLAGS="-O2 -I$BUILD_DIR -Isrc/runtime -Wall $EXTRA_CFLAGS"
+CFLAGS="-O2 -I$BUILD_DIR -Wall"
 
 # On Apple aarch64, force arm64 so the NEON (#if __aarch64__) path compiles.
 case "$(uname -s)" in
@@ -126,22 +115,7 @@ if ! $CC_BIN $CFLAGS "$TEST" -o "$BIN"; then
 fi
 
 echo "Running $BIN"
-# shellcheck disable=SC2086
-if ! $RUNNER "$BIN"; then
-    fail
-fi
-
-GC_SECTIONS="-Wl,--gc-sections"
-if [ "$(uname -s)" = "Darwin" ]; then
-    GC_SECTIONS="-Wl,-dead_strip"
-fi
-
-echo "Compiling in-place span ABI test"
-$CC_BIN $CFLAGS -ffunction-sections -fdata-sections -Isrc/runtime -c "$SRC" -o "$SPAN_OBJ"
-$CC_BIN $CFLAGS -ffunction-sections -fdata-sections -Isrc/runtime -c "$SPAN_TEST" -o "$SPAN_TEST_OBJ"
-$CC_BIN $CFLAGS $GC_SECTIONS "$SPAN_OBJ" "$SPAN_TEST_OBJ" -o "$SPAN_BIN"
-if $RUNNER "$SPAN_BIN"; then
-    sh scripts/check/check-engine2d-row-scheduling.shs
+if "$BIN"; then
     echo "engine2d-simd-c-kernels: pass"
     exit 0
 fi

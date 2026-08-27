@@ -18,13 +18,12 @@ Implementation note: all [u8] builders follow the tls12_record.spl pattern —
 _pb mutates-and-returns buf so callers reassign.  Avoids interpreter-mode
 silent drops on deeper call chains.
 
-All byte arrays are built via `.push(v.to_u8())` and parsed through guarded
-native indexing, keeping the protocol path in Pure Simple.
+All byte arrays are built via .push(v.to_u8()) — never [u8] literals, which
+decode as zero bytes through rt_bytes_u8_at under the interpreter.
 """
 
-use std.common.string_core.{text_to_bytes}
-
-@unsafe(reason: "raw byte-array to text lift; domain parsing rejects non-empty input becoming empty text", capabilities: [ffi])
+extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
+extern fn rt_text_to_bytes(s: text) -> [u8]
 extern fn rt_bytes_to_text(data: [u8]) -> text
 
 # ============================================================================
@@ -141,7 +140,7 @@ fn _push_u16_be(buf: [u8], value: i64) -> [u8]:
     buf = _pb(buf, value & 0xFF)
     return buf
 
-fn _socks5_append_bytes(buf: [u8], src: [u8]) -> [u8]:
+fn _append_bytes(buf: [u8], src: [u8]) -> [u8]:
     """Append all bytes of src onto buf; return buf."""
     var i: i64 = 0
     val n = src.len()
@@ -152,8 +151,8 @@ fn _socks5_append_bytes(buf: [u8], src: [u8]) -> [u8]:
 
 fn _read_u16_be(data: [u8], offset: i64) -> i64:
     """Read a big-endian u16 from data at offset."""
-    val b0 = data[offset].to_i64()
-    val b1 = data[offset + 1].to_i64()
+    val b0 = rt_bytes_u8_at(data, offset)
+    val b1 = rt_bytes_u8_at(data, offset + 1)
     return (b0 << 8) | b1
 
 # ============================================================================
@@ -203,16 +202,16 @@ fn socks5_parse_greeting(data: [u8]) -> GreetingResult:
     """Parse SOCKS5 greeting from client. Returns list of offered methods."""
     if data.len() < 2:
         return GreetingResult.Err(reason: Socks5Error.UnexpectedEnd)
-    val ver = data[0].to_i64()
+    val ver = rt_bytes_u8_at(data, 0)
     if ver != SOCKS5_VER:
         return GreetingResult.Err(reason: Socks5Error.InvalidVersion(got: ver))
-    val nmethods = data[1].to_i64()
+    val nmethods = rt_bytes_u8_at(data, 1)
     if data.len() < 2 + nmethods:
         return GreetingResult.Err(reason: Socks5Error.UnexpectedEnd)
     var methods: [Socks5Method] = []
     var i: i64 = 0
     while i < nmethods:
-        val b = data[2 + i].to_i64()
+        val b = rt_bytes_u8_at(data, 2 + i)
         val m = _byte_to_method(b)
         if m != nil:
             methods.push(m)
@@ -235,10 +234,10 @@ fn socks5_parse_greeting_response(data: [u8]) -> GreetingResponseResult:
     """Parse SOCKS5 server greeting response."""
     if data.len() < 2:
         return GreetingResponseResult.Err(reason: Socks5Error.UnexpectedEnd)
-    val ver = data[0].to_i64()
+    val ver = rt_bytes_u8_at(data, 0)
     if ver != SOCKS5_VER:
         return GreetingResponseResult.Err(reason: Socks5Error.InvalidVersion(got: ver))
-    val b = data[1].to_i64()
+    val b = rt_bytes_u8_at(data, 1)
     val m = _byte_to_method(b)
     if m == nil:
         return GreetingResponseResult.Err(reason: Socks5Error.InvalidMethod(got: b))
@@ -250,7 +249,7 @@ fn socks5_parse_greeting_response(data: [u8]) -> GreetingResponseResult:
 
 fn _build_atyp_addr(buf: [u8], atyp: Socks5Atyp) -> [u8]:
     """Append ATYP byte + address bytes; return buf.
-    Uses native array indexing so byte ownership remains in Pure Simple."""
+    Uses native array index push to avoid rt_bytes_u8_at cross-module issues."""
     match atyp:
         case Ipv4(addr):
             buf = _pb(buf, SOCKS5_ATYP_IPV4)
@@ -259,9 +258,7 @@ fn _build_atyp_addr(buf: [u8], atyp: Socks5Atyp) -> [u8]:
                 buf.push(addr[i])
                 i = i + 1
         case Domain(name):
-            val name_bytes = text_to_bytes(name)
-            if name_bytes.len() == 0u64 or name_bytes.len() > 255u64:
-                panic("SOCKS5 domain must contain 1..255 bytes")
+            val name_bytes = rt_text_to_bytes(name)
             buf = _pb(buf, SOCKS5_ATYP_DOMAIN)
             buf = _pb(buf, name_bytes.len())
             var i: i64 = 0
@@ -285,14 +282,14 @@ fn _parse_atyp_addr(data: [u8], offset: i64) -> _AtypParseResult?:
     """Parse ATYP byte + address at offset. Returns nil on error."""
     if data.len() <= offset:
         return nil
-    val atyp_byte = data[offset].to_i64()
+    val atyp_byte = rt_bytes_u8_at(data, offset)
     if atyp_byte == SOCKS5_ATYP_IPV4:
         if data.len() < offset + 1 + 4:
             return nil
         var addr: [u8] = []
         var i: i64 = 0
         while i < 4:
-            addr.push(data[offset + 1 + i])
+            addr.push(rt_bytes_u8_at(data, offset + 1 + i).to_u8())
             i = i + 1
         return _AtypParseResult(
             atyp: Socks5Atyp.Ipv4(addr: addr),
@@ -301,21 +298,15 @@ fn _parse_atyp_addr(data: [u8], offset: i64) -> _AtypParseResult?:
     elif atyp_byte == SOCKS5_ATYP_DOMAIN:
         if data.len() < offset + 2:
             return nil
-        val dlen = data[offset + 1].to_i64()
-        if dlen <= 0:
-            return nil
+        val dlen = rt_bytes_u8_at(data, offset + 1)
         if data.len() < offset + 2 + dlen:
             return nil
         var name_bytes: [u8] = []
         var i: i64 = 0
         while i < dlen:
-            name_bytes.push(data[offset + 2 + i])
+            name_bytes.push(rt_bytes_u8_at(data, offset + 2 + i).to_u8())
             i = i + 1
-        var name = ""
-        unsafe(capabilities: [ffi]):
-            name = rt_bytes_to_text(name_bytes)
-        if name.len() == 0u64:
-            return nil
+        val name = rt_bytes_to_text(name_bytes)
         return _AtypParseResult(
             atyp: Socks5Atyp.Domain(name: name),
             next_offset: offset + 2 + dlen
@@ -326,7 +317,7 @@ fn _parse_atyp_addr(data: [u8], offset: i64) -> _AtypParseResult?:
         var addr: [u8] = []
         var i: i64 = 0
         while i < 16:
-            addr.push(data[offset + 1 + i])
+            addr.push(rt_bytes_u8_at(data, offset + 1 + i).to_u8())
             i = i + 1
         return _AtypParseResult(
             atyp: Socks5Atyp.Ipv6(addr: addr),
@@ -374,17 +365,17 @@ fn socks5_parse_request(data: [u8]) -> RequestResult:
     Returns (cmd, atyp, port) on success."""
     if data.len() < 4:
         return RequestResult.Err(reason: Socks5Error.UnexpectedEnd)
-    val ver = data[0].to_i64()
+    val ver = rt_bytes_u8_at(data, 0)
     if ver != SOCKS5_VER:
         return RequestResult.Err(reason: Socks5Error.InvalidVersion(got: ver))
-    val cmd_byte = data[1].to_i64()
+    val cmd_byte = rt_bytes_u8_at(data, 1)
     val cmd = _byte_to_cmd(cmd_byte)
     if cmd == nil:
         return RequestResult.Err(reason: Socks5Error.InvalidCmd(got: cmd_byte))
     # byte 2 is RSV — ignored on parse per RFC 1928 §4
     val atyp_result = _parse_atyp_addr(data, 3)
     if atyp_result == nil:
-        val atyp_byte = data[3].to_i64()
+        val atyp_byte = rt_bytes_u8_at(data, 3)
         if atyp_byte != SOCKS5_ATYP_IPV4 and atyp_byte != SOCKS5_ATYP_DOMAIN and atyp_byte != SOCKS5_ATYP_IPV6:
             return RequestResult.Err(reason: Socks5Error.InvalidAtyp(got: atyp_byte))
         return RequestResult.Err(reason: Socks5Error.UnexpectedEnd)
@@ -457,17 +448,17 @@ fn socks5_parse_response(data: [u8]) -> ResponseResult:
     Returns (reply, atyp, port) on success."""
     if data.len() < 4:
         return ResponseResult.Err(reason: Socks5Error.UnexpectedEnd)
-    val ver = data[0].to_i64()
+    val ver = rt_bytes_u8_at(data, 0)
     if ver != SOCKS5_VER:
         return ResponseResult.Err(reason: Socks5Error.InvalidVersion(got: ver))
-    val rep_byte = data[1].to_i64()
+    val rep_byte = rt_bytes_u8_at(data, 1)
     val rep = _byte_to_reply(rep_byte)
     if rep == nil:
         return ResponseResult.Err(reason: Socks5Error.InvalidReply(got: rep_byte))
     # byte 2 is RSV — ignored on parse
     val atyp_result = _parse_atyp_addr(data, 3)
     if atyp_result == nil:
-        val atyp_byte = data[3].to_i64()
+        val atyp_byte = rt_bytes_u8_at(data, 3)
         if atyp_byte != SOCKS5_ATYP_IPV4 and atyp_byte != SOCKS5_ATYP_DOMAIN and atyp_byte != SOCKS5_ATYP_IPV6:
             return ResponseResult.Err(reason: Socks5Error.InvalidAtyp(got: atyp_byte))
         return ResponseResult.Err(reason: Socks5Error.UnexpectedEnd)
@@ -484,10 +475,9 @@ fn socks5_parse_response(data: [u8]) -> ResponseResult:
 # ============================================================================
 
 fn _text_push_into(buf: [u8], s: text) -> [u8]:
-    """Push one length-prefixed UTF-8 field into buf."""
-    val bytes = text_to_bytes(s)
-    if bytes.len() > 255u64:
-        panic("SOCKS5 credential field exceeds 255 bytes")
+    """Push UTF-8 bytes of s into buf using rt_text_to_bytes; return buf.
+    Caller must not hold any other rt_text_to_bytes slice across this call."""
+    val bytes = rt_text_to_bytes(s)
     buf = _pb(buf, bytes.len())
     var i: i64 = 0
     while i < bytes.len():
@@ -497,7 +487,8 @@ fn _text_push_into(buf: [u8], s: text) -> [u8]:
 
 fn socks5_userpass_request(user: text, password: text) -> [u8]:
     """Encode RFC 1929 username/password auth request: VER ULEN UNAME PLEN PASSWD.
-    Calls _text_push_into twice in sequence."""
+    Calls _text_push_into twice in sequence — each rt_text_to_bytes call is
+    fully consumed before the next, avoiding the shared-buffer clobber."""
     var buf: [u8] = []
     buf = _pb(buf, SOCKS5_USERPASS_VER)
     buf = _text_push_into(buf, user)
@@ -510,10 +501,10 @@ fn socks5_userpass_parse_response(data: [u8]) -> UserPassResponseResult:
     formed but non-zero STATUS), Err on malformed input."""
     if data.len() < 2:
         return UserPassResponseResult.Err(reason: Socks5Error.UnexpectedEnd)
-    val ver = data[0].to_i64()
+    val ver = rt_bytes_u8_at(data, 0)
     if ver != SOCKS5_USERPASS_VER:
         return UserPassResponseResult.Err(reason: Socks5Error.InvalidVersion(got: ver))
-    val status = data[1].to_i64()
+    val status = rt_bytes_u8_at(data, 1)
     if status == 0:
         return UserPassResponseResult.Ok(success: true)
     else:

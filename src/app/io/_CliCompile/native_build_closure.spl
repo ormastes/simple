@@ -7,22 +7,15 @@
 # a move, not a rewrite (doc/08_tracking/bug/memory_retention_compiler_and_interpreter_2026-08-21.md).
 use app.io.env_ops (env_get)
 use app.io.time_ops (time_now_unix_micros)
-use app.cli.native_build_warm_receipt.{native_build_warm_candidate_publish}
-use std.nogc_sync_mut.io.file_ops.{file_exists}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 use compiler.driver.driver_source_loading.{
+    _driver_entry_import_module_paths, _driver_entry_sibling_module_paths,
     _driver_resolve_entry_import, _driver_text_bucket_set_new,
-    _driver_cached_entry_source_scan
+    _driver_text_bucket_set_has, _driver_text_bucket_set_add
 }
-@unsafe(reason: "raw path expansion; empty text is the invalid-or-expansion-failure sentinel", capabilities: [ffi])
+use std.io_runtime.{read_file_text}
+extern fn rt_file_exists(path: text) -> bool
 extern fn rt_path_absolute(path: text) -> text
-
-fn _nb_file_exists_raw(path: text) -> bool:
-    file_exists(path)
-
-fn _nb_path_absolute_raw(path: text) -> text:
-    unsafe(capabilities: [ffi]):
-        rt_path_absolute(path)
 
 fn _cli_eprint(message: text):
     eprint(message)
@@ -51,11 +44,11 @@ fn _nb_resolve_relative(mp: text, importer_file: text) -> text:
         up = up + 1
     val rel = mp.substring(dots).replace(".", "/")
     val base = if base_dir == "": rel else: "{base_dir}/{rel}"
-    if _nb_file_exists_raw("{base}.spl"):
+    if rt_file_exists("{base}.spl"):
         return "{base}.spl"
-    if _nb_file_exists_raw("{base}/mod.spl"):
+    if rt_file_exists("{base}/mod.spl"):
         return "{base}/mod.spl"
-    if _nb_file_exists_raw("{base}/__init__.spl"):
+    if rt_file_exists("{base}/__init__.spl"):
         return "{base}/__init__.spl"
     ""
 
@@ -96,13 +89,13 @@ fn _nb_resolve_under_root(root: text, segs: [text]) -> text:
         return ""
     val rel = _nb_join_segments(segs)
     val p1 = "{root}/{rel}.spl"
-    if _nb_file_exists_raw(p1):
+    if rt_file_exists(p1):
         return p1
     val p2 = "{root}/{rel}/mod.spl"
-    if _nb_file_exists_raw(p2):
+    if rt_file_exists(p2):
         return p2
     val p3 = "{root}/{rel}/__init__.spl"
-    if _nb_file_exists_raw(p3):
+    if rt_file_exists(p3):
         return p3
     ""
 
@@ -115,9 +108,9 @@ fn _nb_resolve_segs(segs: [text], source_dirs: [text], importer_path: text) -> t
     if segs.len() > 0:
         val resolved = _driver_resolve_entry_import(module_path, entry_dir)
         if resolved != "":
-            val resolved_abs = _nb_path_absolute_raw(resolved).replace("\\", "/")
+            val resolved_abs = rt_path_absolute(resolved).replace("\\", "/")
             for root in source_dirs:
-                val root_abs = _nb_trim_trailing_slashes(_nb_path_absolute_raw(root).replace("\\", "/"))
+                val root_abs = _nb_trim_trailing_slashes(rt_path_absolute(root).replace("\\", "/"))
                 val root_prefix = if root_abs.ends_with("/"): root_abs else: root_abs + "/"
                 if resolved_abs.starts_with(root_prefix):
                     return resolved
@@ -178,23 +171,27 @@ pub fn _native_build_entry_closure(entry: text, source_dirs: [text]) -> [text]:
     val trace_timing = (env_get("SIMPLE_NATIVE_BUILD_TRACE_CLOSURE_TIMING") ?? "") == "1"
     var queue: [text] = [entry]
     var discovered = _driver_text_bucket_set_new(512)
-    discovered[entry] = true
+    discovered = _driver_text_bucket_set_add(discovered, entry)
     var result: [text] = []
     var resolve_cache: Dict<text, text> = {}
     val closure_source_dirs = _nb_normalize_source_dirs(source_dirs)
     var qi = 0
+    var admitted_bytes: i64 = 0
     var timing_file_start_us: i64 = 0
     while qi < queue.len():
+        if result.len() >= NATIVE_BUILD_CLOSURE_MAX_SOURCES:
+            _cli_eprint("Error: native-build entry closure exceeds {NATIVE_BUILD_CLOSURE_MAX_SOURCES} sources; use a narrower entry/source set")
+            return []
         val f = queue[qi]
         qi = qi + 1
         if trace_timing:
             timing_file_start_us = time_now_unix_micros()
-        result.append(f)
-        if not _nb_file_exists_raw(f):
+        result = result.push(f)
+        if not rt_file_exists(f):
             if trace_closure and f == entry:
                 _cli_eprint("[native-build] closure entry missing {f}")
             continue
-        val (content, imports, siblings, _) = _driver_cached_entry_source_scan(f)
+        val content = read_file_text(f)
         if trace_closure and f == entry:
             _cli_eprint("[native-build] closure entry read len={content.len()}")
         if trace_closure and result.len() % 25 == 0:
@@ -203,15 +200,15 @@ pub fn _native_build_entry_closure(entry: text, source_dirs: [text]) -> [text]:
         # without materializing every ordinary source line. Sibling `mod` and
         # `export member.*` declarations use a separate guarded compatibility
         # scan because they resolve relative to the declaring file.
-        var module_paths = imports
-        for sibling in siblings:
+        var module_paths = _driver_entry_import_module_paths(content)
+        for sibling in _driver_entry_sibling_module_paths(content):
             module_paths = module_paths.push(sibling)
         for mp in module_paths:
             if mp.starts_with("."):
                 val rel_rp = _nb_resolve_relative(mp, f)
-                if rel_rp != "" and not discovered.contains_key(rel_rp):
-                    queue.append(rel_rp)
-                    discovered[rel_rp] = true
+                if rel_rp != "" and not _driver_text_bucket_set_has(discovered, rel_rp):
+                    queue = queue.push(rel_rp)
+                    discovered = _driver_text_bucket_set_add(discovered, rel_rp)
                 continue
             val segs = mp.split(".")
             val seg_key = _nb_join_segments(segs)
@@ -223,9 +220,9 @@ pub fn _native_build_entry_closure(entry: text, source_dirs: [text]) -> [text]:
                 resolve_cache[seg_key] = rp
             if trace_closure and f == entry:
                 _cli_eprint("[native-build] closure import {mp} -> {rp}")
-            if rp != "" and not discovered.contains_key(rp):
-                queue.append(rp)
-                discovered[rp] = true
+            if rp != "" and not _driver_text_bucket_set_has(discovered, rp):
+                queue = queue.push(rp)
+                discovered = _driver_text_bucket_set_add(discovered, rp)
             if rp == "" and segs.len() > 1:
                 var drop: [text] = []
                 var di = 0
@@ -239,11 +236,11 @@ pub fn _native_build_entry_closure(entry: text, source_dirs: [text]) -> [text]:
                 else:
                     drop_rp = _nb_resolve_segs(drop, closure_source_dirs, f)
                     resolve_cache[drop_key] = drop_rp
-                if drop_rp != "" and not discovered.contains_key(drop_rp):
-                    queue.append(drop_rp)
-                    discovered[drop_rp] = true
+                if drop_rp != "" and not _driver_text_bucket_set_has(discovered, drop_rp):
+                    queue = queue.push(drop_rp)
+                    discovered = _driver_text_bucket_set_add(discovered, drop_rp)
         if trace_timing:
             val elapsed_us = time_now_unix_micros() - timing_file_start_us
             _cli_eprint("[native-build] closure timing n={result.len()} queued={queue.len()} elapsed_us={elapsed_us} imports={module_paths.len()} content_len={content.len()} file={f}")
-    val _candidate_written = native_build_warm_candidate_publish(result)
     result
+

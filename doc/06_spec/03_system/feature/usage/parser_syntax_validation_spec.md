@@ -1,5 +1,30 @@
 # Parser Syntax Validation Specification
 
+> <details>
+
+<!-- sdn-diagram:id=parser_syntax_validation_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=parser_syntax_validation_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+parser_syntax_validation_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=parser_syntax_validation_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 36 | 36 | 0 | 0 |
@@ -17,7 +42,7 @@
 | Category | Infrastructure \| Parser |
 | Status | Implemented |
 | Source | `test/03_system/feature/usage/parser_syntax_validation_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Key Validations
@@ -36,18 +61,13 @@
 
 #### parses code with trailing comment
 
-- parses code with trailing comment
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses code with trailing comment")
 val x = 42  # This is a comment
 expect x == 42
 ```
@@ -56,18 +76,13 @@ expect x == 42
 
 #### parses comment-only lines
 
-- parses comment-only lines
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses comment-only lines")
 # This is a full-line comment
 val x = 42
 # Another comment
@@ -78,18 +93,13 @@ expect x == 42
 
 #### parses multiple comment styles
 
-- parses multiple comment styles
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses multiple comment styles")
 val x = 42  # Hash comment
 expect x == 42
 ```
@@ -100,18 +110,13 @@ expect x == 42
 
 #### parses block comment
 
-- parses block comment
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses block comment")
 # This is a multi-line comment
 # that spans several lines.
 val x = 42
@@ -122,18 +127,17 @@ expect x == 42
 
 #### parses inline docstring
 
-- parses inline docstring
+1. fn documented
+2. expect documented
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses inline docstring")
 fn documented() -> i64:
     # Returns the answer.
     42
@@ -146,18 +150,13 @@ expect documented() == 42
 
 #### parses simple indented block
 
-- parses simple indented block
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses simple indented block")
 if true:
     val x = 42
     expect x == 42
@@ -167,18 +166,13 @@ if true:
 
 #### parses nested indentation
 
-- parses nested indentation
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses nested indentation")
 if true:
     if true:
         if true:
@@ -190,18 +184,13 @@ if true:
 
 #### parses dedent correctly
 
-- parses dedent correctly
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses dedent correctly")
 var total = 0
 if true:
     total = 10
@@ -214,18 +203,13 @@ expect total == 42
 
 #### parses multiple statements in block
 
-- parses multiple statements in block
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("parses multiple statements in block")
 var a = 0
 var b = 0
 if true:
@@ -244,18 +228,13 @@ expect a + b == 42
 
 #### uses val for immutable
 
-- uses val for immutable
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("uses val for immutable")
 val x = 42
 expect x == 42
 ```
@@ -264,18 +243,13 @@ expect x == 42
 
 #### uses var for mutable
 
-- uses var for mutable
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("uses var for mutable")
 var x = 0
 x = 42
 expect x == 42
@@ -285,18 +259,13 @@ expect x == 42
 
 #### uses let for binding
 
-- uses let for binding
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("uses let for binding")
 let x = 42
 expect x == 42
 ```
@@ -307,18 +276,17 @@ expect x == 42
 
 #### uses fn for function
 
-- uses fn for function
+1. fn get value
+2. expect get value
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("uses fn for function")
 fn get_value() -> i64:
     42
 expect get_value() == 42
@@ -328,18 +296,17 @@ expect get_value() == 42
 
 #### uses return for early return
 
-- uses return for early return
+1. fn check
+2. expect check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("uses return for early return")
 fn check(x: i64) -> i64:
     if x < 0:
         return 0
@@ -353,18 +320,17 @@ expect check(42) == 42
 
 #### uses elif not else if
 
-- uses elif not else if
+1. fn classify
+2. expect classify
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("uses elif not else if")
 fn classify(x: i64) -> text:
     if x < 0:
         "negative"
@@ -381,18 +347,13 @@ expect classify(5) == "positive"
 
 #### uses lowercase true
 
-- uses lowercase true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("uses lowercase true")
 val x = true
 expect x == true
 ```
@@ -401,18 +362,13 @@ expect x == true
 
 #### uses lowercase false
 
-- uses lowercase false
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("uses lowercase false")
 val x = false
 expect x == false
 ```
@@ -421,18 +377,13 @@ expect x == false
 
 #### uses booleans in conditions
 
-- uses booleans in conditions
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("uses booleans in conditions")
 if true:
     expect true
 if not false:
@@ -445,18 +396,13 @@ if not false:
 
 #### uses nil for null value
 
-- uses nil for null value
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("uses nil for null value")
 val x = nil
 expect x == nil
 ```
@@ -465,18 +411,13 @@ expect x == nil
 
 #### uses None for Option
 
-- uses None for Option
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("uses None for Option")
 val opt: Option<i64> = None
 expect not opt.?
 ```
@@ -485,18 +426,13 @@ expect not opt.?
 
 #### uses Some for Option with value
 
-- uses Some for Option with value
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("uses Some for Option with value")
 val opt = Some(42)
 expect opt.?
 ```
@@ -507,18 +443,13 @@ expect opt.?
 
 #### uses colon for type annotation
 
-- uses colon for type annotation
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("uses colon for type annotation")
 val x: i64 = 42
 expect x == 42
 ```
@@ -527,18 +458,17 @@ expect x == 42
 
 #### uses arrow for return type
 
-- uses arrow for return type
+1. fn get value
+2. expect get value
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("uses arrow for return type")
 fn get_value() -> i64:
     42
 expect get_value() == 42
@@ -548,18 +478,17 @@ expect get_value() == 42
 
 #### uses angle brackets for generics
 
-- uses angle brackets for generics
+1. fn identity<T>
+2. expect identity
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("uses angle brackets for generics")
 fn identity<T>(x: T) -> T:
     x
 expect identity(42) == 42
@@ -569,18 +498,16 @@ expect identity(42) == 42
 
 #### uses Option for optional types
 
-- uses Option for optional types
+1. expect opt unwrap
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("uses Option for optional types")
 val opt: Option<i64> = Some(42)
 expect opt.unwrap() == 42
 ```
@@ -591,18 +518,13 @@ expect opt.unwrap() == 42
 
 #### uses double quotes for interpolated strings
 
-- uses double quotes for interpolated strings
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("uses double quotes for interpolated strings")
 val name = "World"
 val greeting = "Hello, {name}!"
 expect greeting == "Hello, World!"
@@ -612,18 +534,16 @@ expect greeting == "Hello, World!"
 
 #### uses single quotes for raw strings
 
-- uses single quotes for raw strings
+1. expect raw contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("uses single quotes for raw strings")
 val raw = 'Hello\nWorld'
 expect raw.contains("\\n")
 ```
@@ -632,18 +552,16 @@ expect raw.contains("\\n")
 
 #### uses r prefix for raw double-quoted
 
-- uses r prefix for raw double-quoted
+1. expect raw contains
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("uses r prefix for raw double-quoted")
 val raw = r"Path\to\file"
 expect raw.contains("\\")
 ```
@@ -654,18 +572,16 @@ expect raw.contains("\\")
 
 #### uses square brackets for arrays
 
-- uses square brackets for arrays
+1. expect arr len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("uses square brackets for arrays")
 val arr = [1, 2, 3]
 expect arr.len() == 3
 ```
@@ -674,18 +590,13 @@ expect arr.len() == 3
 
 #### uses parentheses for tuples
 
-- uses parentheses for tuples
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("uses parentheses for tuples")
 val t = (1, 2, 3)
 expect t.0 == 1
 ```
@@ -694,18 +605,13 @@ expect t.0 == 1
 
 #### uses braces for dictionaries
 
-- uses braces for dictionaries
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("uses braces for dictionaries")
 val d = {"key": 42}
 expect d["key"] == 42
 ```
@@ -716,18 +622,13 @@ expect d["key"] == 42
 
 #### uses braces for struct literal
 
-- uses braces for struct literal
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("uses braces for struct literal")
 struct Point:
     x: i64
     y: i64
@@ -739,18 +640,13 @@ expect p.x == 10
 
 #### uses colon in struct literal
 
-- uses colon in struct literal
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("uses colon in struct literal")
 struct Data:
     value: i64
 val d = Data { value: 42 }
@@ -763,18 +659,17 @@ expect d.value == 42
 
 #### uses case keyword for patterns
 
-- uses case keyword for patterns
+1. fn classify
+2. expect classify
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("uses case keyword for patterns")
 fn classify(x: i64) -> text:
     match x:
         case 0:
@@ -788,18 +683,17 @@ expect classify(0) == "zero"
 
 #### uses if for guards
 
-- uses if for guards
+1. fn classify
+2. expect classify
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("uses if for guards")
 fn classify(x: i64) -> text:
     match x:
         case n if n < 0:
@@ -813,18 +707,17 @@ expect classify(-5) == "negative"
 
 #### uses double colon for enum variants
 
-- uses double colon for enum variants
+1. fn check
+2. expect check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("uses double colon for enum variants")
 enum Status:
     Ok
     Error
@@ -851,51 +744,3 @@ expect check(Status.Ok) == "ok"
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `732964c0cf52e942afd3595521b470766299e8339204e369a41f07fb49752ce6`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `732964c0cf52e942afd3595521b470766299e8339204e369a41f07fb49752ce6`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `732964c0cf52e942afd3595521b470766299e8339204e369a41f07fb49752ce6`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/03_system/feature/usage/parser_syntax_validation_spec.spl
-mirror: doc/06_spec/03_system/feature/usage/parser_syntax_validation_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/feature/usage/parser_syntax_validation_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/feature/usage/parser_syntax_validation_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/feature/usage/parser_syntax_validation_spec.spl:46:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'parses code with trailing comment' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/usage/parser_syntax_validation_spec.spl:52:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'parses comment-only lines' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/usage/parser_syntax_validation_spec.spl:60:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'parses multiple comment styles' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

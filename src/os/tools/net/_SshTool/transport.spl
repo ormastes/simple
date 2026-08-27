@@ -70,16 +70,12 @@ use os.apps.sshd.ssh_channel.{
     DEFAULT_MAX_PACKET
 }
 use std.io.signature_sffi.{verify_host_key}
-use std.common.string_core.{text_to_bytes}
 
 extern fn rt_stdin_read_line() -> text?
-@unsafe(reason: "raw connected descriptor; negative sentinel means connect failed", capabilities: [ffi])
+extern fn rt_string_to_byte_array(s: text) -> [u8]
 extern fn rt_io_tcp_connect(addr: text) -> i64
-@unsafe(reason: "raw nullable TCP bytes; nil is read failure and empty is EOF", capabilities: [ffi])
-extern fn rt_io_tcp_read(fd: i64, size: i64) -> [u8]?
-@unsafe(reason: "raw TCP byte-write count; negative, zero, or oversized result violates progress", capabilities: [ffi])
+extern fn rt_io_tcp_read(fd: i64, size: i64) -> [u8]
 extern fn rt_io_tcp_write(fd: i64, data: [u8]) -> i64
-@unsafe(reason: "raw descriptor close consumes one live descriptor; false means close failed", capabilities: [ffi])
 extern fn rt_io_tcp_close(fd: i64) -> bool
 
 class ClientSocket:
@@ -94,17 +90,11 @@ fn _build_packet(payload: [u8]) -> [u8]:
     ssh_packet_build(payload, 0)
 
 fn _socket_send(sock: ClientSocket, data: [u8]) -> Result<u64, text>:
-    if sock.fd < 0:
-        return Err("invalid socket descriptor")
-    var written: i64 = -1
-    unsafe(capabilities: [ffi]):
-        written = rt_io_tcp_write(sock.fd, data)
+    var written: i64 = rt_io_tcp_write(sock.fd, data)
     if written < 0:
         return Err("write failed: {written}")
     if written == 0 and data.len() > 0:
         return Err("write returned 0")
-    if written > data.len():
-        return Err("write returned oversized count: {written} > {data.len()}")
     Ok(written.to_u64())
 
 fn _socket_send_all(sock: ClientSocket, data: [u8]) -> Result<bool, text>:
@@ -126,11 +116,7 @@ fn _socket_send_all(sock: ClientSocket, data: [u8]) -> Result<bool, text>:
 fn _socket_recv_some(sock: ClientSocket, max_len: u64) -> Result<[u8], text>:
     if max_len == 0:
         return Ok([])
-    val bytes = unsafe(capabilities: [ffi]):
-        rt_io_tcp_read(sock.fd, max_len.to_i64())
-    if bytes == nil:
-        return Err("TCP read failed")
-    Ok(bytes!)
+    Ok(rt_io_tcp_read(sock.fd, max_len.to_i64()))
 
 fn _socket_recv_exact(sock: ClientSocket, size: u64) -> Result<[u8], text>:
     var out: [u8] = []

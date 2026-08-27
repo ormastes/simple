@@ -199,18 +199,6 @@ fn zstd_decompress(input: [u8]) -> ZstdDecodeResult:
     val single_segment = (fhd & 0x20) != 0
     val fcs_size_flag = (fhd >> 6) & 0x03
     val has_checksum = (fhd & 0x04) != 0
-    if not single_segment:
-        return ZstdDecodeResult(ok: false, data: [], error: "window descriptor not supported")
-    if (fhd & 0x03) != 0:
-        return ZstdDecodeResult(ok: false, data: [], error: "dictionary id not supported")
-    if (fhd & 0x10) != 0:
-        return ZstdDecodeResult(ok: false, data: [], error: "unused frame header bit")
-    if (fhd & 0x08) != 0:
-        return ZstdDecodeResult(ok: false, data: [], error: "reserved frame header bit")
-    if has_checksum:
-        return ZstdDecodeResult(ok: false, data: [], error: "checksum not supported")
-    if fcs_size_flag == 3:
-        return ZstdDecodeResult(ok: false, data: [], error: "8-byte content size not supported")
 
     # Determine FCS field size
     var fcs_bytes = 1
@@ -232,25 +220,14 @@ fn zstd_decompress(input: [u8]) -> ZstdDecodeResult:
     if n < hdr_end:
         return ZstdDecodeResult(ok: false, data: [], error: "too short for frame header")
 
-    val fcs_pos = 5 + wdesc_bytes
-    var expected_content_size = 0
-    var fci = 0
-    while fci < fcs_bytes:
-        expected_content_size = expected_content_size | (input[fcs_pos + fci].to_i64() << (8 * fci))
-        fci = fci + 1
-    if fcs_size_flag == 1:
-        expected_content_size = expected_content_size + 256
-
+    # Parse FCS (we only need it for validation; skip for now)
     # pos now points to first block
     var pos = hdr_end
 
     var out: [u8] = []
     var done = false
-    var saw_block = false
 
     while not done:
-        if saw_block and out.len() == expected_content_size:
-            return ZstdDecodeResult(ok: false, data: [], error: "extra block after content size")
         if pos + 3 > n:
             return ZstdDecodeResult(ok: false, data: [], error: "truncated block header")
 
@@ -266,13 +243,8 @@ fn zstd_decompress(input: [u8]) -> ZstdDecodeResult:
 
         pos = pos + 3
 
-        if block_size > ZSTD_MAX_RAW_BLOCK:
-            return ZstdDecodeResult(ok: false, data: [], error: "block size too large")
-
         if block_type == ZSTD_BLOCK_RAW:
             # Raw block: block_size bytes of literal data
-            if out.len() + block_size > expected_content_size:
-                return ZstdDecodeResult(ok: false, data: [], error: "block exceeds content size")
             if pos + block_size > n:
                 return ZstdDecodeResult(ok: false, data: [], error: "truncated raw block")
             var bi = 0
@@ -284,10 +256,6 @@ fn zstd_decompress(input: [u8]) -> ZstdDecodeResult:
         else:
             if block_type == ZSTD_BLOCK_RLE:
                 # RLE block: 1 stored byte, block_size = regenerated size
-                if block_size == 0:
-                    return ZstdDecodeResult(ok: false, data: [], error: "zero-size RLE block")
-                if out.len() + block_size > expected_content_size:
-                    return ZstdDecodeResult(ok: false, data: [], error: "block exceeds content size")
                 if pos + 1 > n:
                     return ZstdDecodeResult(ok: false, data: [], error: "truncated RLE block")
                 val rle_byte = input[pos]
@@ -305,13 +273,6 @@ fn zstd_decompress(input: [u8]) -> ZstdDecodeResult:
 
         if last_block:
             done = true
-        saw_block = true
-
-    if pos != n:
-        return ZstdDecodeResult(ok: false, data: [], error: "trailing bytes")
-
-    if out.len() != expected_content_size:
-        return ZstdDecodeResult(ok: false, data: [], error: "content size mismatch")
 
     ZstdDecodeResult(ok: true, data: out, error: "")
 
@@ -369,25 +330,8 @@ impl FseTable:
             slots_for_symbol(s) == c
           Total occupied slots == 1 << table_log.
         """
-        if table_log < 0 or table_log > 20:
-            return FseTable(table_log: 0, entries: [], n_sym: counts.len())
-
         val table_size = 1 << table_log
         val n_sym = counts.len()
-        var normalized_total = 0
-        var ci = 0
-        while ci < n_sym:
-            val c = counts[ci]
-            if c < -1:
-                return FseTable(table_log: 0, entries: [], n_sym: n_sym)
-            if c == -1:
-                normalized_total = normalized_total + 1
-            else:
-                normalized_total = normalized_total + c
-            ci = ci + 1
-        if normalized_total != table_size:
-            return FseTable(table_log: 0, entries: [], n_sym: n_sym)
-
         val step = (table_size >> 1) + (table_size >> 3) + 3
         val mask = table_size - 1
 
@@ -404,8 +348,6 @@ impl FseTable:
         var sym = 0
         while sym < n_sym:
             if counts[sym] == -1:
-                if high_pos < 0:
-                    return FseTable(table_log: 0, entries: [], n_sym: n_sym)
                 entries[high_pos] = FseTableEntry(symbol: sym, nb_bits: table_log, baseline: 0)
                 high_pos = high_pos - 1
             sym = sym + 1

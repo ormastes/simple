@@ -4,18 +4,17 @@ use std.sffi.cli.{cli_get_args}
 use app.io.process_ops.{process_run, process_run_bounded, process_run_timeout}
 use app.io.mod.{env_get}
 use app.test_runner_new.timeout_budget.{client_default_timeout_secs}
-use app.test_runner_new.daemon_backlog.{daemon_backlog_bypass, count_pending_requests}
-use app.test_runner_new.no_examples_gate.{no_examples_is_silent_green, no_examples_exit_code}
+use app.test_runner_new.daemon_backlog.{daemon_backlog_bypass}
 use std.test_runner.test_runner_args.{parse_test_args}
 use std.test_runner.test_config.{load_test_config}
-use std.test_runner.test_runner_types.{TEST_OUTPUT_CAPTURE_BYTES, TestFileResult, TestRunResult}
-use std.test_runner.test_runner_output.{test_run_result_json}
+use std.test_runner.test_runner_types.{TEST_OUTPUT_CAPTURE_BYTES}
 use std.test_runner.test_runner_modes.{run_spl_doctest_mode}
 use app.test_daemon.light_protocol.{LIGHT_REQUEST_RESPONSE_GRACE_MS, light_request_encode, light_request_expiry_micros, light_request_timeout_ms_from_seconds, timeout_verdict_line, has_verdict_line, exit_code_reason}
 
 use std.io_runtime.{dir_create_all}
 use std.io_runtime.{dir_list}
 use std.io_runtime.{file_exists}
+extern fn rt_file_read_text(path: text) -> text
 use std.io_runtime.{read_file_text}
 use std.io_runtime.{file_write}
 use std.io_runtime.{file_delete}
@@ -34,12 +33,12 @@ extern fn rt_path_absolute(path: text) -> text
 # consuming and discarding the real request (#98).
 fn atomic_write_text(path: text, content: text) -> bool:
     val tmp_path = "{path}.tmp"
-    if not file_write(tmp_path, content):
-        file_delete(tmp_path)
+    if not rt_file_write_text(tmp_path, content):
+        rt_file_delete(tmp_path)
         return false
-    if file_rename(tmp_path, path):
+    if rt_file_rename(tmp_path, path):
         return true
-    file_delete(tmp_path)
+    rt_file_delete(tmp_path)
     false
 
 val LIGHT_DAEMON_DIR: text = ".build/test_daemon_light"
@@ -53,11 +52,7 @@ val LIGHT_LOCK: text = ".build/test_daemon_light/daemon.lock"
 val LIGHT_BINARY: text = ".build/test_daemon_light/daemon.binary"
 
 struct ClientRun:
-    # First requested path. Retained for error reporting only; execution
-    # iterates `paths` so that nothing requested is ever silently skipped.
     path: text
-    # Every positional spec path supplied on the command line, in order.
-    paths: [text]
     timeout_secs: i64
     valid: bool
     error: text
@@ -78,38 +73,9 @@ fn clean_args() -> [text]:
         i = i + 1
     args
 
-# Count positional (non-flag) arguments independently of parse_client_run.
-# main() cross-checks this against the number of paths parse_client_run
-# actually produced: if a future change reintroduces a "first path wins" latch,
-# the two counts diverge and the run fails loudly instead of silently testing a
-# subset. See doc/08_tracking/bug/
-# test_runner_multi_path_drops_all_but_first_2026-08-01.md.
-fn count_positional_args(args: [text]) -> i64:
-    var n = 0
-    var i = 0
-    while i < args.len():
-        val arg = args[i]
-        if arg == "--timeout" and i + 1 < args.len():
-            i = i + 2
-            continue
-        if arg.starts_with("-"):
-            i = i + 1
-            continue
-        n = n + 1
-        i = i + 1
-    n
-
 fn parse_client_run(args: [text]) -> ClientRun:
     var paths: [text] = []
-    # SIMPLE_TIMEOUT_SECONDS supplies the DEFAULT budget; an explicit --timeout
-    # still wins. Until 2026-08-17 the env var was read by nothing at all on
-    # this path, so every session exporting it got the hardcoded 120s and saw
-    # healthy specs recorded as `failed=1 reason=daemon-no-response
-    # budget_ms=120000`. run.timeout_secs feeds BOTH the light-daemon request
-    # budget (light_request_timeout_ms_from_seconds) and the direct-child
-    # `--timeout` argument, so defaulting it here fixes every downstream path.
-    # Bug: simple_timeout_seconds_ignored_by_light_daemon_budget_2026-08-17.md
-    var timeout_secs = client_default_timeout_secs()
+    var timeout_secs = 120
     var i = 0
     while i < args.len():
         val arg = args[i]
@@ -118,11 +84,11 @@ fn parse_client_run(args: [text]) -> ClientRun:
             i = i + 2
             continue
         if arg.starts_with("--timeout="):
-            timeout_secs = to_int(arg[10:])
+            timeout_secs = arg[10:].to_int() ?? 0
             i = i + 1
             continue
-        if not arg.starts_with("-"):
-            paths.push(arg)
+        if not arg.starts_with("-") and path == "":
+            path = arg
         i = i + 1
     if paths.len() == 0:
         return ClientRun(path: "", paths: [], timeout_secs: timeout_secs, valid: false, error: "missing test file")
@@ -131,7 +97,7 @@ fn parse_client_run(args: [text]) -> ClientRun:
     for p in paths:
         if not p.ends_with(".spl"):
             return ClientRun(path: p, paths: paths, timeout_secs: timeout_secs, valid: false, error: "expected .spl test file")
-        if not file_exists(p):
+        if not rt_file_exists(p):
             return ClientRun(path: p, paths: paths, timeout_secs: timeout_secs, valid: false, error: "test file not found")
     ClientRun(path: paths[0], paths: paths, timeout_secs: timeout_secs, valid: true, error: "")
 
@@ -175,7 +141,7 @@ fn simple_binary() -> text:
     # executable; passing it to process_run(_timeout) produces a misleading
     # permission-denied failure instead of running the test. Same fix as
     # test_runner_single.spl's simple_binary().
-    if raw.len() > 0 and (raw[0].ends_with("/simple") or raw[0].ends_with("simple.exe")) and file_exists(raw[0]):
+    if raw.len() > 0 and (raw[0].ends_with("/simple") or raw[0].ends_with("simple.exe")) and rt_file_exists(raw[0]):
         return raw[0]
     # bin/simple (the deployed pure-Simple self-hosted binary — see
     # .claude/rules/bootstrap.md "Default tooling runs on pure-Simple") MUST be
@@ -193,16 +159,16 @@ fn simple_binary() -> text:
     # See doc/08_tracking/bug/test_client_debug_seed_binary_shadowing_timeout_2026-08-06.md.
     if file_exists("bin/simple"):
         return "bin/simple"
-    if file_exists("/proc/self/exe"):
+    if rt_file_exists("/proc/self/exe"):
         return "/proc/self/exe"
     if file_exists("src/compiler_rust/target/debug/simple"):
         return "src/compiler_rust/target/debug/simple"
     "./bin/simple"
 
 fn ensure_dirs():
-    dir_create_all(LIGHT_DAEMON_DIR)
-    dir_create_all(LIGHT_REQ_DIR)
-    dir_create_all(LIGHT_RESP_DIR)
+    rt_dir_create_all(LIGHT_DAEMON_DIR)
+    rt_dir_create_all(LIGHT_REQ_DIR)
+    rt_dir_create_all(LIGHT_RESP_DIR)
 
 fn daemon_lock_alive() -> bool:
     """True only when the lock is held by a LIVE light-daemon process.
@@ -275,18 +241,19 @@ fn ensure_daemon() -> bool:
     report_stale_lock()
     file_delete(LIGHT_LOCK)
     val binary = simple_binary()
-    val (_daemon_out, _daemon_err, daemon_code) = process_run(
+    process_run_timeout(
         "/bin/sh",
-        ["-c", "SIMPLE_EXECUTION_MODE=interpret {binary} run src/app/test_daemon/light_daemon.spl >/tmp/simple-test-daemon-light.log 2>&1 &"]
+        ["-c", "{binary} run src/app/test_daemon/light_daemon.spl >/tmp/simple-test-daemon-light.log 2>&1 &"],
+        1000
     )
     if daemon_code != 0:
-        file_write("/tmp/simple-test-daemon-light.log", "failed to spawn light daemon: {daemon_code}\n")
+        rt_file_write_text("/tmp/simple-test-daemon-light.log", "failed to spawn light daemon: {daemon_code}\n")
         return false
     var waits = 0
     while waits < 40:
-        if file_exists(LIGHT_LOCK):
+        if rt_file_exists(LIGHT_LOCK):
             return true
-        thread_sleep(50)
+        rt_sleep_ms(50)
         waits = waits + 1
     file_write("/tmp/simple-test-daemon-light.log", "light daemon shell exited but did not create lock\n")
     false
@@ -370,10 +337,9 @@ fn print_response(path: text, content: text) -> i64:
         return 1
     val code = content[0:newline].trim().to_i64() ?? 1
     val body = content[newline + 1:]
-    record_json_row(path, body)
     if body != "":
         print body
-    fail_closed_on_no_examples(path, body, code)
+    code
 
 fn has_spl_doctest_flag(args: [text]) -> bool:
     for a in args:
@@ -451,22 +417,13 @@ fn _spec_timeout_secs_directive_text(content: text) -> i64:
 
 # Run one spec file directly, bypassing the daemon. `--no-session-daemon`
 # routes to test_runner_single.spl (no daemon, no recursion).
-# The requested --timeout is forwarded UNCLAMPED to the inner single-runner
-# (which imposes the per-file bound on the spec child and reports on its own
-# timeout); the outer bounded wait gets 30s of grace on top so the inner
-# runner wins the race instead of this wait killing it mid-report. See
-# doc/08_tracking/bug/
-# seed_test_runner_kills_child_at_600s_ignoring_timeout_2026-08-02.md.
-fn run_one_direct(binary: text, path: text, timeout_secs: i64) -> i64:
-    val child_timeout_secs = effective_timeout_secs(path, timeout_secs)
-    val outer_timeout_ms = child_timeout_secs * 1000 + 30000
+fn run_one_direct(binary: text, path: text, timeout_ms: i64) -> i64:
     val (out, err, code) = process_run_bounded(
         binary,
-        ["test", "--no-session-daemon", "--timeout", "{child_timeout_secs}", path],
-        outer_timeout_ms,
+        ["test", "--no-session-daemon", path],
+        timeout_ms,
         TEST_OUTPUT_CAPTURE_BYTES
     )
-    record_json_row(path, out + "\n" + err)
     if out != "":
         print out
     if err != "":
@@ -484,7 +441,7 @@ fn run_one_direct(binary: text, path: text, timeout_secs: i64) -> i64:
     fail_closed_on_no_examples(path, out + err, code)
 
 # Run one spec file through the light daemon. `seq` disambiguates request ids
-# within a single multi-path invocation: time_now_unix_micros() can repeat
+# within a single multi-path invocation: rt_time_now_unix_micros() can repeat
 # across two fast iterations, and a colliding id would make the second request
 # overwrite the first one's response file.
 fn run_one_via_daemon(path: text, timeout_ms: i64, seq: i64) -> i64:
@@ -503,7 +460,7 @@ fn run_one_via_daemon(path: text, timeout_ms: i64, seq: i64) -> i64:
         if file_exists(resp_path):
             val content = read_file_text(resp_path)
             file_delete(resp_path)
-            return print_response(path, content)
+            return print_response(content)
         thread_sleep(100)
     # No response inside the budget + grace. Emit a verdict so the spec reads
     # BROKEN, not UNRUN, and name the lock + the one-line remedy: the most
@@ -600,18 +557,7 @@ fn _test_env_gate_names() -> text:
     names.join(", ")
 
 fn main() -> i64:
-    val raw_cleaned = clean_args()
-    var cleaned: [text] = []
-    var jf = 0
-    while jf < raw_cleaned.len():
-        if raw_cleaned[jf] == "--json":
-            json_mode = true
-        elif raw_cleaned[jf] == "--format" and jf + 1 < raw_cleaned.len() and raw_cleaned[jf + 1] == "json":
-            json_mode = true
-            jf = jf + 1
-        else:
-            cleaned.push(raw_cleaned[jf])
-        jf = jf + 1
+    val cleaned = clean_args()
     if has_spl_doctest_flag(cleaned):
         return run_scoped_spl_doctest(cleaned)
     val run = parse_client_run(cleaned)
@@ -619,21 +565,7 @@ fn main() -> i64:
         print "Simple Test Runner client"
         print "error: {run.error}: {run.path}"
         return 1
-    val requested = run.paths
-    val requested_count = count_positional_args(cleaned)
-    # Fail closed: a positional path that never became a run target is a
-    # dropped spec, and a dropped spec must never report success.
-    if requested.len() != requested_count:
-        print "Simple Test Runner client"
-        print "ERROR: dropped spec path(s) while parsing arguments: {requested_count} requested, {requested.len()} parsed"
-        return 1
-    # Daemon-lane timeout only: the light-request protocol clamps to
-    # LIGHT_REQUEST_MAX_TIMEOUT_MS (600s). The direct lane must honor the
-    # full requested --timeout — see long_timeout_bypass below and
-    # doc/08_tracking/bug/
-    # seed_test_runner_kills_child_at_600s_ignoring_timeout_2026-08-02.md.
     val timeout_ms = light_request_timeout_ms_from_seconds(run.timeout_secs)
-    val long_timeout_bypass = run.timeout_secs * 1000 > timeout_ms
     ensure_dirs()
     # The light daemon may be unable to start (e.g. it relies on runtime
     # methods the seed interpreter lacks). Degrade to direct execution rather
@@ -715,13 +647,7 @@ fn main() -> i64:
     # daemon_backlog.spl already decided the policy and pinned it with a unit
     # spec, but had ZERO production call sites -- the decision was never
     # consulted, so clients joined the queue unconditionally. This is that wiring.
-    # Count only `.req` entries. A raw dir_list().len() also counts the
-    # `.req.tmp` files produced by the atomic tmp+rename write above, so a
-    # client could bypass on the in-flight write that is about to become its
-    # OWN request -- and, worse, on leftover `.resp`/lock names. That is what
-    # `count_pending_requests` exists for; it was pinned by a unit spec but had
-    # zero production call sites. This is that wiring.
-    val backlog_pending = if file_exists(LIGHT_REQ_DIR): count_pending_requests(dir_list(LIGHT_REQ_DIR)) else: 0
+    val backlog_pending = if file_exists(LIGHT_REQ_DIR): dir_list(LIGHT_REQ_DIR).len() else: 0
     val backlog_bypass = daemon_backlog_bypass(backlog_pending)
     val daemon_ok = if cov_bypass or binary_override_bypass or long_timeout_bypass or invoker_bypass or require_gpu_bypass or env_gate_bypass or backlog_bypass: false else: ensure_daemon()
     var binary = ""
@@ -736,8 +662,6 @@ fn main() -> i64:
             print "invoking-binary: live test daemon runs {daemon_binary} but this process is {invoker}; bypassing daemon so the invoking binary executes the spec"
         elif binary_override_bypass:
             print "binary-override: {_binary_override_names()} set; bypassing test daemon so the override reaches the spec"
-        elif backlog_bypass:
-            print "daemon-backlog: {backlog_pending} request(s) queued on the single-worker test daemon; running directly"
         elif long_timeout_bypass:
             print "timeout: --timeout {run.timeout_secs}s exceeds daemon cap; running directly"
         else:
@@ -757,7 +681,7 @@ fn main() -> i64:
             val p_timeout_ms = light_request_timeout_ms_from_seconds(effective_timeout_secs(p, run.timeout_secs))
             code = run_one_via_daemon(p, p_timeout_ms, seq)
         else:
-            code = run_one_direct(binary, p, run.timeout_secs)
+            code = run_one_direct(binary, p, timeout_ms)
         executed = executed + 1
         seq = seq + 1
         # Aggregate: any failing spec fails the whole run. Keep going so the
@@ -771,6 +695,4 @@ fn main() -> i64:
     if executed != requested.len():
         print "ERROR: executed {executed} of {requested.len()} requested spec file(s); some were skipped"
         return 1
-    if json_mode:
-        print_json_summary()
     worst

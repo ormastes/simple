@@ -1,0 +1,198 @@
+# Lossless class/struct declaration lowering from frozen scalar readers.
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.hir.hir_destination_declaration_metadata.{HDDM_CLASS_DECL,
+    HDDM_STRUCT_DECL, HDDM_NOMINAL_ATTRIBUTE}
+use compiler.hir.hir_lowering.hir_destination_graph.{HD_RANGE_EXPR}
+use compiler.hir.hir_lowering.hir_destination_declarations.{HD_NOMINAL_CLASS,
+    HD_NOMINAL_STRUCT}
+use compiler.hir.hir_lowering.hir_destination_registry_reader.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir.mir_types.{MirType, MirTypeDef, MirTypeDefKind,
+    MirDeclarationField, MirDeclarationAttribute, MirFieldDef}
+use compiler.mir._MirLowering.hir_destination_types.{
+    mir_destination_lower_type_scalar_checked}
+
+fn mir_nominal_visibility(wire: i64) -> Visibility:
+    if wire == 0: return Visibility.Public
+    if wire == 1: return Visibility.Peer
+    if wire == 2: return Visibility.Up
+    if wire == 3: return Visibility.Internal
+    if wire == 4: return Visibility.Package
+    Visibility.Private
+
+fn mir_nominal_align(offset: i64, alignment: i64) -> i64:
+    if alignment <= 1: return offset
+    ((offset + alignment - 1) / alignment) * alignment
+
+impl MirLowering:
+    me lower_destination_nominal_details(slot: i64, generation: i64,
+            module_row: i64) -> bool:
+        var builder = self.builder; var module_ = builder.module
+        var types = module_.types
+        var metadata_kind = HDDM_CLASS_DECL
+        while metadata_kind <= HDDM_STRUCT_DECL:
+            val range_row = hdr_declaration_metadata_module_range(slot,
+                generation, module_row, metadata_kind)
+            if range_row >= 0:
+                val start = hdr_declaration_metadata_range_start(slot,
+                    generation, range_row)
+                val count = hdr_declaration_metadata_range_len(slot,
+                    generation, range_row)
+                if start < 0 or count < 0: return false
+                var offset = 0
+                while offset < count:
+                    val metadata_row = start + offset
+                    val symbol_id = hdr_declaration_metadata_owner(slot,
+                        generation, metadata_row)
+                    val detail_row = hdr_decl_nominal_detail_lookup(slot,
+                        generation, module_row, symbol_id)
+                    if symbol_id < 0 or detail_row < 0: return false
+                    val detail_kind = hdr_decl_nominal_detail_i64(slot,
+                        generation, detail_row, 0)
+                    if (metadata_kind == HDDM_CLASS_DECL and
+                            detail_kind != HD_NOMINAL_CLASS) or
+                            (metadata_kind == HDDM_STRUCT_DECL and
+                            detail_kind != HD_NOMINAL_STRUCT): return false
+                    val has_base = hdr_decl_nominal_detail_has_base(slot,
+                        generation, detail_row)
+                    val base_row = hdr_decl_nominal_detail_i64(slot, generation,
+                        detail_row, 3)
+                    if has_base != (base_row >= 0): return false
+                    val base_type: MirType? = if has_base:
+                        mir_destination_lower_type_scalar_checked(slot,
+                            generation, base_row)
+                    else: nil
+                    if has_base and not base_type.?: return false
+                    val trait_count = hdr_decl_nominal_detail_trait_range_len(
+                        slot, generation, detail_row)
+                    if trait_count < 0: return false
+                    var traits: [MirType] = []
+                    var ordinal = 0
+                    while ordinal < trait_count:
+                        val trait_type = mir_destination_lower_type_scalar_checked(
+                            slot, generation, hdr_decl_nominal_detail_trait(slot,
+                                generation, detail_row, ordinal))
+                        if not trait_type.?: return false
+                        traits.push(trait_type ?? MirType.unit())
+                        ordinal = ordinal + 1
+                    val field_count = hdr_decl_nominal_detail_field_range_len(
+                        slot, generation, detail_row)
+                    if field_count < 0: return false
+                    var declaration_fields: [MirDeclarationField] = []
+                    var layout_fields: [MirFieldDef] = []
+                    var next_offset = 0
+                    ordinal = 0
+                    while ordinal < field_count:
+                        val type_ = mir_destination_lower_type_scalar_checked(slot,
+                            generation, hdr_decl_nominal_detail_field_i64(slot,
+                                generation, detail_row, ordinal, 1))
+                        if not type_.?: return false
+                        val field_type = type_ ?? MirType.unit()
+                        val has_bits = hdr_decl_nominal_detail_field_bool(slot,
+                            generation, detail_row, ordinal, 2)
+                        val bits = hdr_decl_nominal_detail_field_i64(slot,
+                            generation, detail_row, ordinal, 3)
+                        if has_bits != (bits > 0): return false
+                        val field_offset = mir_nominal_align(next_offset,
+                            field_type.alignment())
+                        val field = MirDeclarationField(
+                            symbol: SymbolId(id: hdr_decl_nominal_detail_field_i64(
+                                slot, generation, detail_row, ordinal, 0)),
+                            name: hdr_decl_nominal_detail_field_name(slot,
+                                generation, detail_row, ordinal), type_: field_type,
+                            visibility: mir_nominal_visibility(
+                                hdr_decl_nominal_detail_field_visibility(slot,
+                                    generation, detail_row, ordinal)),
+                            is_public: hdr_decl_nominal_detail_field_is_public(slot,
+                                generation, detail_row, ordinal),
+                            is_volatile: hdr_decl_nominal_detail_field_bool(slot,
+                                generation, detail_row, ordinal, 1),
+                            has_bits_attr: has_bits, bits_width: bits,
+                            has_fixed_address: hdr_decl_nominal_detail_field_bool(
+                                slot, generation, detail_row, ordinal, 3),
+                            fixed_address: hdr_decl_nominal_detail_field_i64(slot,
+                                generation, detail_row, ordinal, 4),
+                            has_default: hdr_decl_nominal_detail_field_bool(slot,
+                                generation, detail_row, ordinal, 4),
+                            default_expr_row: hdr_decl_nominal_detail_field_i64(
+                                slot, generation, detail_row, ordinal, 5),
+                            bit_offset: 0, bit_width: 0,
+                            has_source_bits: false, source_bits: 0,
+                            is_reserved: false,
+                            span_row: hdr_decl_nominal_detail_field_i64(slot,
+                                generation, detail_row, ordinal, 6))
+                        declaration_fields.push(field)
+                        layout_fields.push(MirFieldDef(name: field.name,
+                            type_: field.type_, offset: field_offset,
+                            has_bits_attr: field.has_bits_attr,
+                            bits_width: field.bits_width, symbol: field.symbol,
+                            visibility: field.visibility,
+                            is_public: field.is_public,
+                            is_volatile: field.is_volatile,
+                            has_fixed_address: field.has_fixed_address,
+                            fixed_address: field.fixed_address,
+                            has_default: field.has_default,
+                            default_expr_row: field.default_expr_row,
+                            span_row: field.span_row))
+                        next_offset = field_offset + field_type.size_bytes()
+                        ordinal = ordinal + 1
+                    val symbol = SymbolId(id: symbol_id)
+                    types[symbol] = MirTypeDef(symbol: symbol,
+                        name: hdr_declaration_metadata_name(slot, generation,
+                            metadata_row),
+                        kind: MirTypeDefKind.Struct(layout_fields),
+                        is_export_c: false, export_name: "",
+                        defining_module: module_row,
+                        defining_module_name: hdr_module_name(slot, generation,
+                            module_row),
+                        visibility: mir_nominal_visibility(
+                            hdr_declaration_metadata_i64(slot, generation,
+                                metadata_row, 0)),
+                        declaration_kind: metadata_kind,
+                        has_base_type: has_base, base_type: base_type,
+                        trait_types: traits,
+                        declaration_fields: declaration_fields)
+                    offset = offset + 1
+            metadata_kind = metadata_kind + 1
+        val attribute_range = hdr_declaration_metadata_module_range(slot,
+            generation, module_row, HDDM_NOMINAL_ATTRIBUTE)
+        if attribute_range >= 0:
+            val attribute_start = hdr_declaration_metadata_range_start(slot,
+                generation, attribute_range)
+            val attribute_count = hdr_declaration_metadata_range_len(slot,
+                generation, attribute_range)
+            if attribute_start < 0 or attribute_count < 0: return false
+            var attribute_offset = 0
+            while attribute_offset < attribute_count:
+                val row = attribute_start + attribute_offset
+                val symbol = SymbolId(id: hdr_declaration_metadata_owner(slot,
+                    generation, row))
+                if not types.contains_key(symbol): return false
+                val expr_handle = hdr_declaration_metadata_i64(slot,
+                    generation, row, 0)
+                val expected_count = hdr_declaration_metadata_i64(slot,
+                    generation, row, 1)
+                if expr_handle < 0 or hdr_range_kind(slot, generation,
+                        expr_handle) != HD_RANGE_EXPR:
+                    return false
+                val subtype = hdr_range_subtype(slot, generation, expr_handle)
+                val expr_count = hdr_range_length(slot, generation, expr_handle)
+                if expr_count < 0 or expr_count != expected_count: return false
+                var expr_rows: [i64] = []
+                var expr_offset = 0
+                while expr_offset < expr_count:
+                    val expr_row = hdr_range_value(slot, generation, expr_handle,
+                        subtype, expr_offset)
+                    if expr_row < 0: return false
+                    expr_rows.push(expr_row); expr_offset = expr_offset + 1
+                var type_def = types[symbol]
+                var attributes = type_def.attributes
+                attributes.push(MirDeclarationAttribute(
+                    name: hdr_declaration_metadata_name(slot, generation, row),
+                    argument: "", expr_rows: expr_rows,
+                    span_row: hdr_declaration_metadata_span(slot, generation, row)))
+                type_def.attributes = attributes; types[symbol] = type_def
+                attribute_offset = attribute_offset + 1
+        module_.types = types; builder.module = module_; self.builder = builder
+        true

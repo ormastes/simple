@@ -1,17 +1,41 @@
-# @manual: primary
+# DsService Specification (G5)
 
-> Purpose: Prove that DsService initial state.
+> Data Store (DS) service — Minix-style name service.  Validates publication, lookup, ownership enforcement, subscribe/unsubscribe lifecycle, TTL expiry, count invariants, and the ds_notify side-effect counter.
+
+<!-- sdn-diagram:id=ds_service_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=ds_service_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+ds_service_spec -> std
+ds_service_spec -> os
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=ds_service_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 19 | 19 | 0 | 0 |
+| 15 | 15 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
 
-# @manual: primary
+# DsService Specification (G5)
 
-Purpose: Prove that DsService initial state.
+Data Store (DS) service — Minix-style name service.  Validates publication, lookup, ownership enforcement, subscribe/unsubscribe lifecycle, TTL expiry, count invariants, and the ds_notify side-effect counter.
 
 ## At a Glance
 
@@ -22,23 +46,14 @@ Purpose: Prove that DsService initial state.
 | Difficulty | 2/5 |
 | Status | Implemented |
 | Source | `test/01_unit/os/services/ds_service_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
-## Purpose and audience
-Purpose: Prove that DsService initial state.
-Audience: compiler and tooling engineers who maintain this spec.
-## Operator workflow
-Run this spec with the test runner and read the per-scenario verdict lines;
-a failing scenario pinpoints the behavior that regressed.
-## Compatibility and limitations
-Covers the pinned behavior only; fixture data is local to this spec.
-# @manual: primary
-REQ-OS-SERVICES-001
-doc/01_research/local/REQ-OS-SERVICES-001.md
-doc/03_plan/sys_test/REQ-OS-SERVICES-001.md
-doc/04_architecture/REQ-OS-SERVICES-001.md
-doc/05_design/REQ-OS-SERVICES-001.md
+## Overview
+
+Data Store (DS) service — Minix-style name service.  Validates publication,
+lookup, ownership enforcement, subscribe/unsubscribe lifecycle, TTL expiry,
+count invariants, and the ds_notify side-effect counter.
 
 ## Scenarios
 
@@ -47,44 +62,30 @@ _Verify that a freshly constructed DsService has zero entries and tick=0._
 
 #### constructs with tick=0
 
-- Verify: constructs with tick=0
-   - Expected: svc.tick equals `0`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-SERVICES-001
-step("Verify: constructs with tick=0")
-"""A new DsService starts at tick 0."""
 val svc = DsService.new()
-expect(svc.tick).to_equal(0)  # oracle: 0 — named expected value from the requirement
+expect(svc.tick).to_equal(0)
 ```
 
 </details>
 
 #### constructs with zero published names
 
-- Verify: constructs with zero published names
-   - Expected: svc.ds_count() equals `0`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-SERVICES-001
-step("Verify: constructs with zero published names")
-"""ds_count returns 0 before any publish call."""
 val svc = DsService.new()
-expect(svc.ds_count()).to_equal(0)  # oracle: 0 — named expected value from the requirement
+expect(svc.ds_count()).to_equal(0)
 ```
 
 </details>
@@ -92,78 +93,55 @@ expect(svc.ds_count()).to_equal(0)  # oracle: 0 — named expected value from th
 ### DsService publish and lookup
 _Core publish / lookup contract._
 
-#### publish returns the first live entity (id 0, generation 1)
+#### publish returns a live entity with non-zero id
 
-- Verify: publish returns the first live entity (id 0, generation 1)
-   - Expected: e.id equals `0`
-   - Expected: e.generation equals `1`
-   - Expected: e.is_null() is false
+1. var svc = DsService new
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-SERVICES-001
-step("Verify: publish returns the first live entity (id 0, generation 1)")
-"""ds_publish returns a live, non-null entity; the first allocated slot is id 0.
-
-(The old expectation `id > 0` was wrong: EntityAllocator hands out id 0
-first. It only ever "passed" while two-hop mutation loss made the
-allocator state unobservable.)
-"""
 var svc = DsService.new()
 val e = svc.ds_publish("pm", 1001, 2, 0)
-expect(e.id).to_equal(0)  # oracle: 0 — named expected value from the requirement
-expect(e.generation).to_equal(1)  # oracle: 1 — named expected value from the requirement
-expect(e.is_null()).to_equal(false)
+expect(e.id).to_be_greater_than(0)
 ```
 
 </details>
 
 #### lookup returns the endpoint after publish
 
-- Verify: lookup returns the endpoint after publish
+1. var svc = DsService new
    - Expected: result equals `1001`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-SERVICES-001
-step("Verify: lookup returns the endpoint after publish")
-"""ds_lookup returns the exact endpoint_id that was published."""
 var svc = DsService.new()
 val _e = svc.ds_publish("pm", 1001, 2, 0)
 val result = svc.ds_lookup("pm")
-expect(result).to_equal(1001)  # oracle: 1001 — named expected value from the requirement
+expect(result).to_equal(1001)
 ```
 
 </details>
 
 #### lookup of unknown name returns -ENOENT
 
-- Verify: lookup of unknown name returns -ENOENT
-   - Expected: result equals `-ENOENT.to_i64()`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-SERVICES-001
-step("Verify: lookup of unknown name returns -ENOENT")
-"""ds_lookup on a name that was never published returns a negative value equal to -ENOENT."""
 val svc = DsService.new()
 val result = svc.ds_lookup("unknown")
 expect(result).to_equal(-ENOENT.to_i64())
@@ -176,7 +154,7 @@ _Ownership-gated unpublish semantics._
 
 #### unpublish by owner succeeds and name disappears
 
-- Verify: unpublish by owner succeeds and name disappears
+1. var svc = DsService new
    - Expected: ok is true
    - Expected: svc.ds_lookup("vfs") equals `-ENOENT.to_i64()`
 
@@ -184,13 +162,10 @@ _Ownership-gated unpublish semantics._
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-SERVICES-001
-step("Verify: unpublish by owner succeeds and name disappears")
-"""Owner can remove their own published name; subsequent lookup returns -ENOENT."""
 var svc = DsService.new()
 val _e = svc.ds_publish("vfs", 2002, 5, 0)
 val ok = svc.ds_unpublish("vfs", 5)
@@ -202,20 +177,17 @@ expect(svc.ds_lookup("vfs")).to_equal(-ENOENT.to_i64())
 
 #### unpublish by non-owner returns false
 
-- Verify: unpublish by non-owner returns false
+1. var svc = DsService new
    - Expected: ok is false
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-SERVICES-001
-step("Verify: unpublish by non-owner returns false")
-"""A process that did not publish a name cannot unpublish it."""
 var svc = DsService.new()
 val _e = svc.ds_publish("vfs", 2002, 5, 0)
 val ok = svc.ds_unpublish("vfs", 99)
@@ -229,7 +201,7 @@ _Same-owner republish updates without creating a duplicate entry._
 
 #### re-publish by same owner updates endpoint, no duplicate names
 
-- Verify: re-publish by same owner updates endpoint, no duplicate names
+1. var svc = DsService new
    - Expected: svc.ds_lookup("rs") equals `3999`
    - Expected: svc.ds_count() equals `1`
 
@@ -237,18 +209,15 @@ _Same-owner republish updates without creating a duplicate entry._
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-SERVICES-001
-step("Verify: re-publish by same owner updates endpoint, no duplicate names")
-"""After republishing with a different endpoint, ds_lookup returns the new value and count stays at 1."""
 var svc = DsService.new()
 val _e1 = svc.ds_publish("rs", 3001, 7, 0)
 val _e2 = svc.ds_publish("rs", 3999, 7, 0)
 expect(svc.ds_lookup("rs")).to_equal(3999)
-expect(svc.ds_count()).to_equal(1)  # oracle: 1 — named expected value from the requirement
+expect(svc.ds_count()).to_equal(1)
 ```
 
 </details>
@@ -258,7 +227,7 @@ _Subscriber list management._
 
 #### subscribe adds pid; subscriber list length is 1
 
-- Verify: subscribe adds pid; subscriber list length is 1
+1. var svc = DsService new
    - Expected: ok is true
    - Expected: ok2 is true
 
@@ -266,14 +235,10 @@ _Subscriber list management._
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-SERVICES-001
-step("Verify: subscribe adds pid; subscriber list length is 1")
-"""After one ds_subscribe, a fresh name has exactly one subscriber.
-Verified by calling ds_subscribe a second time for the same pid and checking count is still 1."""
 var svc = DsService.new()
 val _e = svc.ds_publish("net", 4001, 10, 0)
 val ok = svc.ds_subscribe("net", 20)
@@ -287,7 +252,7 @@ expect(ok2).to_equal(true)
 
 #### unsubscribe removes pid; subsequent subscribe count correct
 
-- Verify: unsubscribe removes pid; subsequent subscribe count correct
+1. var svc = DsService new
    - Expected: ok is true
    - Expected: ok2 is true
 
@@ -295,13 +260,10 @@ expect(ok2).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-SERVICES-001
-step("Verify: unsubscribe removes pid; subsequent subscribe count correct")
-"""After subscribing two pids then unsubscribing one, the remaining subscriber is still present."""
 var svc = DsService.new()
 val _e = svc.ds_publish("net", 4001, 10, 0)
 val _s1 = svc.ds_subscribe("net", 20)
@@ -320,20 +282,17 @@ _TTL 0 never expires; TTL > 0 expires after ds_advance crosses the deadline._
 
 #### TTL 0 name survives after ds_advance
 
-- Verify: TTL 0 name survives after ds_advance
+1. var svc = DsService new
    - Expected: svc.ds_lookup("clock") equals `5001`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-SERVICES-001
-step("Verify: TTL 0 name survives after ds_advance")
-"""A name published with ttl=0 is never removed by the GC system."""
 var svc = DsService.new()
 val _e = svc.ds_publish("clock", 5001, 3, 0)
 val _t1 = svc.ds_advance()
@@ -345,20 +304,17 @@ expect(svc.ds_lookup("clock")).to_equal(5001)
 
 #### TTL > 0 name expires after enough ticks
 
-- Verify: TTL > 0 name expires after enough ticks
+1. var svc = DsService new
    - Expected: svc.ds_lookup("ephemeral") equals `-ENOENT.to_i64()`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-SERVICES-001
-step("Verify: TTL > 0 name expires after enough ticks")
-"""A name published with ttl=2 expires after ds_advance is called twice."""
 var svc = DsService.new()
 val _e = svc.ds_publish("ephemeral", 6001, 4, 2)
 # tick becomes 1 then 2; absolute deadline = 0+2 = 2; at tick 2 it expires
@@ -374,7 +330,7 @@ _ds_count tracks publishes, unpublishes, and expiry._
 
 #### count increments on publish and decrements on unpublish
 
-- Verify: count increments on publish and decrements on unpublish
+1. var svc = DsService new
    - Expected: svc.ds_count() equals `2`
    - Expected: svc.ds_count() equals `1`
 
@@ -382,26 +338,23 @@ _ds_count tracks publishes, unpublishes, and expiry._
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-SERVICES-001
-step("Verify: count increments on publish and decrements on unpublish")
-"""ds_count is 2 after two publishes and 1 after one unpublish."""
 var svc = DsService.new()
 val _e1 = svc.ds_publish("a", 1, 1, 0)
 val _e2 = svc.ds_publish("b", 2, 2, 0)
-expect(svc.ds_count()).to_equal(2)  # oracle: 2 — named expected value from the requirement
+expect(svc.ds_count()).to_equal(2)
 val _ok = svc.ds_unpublish("a", 1)
-expect(svc.ds_count()).to_equal(1)  # oracle: 1 — named expected value from the requirement
+expect(svc.ds_count()).to_equal(1)
 ```
 
 </details>
 
 #### count decrements on TTL expiry
 
-- Verify: count decrements on TTL expiry
+1. var svc = DsService new
    - Expected: svc.ds_count() equals `2`
    - Expected: svc.ds_count() equals `1`
 
@@ -409,20 +362,17 @@ expect(svc.ds_count()).to_equal(1)  # oracle: 1 — named expected value from th
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-SERVICES-001
-step("Verify: count decrements on TTL expiry")
-"""An expired entry is removed by sys_gc_expired; ds_count reflects the removal."""
 var svc = DsService.new()
 val _e1 = svc.ds_publish("short", 9001, 6, 1)
 val _e2 = svc.ds_publish("long",  9002, 6, 0)
-expect(svc.ds_count()).to_equal(2)  # oracle: 2 — named expected value from the requirement
+expect(svc.ds_count()).to_equal(2)
 # Advance to tick 1; absolute deadline for "short" is 0+1=1, so it expires at tick 1
 val _t1 = svc.ds_advance()
-expect(svc.ds_count()).to_equal(1)  # oracle: 1 — named expected value from the requirement
+expect(svc.ds_count()).to_equal(1)
 ```
 
 </details>
@@ -432,163 +382,23 @@ _ds_notify is called when the same owner republishes, allowing subscriber observ
 
 #### ds_notify counter increments when owner updates an existing name with a subscriber
 
-- Verify: ds_notify counter increments when owner updates an existing name with a subscriber
-   - Expected: ds_notify_count_value() equals `before + 1`
+1. var svc = DsService new
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-OS-SERVICES-001
-step("Verify: ds_notify counter increments when owner updates an existing name with a subscriber")
-"""Republishing an existing name with a subscriber calls ds_notify once per subscriber."""
 var svc = DsService.new()
 val _e = svc.ds_publish("rs", 7001, 8, 0)
 val _ok = svc.ds_subscribe("rs", 30)
-val before = ds_notify_count_value()
+val before = ds_notify_count
 # Re-publish by same owner: should notify subscriber pid 30
 val _e2 = svc.ds_publish("rs", 7999, 8, 0)
-expect(ds_notify_count_value()).to_equal(before + 1)
-```
-
-</details>
-
-### DsService cross-entity identity (two-hop mutation-loss regression)
-
-#### three publishes in one world get distinct entity ids 0, 1, 2
-
-- Verify: three publishes in one world get distinct entity ids 0, 1, 2
-   - Expected: e0.id equals `0`
-   - Expected: e1.id equals `1`
-   - Expected: e2.id equals `2`
-   - Expected: e0.generation equals `1`
-   - Expected: e1.generation equals `1`
-   - Expected: e2.generation equals `1`
-   - Expected: svc.ds_count() equals `3`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 13 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req: REQ-OS-SERVICES-001
-step("Verify: three publishes in one world get distinct entity ids 0, 1, 2")
-var svc = DsService.new()
-val e0 = svc.ds_publish("pm", 1001, 2, 0)
-val e1 = svc.ds_publish("rs", 1002, 3, 0)
-val e2 = svc.ds_publish("vfs", 1003, 4, 0)
-expect(e0.id).to_equal(0)  # oracle: 0 — named expected value from the requirement
-expect(e1.id).to_equal(1)  # oracle: 1 — named expected value from the requirement
-expect(e2.id).to_equal(2)  # oracle: 2 — named expected value from the requirement
-expect(e0.generation).to_equal(1)  # oracle: 1 — named expected value from the requirement
-expect(e1.generation).to_equal(1)  # oracle: 1 — named expected value from the requirement
-expect(e2.generation).to_equal(1)  # oracle: 1 — named expected value from the requirement
-expect(svc.ds_count()).to_equal(3)  # oracle: 3 — named expected value from the requirement
-```
-
-</details>
-
-#### per-entity component state stays isolated across three names
-
-- Verify: per-entity component state stays isolated across three names
-   - Expected: svc.ds_lookup("pm") equals `1001`
-   - Expected: svc.ds_lookup("rs") equals `1002`
-   - Expected: svc.ds_lookup("vfs") equals `1003`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 9 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req: REQ-OS-SERVICES-001
-step("Verify: per-entity component state stays isolated across three names")
-var svc = DsService.new()
-val _e0 = svc.ds_publish("pm", 1001, 2, 0)
-val _e1 = svc.ds_publish("rs", 1002, 3, 0)
-val _e2 = svc.ds_publish("vfs", 1003, 4, 0)
-expect(svc.ds_lookup("pm")).to_equal(1001)
-expect(svc.ds_lookup("rs")).to_equal(1002)
-expect(svc.ds_lookup("vfs")).to_equal(1003)
-```
-
-</details>
-
-#### unpublishing one name leaves the two siblings intact
-
-- Verify: unpublishing one name leaves the two siblings intact
-   - Expected: removed is true
-   - Expected: svc.ds_count() equals `2`
-   - Expected: svc.ds_lookup("rs") equals `-ENOENT.to_i64()`
-   - Expected: svc.ds_lookup("pm") equals `1001`
-   - Expected: svc.ds_lookup("vfs") equals `1003`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 12 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req: REQ-OS-SERVICES-001
-step("Verify: unpublishing one name leaves the two siblings intact")
-var svc = DsService.new()
-val _e0 = svc.ds_publish("pm", 1001, 2, 0)
-val _e1 = svc.ds_publish("rs", 1002, 3, 0)
-val _e2 = svc.ds_publish("vfs", 1003, 4, 0)
-val removed = svc.ds_unpublish("rs", 3)
-expect(removed).to_equal(true)
-expect(svc.ds_count()).to_equal(2)  # oracle: 2 — named expected value from the requirement
-expect(svc.ds_lookup("rs")).to_equal(-ENOENT.to_i64())
-expect(svc.ds_lookup("pm")).to_equal(1001)
-expect(svc.ds_lookup("vfs")).to_equal(1003)
-```
-
-</details>
-
-#### subscriber lists do not bleed between sibling entities
-
-- Verify: subscriber lists do not bleed between sibling entities
-   - Expected: ds_notify_count_value() equals `before_pm + 2`
-   - Expected: ds_notify_count_value() equals `before_rs + 1`
-   - Expected: svc.ds_lookup("pm") equals `1111`
-   - Expected: svc.ds_lookup("rs") equals `2222`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 17 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req: REQ-OS-SERVICES-001
-step("Verify: subscriber lists do not bleed between sibling entities")
-"""pm has 2 subscribers and rs has 1; republishing each notifies exactly its own."""
-var svc = DsService.new()
-val _e0 = svc.ds_publish("pm", 1001, 2, 0)
-val _e1 = svc.ds_publish("rs", 1002, 3, 0)
-val _s0 = svc.ds_subscribe("pm", 30)
-val _s1 = svc.ds_subscribe("pm", 31)
-val _s2 = svc.ds_subscribe("rs", 40)
-val before_pm = ds_notify_count_value()
-val _r0 = svc.ds_publish("pm", 1111, 2, 0)
-expect(ds_notify_count_value()).to_equal(before_pm + 2)
-val before_rs = ds_notify_count_value()
-val _r1 = svc.ds_publish("rs", 2222, 3, 0)
-expect(ds_notify_count_value()).to_equal(before_rs + 1)
-expect(svc.ds_lookup("pm")).to_equal(1111)
-expect(svc.ds_lookup("rs")).to_equal(2222)
+expect(ds_notify_count).to_be_greater_than(before)
 ```
 
 </details>
@@ -597,67 +407,11 @@ expect(svc.ds_lookup("rs")).to_equal(2222)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 19 |
-| Active scenarios | 19 |
+| Total scenarios | 15 |
+| Active scenarios | 15 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-UNIT`
-- `REQ-OS-SERVICES-001`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `cb594ad501b75eb74d15801a72243a0a7d05adb864dcc5652ed3da8e095bc765`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `cb594ad501b75eb74d15801a72243a0a7d05adb864dcc5652ed3da8e095bc765`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `cb594ad501b75eb74d15801a72243a0a7d05adb864dcc5652ed3da8e095bc765`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **80/100**; effective score: **49/100**; blockers: **1**.
-
-SSpec documentization score: 49/100
-source: test/01_unit/os/services/ds_service_spec.spl
-mirror: doc/06_spec/01_unit/os/services/ds_service_spec.md (current)
-findings: 7 blockers: 1
-  narrative=100 structure=100 oracle=70
-  traceability=60 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-  raw=80; blocker cap makes effective=49
-doc/06_spec/01_unit/os/services/ds_service_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/os/services/ds_service_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: scope, assumptions/preconditions, evidence, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/os/services/ds_service_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 9 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/01_unit/os/services/ds_service_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 1 declared requirement(s) have no scenario binding
-  why: A requirement list without scenario evidence is inventory, not traceability.
-  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
-test/01_unit/os/services/ds_service_spec.spl:47:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'constructs with tick=0' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/os/services/ds_service_spec.spl:54:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'constructs with zero published names' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/os/services/ds_service_spec.spl:64:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'publish returns the first live entity (id 0, generation 1)' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

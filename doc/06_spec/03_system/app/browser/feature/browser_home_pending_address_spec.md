@@ -214,37 +214,16 @@ expect(rejected_session.ui_access_revision).to_equal(
 expect(rejected_session.current_url).to_equal(HOME_OLD_URL)
 expect(rejected_session.history.len()).to_equal(1)
 
-var rejected_registry = home_registry(
-    "javascript:alert(1)"
-)
-val rejected_down = rejected_registry.dispatch_chrome_pointer(
-    3, HOME_WINDOW_ID, "home", true
-)
-expect(rejected_down.reason).to_equal("chrome-pressed")
-expect(rejected_registry.entries[0].address_editing).to_be(true)
-val rejected_up = rejected_registry.dispatch_chrome_pointer(
-    4, HOME_WINDOW_ID, "home", false
-)
-expect(rejected_up.callback_count).to_equal(0)
-expect(rejected_up.reason).to_equal("home-unconfigured")
-expect(rejected_registry.address_text(
-    HOME_WINDOW_ID
-)).to_equal(HOME_ABANDONED_DRAFT)
-expect(
-    rejected_registry.entries[0].address_editing
-).to_be(true)
-expect(
-    rejected_registry.entries[0].address_replace_on_text
-).to_be(true)
-expect(rejected_registry.document_url(
-    HOME_WINDOW_ID
-)).to_equal(HOME_OLD_URL)
-expect(
-    rejected_registry.entries[0].renderer.history_urls
-).to_equal([HOME_OLD_URL])
-expect(
-    rejected_registry.entries[0].renderer.history_index
-).to_equal(0)
+        val home_down = registry.dispatch_chrome_pointer(
+            1, HOME_WINDOW_ID, "home", true
+        )
+        expect(home_down.reason).to_equal("chrome-pressed")
+        expect(registry.entries[0].address_editing).to_be(true)
+        val home_up = registry.dispatch_chrome_pointer(
+            2, HOME_WINDOW_ID, "home", false
+        )
+        expect(home_up.callback_count).to_equal(1)
+        expect(home_up.reason).to_equal("")
 
 var busy_registry = home_registry(HOME_TARGET_URL)
 var busy_entry = busy_registry.entries[0]
@@ -277,32 +256,153 @@ expect(
     busy_registry.entries[0].renderer.history_urls
 ).to_equal([HOME_OLD_URL])
 
-var address_session = BrowserSession.new()
-expect(address_session.open_html(
-    HOME_OLD_URL, HOME_OLD_HTML
-).unwrap()).to_be(true)
-address_session.address_draft = HOME_ABANDONED_DRAFT
-val address_revision = address_session.ui_access_revision
-expect(address_session.begin_network_navigation(
-    "Example.COM/next", "GET", "", "", ""
-).unwrap()).to_be(true)
-expect(address_session.address_draft).to_equal(
-    "https://Example.COM/next"
-)
-expect(address_session.ui_access_revision).to_equal(
-    address_revision + 1
-)
-val unchanged_revision = address_session.ui_access_revision
-expect(address_session.begin_network_navigation(
-    "https://Example.COM/next", "GET", "", "", ""
-).unwrap()).to_be(true)
-expect(address_session.ui_access_revision).to_equal(
-    unchanged_revision
-)
+        expect(worker.chrome_focus).to_equal("")
+        expect(worker.address_replace_on_text).to_be(false)
+        expect(worker.browser.address_draft).to_equal(HOME_TARGET_URL)
+        expect(worker.browser.pending_url).to_equal(HOME_TARGET_URL)
+        expect(worker.browser.ui_access_revision).to_equal(
+            worker_revision + 1
+        )
+        expect(worker.browser.current_url).to_equal(HOME_OLD_URL)
+        expect(worker.browser.history.len()).to_equal(worker_history_len)
+        expect(worker.browser.current_index).to_equal(
+            worker_history_index
+        )
 
-close_home_registry(registry)
-close_home_registry(rejected_registry)
-close_home_registry(busy_registry)
+        expect(registry.address_text(HOME_WINDOW_ID)).to_equal(
+            HOME_TARGET_URL
+        )
+        expect(registry.entries[0].address_editing).to_be(false)
+        expect(
+            registry.entries[0].address_replace_on_text
+        ).to_be(false)
+        expect(
+            registry.entries[0].renderer.navigation_permit.url
+        ).to_equal(HOME_TARGET_URL)
+        expect(registry.document_url(HOME_WINDOW_ID)).to_equal(
+            HOME_OLD_URL
+        )
+        expect(
+            registry.entries[0].renderer.history_urls
+        ).to_equal(registry_history_urls)
+        expect(
+            registry.entries[0].renderer.history_index
+        ).to_equal(registry_history_index)
+
+        var rejected_session = BrowserSession.new()
+        expect(rejected_session.open_html(
+            HOME_OLD_URL, HOME_OLD_HTML
+        ).unwrap()).to_be(true)
+        expect(rejected_session.try_set_home_url(
+            HOME_TARGET_URL
+        )).to_be(true)
+        rejected_session.address_draft = HOME_ABANDONED_DRAFT
+        val rejected_revision = rejected_session.ui_access_revision
+        expect(rejected_session.try_set_home_url(
+            "javascript:alert(1)"
+        )).to_be(false)
+        expect(rejected_session.home_url).to_equal(HOME_TARGET_URL)
+        expect(rejected_session.begin_network_navigation(
+            "javascript:alert(1)", "GET", "", "", ""
+        ).unwrap_err()).to_equal("unsupported navigation scheme")
+        expect(rejected_session.address_draft).to_equal(
+            HOME_ABANDONED_DRAFT
+        )
+        expect(rejected_session.ui_access_revision).to_equal(
+            rejected_revision
+        )
+        expect(rejected_session.current_url).to_equal(HOME_OLD_URL)
+        expect(rejected_session.history.len()).to_equal(1)
+
+        var rejected_registry = home_registry(
+            "javascript:alert(1)"
+        )
+        val rejected_down = rejected_registry.dispatch_chrome_pointer(
+            3, HOME_WINDOW_ID, "home", true
+        )
+        expect(rejected_down.reason).to_equal("chrome-pressed")
+        expect(rejected_registry.entries[0].address_editing).to_be(true)
+        val rejected_up = rejected_registry.dispatch_chrome_pointer(
+            4, HOME_WINDOW_ID, "home", false
+        )
+        expect(rejected_up.callback_count).to_equal(0)
+        expect(rejected_up.reason).to_equal("home-unconfigured")
+        expect(rejected_registry.address_text(
+            HOME_WINDOW_ID
+        )).to_equal(HOME_ABANDONED_DRAFT)
+        expect(
+            rejected_registry.entries[0].address_editing
+        ).to_be(true)
+        expect(
+            rejected_registry.entries[0].address_replace_on_text
+        ).to_be(true)
+        expect(rejected_registry.document_url(
+            HOME_WINDOW_ID
+        )).to_equal(HOME_OLD_URL)
+        expect(
+            rejected_registry.entries[0].renderer.history_urls
+        ).to_equal([HOME_OLD_URL])
+        expect(
+            rejected_registry.entries[0].renderer.history_index
+        ).to_equal(0)
+
+        var busy_registry = home_registry(HOME_TARGET_URL)
+        var busy_entry = busy_registry.entries[0]
+        busy_entry.renderer.pending_wire = "partially-written"
+        busy_entry.renderer.pending_wire_offset = 1
+        busy_registry.entries[0] = busy_entry
+        val busy_revision = busy_entry.mutation_revision
+        expect(busy_registry.dispatch_chrome_pointer(
+            5, HOME_WINDOW_ID, "home", true
+        ).reason).to_equal("chrome-pressed")
+        val busy_home = busy_registry.dispatch_chrome_pointer(
+            6, HOME_WINDOW_ID, "home", false
+        )
+        expect(busy_home.callback_count).to_equal(0)
+        expect(busy_home.reason).to_equal("renderer-busy")
+        expect(busy_registry.address_text(
+            HOME_WINDOW_ID
+        )).to_equal(HOME_ABANDONED_DRAFT)
+        expect(busy_registry.entries[0].address_editing).to_be(true)
+        expect(
+            busy_registry.entries[0].address_replace_on_text
+        ).to_be(true)
+        expect(
+            busy_registry.entries[0].mutation_revision
+        ).to_equal(busy_revision)
+        expect(busy_registry.document_url(
+            HOME_WINDOW_ID
+        )).to_equal(HOME_OLD_URL)
+        expect(
+            busy_registry.entries[0].renderer.history_urls
+        ).to_equal([HOME_OLD_URL])
+
+        var address_session = BrowserSession.new()
+        expect(address_session.open_html(
+            HOME_OLD_URL, HOME_OLD_HTML
+        ).unwrap()).to_be(true)
+        address_session.address_draft = HOME_ABANDONED_DRAFT
+        val address_revision = address_session.ui_access_revision
+        expect(address_session.begin_network_navigation(
+            "Example.COM/next", "GET", "", "", ""
+        ).unwrap()).to_be(true)
+        expect(address_session.address_draft).to_equal(
+            "https://Example.COM/next"
+        )
+        expect(address_session.ui_access_revision).to_equal(
+            address_revision + 1
+        )
+        val unchanged_revision = address_session.ui_access_revision
+        expect(address_session.begin_network_navigation(
+            "https://Example.COM/next", "GET", "", "", ""
+        ).unwrap()).to_be(true)
+        expect(address_session.ui_access_revision).to_equal(
+            unchanged_revision
+        )
+
+        close_home_registry(registry)
+        close_home_registry(rejected_registry)
+        close_home_registry(busy_registry)
 ```
 
 </details>

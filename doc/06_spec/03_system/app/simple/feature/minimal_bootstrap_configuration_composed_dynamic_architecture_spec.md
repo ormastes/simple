@@ -2,12 +2,11 @@
 
 > Tests covering Minimal-bootstrap composition development.
 
-| Tests | Active | Skipped | Pending |
-|-------|--------|---------|--------:|
-| 6 | 6 | 0 | 0 |
+1. Compile the original app name.
+2. Compile the renamed app record.
+3. `load_unchanged_core` — load both validated projections in one launcher process.
 
-<details>
-<summary>Full Scenario Manual</summary>
+Expected outcome: both records become observable without restarting or recompiling launcher source. This is not yet the stronger on-disk core-artifact hash proof required for complete REQ-008/NFR-008 acceptance.
 
 # Minimal Bootstrap Configuration Composed Dynamic Architecture Specification
 

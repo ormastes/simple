@@ -13,16 +13,15 @@ use os.kernel.memory.vmm_address_space.{
 }
 use os.kernel.memory.pmm.{pmm_alloc_page}
 
-# The RV64 paging dependency is selected inside the @cfg(riscv64) bodies and
-# crosses the architecture boundary only through arch_adapt. The seed's cfg
-# strip does not strip @cfg-gated top-level `use` lines, so keeping the facade
-# import function-local prevents RV64-only `sfence.vma` inline asm from entering
-# an x86_64 kernel closure.
+# NOTE(cross-arch import leak): riscv64 paging imports live INSIDE the
+# @cfg(riscv64) fn bodies below. The seed's cfg strip does not strip
+# @cfg-gated top-level `use` lines, so a top-level import here pulls
+# riscv64 paging (with RV64-only `sfence.vma` inline asm) into every
+# x86_64 kernel build and breaks the inline-asm C compile.
 
 var g_user_as_next_id: u64 = 1
-val ARM64_FS_EXEC_FRAME_BASE: u64 = 0x52000000
-var g_arm64_fs_exec_frame_next: u64 = ARM64_FS_EXEC_FRAME_BASE
-val ARM64_FS_EXEC_FRAME_END: u64 = 0x57000000
+var g_arm64_fs_exec_frame_next: u64 = 0x48100000
+val ARM64_FS_EXEC_FRAME_END: u64 = 0x50000000
 
 @cfg(not(baremetal))
 @export("rt_arm64_user_as_create_host_stub")
@@ -65,8 +64,8 @@ fn alloc_user_page_frame() -> PageFrame?:
     val frame = pmm_alloc_page()
     if frame != nil:
         return frame
-    if g_arm64_fs_exec_frame_next < ARM64_FS_EXEC_FRAME_BASE or g_arm64_fs_exec_frame_next >= ARM64_FS_EXEC_FRAME_END:
-        g_arm64_fs_exec_frame_next = ARM64_FS_EXEC_FRAME_BASE
+    if g_arm64_fs_exec_frame_next < 0x48100000 or g_arm64_fs_exec_frame_next >= ARM64_FS_EXEC_FRAME_END:
+        g_arm64_fs_exec_frame_next = 0x48100000
     if g_arm64_fs_exec_frame_next + 4096 <= ARM64_FS_EXEC_FRAME_END:
         val phys = g_arm64_fs_exec_frame_next
         g_arm64_fs_exec_frame_next = g_arm64_fs_exec_frame_next + 4096
@@ -89,22 +88,18 @@ fn map_user_page_in(space: AddressSpace, virt: VirtAddr, phys: PhysAddr, flags: 
 fn alloc_user_page_frame() -> PageFrame?:
     pmm_alloc_page()
 
-# Narrow cross-layer seam used by the loader-owned mapped-address-space lease.
-export create_user_address_space, destroy_user_address_space
-
 @cfg(riscv64)
 fn create_user_address_space() -> AddressSpace:
-    use os.kernel.arch_adapt.riscv64_user_paging.{riscv64_vmm_create_address_space}
-    AddressSpace(phys_root: riscv64_vmm_create_address_space(), id: _next_user_as_id())
+    use os.kernel.arch.riscv64.paging.{vmm_create_address_space as rv64_vmm_create_address_space}
+    AddressSpace(phys_root: rv64_vmm_create_address_space(), id: _next_user_as_id())
 
 @cfg(riscv64)
 fn destroy_user_address_space(space: AddressSpace):
-    # ponytail: retain boot-lifetime roots until the Sv39 owner has a safe table-tree walker.
-    val _space = space
+    vmm_destroy_user_address_space(space)
 
 @cfg(riscv64)
 fn map_user_page_in(space: AddressSpace, virt: VirtAddr, phys: PhysAddr, flags: VmFlags) -> bool:
-    use os.kernel.arch_adapt.riscv64_user_paging.{riscv64_vmm_map_page_in}
+    use os.kernel.arch.riscv64.paging.{riscv64_vmm_map_page_in}
     riscv64_vmm_map_page_in(space.phys_root, virt, phys, flags)
 
 @cfg(riscv64)

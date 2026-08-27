@@ -5,8 +5,7 @@ working copy with several other sessions active.
 **Severity:** blocks any bootstrap while another session is executing the seed;
 worse, the documented workaround for the symptom would reintroduce a known
 0-byte-clobber race.
-Status: FIXED
-Status re-verified 2026-08-17 by source inspection (triage shard 00).
+**Status:** open. Not worked around — see "Why nothing was forced".
 
 ## Symptom
 

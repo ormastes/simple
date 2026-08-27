@@ -4,7 +4,7 @@
 # Used by the watcher daemon (write) and interpreter (read) for
 # SMF cache discovery without scanning the filesystem.
 #
-# Format: SDN at <smf-cache-dir>/manifest.sdn
+# Format: SDN at build/smf/manifest.sdn
 # Concurrent access safety: atomic write via tmp+rename pattern.
 
 
@@ -12,12 +12,13 @@ extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_rename(src: text, dst: text) -> bool
+extern fn rt_dir_create_all(path: text) -> bool
 extern fn rt_time_now_unix_micros() -> i64
 extern fn rt_hash_text(s: text) -> i64
+extern fn rt_env_get(key: text) -> text
 
 use compiler.driver.cache.action_key.{interface_digest_of_source}
 use std.io_runtime.{dir_create_all}
-use std.nogc_sync_mut.io_runtime.{env_get_opt}
 
 # ============================================================================
 # Types
@@ -35,10 +36,6 @@ struct SmfManifestEntry:
     gc_off: bool
     profile: text
     allowed_families: [text]
-    # Canonical interface digest (action_key.interface_digest_of over the
-    # textual interface parts of the source). Additive (2026-08-18): old
-    # manifests parse with "" (absent); readers must treat "" as no-evidence.
-    iface_digest: text
 
 struct SmfManifest:
     version: i64
@@ -51,7 +48,7 @@ struct SmfManifest:
 
 fn smf_manifest_new() -> SmfManifest:
     SmfManifest(
-        version: 3,
+        version: 4,
         entries: {},
         updated_at: rt_time_now_unix_micros()
     )
@@ -68,21 +65,6 @@ fn smf_manifest_entry_new(
     profile: text,
     allowed_families: [text]
 ) -> SmfManifestEntry:
-    smf_manifest_entry_new_with_iface(source_path, smf_path, source_hash, backend, opt_level, release, debug_info, gc_off, profile, allowed_families, "")
-
-fn smf_manifest_entry_new_with_iface(
-    source_path: text,
-    smf_path: text,
-    source_hash: i64,
-    backend: text,
-    opt_level: i64,
-    release: bool,
-    debug_info: bool,
-    gc_off: bool,
-    profile: text,
-    allowed_families: [text],
-    iface_digest: text
-) -> SmfManifestEntry:
     SmfManifestEntry(
         source_path: source_path,
         smf_path: smf_path,
@@ -94,8 +76,7 @@ fn smf_manifest_entry_new_with_iface(
         debug_info: debug_info,
         gc_off: gc_off,
         profile: profile,
-        allowed_families: allowed_families,
-        iface_digest: iface_digest
+        allowed_families: allowed_families
     )
 
 # ============================================================================
@@ -107,7 +88,7 @@ fn smf_manifest_update(manifest: SmfManifest, entry: SmfManifestEntry) -> SmfMan
     var entries = manifest.entries
     entries[entry.source_path] = entry
     SmfManifest(
-        version: manifest.version,
+        version: 4,
         entries: entries,
         updated_at: rt_time_now_unix_micros()
     )
@@ -118,7 +99,7 @@ fn smf_manifest_remove(manifest: SmfManifest, source_path: text) -> SmfManifest:
     if entries.has(source_path):
         entries.remove(source_path)
     SmfManifest(
-        version: manifest.version,
+        version: 4,
         entries: entries,
         updated_at: rt_time_now_unix_micros()
     )
@@ -130,7 +111,7 @@ fn smf_manifest_find(manifest: SmfManifest, source_path: text) -> SmfManifestEnt
     nil
 
 fn smf_manifest_count(manifest: SmfManifest) -> i64:
-    manifest.entries.keys().len()
+    manifest.entries.len()
 
 fn smf_manifest_entry_matches_source(entry: SmfManifestEntry, source_text: text) -> bool:
     """Verify a manifest entry against the live source text. FAIL CLOSED.
@@ -182,7 +163,7 @@ fn smf_manifest_entry_iface_verdict(entry: SmfManifestEntry, source_text: text) 
 # Level-gated diagnostic (default OFF): set SIMPLE_IFACE_DIGEST_LOG=1 to log
 # the verdict on every manifest-backed cache load.
 fn smf_manifest_iface_diagnostic(entry: SmfManifestEntry, source_text: text):
-    if (env_get_opt("SIMPLE_IFACE_DIGEST_LOG") ?? "") != "1":
+    if (rt_env_get("SIMPLE_IFACE_DIGEST_LOG") ?? "") != "1":
         return
     val verdict = smf_manifest_entry_iface_verdict(entry, source_text)
     print "[iface-digest] {entry.source_path}: {iface_digest_verdict_text(verdict)}"
@@ -207,11 +188,11 @@ fn smf_manifest_to_sdn(manifest: SmfManifest) -> text:
     ]
 
     if manifest.entries.keys().len() > 0:
-        lines.push("entries |source_path, smf_path, source_hash, compiled_at, backend, opt_level, release, debug_info, gc_off, profile, allowed_families, iface_digest|")
+        lines.push("entries |source_path, smf_path, source_hash, compiled_at, backend, opt_level, release, debug_info, gc_off, profile, allowed_families|")
         for key in manifest.entries.keys():
             val e = manifest.entries[key]
             val allowed_families = e.allowed_families.join(";")
-            lines.push("    \"{e.source_path}\", \"{e.smf_path}\", {e.source_hash}, {e.compiled_at}, \"{e.backend}\", {e.opt_level}, {bool_to_sdn_int(e.release)}, {bool_to_sdn_int(e.debug_info)}, {bool_to_sdn_int(e.gc_off)}, \"{e.profile}\", \"{allowed_families}\", \"{e.iface_digest}\"")
+            lines.push("    \"{e.source_path}\", \"{e.smf_path}\", {e.source_hash}, {e.compiled_at}, \"{e.backend}\", {e.opt_level}, {bool_to_sdn_int(e.release)}, {bool_to_sdn_int(e.debug_info)}, {bool_to_sdn_int(e.gc_off)}, \"{e.profile}\", \"{allowed_families}\"")
 
     lines.join("\n")
 
@@ -251,36 +232,18 @@ fn parse_manifest_entry_line(line: text) -> SmfManifestEntry?:
     if parts.len() < 5:
         return nil
 
-    # Hoisted `.trim().replace(..)` chains: the deployed stage-4 interpreter's
-    # nested-call dispatcher predates the 2026-07-07 seed fix (050209d9b3), so a
-    # chained outer `.replace` in val position aborts the worker ("method
-    # 'replace' not found on value of type str in nested call context") — same
-    # bootstrap Stage-1 post-link wall as cache_validator.source_to_cache_path.
-    val source_path_raw = parts[0].trim()
-    val source_path = source_path_raw.replace("\"", "")
-    val smf_path_raw = parts[1].trim()
-    val smf_path = smf_path_raw.replace("\"", "")
+    val source_path = parts[0].trim().replace("\"", "")
+    val smf_path = parts[1].trim().replace("\"", "")
     val source_hash = parts[2].trim().to_i64() ?? 0
     val compiled_at = parts[3].trim().to_i64() ?? 0
-    val backend_raw = parts[4].trim()
-    val backend = backend_raw.replace("\"", "")
+    val backend = parts[4].trim().replace("\"", "")
     val opt_level = if parts.len() > 5: parts[5].trim().to_i64() ?? 0 else: 0
     val release = if parts.len() > 6: parse_manifest_bool(parts[6].trim()) else: false
     val debug_info = if parts.len() > 7: parse_manifest_bool(parts[7].trim()) else: true
     val gc_off = if parts.len() > 8: parse_manifest_bool(parts[8].trim()) else: false
-    var profile = "dev"
-    if parts.len() > 9:
-        val profile_raw = parts[9].trim()
-        profile = profile_raw.replace("\"", "")
-    var allowed_families_text = ""
-    if parts.len() > 10:
-        val families_raw = parts[10].trim()
-        allowed_families_text = families_raw.replace("\"", "")
+    val profile = if parts.len() > 9: parts[9].trim().replace("\"", "") else: "dev"
+    val allowed_families_text = if parts.len() > 10: parts[10].trim().replace("\"", "") else: ""
     val allowed_families = if allowed_families_text == "": [] else: allowed_families_text.split(";")
-    var iface_digest = ""
-    if parts.len() > 11:
-        val iface_raw = parts[11].trim()
-        iface_digest = iface_raw.replace("\"", "")
 
     Some(SmfManifestEntry(
         source_path: source_path,
@@ -293,8 +256,7 @@ fn parse_manifest_entry_line(line: text) -> SmfManifestEntry?:
         debug_info: debug_info,
         gc_off: gc_off,
         profile: profile,
-        allowed_families: allowed_families,
-        iface_digest: iface_digest
+        allowed_families: allowed_families
     ))
 
 # ============================================================================
@@ -304,18 +266,36 @@ fn parse_manifest_entry_line(line: text) -> SmfManifestEntry?:
 val SMF_MANIFEST_DEFAULT_PATH: text = "build/smf/manifest.sdn"
 
 fn load_smf_manifest(path: text) -> SmfManifest:
-    """Load manifest from file. Returns empty manifest if file doesn't exist."""
+    """Load manifest from file. Returns empty manifest if file doesn't exist.
+
+    Every entry is whole-entry verified on load via
+    smf_manifest_entry_verifies (re-reads entry.source_path and checks the
+    recorded hash). Entries that fail verification are DROPPED — fail closed:
+    a stale or unverifiable row can never be returned to a caller, so a
+    manifest lookup on a changed source misses instead of silently reusing
+    the stale .smf. Valid, unchanged entries are retained unchanged.
+    """
     if not rt_file_exists(path):
         return smf_manifest_new()
     val content = rt_file_read_text(path) ?? ""
     if content == "":
         return smf_manifest_new()
-    smf_manifest_from_sdn(content)
+    smf_manifest_drop_unverified(smf_manifest_from_sdn(content))
+
+fn smf_manifest_drop_unverified(manifest: SmfManifest) -> SmfManifest:
+    """Return a manifest containing only entries that pass whole-entry
+    verification (smf_manifest_entry_verifies). Fail closed on mismatch."""
+    var entries: Dict<text, SmfManifestEntry> = {}
+    for key in manifest.entries.keys():
+        val e = manifest.entries[key]
+        if smf_manifest_entry_verifies(e):
+            entries[key] = e
+    SmfManifest(version: manifest.version, entries: entries, updated_at: manifest.updated_at)
 
 fn save_smf_manifest(manifest: SmfManifest, path: text) -> bool:
     """Save manifest to file using atomic tmp+rename."""
     val dir = path_dir(path)
-    dir_create_all(dir)
+    rt_dir_create_all(dir)
 
     val sdn = smf_manifest_to_sdn(manifest)
     val tmp_path = "{path}.tmp"
@@ -329,9 +309,6 @@ fn load_smf_manifest_default() -> SmfManifest:
 
 fn save_smf_manifest_default(manifest: SmfManifest) -> bool:
     save_smf_manifest(manifest, SMF_MANIFEST_DEFAULT_PATH)
-
-fn smf_manifest_path_for_smf(smf_path: text) -> text:
-    "{path_dir(smf_path)}/manifest.sdn"
 
 # ============================================================================
 # Convenience: update + save in one call
@@ -349,14 +326,27 @@ fn update_smf_manifest_entry(
     profile: text,
     allowed_families: [text]
 ) -> bool:
+    update_smf_manifest_entry_with_mcdc(
+        source_path, smf_path, source_hash, backend, opt_level, release,
+        debug_info, gc_off, profile, allowed_families, "off")
+
+fn update_smf_manifest_entry_with_mcdc(
+    source_path: text,
+    smf_path: text,
+    source_hash: i64,
+    backend: text,
+    opt_level: i64,
+    release: bool,
+    debug_info: bool,
+    gc_off: bool,
+    profile: text,
+    allowed_families: [text],
+    mcdc_policy: text
+) -> bool:
     """Load manifest, update entry, save. Convenience for single-entry updates."""
     val manifest_path = smf_manifest_path_for_smf(smf_path)
     var manifest = load_smf_manifest(manifest_path)
-    # RECORD the canonical interface digest alongside the whole-source hash.
-    # First real caller of action_key.interface_digest_of (2026-08-18).
-    val src_text = if rt_file_exists(source_path): rt_file_read_text(source_path) ?? "" else: ""
-    val iface = if src_text == "": "" else: interface_digest_of_source(src_text)
-    val entry = smf_manifest_entry_new_with_iface(
+    val entry = smf_manifest_entry_new(
         source_path,
         smf_path,
         source_hash,
@@ -366,11 +356,10 @@ fn update_smf_manifest_entry(
         debug_info,
         gc_off,
         profile,
-        allowed_families,
-        iface
+        allowed_families
     )
     manifest = smf_manifest_update(manifest, entry)
-    save_smf_manifest(manifest, manifest_path)
+    save_smf_manifest_default(manifest)
 
 # ============================================================================
 # Helpers

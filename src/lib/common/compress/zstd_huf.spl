@@ -55,9 +55,8 @@ fn zstd_huf_complete_weights(partial_weights: [i64]) -> Result<[i64], Compressio
     while i < partial_weights.len():
         val weight = partial_weights[i]
         val valid = _zstd_huf_validate_weight(weight)
-        match valid:
-            case Ok(_): pass
-            case Err(reason): return Err(reason)
+        if valid.is_err():
+            return Err(valid.unwrap_err())
         if weight > 0:
             sum = sum + (1 << (weight - 1))
         i = i + 1
@@ -72,9 +71,8 @@ fn zstd_huf_complete_weights(partial_weights: [i64]) -> Result<[i64], Compressio
     var complete = partial_weights
     complete.push(last_weight)
     val validated = zstd_huf_weights_to_symbols(complete)
-    match validated:
-        case Ok(_): pass
-        case Err(reason): return Err(reason)
+    if validated.is_err():
+        return Err(validated.unwrap_err())
     Ok(complete)
 
 fn zstd_huf_weights_to_symbols(weights: [i64]) -> Result<[ZstdHufSymbolInfo], CompressionError>:
@@ -90,9 +88,8 @@ fn zstd_huf_weights_to_symbols(weights: [i64]) -> Result<[ZstdHufSymbolInfo], Co
     while i < weights.len():
         val weight = weights[i]
         val valid = _zstd_huf_validate_weight(weight)
-        match valid:
-            case Ok(_): pass
-            case Err(reason): return Err(reason)
+        if valid.is_err():
+            return Err(valid.unwrap_err())
         if weight > max_weight:
             max_weight = weight
         if weight > 0:
@@ -105,23 +102,19 @@ fn zstd_huf_weights_to_symbols(weights: [i64]) -> Result<[ZstdHufSymbolInfo], Co
         return Err(CompressionError.CorruptStream("zstd huf has no present symbols"))
     if non_zero < 2:
         return Err(CompressionError.CorruptStream("zstd huf needs at least two present symbols"))
+    if not has_weight_one:
+        return Err(CompressionError.CorruptStream("zstd huf requires at least one weight of 1"))
     # Per RFC 8478 §4.2.1.1, Max_Number_of_Bits is the smallest L such that
     # sum(2^(w-1)) == 2^L. This is generally L >= max_weight (with equality
     # only when at least one symbol has the maximum codeword length); when
     # the weights complete to a strictly larger power of two, max_bits
     # exceeds max_weight and `bits = max_bits + 1 - w`, not max_weight + 1 - w.
-    # Detect oversubscription/incompleteness (weight_sum not a clean power of
-    # two) before the at-least-one-weight-of-1 check: an oversubscribed set
-    # such as [2,2,2,2,2] has no weight of 1, and the sum mismatch is the
-    # precise root cause that callers assert on.
     if not _zstd_huf_is_power_of_two(weight_sum):
         val next_target = _zstd_huf_next_power_of_two(weight_sum)
         val gap = next_target - weight_sum
         if _zstd_huf_is_power_of_two(gap):
             return Err(CompressionError.CorruptStream("zstd huf weight sum incomplete"))
         return Err(CompressionError.CorruptStream("zstd huf weight sum oversubscribed"))
-    if not has_weight_one:
-        return Err(CompressionError.CorruptStream("zstd huf requires at least one weight of 1"))
     val max_bits = _zstd_huf_log2_exact(weight_sum)
     if max_bits < max_weight:
         return Err(CompressionError.CorruptStream("zstd huf weight sum below max weight"))
@@ -168,10 +161,9 @@ fn _zstd_huf_sort_for_canonical(symbols: [ZstdHufSymbolInfo]) -> [ZstdHufSymbolI
 
 fn zstd_huf_build_canonical_entries(weights: [i64]) -> Result<[ZstdHufCanonicalEntry], CompressionError>:
     val symbols_res = zstd_huf_weights_to_symbols(weights)
-    val symbols = match symbols_res:
-        case Ok(decoded): decoded
-        case Err(reason): return Err(reason)
-    val ordered = _zstd_huf_sort_for_canonical(symbols)
+    if symbols_res.is_err():
+        return Err(symbols_res.unwrap_err())
+    val ordered = _zstd_huf_sort_for_canonical(symbols_res.unwrap())
     var entries: [ZstdHufCanonicalEntry] = []
     if ordered.len() == 0:
         return Err(CompressionError.CorruptStream("zstd huf has no present symbols"))
@@ -425,13 +417,13 @@ fn zstd_huf_encode_literals(literals: [u8]) -> Result<([u8], [i64]), Compression
         return Err(CompressionError.UnsupportedFeature("zstd huf encode of empty literal stream"))
     val counts = _zstd_huf_count_frequencies(literals)
     val weights_res = _zstd_huf_assign_weights(counts)
-    val weights = match weights_res:
-        case Ok(decoded): decoded
-        case Err(reason): return Err(reason)
+    if weights_res.is_err():
+        return Err(weights_res.unwrap_err())
+    val weights = weights_res.unwrap()
     val canonical_res = zstd_huf_build_canonical_entries(weights)
-    val canonical = match canonical_res:
-        case Ok(decoded): decoded
-        case Err(reason): return Err(reason)
+    if canonical_res.is_err():
+        return Err(canonical_res.unwrap_err())
+    val canonical = canonical_res.unwrap()
     val lookup = _zstd_huf_encoder_lookup(canonical)
     # Flat LSB-first bit buffer: byte_buf[k] holds emission bits 8k..8k+7,
     # leftover holds the trailing leftover_count bits (0..7).
@@ -594,13 +586,13 @@ fn zstd_huf_encode_fse_weight_header(weights: [i64]) -> Result<[u8], Compression
         return Err(CompressionError.UnsupportedFeature("zstd huf fse weight header needs >=2 explicit weights"))
     val table_log = 5
     val counts_res = _zstd_huf_normalize_for_fse(dist, total, table_log)
-    val counts = match counts_res:
-        case Ok(decoded): decoded
-        case Err(reason): return Err(reason)
+    if counts_res.is_err():
+        return Err(counts_res.unwrap_err())
+    val counts = counts_res.unwrap()
     val table_res = zstd_fse_build_encode_table(table_log, counts)
-    val table = match table_res:
-        case Ok(decoded): decoded
-        case Err(reason): return Err(reason)
+    if table_res.is_err():
+        return Err(table_res.unwrap_err())
+    val table = table_res.unwrap()
     var weight_symbols: [i64] = []
     val explicit = weights.len() - 1
     var i = 0
@@ -608,9 +600,9 @@ fn zstd_huf_encode_fse_weight_header(weights: [i64]) -> Result<[u8], Compression
         weight_symbols.push(weights[i])
         i = i + 1
     val bitstream_res = zstd_fse_encode_symbols(table, weight_symbols)
-    val bitstream = match bitstream_res:
-        case Ok(decoded): decoded
-        case Err(reason): return Err(reason)
+    if bitstream_res.is_err():
+        return Err(bitstream_res.unwrap_err())
+    val bitstream = bitstream_res.unwrap()
     if bitstream.len() >= 128:
         return Err(CompressionError.UnsupportedFeature("zstd huf fse weight header bitstream >= 128 bytes"))
     var out: [u8] = []
@@ -633,63 +625,13 @@ fn zstd_huf_expand_decode_table(entries: [ZstdHufCanonicalEntry], table_bits: i6
     var i = 0
     while i < entries.len():
         val entry = entries[i]
-        if entry.symbol < 0 or entry.symbol >= ZSTD_HUF_MAX_SYMBOLS:
-            return Err(CompressionError.CorruptStream("zstd huf decode table symbol"))
         if entry.bits <= 0 or entry.bits > table_bits:
             return Err(CompressionError.CorruptStream("zstd huf decode table entry width"))
-        if entry.code >= (1u32 << entry.bits.to_u32()):
-            return Err(CompressionError.CorruptStream("zstd huf decode table code width"))
         val base = zstd_huf_reverse_bits(entry.code, entry.bits)
         val fill_count = 1 << (table_bits - entry.bits)
         var fill = 0
         while fill < fill_count:
             val slot_idx = (base | (fill.to_u32() << entry.bits.to_u32())).to_i64()
-            if slot_idx < 0 or slot_idx >= table_size:
-                return Err(CompressionError.CorruptStream("zstd huf decode table slot"))
-            val current = table[slot_idx]
-            if current.bits != 0:
-                return Err(CompressionError.CorruptStream("zstd huf decode table collision"))
-            table[slot_idx] = ZstdHufDecodeEntry(symbol: entry.symbol, bits: entry.bits)
-            fill = fill + 1
-        i = i + 1
-    i = 0
-    while i < table.len():
-        if table[i].bits == 0:
-            return Err(CompressionError.CorruptStream("zstd huf decode table incomplete"))
-        i = i + 1
-    Ok(table)
-
-# Build a Huffman decode table indexed by an MSB-first backward bit reader, as
-# real zstd frames require (RFC 8478 §4.2.2 / Annex A). Unlike
-# `zstd_huf_expand_decode_table` (which reverses each canonical code for the
-# Simple-internal LSB reader), here each canonical code is placed left-aligned
-# at `code << (table_bits - bits)` and spans `2^(table_bits - bits)` contiguous
-# slots, so peeking `table_bits` bits MSB-first indexes directly to the symbol.
-fn zstd_huf_expand_decode_table_msb(entries: [ZstdHufCanonicalEntry], table_bits: i64) -> Result<[ZstdHufDecodeEntry], CompressionError>:
-    if table_bits <= 0 or table_bits > ZSTD_HUF_MAX_BITS:
-        return Err(CompressionError.CorruptStream("zstd huf decode table width"))
-    val table_size = 1 << table_bits
-    var table: [ZstdHufDecodeEntry] = []
-    var slot = 0
-    while slot < table_size:
-        table.push(ZstdHufDecodeEntry(symbol: -1, bits: 0))
-        slot = slot + 1
-    var i = 0
-    while i < entries.len():
-        val entry = entries[i]
-        if entry.symbol < 0 or entry.symbol >= ZSTD_HUF_MAX_SYMBOLS:
-            return Err(CompressionError.CorruptStream("zstd huf decode table symbol"))
-        if entry.bits <= 0 or entry.bits > table_bits:
-            return Err(CompressionError.CorruptStream("zstd huf decode table entry width"))
-        if entry.code >= (1u32 << entry.bits.to_u32()):
-            return Err(CompressionError.CorruptStream("zstd huf decode table code width"))
-        val base = (entry.code.to_i64() << (table_bits - entry.bits))
-        val fill_count = 1 << (table_bits - entry.bits)
-        var fill = 0
-        while fill < fill_count:
-            val slot_idx = base + fill
-            if slot_idx < 0 or slot_idx >= table_size:
-                return Err(CompressionError.CorruptStream("zstd huf decode table slot"))
             val current = table[slot_idx]
             if current.bits != 0:
                 return Err(CompressionError.CorruptStream("zstd huf decode table collision"))

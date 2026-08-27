@@ -6,7 +6,7 @@
 #   bin/simple run src/app/llm_caret/main.spl [options]
 #
 # Options:
-#   --provider <name>        dummy | claude_cli | opencode_cli | claude_api | openai |
+#   --provider <name>        claude_cli | opencode_cli | claude_api | openai |
 #                             openai_compat | local_torch (default: config file's
 #                             defaults.provider, else claude_cli)
 #   --model <name>           model id (default: provider's configured model)
@@ -29,8 +29,7 @@
 # Sessions persist to ~/.llm_caret/sessions/<id>.json (session.spl) so
 # --resume restores a prior transcript + provider session id across runs.
 
-use app.io.mod.{env_get, file_exists, current_time_ms, process_spawn_async,
-    process_spawn_async_env}
+use app.io.mod.{env_get, file_exists, current_time_ms}
 use std.nogc_sync_mut.cli.cli_util.{get_cli_args}
 use std.nogc_sync_mut.http_server.{SimpleHttpServer, SecureServerPolicy,
     plaintext_development_capability, Router, HttpRequest, HttpResponse,
@@ -38,7 +37,7 @@ use std.nogc_sync_mut.http_server.{SimpleHttpServer, SecureServerPolicy,
 use std.nogc_sync_mut.io.tcp.{TcpListener, TcpStream}
 use std.log.{info as log_info}
 
-use std.common.string_core.{bytes_to_text}
+extern fn rt_bytes_to_text(data: [u8]) -> text
 
 use app.llm_caret.config.{load_config, config_loaded,
     config_default_provider, config_claude_cli_path, config_claude_cli_model,
@@ -50,13 +49,7 @@ use app.llm_caret.provider.{LLMResponse, dispatch_send, is_valid_provider, list_
 use app.llm_caret.tools.{PermissionPolicy, ModelResponse,
     default_policy, allow_all_policy, parse_tool_use_blocks, new_model_text, new_model_tools}
 use app.llm_caret.types.{Message}
-use app.llm_caret.chat_tui.{
-    make_chat_tui_with_status,
-    caret_chat,
-    ProviderSwitchResult,
-    SessionResumeResult,
-    SessionHooks
-}
+use app.llm_caret.chat_tui.{make_chat_tui_with_status, caret_chat, SessionHooks}
 use app.llm_caret.json_helpers.{build_message_json, ja}
 use app.llm_caret.server.{handle_route, build_error_response,
     build_chat_completion_response, build_anthropic_response,
@@ -65,7 +58,6 @@ use app.llm_caret.session.{Session, save_session, load_session, list_session_ids
 use app.llm_caret.gui.{caret_gui_html, caret_gui_prompt,
     caret_gui_json_content, caret_gui_json_error}
 use app.llm_caret.messaging.cli.{run_messaging_cli}
-use app.llm_caret.workspace_cli.{run_workspace_cli}
 
 # ============================================================================
 # Argument parsing (pure - unit-testable without a live process)
@@ -78,7 +70,6 @@ struct MainArgs:
     system_prompt: text
     resume_id: text
     workspace_root: text
-    prompt: text
     allow_all: bool
     ui_mode: text        # "auto" | "tui" | "plain"
     server_mode: bool
@@ -93,7 +84,6 @@ fn parse_main_args(args: [text]) -> MainArgs:
     var system_prompt = ""
     var resume_id = ""
     var workspace_root = ""
-    var prompt = ""
     var allow_all = false
     var ui_mode = "auto"
     var server_mode = false
@@ -135,23 +125,12 @@ fn parse_main_args(args: [text]) -> MainArgs:
             i = i + 1
         elif arg.starts_with("--workspace="):
             workspace_root = arg.substring(12)
-        elif arg == "--prompt" and i + 1 < args.len():
-            prompt = args[i + 1]
-            i = i + 1
-        elif arg.starts_with("--prompt="):
-            prompt = arg.substring(9)
         elif arg == "--dangerously-allow-all":
             allow_all = true
         elif arg == "--plain":
             ui_mode = "plain"
         elif arg == "--tui":
             ui_mode = "tui"
-        elif arg == "--gui":
-            ui_mode = "gui"
-        elif arg == "--electron":
-            ui_mode = "electron"
-        elif arg == "--metal-gui":
-            ui_mode = "metal_gui"
         elif arg == "--server":
             server_mode = true
         elif arg == "--port" and i + 1 < args.len():
@@ -165,7 +144,7 @@ fn parse_main_args(args: [text]) -> MainArgs:
     MainArgs(
         provider: provider, model: model, config_path: config_path,
         system_prompt: system_prompt, resume_id: resume_id,
-        workspace_root: workspace_root, prompt: prompt, allow_all: allow_all,
+        workspace_root: workspace_root, allow_all: allow_all,
         ui_mode: ui_mode, server_mode: server_mode, port: port,
         help: help, unknown: unknown
     )
@@ -183,7 +162,7 @@ fn print_help():
     print "HTTP proxy."
     print ""
     print "Options:"
-    print "  --provider <name>        dummy | claude_cli | opencode_cli | claude_api |"
+    print "  --provider <name>        claude_cli | opencode_cli | claude_api |"
     print "                           openai | openai_compat | local_torch"
     print "  --model <name>           model id (default: provider's configured model)"
     print "  --config <path>          load an llm_caret.sdn config file"
@@ -193,16 +172,8 @@ fn print_help():
     print "  --dangerously-allow-all  auto-approve mutating tools (bash/write_file)"
     print "  --plain                  force the plain (non-TUI) renderer"
     print "  --tui                    force the full-screen TUI renderer"
-    print "  --gui                    launch the browser GUI renderer"
-    print "  --electron               launch the GUI in Electron"
-    print "  --metal-gui              launch pure Simple Web/Draw IR/Metal GUI"
-    print "  --prompt <text>          send one prompt, print the response, and exit"
     print "  --server                 run the HTTP proxy instead of interactive chat"
     print "  --port <n>               proxy port (default 8317, or $LLM_CARET_PORT)"
-    print ""
-    print "Subcommands:"
-    print "  workspace <id> <cmd>     agent tmux sessions + git worktrees (workspace help)"
-    print "  messaging <cmd>          messaging domain CLI"
     print "  -h, --help               show this help"
     print ""
     print "Slash commands (interactive mode): /help /exit /new /model <m>"
@@ -210,10 +181,6 @@ fn print_help():
     print ""
     print "Examples:"
     print "  simple run src/app/llm_caret/main.spl --plain"
-    print "  simple run src/app/llm_caret/main.spl --provider dummy --prompt hi"
-    print "  simple run src/app/llm_caret/main.spl --provider dummy --gui"
-    print "  simple run src/app/llm_caret/main.spl --provider dummy --electron"
-    print "  simple run src/app/llm_caret/main.spl --provider dummy --metal-gui --prompt test"
     print "  simple run src/app/llm_caret/main.spl --provider claude_api --model claude-opus-4-20250514"
     print "  simple run src/app/llm_caret/main.spl --resume 2026-07-19-abc123"
     print "  simple run src/app/llm_caret/main.spl --server --port 8317"
@@ -229,9 +196,9 @@ fn _effective_provider(args: MainArgs) -> text:
         return config_default_provider()
     "claude_cli"
 
-fn _default_model(provider: text) -> text:
-    if provider == "dummy":
-        return "dummy-hello"
+fn _effective_model(provider: text, args: MainArgs) -> text:
+    if args.model != "":
+        return args.model
     if provider == "claude_cli":
         return config_claude_cli_model()
     if provider == "opencode_cli":
@@ -243,43 +210,6 @@ fn _default_model(provider: text) -> text:
     if provider == "openai_compat":
         return config_compat_model()
     ""
-
-fn _effective_model(provider: text, args: MainArgs) -> text:
-    if args.model != "":
-        return args.model
-    _default_model(provider)
-
-struct ResumeBackend:
-    provider: text
-    model: text
-    reuse_provider_session: bool
-
-fn resolve_resume_backend(
-    requested_provider: text,
-    requested_model: text,
-    saved_provider: text,
-    saved_model: text
-) -> ResumeBackend:
-    val provider = if requested_provider == "":
-        saved_provider
-    else:
-        requested_provider
-    val normalized_saved_model = if saved_model == "":
-        _default_model(saved_provider)
-    else:
-        saved_model
-    val model = if requested_model != "":
-        requested_model
-    elif provider == saved_provider:
-        normalized_saved_model
-    else:
-        _default_model(provider)
-    ResumeBackend(
-        provider: provider,
-        model: model,
-        reuse_provider_session:
-            provider == saved_provider and model == normalized_saved_model
-    )
 
 fn _effective_cli_path(provider: text) -> text:
     if provider == "claude_cli":
@@ -426,7 +356,7 @@ fn _proxy_dispatch(content: text, model: text) -> LLMResponse:
                    RT_CLI_PATH, RT_SYSTEM_PROMPT, "", 0, RT_MAX_TOKENS, messages_json)
 
 fn _to_http_status(code: i64) -> HttpStatus:
-    if code == 200: return HttpStatus.OK
+    if code == 200: return HttpStatus.Ok
     if code == 400: return HttpStatus.BadRequest
     if code == 401: return HttpStatus.Unauthorized
     if code == 404: return HttpStatus.NotFound
@@ -616,7 +546,7 @@ fn _gui_read_request(stream: TcpStream) -> Result<(text, text, text), text>:
     if content_length > 0:
         match stream.read_exact(content_length):
             Err(e): return Err("Failed to read request body: {e}")
-            Ok(bytes): body = bytes_to_text(bytes)
+            Ok(bytes): body = rt_bytes_to_text(bytes)
     Ok((method, path, body))
 
 fn _gui_status_text(status: i64) -> text:
@@ -757,27 +687,11 @@ fn _slash_on_model(name: text) -> text:
     RT_MODEL = name
     "model set to " + name
 
-fn _slash_on_provider(name: text) -> ProviderSwitchResult:
+fn _slash_on_provider(name: text) -> text:
     if not is_valid_provider(name):
-        return ProviderSwitchResult(
-            accepted: false,
-            message: "unknown provider: " + name + " (valid: " +
-                list_providers().join(", ") + ")",
-            provider: RT_PROVIDER,
-            model: RT_MODEL
-        )
+        return "unknown provider: " + name + " (valid: " + list_providers().join(", ") + ")"
     RT_PROVIDER = name
-    RT_MODEL = _default_model(name)
-    RT_API_KEY = _effective_api_key(name)
-    RT_BASE_URL = _effective_base_url(name)
-    RT_CLI_PATH = _effective_cli_path(name)
-    RT_SESSION_ID = ""
-    ProviderSwitchResult(
-        accepted: true,
-        message: "provider set to " + name,
-        provider: name,
-        model: RT_MODEL
-    )
+    "provider set to " + name
 
 fn _slash_on_sessions() -> text:
     val ids = list_session_ids()
@@ -785,68 +699,14 @@ fn _slash_on_sessions() -> text:
         return "No saved sessions."
     "Sessions:\n  " + ids.join("\n  ")
 
-fn _slash_on_new() -> text:
-    RT_SESSION_ID = ""
-    gen_session_id()
-
-fn _hidden_commands_enabled() -> bool:
-    val raw = (env_get("LLM_CARET_ENABLE_HIDDEN_COMMANDS") ?? "").to_lower()
-    raw == "1" or raw == "true"
-
-fn _slash_on_hidden_command(name: text, arg: text) -> text:
-    if name == "debug-tool-call":
-        if arg == "":
-            return "Usage: /debug-tool-call <tool_use_json>"
-        val calls = parse_tool_use_blocks(arg)
-        if calls.len() == 0:
-            return "No tool call envelope found."
-        val call = calls[0]
-        if call.id == "" or call.name == "":
-            return "Invalid tool call envelope."
-        # Inputs may contain commands, file contents, or credentials.
-        return "tool call id=" + call.id + " name=" + call.name +
-            " input_bytes=" + call.input.len().to_text()
-    "Hidden command not implemented: /" + name
-
-fn apply_resumed_session(sess: Session) -> SessionResumeResult:
-    if not is_valid_provider(sess.provider):
-        return SessionResumeResult(
-            found: false,
-            message: "saved session '" + sess.id +
-                "' has unknown provider '" + sess.provider + "'",
-            messages: [], session_id: "",
-            provider: "", model: ""
-        )
-    RT_PROVIDER = sess.provider
-    RT_MODEL = if sess.model == "":
-        _default_model(sess.provider)
-    else:
-        sess.model
-    RT_API_KEY = _effective_api_key(RT_PROVIDER)
-    RT_BASE_URL = _effective_base_url(RT_PROVIDER)
-    RT_CLI_PATH = _effective_cli_path(RT_PROVIDER)
-    RT_SESSION_ID = sess.provider_session_id
-    SessionResumeResult(
-        found: true,
-        message: "resumed session " + sess.id,
-        messages: sess.messages,
-        session_id: sess.id,
-        provider: RT_PROVIDER,
-        model: RT_MODEL
-    )
-
-fn _slash_on_resume(id: text) -> SessionResumeResult:
+fn _slash_on_resume(id: text) -> (bool, text, [Message]):
     val loaded = load_session(id)
     match loaded:
         Some(sess):
-            return apply_resumed_session(sess)
+            RT_SESSION_ID = sess.provider_session_id
+            return (true, "resumed session " + id, sess.messages)
         nil:
-            return SessionResumeResult(
-                found: false,
-                message: "no saved session '" + id + "'",
-                messages: [], session_id: "",
-                provider: "", model: ""
-            )
+            return (false, "no saved session '" + id + "'", [])
 
 fn _on_persist(session_id: text, conv: [Message]):
     save_session(Session(
@@ -858,13 +718,10 @@ fn _on_persist(session_id: text, conv: [Message]):
 fn _build_session_hooks(active_session_id: text) -> SessionHooks:
     SessionHooks(
         session_id: active_session_id,
-        hidden_commands_enabled: _hidden_commands_enabled(),
         on_model: _slash_on_model,
         on_provider: _slash_on_provider,
         on_sessions: _slash_on_sessions,
-        on_new: _slash_on_new,
         on_resume: _slash_on_resume,
-        on_hidden_command: _slash_on_hidden_command,
         on_persist: _on_persist
     )
 
@@ -873,8 +730,6 @@ fn _build_session_hooks(active_session_id: text) -> SessionHooks:
 # ============================================================================
 
 fn run_main_args(raw_args: [text]) -> i64:
-    if raw_args.len() > 0 and raw_args[0] == "workspace":
-        return run_workspace_cli(raw_args)
     if raw_args.len() > 0 and raw_args[0] == "messaging":
         return run_messaging_cli(raw_args)
     val args = parse_main_args(raw_args)
@@ -896,20 +751,20 @@ fn run_main_args(raw_args: [text]) -> i64:
             print "Error: {err}"
             return 2
 
-    var provider = _effective_provider(args)
+    val provider = _effective_provider(args)
     if not is_valid_provider(provider):
         print "Error: unknown provider '{provider}'"
         print "Valid providers: {list_providers().join(", ")}"
         return 2
 
-    var model = _effective_model(provider, args)
+    val model = _effective_model(provider, args)
+    val api_key = _effective_api_key(provider)
+    val base_url = _effective_base_url(provider)
+    val cli_path = _effective_cli_path(provider)
     val workspace_root = _resolve_workspace(args)
     val policy = _build_policy(args, workspace_root)
 
     if args.server_mode:
-        val api_key = _effective_api_key(provider)
-        val base_url = _effective_base_url(provider)
-        val cli_path = _effective_cli_path(provider)
         main_configure(provider, model, api_key, base_url, cli_path, args.system_prompt, "", 0)
         match run_server(_effective_port(args)):
             Err(e):
@@ -924,25 +779,13 @@ fn run_main_args(raw_args: [text]) -> i64:
         val loaded = load_session(args.resume_id)
         match loaded:
             Some(sess):
-                val backend = resolve_resume_backend(
-                    args.provider, args.model, sess.provider, sess.model
-                )
-                provider = backend.provider
-                model = backend.model
-                if not is_valid_provider(provider):
-                    print "Error: saved session has unknown provider '{provider}'"
-                    return 2
                 active_session_id = sess.id
-                if backend.reuse_provider_session:
-                    provider_session_id = sess.provider_session_id
+                provider_session_id = sess.provider_session_id
                 conv = sess.messages
             nil:
                 print "Error: no saved session '{args.resume_id}'"
                 return 2
 
-    val api_key = _effective_api_key(provider)
-    val base_url = _effective_base_url(provider)
-    val cli_path = _effective_cli_path(provider)
     main_configure(provider, model, api_key, base_url, cli_path, args.system_prompt, provider_session_id, 0)
 
     if args.ui_mode == "metal_gui":
@@ -969,13 +812,5 @@ fn run_main_args(raw_args: [text]) -> i64:
     val status_text = "provider=" + provider + " model=" + model + " session=" + active_session_id
     val ui = make_chat_tui_with_status("llm_caret - {provider}", status_text)
     val hooks = _build_session_hooks(active_session_id)
-    val chat_result = caret_chat(
-        ui, policy, main_responder, args.ui_mode, hooks, conv
-    )
-    if not chat_result.ok:
-        print "Error: " + chat_result.error
-        return 1
+    caret_chat(ui, policy, main_responder, args.ui_mode, hooks, conv)
     0
-
-fn main() -> i64:
-    run_main_args(get_cli_args())

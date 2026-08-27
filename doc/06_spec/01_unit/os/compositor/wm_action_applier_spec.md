@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 17 | 17 | 0 | 0 |
+| 12 | 12 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -89,7 +89,7 @@ expect(compositor.surfaces[0].app_id).to_equal("simple.app")
 
 </details>
 
-#### creates web windows with a Simple Web render request surface
+#### materializes shared GUI WindowManager state into SimpleOS compositor surfaces
 
 - creates web windows with a Simple Web render request surface
    - Expected: compositor.surfaces.len() equals `1`
@@ -321,7 +321,7 @@ expect(tree.title()).to_equal("Window 44")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 28 lines folded for reproduction.
+Runnable source: 26 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -856,7 +856,7 @@ expect(grip.interaction.resize_window_id).to_equal(0)
 | Category | Hardware & OS |
 | Status | Active |
 | Source | `test/01_unit/os/compositor/wm_action_applier_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -868,8 +868,8 @@ Tests covering shared WM action applier.
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 17 |
-| Active scenarios | 17 |
+| Total scenarios | 12 |
+| Active scenarios | 12 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

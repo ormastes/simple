@@ -1,6 +1,31 @@
 # Tui Screen Specification
 
-> Tests covering Screen buffer basics, Screen with UI tree rendering, Screen drawing primitives.
+> <details>
+
+<!-- sdn-diagram:id=tui_screen_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=tui_screen_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+tui_screen_spec -> app
+tui_screen_spec -> common
+tui_screen_spec -> nogc_sync_mut
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=tui_screen_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -20,25 +45,13 @@
 
 #### creates screen with correct dimensions _(slow)_
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- creates screen with correct dimensions
-   - Expected: screen.width equals `80`
-   - Expected: screen.height equals `24`
-   - Expected: screen.buffer.len() equals `24`
-
-
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("creates screen with correct dimensions")
 val screen = Screen.new(80, 24)
 expect(screen.width).to_equal(80)
 expect(screen.height).to_equal(24)
@@ -55,18 +68,18 @@ expect(screen.buffer.len()).to_equal(24)
 
 #### put_text writes content at position _(slow)_
 
-- put_text writes content at position
+1. var screen = Screen new
+
+2. screen = screen put text
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("put_text writes content at position")
 var screen = Screen.new(40, 10)
 screen = screen.put_text(0, 0, "Hello")
 val line = screen.buffer[0]
@@ -83,18 +96,18 @@ expect(line).to_start_with("Hello")
 
 #### draw_box produces box-drawing characters _(slow)_
 
-- draw_box produces box-drawing characters
+1. var screen = Screen new
+
+2. screen = screen draw box
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("draw_box produces box-drawing characters")
 var screen = Screen.new(40, 10)
 screen = screen.draw_box(0, 0, 20, 5, "Test")
 val rendered = screen.render()
@@ -122,18 +135,13 @@ expect(rendered).to_contain("\u{2518}")
 
 #### render produces non-empty output _(slow)_
 
-- render produces non-empty output
-
-
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("render produces non-empty output")
 val screen = Screen.new(80, 24)
 val output = screen.render()
 expect(output.len()).to_be_greater_than(0)
@@ -149,18 +157,18 @@ expect(output.len()).to_be_greater_than(0)
 
 #### clear resets the buffer _(slow)_
 
-- clear resets the buffer
+1. var screen = Screen new
+
+2. screen = screen put text
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("clear resets the buffer")
 var screen = Screen.new(40, 10)
 screen = screen.put_text(0, 0, "Some text")
 val cleared = screen.clear()
@@ -181,19 +189,23 @@ expect(line).to_start_with(" ")
 
 #### renders minimal.ui.sdn tree to screen buffer _(slow)_
 
-- renders minimal.ui.sdn tree to screen buffer
+1. Ok
+
+2. var screen = Screen new
+
+3. screen = render tui tree
+
+4. Err
    - Expected: e equals ``
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("renders minimal.ui.sdn tree to screen buffer")
 val tree_result = parse_ui_to_tree("examples/06_io/ui/minimal.ui.sdn")
 match tree_result:
     Ok(tree) :
@@ -224,19 +236,23 @@ match tree_result:
 
 #### renders demo.ui.sdn tree with multiple widgets _(slow)_
 
-- renders demo.ui.sdn tree with multiple widgets
+1. Ok
+
+2. var screen = Screen new
+
+3. screen = render tui tree
+
+4. Err
    - Expected: e equals ``
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("renders demo.ui.sdn tree with multiple widgets")
 val tree_result = parse_ui_to_tree("examples/06_io/ui/demo.ui.sdn")
 match tree_result:
     Ok(tree) :
@@ -269,18 +285,18 @@ match tree_result:
 
 #### draw_hline produces a horizontal line _(slow)_
 
-- draw_hline produces a horizontal line
+1. var screen = Screen new
+
+2. screen = screen draw hline
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("draw_hline produces a horizontal line")
 var screen = Screen.new(40, 10)
 screen = screen.draw_hline(2, 0, 20, "\u{2500}")
 val line = screen.buffer[2]
@@ -297,18 +313,18 @@ expect(line).to_contain("\u{2500}")
 
 #### draw_vline produces a vertical line _(slow)_
 
-- draw_vline produces a vertical line
+1. var screen = Screen new
+
+2. screen = screen draw vline
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("draw_vline produces a vertical line")
 var screen = Screen.new(40, 10)
 screen = screen.draw_vline(0, 5, 5, "\u{2502}")
 # Each row from 0..4 should have the vertical char at col 5
@@ -328,19 +344,19 @@ expect(row4).to_contain("\u{2502}")
 
 #### fill_row fills entire row _(slow)_
 
-- fill_row fills entire row
+1. var screen = Screen new
+
+2. screen = screen fill row
    - Expected: line.len() equals `20`
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("fill_row fills entire row")
 var screen = Screen.new(20, 5)
 screen = screen.fill_row(1, "#")
 val line = screen.buffer[1]
@@ -359,18 +375,18 @@ expect(line.len()).to_equal(20)
 
 #### put_styled includes style codes _(slow)_
 
-- put_styled includes style codes
+1. var screen = Screen new
+
+2. screen = screen put styled
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("put_styled includes style codes")
 var screen = Screen.new(40, 5)
 screen = screen.put_styled(0, 0, "Bold", "\u{001b}[1m")
 val line = screen.buffer[0]
@@ -392,12 +408,12 @@ expect(line).to_contain("Bold")
 | Category | Other |
 | Status | Active |
 | Source | `test/03_system/gui/tui_screen_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering Screen buffer basics, Screen with UI tree rendering, Screen drawing primitives.
+Tests covering:
 - Screen buffer basics
 - Screen with UI tree rendering
 - Screen drawing primitives
@@ -414,54 +430,3 @@ Tests covering Screen buffer basics, Screen with UI tree rendering, Screen drawi
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `c26012643906af40d36cfcafaf75220203071859139c31f9990c2918bd99c4ea`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `c26012643906af40d36cfcafaf75220203071859139c31f9990c2918bd99c4ea`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `c26012643906af40d36cfcafaf75220203071859139c31f9990c2918bd99c4ea`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
-
-SSpec documentization score: 86/100
-source: test/03_system/gui/tui_screen_spec.spl
-mirror: doc/06_spec/03_system/gui/tui_screen_spec.md (current)
-findings: 6 blockers: 0
-  narrative=100 structure=100 oracle=70
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/gui/tui_screen_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/gui/tui_screen_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/gui/tui_screen_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 4 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/03_system/gui/tui_screen_spec.spl:28:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates screen with correct dimensions' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/gui/tui_screen_spec.spl:36:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'put_text writes content at position' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/gui/tui_screen_spec.spl:44:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'draw_box produces box-drawing characters' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

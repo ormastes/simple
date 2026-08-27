@@ -1,0 +1,89 @@
+# `gc --dry-run` / `gc explain` rendering
+#
+# Agent C3. A dry run renders EXACTLY the plan a real run would execute: the plan
+# is a pure function of the snapshot (gc_fast.gc_fast_plan / gc_mark_sweep.gc_mark),
+# so `--dry-run` and the real pass cannot diverge. Nothing in this file mutates
+# anything.
+#
+# `explain` additionally answers the operator's real question — "why are these
+# bytes still here?" — by naming the protection class that held each retained
+# object, and by surfacing PinnedOverflow when protected roots alone blow the max.
+#
+# Rendering accumulates into a [text] and joins once; never `out = out + ...` in
+# a loop (quadratic, and an operator report can list tens of thousands of rows).
+
+use compiler.driver.cache.metadata.gc_config.{GcLimits, gc_high_watermark_bytes, gc_low_watermark_bytes, gc_hard_limit_bytes}
+use compiler.driver.cache.metadata.cache_metadata.{gc_class_name}
+use compiler.driver.cache.gc.gc_fast.{GcFastPlan}
+use compiler.driver.cache.gc.gc_eviction.{EvictionCandidate, eviction_candidate_protected}
+use compiler.driver.cache.gc.gc_admission.{PinnedOverflowReport}
+use compiler.driver.cache.gc.gc_mark_sweep.{GcMarkResult, GcRepairReport}
+
+fn gc_limit_lines(limits: GcLimits, used_bytes: i64) -> [text]:
+    [
+        "limits: used={used_bytes} B max={limits.max_bytes} B",
+        "  high_watermark={gc_high_watermark_bytes(limits)} B (start GC)",
+        "  low_watermark={gc_low_watermark_bytes(limits)} B (stop GC — hysteresis)",
+        "  hard_limit={gc_hard_limit_bytes(limits)} B (reject writes)",
+    ]
+
+fn gc_list_lines(label: text, items: [text]) -> [text]:
+    var lines: [text] = ["  {label}: {items.len()}"]
+    for i in items:
+        lines = lines.push("    - {i}")
+    lines
+
+fn gc_append_all(target: [text], extra: [text]) -> [text]:
+    var out = target
+    for e in extra:
+        out = out.push(e)
+    out
+
+fn gc_dry_run_report(plan: GcFastPlan, limits: GcLimits, used_bytes: i64) -> text:
+    var lines: [text] = ["gc --dry-run (fast pass) — NOTHING WAS MOVED OR DELETED"]
+    lines = gc_append_all(lines, gc_limit_lines(limits, used_bytes))
+    lines = lines.push("phases (in execution order):")
+    lines = gc_append_all(lines, gc_list_lines("1 expired temp", plan.expired_temp))
+    lines = gc_append_all(lines, gc_list_lines("2 expired quarantine", plan.expired_quarantine))
+    lines = gc_append_all(lines, gc_list_lines("3 branch mappings past TTL", plan.expired_branch_mappings))
+    lines = gc_append_all(lines, gc_list_lines("4 evicted unpinned action mappings", plan.evicted_mappings))
+    lines = gc_append_all(lines, gc_list_lines("5 unreferenced CAS blobs", plan.unreferenced_blobs))
+    lines = lines.push("6 atomic rename into trash/, 7 async delete after grace period")
+    lines = lines.push("reclaimable={plan.bytes_reclaimable} B reaches_low_watermark={plan.reached_low_watermark}")
+    lines.join("\n")
+
+# Why bytes remain: one line per retained object with the class that protected it.
+fn gc_explain_retention(items: [EvictionCandidate]) -> text:
+    var lines: [text] = ["gc explain — retained objects and the class protecting them"]
+    for c in items:
+        if eviction_candidate_protected(c):
+            lines = lines.push("  PROTECTED {c.digest} {c.artifact_size_bytes} B — {gc_class_name(c.protection_class)}")
+        else:
+            lines = lines.push("  evictable {c.digest} {c.artifact_size_bytes} B — {gc_class_name(c.protection_class)}")
+    lines.join("\n")
+
+fn gc_render_pinned_overflow(report: PinnedOverflowReport) -> text:
+    var lines: [text] = [
+        "PinnedOverflow — protected roots alone exceed the configured maximum",
+        "  protected_bytes={report.protected_bytes}",
+        "  configured_max={report.configured_max}",
+        "  largest_roots:",
+    ]
+    for r in report.largest_roots:
+        lines = lines.push("    - {r.digest} {r.bytes} B ({gc_class_name(r.protection_class)})")
+    lines = lines.push("  suggested_action: {report.suggested_action}")
+    lines = lines.push("  NOTE: no protected root was or will be deleted to meet the target.")
+    lines.join("\n")
+
+fn gc_render_mark_sweep(result: GcMarkResult, repair: GcRepairReport) -> text:
+    var lines: [text] = [
+        "gc mark-and-sweep",
+        "  marked (reachable): {result.marked.len()}",
+        "  unmarked (to trash/): {result.unmarked.len()}",
+    ]
+    lines = gc_append_all(lines, gc_list_lines("broken edges (integrity findings)", result.unreachable_edges))
+    lines = gc_append_all(lines, gc_list_lines("refcounts repaired", repair.repaired_refcounts))
+    lines = gc_append_all(lines, gc_list_lines("sizes repaired", repair.repaired_sizes))
+    lines = gc_append_all(lines, gc_list_lines("metadata entries added", repair.added_entries))
+    lines = lines.push("  refcounts are an optimization; this pass is the source of truth.")
+    lines.join("\n")

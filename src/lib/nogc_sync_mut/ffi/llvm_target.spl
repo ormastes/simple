@@ -16,44 +16,22 @@ var _targets_initialized_tm: bool = false
 # symbols in libLLVM.so - dlsym(them) returns NULL and the call silently no-ops,
 # so no target ever registers and LLVMGetTargetFromTriple fails. Call the real
 # per-arch exported init symbols instead; arches not built into libLLVM dlsym to
-# NULL. The checked resolver now fails closed for a missing configured target
-# rather than silently pretending initialization succeeded.
-@unsafe(reason: "untyped dynamic LLVM target-info ABI", capabilities: [ffi, raw_ptr])
+# NULL and no-op safely (same as the old behavior, just now x86 actually registers).
 fn llvm_initialize_all_target_infos():
-    _lc0("LLVMInitializeX86TargetInfo")
-    _lc0("LLVMInitializeAArch64TargetInfo")
-    _lc0("LLVMInitializeARMTargetInfo")
-    _lc0("LLVMInitializeRISCVTargetInfo")
+    _lc0("LLVMInitializeAllTargetInfos")
 
-@unsafe(reason: "untyped dynamic LLVM target ABI", capabilities: [ffi, raw_ptr])
 fn llvm_initialize_all_targets():
-    _lc0("LLVMInitializeX86Target")
-    _lc0("LLVMInitializeAArch64Target")
-    _lc0("LLVMInitializeARMTarget")
-    _lc0("LLVMInitializeRISCVTarget")
+    _lc0("LLVMInitializeAllTargets")
 
-@unsafe(reason: "untyped dynamic LLVM target-MC ABI", capabilities: [ffi, raw_ptr])
 fn llvm_initialize_all_target_mcs():
-    _lc0("LLVMInitializeX86TargetMC")
-    _lc0("LLVMInitializeAArch64TargetMC")
-    _lc0("LLVMInitializeARMTargetMC")
-    _lc0("LLVMInitializeRISCVTargetMC")
+    _lc0("LLVMInitializeAllTargetMCs")
 
-@unsafe(reason: "untyped dynamic LLVM assembly-printer ABI", capabilities: [ffi, raw_ptr])
 fn llvm_initialize_all_asm_printers():
-    _lc0("LLVMInitializeX86AsmPrinter")
-    _lc0("LLVMInitializeAArch64AsmPrinter")
-    _lc0("LLVMInitializeARMAsmPrinter")
-    _lc0("LLVMInitializeRISCVAsmPrinter")
+    _lc0("LLVMInitializeAllAsmPrinters")
 
-@unsafe(reason: "untyped dynamic LLVM assembly-parser ABI", capabilities: [ffi, raw_ptr])
 fn llvm_initialize_all_asm_parsers():
-    _lc0("LLVMInitializeX86AsmParser")
-    _lc0("LLVMInitializeAArch64AsmParser")
-    _lc0("LLVMInitializeARMAsmParser")
-    _lc0("LLVMInitializeRISCVAsmParser")
+    _lc0("LLVMInitializeAllAsmParsers")
 
-@unsafe(reason: "transitively initializes unverified dynamic LLVM targets", capabilities: [ffi, raw_ptr])
 fn llvm_initialize_targets():
     if _targets_initialized_tm:
         return
@@ -64,23 +42,15 @@ fn llvm_initialize_targets():
     llvm_initialize_all_asm_printers()
     llvm_initialize_all_asm_parsers()
 
-@unsafe(reason: "untyped LLVM target lookup with raw out-pointers", capabilities: [ffi, raw_ptr])
 fn llvm_get_target_from_triple(triple: text) -> i64:
     # LLVMGetTargetFromTriple(Triple, &Target, &ErrorMessage) -> LLVMBool
     # Returns 0 on success, writes Target to output param
     val target_ptr = rt_alloc(8)
     val err_ptr = rt_alloc(8)
-    if target_ptr == 0 or err_ptr == 0:
-        if target_ptr != 0:
-            rt_free(target_ptr)
-        if err_ptr != 0:
-            rt_free(err_ptr)
-        return 0
     rt_ptr_write_i64(target_ptr, 0, 0)
     rt_ptr_write_i64(err_ptr, 0, 0)
-    val triple_z = triple + "\0"
     var args: [i64] = []
-    args.push(triple_z.ptr())
+    args.push(triple.ptr())
     args.push(target_ptr)
     args.push(err_ptr)
     val result = _lcn("LLVMGetTargetFromTriple", args)
@@ -95,42 +65,32 @@ fn llvm_get_target_from_triple(triple: text) -> i64:
     target
 
 # reason: positional ffi llvm API
-@unsafe(reason: "untyped dynamic LLVM target-machine ABI", capabilities: [ffi, raw_ptr])
 fn llvm_create_target_machine(target: i64, triple: text, cpu: text, features: text, opt_level: i64, reloc: i64, code_model: i64) -> i64:
-    # LLVMCreateTargetMachine takes null-terminated Triple/CPU/Features (no length
-    # variant — it strlen()s them). Seed strings aren't guaranteed null-terminated
-    # and `features` is often the empty computed string "", so `.ptr()` overreads
-    # and SIGSEGVs. Append a NUL byte so the buffer ends in 0 and strlen stops.
     val triple_z = triple + "\0"
     val cpu_z = cpu + "\0"
     val features_z = features + "\0"
     var args: [i64] = []
     args.push(target)
-    args.push(triple_z.ptr())
-    args.push(cpu_z.ptr())
-    args.push(features_z.ptr())
+    args.push(triple.ptr())
+    args.push(cpu.ptr())
+    args.push(features.ptr())
     args.push(opt_level)
     args.push(reloc)
     args.push(code_model)
     _lcn("LLVMCreateTargetMachine", args)
 
-@unsafe(reason: "unverified LLVM target-machine handle release", capabilities: [ffi, raw_ptr])
 fn llvm_dispose_target_machine(tm: i64):
     _lc1("LLVMDisposeTargetMachine", tm)
 
 # reason: positional ffi llvm API
-@unsafe(reason: "untyped LLVM emission ABI with raw error out-pointer", capabilities: [ffi, raw_ptr])
 fn llvm_target_machine_emit_to_file(tm: i64, mod_: i64, filename: text, file_type: i64) -> bool:
     # LLVMTargetMachineEmitToFile(TM, M, Filename, FileType, &ErrorMessage) -> LLVMBool
     val err_ptr = rt_alloc(8)
-    if err_ptr == 0:
-        return false
     rt_ptr_write_i64(err_ptr, 0, 0)
-    val filename_z = filename + "\0"
     var args: [i64] = []
     args.push(tm)
     args.push(mod_)
-    args.push(filename_z.ptr())
+    args.push(filename.ptr())
     args.push(file_type)
     args.push(err_ptr)
     val result = _lcn("LLVMTargetMachineEmitToFile", args)
@@ -140,11 +100,9 @@ fn llvm_target_machine_emit_to_file(tm: i64, mod_: i64, filename: text, file_typ
     rt_free(err_ptr)
     result == 0
 
-@unsafe(reason: "untyped LLVM-owned target-triple pointer ABI", capabilities: [ffi, raw_ptr])
 fn llvm_get_default_target_triple() -> i64:
     _lc0("LLVMGetDefaultTargetTriple")
 
-@unsafe(reason: "untyped LLVM target-data ownership ABI", capabilities: [ffi, raw_ptr])
 fn llvm_create_target_data_layout(tm: i64) -> i64:
     _lc1("LLVMCreateTargetDataLayout", tm)
 
@@ -153,21 +111,16 @@ fn llvm_create_target_data_layout(tm: i64) -> i64:
 # ============================================================================
 
 # reason: positional ffi llvm API
-@unsafe(reason: "untyped dynamic LLVM pass-pipeline ABI", capabilities: [ffi, raw_ptr])
 fn llvm_run_passes(mod_: i64, passes: text, tm: i64, options: i64) -> i64:
     # LLVMRunPasses(Module, Passes, TM, Options) -> LLVMErrorRef (0=success)
-    val passes_z = passes + "\0"
-    _lc4("LLVMRunPasses", mod_, passes_z.ptr(), tm, options)
+    _lc4("LLVMRunPasses", mod_, passes.ptr(), tm, options)
 
-@unsafe(reason: "untyped LLVM pass-options ownership ABI", capabilities: [ffi, raw_ptr])
 fn llvm_create_pass_builder_options() -> i64:
     _lc0("LLVMCreatePassBuilderOptions")
 
-@unsafe(reason: "unverified LLVM pass-options handle release", capabilities: [ffi, raw_ptr])
 fn llvm_dispose_pass_builder_options(options: i64):
     _lc1("LLVMDisposePassBuilderOptions", options)
 
-@unsafe(reason: "untyped LLVM pass-options mutation ABI", capabilities: [ffi, raw_ptr])
 fn llvm_pass_builder_options_set_verify_each(options: i64, verify: bool):
     val v = if verify: 1 else: 0
     _lc2("LLVMPassBuilderOptionsSetVerifyEach", options, v)
@@ -176,30 +129,20 @@ fn llvm_pass_builder_options_set_verify_each(options: i64, verify: bool):
 # 9. Memory Buffer (for reading emitted object code)
 # ============================================================================
 
-@unsafe(reason: "unverified LLVM buffer handle and borrowed pointer ABI", capabilities: [ffi, raw_ptr])
 fn llvm_get_buffer_start(buf: i64) -> i64:
     _lc1("LLVMGetBufferStart", buf)
 
-@unsafe(reason: "unverified LLVM buffer handle and extent ABI", capabilities: [ffi, raw_ptr])
 fn llvm_get_buffer_size(buf: i64) -> i64:
     _lc1("LLVMGetBufferSize", buf)
 
-@unsafe(reason: "unverified LLVM memory-buffer handle release", capabilities: [ffi, raw_ptr])
 fn llvm_dispose_memory_buffer(buf: i64):
     _lc1("LLVMDisposeMemoryBuffer", buf)
 
 # reason: positional ffi llvm API
-@unsafe(reason: "untyped LLVM emission ABI with raw error/buffer out-pointers", capabilities: [ffi, raw_ptr])
 fn llvm_target_machine_emit_to_memory_buffer(tm: i64, mod_: i64, file_type: i64) -> i64:
     # LLVMTargetMachineEmitToMemoryBuffer(TM, M, FileType, &ErrorMessage, &OutMemBuf) -> LLVMBool
     val err_ptr = rt_alloc(8)
     val buf_ptr = rt_alloc(8)
-    if err_ptr == 0 or buf_ptr == 0:
-        if err_ptr != 0:
-            rt_free(err_ptr)
-        if buf_ptr != 0:
-            rt_free(buf_ptr)
-        return 0
     rt_ptr_write_i64(err_ptr, 0, 0)
     rt_ptr_write_i64(buf_ptr, 0, 0)
     var args: [i64] = []

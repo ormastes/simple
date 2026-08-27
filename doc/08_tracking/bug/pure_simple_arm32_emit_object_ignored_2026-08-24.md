@@ -1,12 +1,8 @@
-# Pure-Simple ARM32 `--emit-object` admission remains open
+# Pure-Simple ARM32 `--emit-object` is ignored
 
 ## Status
 
-**SOURCE CANDIDATE PRESENT; EXECUTION OPEN.** Current Pure-Simple source accepts
-`--emit-object` and preserves explicit ARM32 `eabihf`, and this lane adds an
-exact relocatable-link runner for the Cosmos FSBL candidate. No freshly
-provenance-admitted Stage-4 compiler has executed that runner here. The
-firmware prerequisite and production cutover are therefore not closed.
+OPEN — blocks linking Pure-Simple Cosmos HAL owners into the ARMv7 firmware.
 
 ## Historical observation
 
@@ -28,29 +24,49 @@ path. ARM32 target selection distinguishes explicit
 The pending command is:
 
 ```sh
-SIMPLE_BINARY=/absolute/path/to/fresh-admitted-stage4/simple \
-  sh test/02_integration/os/cosmos/run_pure_simple_arm32_emit_object_test.shs
+SIMPLE_NO_STUB_FALLBACK=1 sh scripts/bootstrap/bootstrap-from-scratch.sh \
+  --full-bootstrap --stop-after-stage2 --backend=llvm --mode=dynload \
+  --jobs=half --output=build/bootstrap/cosmos-object-probe-stage2 \
+  --no-mcp --no-verify --progress
 ```
 
-The runner canonicalizes the compiler path, validates its adjacent Stage-4
-provenance receipt, rejects Rust/bootstrap/debug identity, and binds the
-compiler digest before and after the run. It compiles the actual
-`src/os/kernel/arch/arm32/cosmos/cosmos_fsbl.spl` candidate and checks ELF32,
-ET_REL, EM_ARM, hard-float attributes, the exact exported
-`cosmos_fsbl_validate_handoff` and `cosmos_fsbl_selftest` functions, real ARM
-consumer relocations, successful `ld.lld -r` combination, and no remaining
-undefined symbol.
+```sh
+SIMPLE=build/bootstrap/cosmos-object-probe-stage2/stage2/x86_64-unknown-linux-gnu/simple
+"$SIMPLE" native-build --backend llvm \
+  --source test/fixtures/os/cosmos \
+  --entry test/fixtures/os/cosmos/simple_object_link_probe.spl \
+  --entry-closure --target armv7-unknown-none-eabihf --emit-object \
+  -o build/hal-link-probe/simple_object_link_probe.o
+file build/hal-link-probe/simple_object_link_probe.o
+readelf -h build/hal-link-probe/simple_object_link_probe.o
+readelf -Ws build/hal-link-probe/simple_object_link_probe.o
+nm -u build/hal-link-probe/simple_object_link_probe.o
+```
 
-The consumer supplies only `cosmos_fsbl_mmio_read32` and
-`cosmos_fsbl_platform_is_qemu`. These are required volatile-I/O/platform ABI
-shims, not foreign owners of FSBL validation policy.
+The exploratory run reported:
 
-## Closure evidence and limits
+- the compiler warns `unknown option '--emit-object', ignoring`;
+- it reports a freestanding link rather than relocatable-object emission;
+- `file` identifies the output as `ELF 32-bit ... executable, ARM`;
+- `readelf` reports `Type: EXEC`, not `REL`;
+- `nm -u` reported an unresolved `__aeabi_unwind_cpp_pr0` symbol.
 
-Closing this blocker requires a retained result binding the admitted compiler
-and provenance, command, candidate source, object digest, ELF header, symbols,
-relocations, and combined object. This source-only candidate has not been run
-or verified in this lane. Even a passing ET_REL runner does not authorize
-removing production `cosmos_fsbl.c`: physical ARM/QEMU boot, package wiring,
-and reproducible x86-host bootstrap/build evidence remain separate cutover
-gates.
+That exploratory artifact used an equivalent scalar exported function before
+the stable fixture above was committed. The commands above have not yet been
+rerun against the committed fixture; a future closing receipt must bind the
+compiler hash, fixture blob, command, output hash, ELF type, and symbol table.
+
+The same compiler's `native-build --help` does not advertise either
+`--emit-object` or `--target`, despite those options existing in the current
+Pure-Simple driver source. Do not feed this executable to the Cosmos firmware
+relocatable link or fall back to the Rust seed. The migration prerequisite is
+a Stage-4 Pure-Simple compiler that emits an ARM32 `REL` object and preserves
+the exported C symbol in this fixture.
+
+## Unblocked adjacent work
+
+The Cosmos mock-MMIO oracle now executes each stateful case in a separate
+normally exiting process. That preserves test isolation without `fork` plus
+`_exit` and allows an enabled per-process coverage handler to flush. Coverage
+file naming and cross-process merge policy remain the responsibility of the
+selected coverage runner.

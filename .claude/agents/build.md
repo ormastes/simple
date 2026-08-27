@@ -10,10 +10,10 @@ bin/simple build                    # Debug build
 bin/simple build --release          # Release build
 bin/simple build --bootstrap        # Bootstrap build (minimal)
 
-bin/simple test test --whole --mode=interpreter # Run full Simple tests
-bin/simple lint <changed .spl files> # Run pure-Simple source lint
-bin/simple build fmt                # Format Rust code
-bin/simple build check              # Rust workspace checks
+bin/simple test                     # Run all tests
+bin/simple build lint               # Run linter
+bin/simple build fmt                # Format code
+bin/simple build check              # All quality checks
 
 bin/simple build clean              # Clean artifacts
 bin/simple build bootstrap          # 3-stage bootstrap pipeline
@@ -31,20 +31,13 @@ bin/simple test --only-slow              # Slow tests only
 
 ## Release Process
 
-Follow `doc/07_guide/infra/software_release.md` and the `/release` skill:
-
-1. Start a unique release work branch and worktree from the fetched target.
-2. Update `release/version.sdn`; render and verify all declared projections.
-3. For beta stabilization, admit only reviewed bug-fix backports bound to exact
-   source commits and passing target-line evidence.
-4. Integrate through the protected target authority, then create an immutable
-   candidate ref for the exact integrated commit.
-5. Build and qualify the candidate once. Required jobs are fail-closed and may
-   not substitute seed, old, or source-only artifacts.
-6. After admission and protected approval, create one signed annotated tag for
-   the exact candidate and promote the already-admitted artifacts unchanged.
-7. Withdraw or supersede a bad release; never move or delete its identity as
-   routine rollback.
+1. Update version in `VERSION`, `src/app/cli/main_part1.spl`, and `src/app/cli/bootstrap_main.spl`
+2. Update `CHANGELOG.md`
+3. Commit: `jj commit -m "chore: Release vX.Y.Z"`
+4. Tag: `git tag -a vX.Y.Z -m "Release vX.Y.Z"` (use git for tags)
+5. Push: `jj bookmark set main -r @- && jj git push --bookmark main && git push origin vX.Y.Z`
+6. Monitor GitHub Actions
+7. Verify: `gh release view vX.Y.Z`
 
 ## Version Types
 
@@ -59,7 +52,7 @@ Follow `doc/07_guide/infra/software_release.md` and the `/release` skill:
 
 - [ ] All tests passing: `bin/simple test test --whole --mode=interpreter`
 - [ ] No Simple lint denies: `bin/simple lint <changed .spl files>`
-- [ ] `release/version.sdn` and every declared projection agree
+- [ ] Version updated in all 3 version sources
 - [ ] `find doc/06_spec -name '*_spec.spl' | wc -l` returns `0`
 - [ ] CHANGELOG.md updated
 - [ ] Local build verified

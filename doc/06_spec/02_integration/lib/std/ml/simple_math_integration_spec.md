@@ -339,8 +339,6 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("should apply FFT to grid data")
 val t6 = Matrix.new([8, 8])
 expect t6.shape == [8, 8]
 ```
@@ -355,7 +353,7 @@ expect t6.shape == [8, 8]
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple

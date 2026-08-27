@@ -1,0 +1,216 @@
+# Enterprise Store — audit-chain tamper detection ON OPEN (W14-B)
+
+> Purpose: the behavior asserted in this spec  Audience: engineers reading this spec to confirm the behavior still holds.
+
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 3 | 3 | 0 | 0 |
+
+<details>
+<summary>Full Scenario Manual</summary>
+
+# Enterprise Store — audit-chain tamper detection ON OPEN (W14-B)
+
+Purpose: the behavior asserted in this spec  Audience: engineers reading this spec to confirm the behavior still holds.
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Standard Library |
+| Status | Active |
+| Requirements | N/A |
+| Plan | doc/03_plan/agent_tasks/simple_erp.md |
+| Design | N/A |
+| Research | doc/01_research/local/simple_enterprise_suite_assessment_2026-08-14.md |
+| Source | `test/01_unit/lib/nogc_sync_mut/enterprise_store/enterprise_store_audit_chain_on_open_spec.spl` |
+| Updated | 2026-08-22 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Purpose and audience
+
+Purpose: the behavior asserted in this spec  Audience: engineers reading this spec to confirm the behavior still holds.
+
+## Operator workflow
+
+1. Run `bin/simple test test/01_unit/lib/nogc_sync_mut/enterprise_store/enterprise_store_audit_chain_on_open_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the behavior under test.
+
+## Compatibility and limitations
+
+Covers the behavior asserted here; platform-specific behavior is out of scope.
+
+## Scenarios
+
+### enterprise store — audit chain verified on open (file backend)
+
+#### accepts an untampered file-backend store with a valid audit chain
+
+- Open the file backend and append two chained audit records
+- Sanity: the persisted chain verifies before any tampering
+- A verifying open accepts the healthy store
+   - Expected: opened.1 equals ``
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 17 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-SSPEC-LOCAL-001
+val path = "build/test-artifacts/enterprise_audit_chain_ok.db"
+fresh_store(path)
+step("Open the file backend and append two chained audit records")
+val store = store_open_file(path)
+expect(store.open_ok).to_be(true)
+expect(audit_append(store, "t1", "alice", "login", "ok")).to_be(true)
+expect(audit_append(store, "t1", "alice", "update", "row-7")).to_be(true)
+store_close(store)
+step("Sanity: the persisted chain verifies before any tampering")
+val reopened = store_open_file(path)
+expect(audit_verify_chain(reopened, "t1")).to_be(true)
+store_close(reopened)
+step("A verifying open accepts the healthy store")
+val opened = store_open_verified(path)
+expect(opened.0.open_ok).to_be(true)
+expect(opened.1).to_equal("")
+```
+
+</details>
+
+#### REJECTS on open a store whose audit payload was mutated out-of-band
+
+- Persist a two-record audit chain to the file backend
+- Tamper: mutate the first record's persisted detail out-of-band
+- The stored hash no longer matches the mutated payload
+- The verifying open MUST reject the tampered store
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 21 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-SSPEC-LOCAL-001
+val path = "build/test-artifacts/enterprise_audit_chain_tampered.db"
+fresh_store(path)
+step("Persist a two-record audit chain to the file backend")
+val store = store_open_file(path)
+expect(audit_append(store, "t1", "alice", "login", "ok")).to_be(true)
+expect(audit_append(store, "t1", "alice", "update", "row-7")).to_be(true)
+store_close(store)
+step("Tamper: mutate the first record's persisted detail out-of-band")
+val raw = file_read(path)
+expect(raw.contains("detail=ok")).to_be(true)
+expect(file_write(path, raw.replace("detail=ok", "detail=HACKED"))).to_be(true)
+step("The stored hash no longer matches the mutated payload")
+val tampered = store_open_file(path)
+expect(audit_verify_chain(tampered, "t1")).to_be(false)
+store_close(tampered)
+step("The verifying open MUST reject the tampered store")
+val opened = store_open_verified(path)
+expect(opened.0.open_ok).to_be(false)
+expect(opened.1.contains("corrupt store")).to_be(true)
+expect(opened.1.contains("audit chain")).to_be(true)
+```
+
+</details>
+
+#### REJECTS on open a store whose audit chain HASH was mutated out-of-band
+
+- Persist an audit record, then corrupt only its stored hash
+- Corrupt the stored hash column (the leading tab pins the real hash column, never prev_hash)
+- store_verify on the reopened file backend must flag the chain
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 18 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-SSPEC-LOCAL-001
+val path = "build/test-artifacts/enterprise_audit_hash_tampered.db"
+fresh_store(path)
+step("Persist an audit record, then corrupt only its stored hash")
+val store = store_open_file(path)
+expect(audit_append(store, "t1", "bob", "delete", "acct-9")).to_be(true)
+store_close(store)
+val raw = file_read(path)
+step("Corrupt the stored hash column (the leading tab pins the real hash column, never prev_hash)")
+expect(raw.contains("\thash=")).to_be(true)
+val corrupt = raw.replace("\thash=", "\thash=deadbeef")
+expect(file_write(path, corrupt)).to_be(true)
+step("store_verify on the reopened file backend must flag the chain")
+val reopened = store_open_file(path)
+val err = store_verify(reopened)
+store_close(reopened)
+expect(err.contains("corrupt store")).to_be(true)
+expect(err.contains("audit chain")).to_be(true)
+```
+
+</details>
+
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 3 |
+| Active scenarios | 3 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
+
+
+## Related Documentation
+
+- **Plan:** `doc/03_plan/agent_tasks/simple_erp.md`
+- **Research:** `doc/01_research/local/simple_enterprise_suite_assessment_2026-08-14.md`
+
+
+</details>
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `ca74df61a2f87c58b434e4345e6530bf6ef5ea3f0db5e7a1d80b15e28334b324`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `ca74df61a2f87c58b434e4345e6530bf6ef5ea3f0db5e7a1d80b15e28334b324`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `ca74df61a2f87c58b434e4345e6530bf6ef5ea3f0db5e7a1d80b15e28334b324`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/01_unit/lib/nogc_sync_mut/enterprise_store/enterprise_store_audit_chain_on_open_spec.spl
+mirror: doc/06_spec/01_unit/lib/nogc_sync_mut/enterprise_store/enterprise_store_audit_chain_on_open_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/lib/nogc_sync_mut/enterprise_store/enterprise_store_audit_chain_on_open_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/lib/nogc_sync_mut/enterprise_store/enterprise_store_audit_chain_on_open_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: assumptions/preconditions, evidence, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/lib/nogc_sync_mut/enterprise_store/enterprise_store_audit_chain_on_open_spec.spl:67:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'accepts an untampered file-backend store with a valid audit chain' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/lib/nogc_sync_mut/enterprise_store/enterprise_store_audit_chain_on_open_spec.spl:86:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'REJECTS on open a store whose audit payload was mutated out-of-band' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/lib/nogc_sync_mut/enterprise_store/enterprise_store_audit_chain_on_open_spec.spl:109:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'REJECTS on open a store whose audit chain HASH was mutated out-of-band' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

@@ -9,14 +9,11 @@ when not BOOTSTRAP_NO_C:
 use c_ir_builder.{CIRBuilder}
 use c_type_mapper.{CTypeMapper}
 use compiler.mir.mir_data.*
-use compiler.hir.hir_lowering.types.{LoweringErrorKind, hirlowering_for_module}
-use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName, module_surfaces_from_modules}
-use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{HirLowering}
 use compiler.hir.hir_lowering.items.*
 use compiler.hir.hir_lowering.expressions.*
 use compiler.hir.hir_lowering.statements.*
 use compiler.mir.mir_lowering.*
-use compiler.backend.backend.mir_target_context_provider.{backend_mir_target_context}
 use compiler.hir.hir_types.{SymbolTable, Scope, ScopeId, ScopeKind}
 use compiler.core.parser.{parse_module, parser_has_errors, parser_get_errors, parser_init, parser_advance}
 use compiler.core.parser_decls.{parse_module_body}
@@ -27,29 +24,120 @@ use compiler.frontend.parser_types.*
 use compiler.frontend.parser_types_expr.*
 use compiler.common.diagnostics.span.Span
 use compiler.frontend.flat_ast_bridge.{op_kind_to_binop, op_kind_to_unaryop}
+use compiler.frontend.core.if_chain_nodes.{FORM_STMT, FORM_EXPR, ARM_CONDITION}
+use compiler.frontend.core.if_chain_nodes.{flat_if_chain_form_get, flat_if_chain_first_arm_get, flat_if_chain_arm_count_get}
+use compiler.frontend.core.if_chain_nodes.{flat_if_chain_else_expr_get, flat_if_chain_else_stmt_count_get, flat_if_chain_else_stmt_at}
+use compiler.frontend.core.if_chain_nodes.{flat_if_arm_next_get, flat_if_arm_kind_get, flat_if_arm_head_get, flat_if_arm_then_expr_get}
+use compiler.frontend.core.if_chain_nodes.{flat_if_arm_body_count_get, flat_if_arm_body_at}
 
-@unsafe(reason: "raw backend compile argument-vector ABI", capabilities: [ffi])
 extern fn sys_get_args() -> [text]
-use std.io_runtime.{read_file_text_result}
-@unsafe(reason: "raw backend generated-output write status ABI", capabilities: [ffi])
+extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_write_text(path: text, content: text) -> bool
 
 # ============================================================================
 # Flat AST → Rich AST Converter
 # ============================================================================
 # The core parser produces a flat, index-based AST stored in global arrays.
-# The HIR lowering expects a rich ParserModule with Dict<text, ParserFunction> etc.
+# The HIR lowering expects a rich Module with Dict<text, Function> etc.
 # This bridge converts between the two formats.
 
 fn make_span() -> Span:
     Span(start: 0, end: 0, line: 0, col: 0, file: "", length: 0)
 
+var flat_ast_conversion_error: text = ""
+
+fn fail_flat_ast_conversion(message: text):
+    if flat_ast_conversion_error == "":
+        flat_ast_conversion_error = message
+
+fn flat_if_condition_only_or_error(chain_id: i64) -> bool:
+    var arm_id = flat_if_chain_first_arm_get(chain_id)
+    var remaining = flat_if_chain_arm_count_get(chain_id)
+    if remaining <= 0:
+        fail_flat_ast_conversion("empty raw if-chain")
+        return false
+    while arm_id >= 0 and remaining > 0:
+        if flat_if_arm_kind_get(arm_id) != ARM_CONDITION:
+            fail_flat_ast_conversion("legacy C entry does not support if val/var or pattern-binding arms")
+            return false
+        arm_id = flat_if_arm_next_get(arm_id)
+        remaining = remaining - 1
+    if remaining != 0 or arm_id >= 0:
+        fail_flat_ast_conversion("malformed raw if-chain arm links")
+        return false
+    true
+
+fn convert_flat_if_expr_branch(expr_idx: i64, span: Span) -> Block:
+    if expr_idx < 0:
+        fail_flat_ast_conversion("raw if-chain has a missing expression branch")
+        return Block(stmts: [Stmt(kind: StmtKind.Expr(Expr(kind: ExprKind.Error, span: span)), span: span)], span: span)
+    if expr_get_tag(expr_idx) == EXPR_BLOCK:
+        var body: [Stmt] = []
+        val stmt_ids = expr_get_stmts(expr_idx)
+        var i = 0
+        while i < stmt_ids.len():
+            body.push(convert_flat_stmt(stmt_ids[i]))
+            i = i + 1
+        return Block(stmts: body, span: span)
+    Block(stmts: [Stmt(kind: StmtKind.Expr(convert_flat_expr(expr_idx)), span: span)], span: span)
+
+fn convert_flat_stmt_arm_block(arm_id: i64, span: Span) -> Block:
+    var body: [Stmt] = []
+    var i = 0
+    while i < flat_if_arm_body_count_get(arm_id):
+        body.push(convert_flat_stmt(flat_if_arm_body_at(arm_id, i)))
+        i = i + 1
+    Block(stmts: body, span: span)
+
+fn convert_flat_expr_if_chain(chain_id: i64, span: Span) -> Expr:
+    if flat_if_chain_form_get(chain_id) != FORM_EXPR:
+        fail_flat_ast_conversion("expression raw if-chain has a non-expression owner")
+        return Expr(kind: ExprKind.Error, span: span)
+    if not flat_if_condition_only_or_error(chain_id):
+        return Expr(kind: ExprKind.Error, span: span)
+    var arms: [IfArm] = []
+    var arm_id = flat_if_chain_first_arm_get(chain_id)
+    var remaining = flat_if_chain_arm_count_get(chain_id)
+    while arm_id >= 0 and remaining > 0:
+        arms.push(IfArm(
+            cond: convert_flat_expr(flat_if_arm_head_get(arm_id)),
+            then_: convert_flat_if_expr_branch(flat_if_arm_then_expr_get(arm_id), span),
+            span: span
+        ))
+        arm_id = flat_if_arm_next_get(arm_id)
+        remaining = remaining - 1
+    val else_idx = flat_if_chain_else_expr_get(chain_id)
+    if else_idx >= 0 and expr_get_tag(else_idx) != EXPR_UNIT:
+        return Expr(kind: ExprKind.IfChain(arms, convert_flat_if_expr_branch(else_idx, span)), span: span)
+    Expr(kind: ExprKind.IfChain(arms, nil), span: span)
+
+fn convert_flat_stmt_if_chain(chain_id: i64, span: Span) -> Stmt:
+    if flat_if_chain_form_get(chain_id) != FORM_STMT:
+        fail_flat_ast_conversion("statement raw if-chain has a non-statement owner")
+        return Stmt(kind: StmtKind.Expr(Expr(kind: ExprKind.Error, span: span)), span: span)
+    if not flat_if_condition_only_or_error(chain_id):
+        return Stmt(kind: StmtKind.Expr(Expr(kind: ExprKind.Error, span: span)), span: span)
+    var arms: [IfArm] = []
+    var arm_id = flat_if_chain_first_arm_get(chain_id)
+    var remaining = flat_if_chain_arm_count_get(chain_id)
+    while arm_id >= 0 and remaining > 0:
+        arms.push(IfArm(
+            cond: convert_flat_expr(flat_if_arm_head_get(arm_id)),
+            then_: convert_flat_stmt_arm_block(arm_id, span),
+            span: span
+        ))
+        arm_id = flat_if_arm_next_get(arm_id)
+        remaining = remaining - 1
+    var else_body: [Stmt] = []
+    var i = 0
+    while i < flat_if_chain_else_stmt_count_get(chain_id):
+        else_body.push(convert_flat_stmt(flat_if_chain_else_stmt_at(chain_id, i)))
+        i = i + 1
+    val else_block: Block? = if else_body.len() > 0: Block(stmts: else_body, span: span) else: nil
+    Stmt(kind: StmtKind.Expr(Expr(kind: ExprKind.IfChain(arms, else_block), span: span)), span: span)
+
 fn convert_decl_visibility(idx: i64) -> Visibility:
-    var vis_text = "private"
-    if idx >= 0 and idx < decl_visibility.len():
-        val stored = decl_visibility[idx]
-        if stored != "":
-            vis_text = stored
+    val vis_text = decl_get_visibility_text(idx)
     if vis_text == "public":
         return Visibility.Public
     if vis_text == "peer":
@@ -87,7 +175,7 @@ fn convert_flat_expr(idx: i64) -> Expr:
     if tag == EXPR_INT_LIT:
         Expr(kind: ExprKind.IntLit(expr_i_val[idx]), span: span)
     elif tag == EXPR_FLOAT_LIT:
-        Expr(kind: ExprKind.FloatLit(expr_f_val[idx].to_float()), span: span)
+        Expr(kind: ExprKind.FloatLit(0.0), span: span)
     elif tag == EXPR_STRING_LIT:
         Expr(kind: ExprKind.StringLit(expr_s_val[idx], nil), span: span)
     elif tag == EXPR_BOOL_LIT:
@@ -174,6 +262,8 @@ fn convert_flat_expr(idx: i64) -> Expr:
             ti = ti + 1
         val then_block = Block(stmts: then_body, span: span)
         Expr(kind: ExprKind.If(cond, then_block, nil), span: span)
+    elif tag == EXPR_IF_CHAIN:
+        convert_flat_expr_if_chain(expr_get_extra(idx), span)
     elif tag == EXPR_RETURN:
         val ret_expr = convert_flat_expr(expr_left[idx])
         Expr(kind: ExprKind.Return(ret_expr), span: span)
@@ -225,9 +315,6 @@ fn convert_flat_expr(idx: i64) -> Expr:
     elif tag == EXPR_EXISTS_CHECK:
         val inner = convert_flat_expr(expr_left[idx])
         Expr(kind: ExprKind.ExistsCheck(inner), span: span)
-    elif tag == EXPR_TRY:
-        val try_inner = convert_flat_expr(expr_left[idx])
-        Expr(kind: ExprKind.Try(try_inner), span: span)
     else:
         # Fallback for unhandled expression types
         print "[bridge] WARNING: unhandled expr tag {tag}"
@@ -278,6 +365,8 @@ fn convert_flat_stmt(idx: i64) -> Stmt:
             si = si + 1
         val then_block = Block(stmts: then_body, span: span)
         Stmt(kind: StmtKind.Expr(Expr(kind: ExprKind.If(cond, then_block, nil), span: span)), span: span)
+    elif tag == STMT_IF_CHAIN:
+        convert_flat_stmt_if_chain(stmt_get_type(idx), span)
     elif tag == STMT_WHILE:
         val cond = convert_flat_expr(stmt_expr[idx])
         val body_stmts = stmt_body[idx]
@@ -330,7 +419,7 @@ fn convert_flat_stmt(idx: i64) -> Stmt:
         print "[bridge] WARNING: unhandled stmt tag {tag}"
         Stmt(kind: StmtKind.Expr(Expr(kind: ExprKind.NilLit, span: span)), span: span)
 
-fn convert_decl_fn(idx: i64) -> ParserFunction:
+fn convert_decl_fn(idx: i64) -> Function:
     val name = decl_name[idx]
     val p_names = decl_param_names[idx]
     val p_types = decl_param_types[idx]
@@ -358,7 +447,7 @@ fn convert_decl_fn(idx: i64) -> ParserFunction:
         si = si + 1
 
     val visibility = convert_decl_visibility(idx)
-    ParserFunction(
+    Function(
         name: name,
         type_params: [],
         params: params,
@@ -381,7 +470,7 @@ fn convert_decl_fn(idx: i64) -> ParserFunction:
         span: span
     )
 
-fn convert_decl_extern_fn(idx: i64) -> ParserFunction:
+fn convert_decl_extern_fn(idx: i64) -> Function:
     val name = decl_name[idx]
     val p_names = decl_param_names[idx]
     val p_types = decl_param_types[idx]
@@ -402,7 +491,7 @@ fn convert_decl_extern_fn(idx: i64) -> ParserFunction:
 
     val ret = decl_ret_type[idx]
     val visibility = convert_decl_visibility(idx)
-    ParserFunction(
+    Function(
         name: name,
         type_params: [],
         params: params,
@@ -425,19 +514,18 @@ fn convert_decl_extern_fn(idx: i64) -> ParserFunction:
         span: span
     )
 
-fn flat_ast_to_module(path: text) -> ParserModule:
+fn flat_ast_to_module(path: text) -> Module:
     val decls = module_get_decls()
-    var functions: Dict<text, ParserFunction> = {}
-    var function_order: [text] = []
-    var structs: Dict<text, ParserStruct> = {}
-    var enums: Dict<text, ParserEnum> = {}
-    var constants: Dict<text, ParserConst> = {}
-    var imports: [ParserImport] = []
+    var functions: Dict<text, Function> = {}
+    var structs: Dict<text, Struct> = {}
+    var enums: Dict<text, Enum> = {}
+    var constants: Dict<text, Const> = {}
+    var imports: [Import] = []
     var exports: [Export] = []
     var impls: [Impl] = []
     val span = make_span()
 
-    print "[bridge] Converting {decls.len()} declarations to rich ParserModule"
+    print "[bridge] Converting {decls.len()} declarations to rich Module"
 
     var di = 0
     while di < decls.len():
@@ -445,18 +533,16 @@ fn flat_ast_to_module(path: text) -> ParserModule:
         val tag = decl_tag[idx]
         if tag == DECL_FN:
             val fn_ = convert_decl_fn(idx)
-            print "[bridge] ParserFunction: {fn_.name}"
+            print "[bridge] Function: {fn_.name}"
             functions[fn_.name] = fn_
-            function_order.push(fn_.name)
         elif tag == DECL_EXTERN_FN:
             val fn_ = convert_decl_extern_fn(idx)
             print "[bridge] Extern function: {fn_.name}"
             functions[fn_.name] = fn_
-            function_order.push(fn_.name)
         elif tag == DECL_STRUCT:
             val s_name = decl_name[idx]
-            print "[bridge] ParserStruct: {s_name} (stub)"
-            var fields: [ParserField] = []
+            print "[bridge] Struct: {s_name} (stub)"
+            var fields: [Field] = []
             val f_names = decl_field_names[idx]
             val f_types = decl_field_types[idx]
             val f_defaults = decl_field_defaults[idx]
@@ -464,7 +550,7 @@ fn flat_ast_to_module(path: text) -> ParserModule:
             while fi < f_names.len():
                 val ft = if fi < f_types.len() and f_types[fi] > 0: convert_flat_type(f_types[fi]) else: Type(kind: TypeKind.Infer, span: span)
                 val fd = if fi < f_defaults.len() and f_defaults[fi] >= 0: convert_flat_expr(f_defaults[fi]) else: nil
-                fields = fields.push(ParserField(
+                fields = fields.push(Field(
                     name: f_names[fi],
                     type_: ft,
                     has_default: fd != nil,
@@ -476,7 +562,7 @@ fn flat_ast_to_module(path: text) -> ParserModule:
                     span: span
                 ))
                 fi = fi + 1
-            structs[s_name] = ParserStruct(
+            structs[s_name] = Struct(
                 name: s_name,
                 type_params: [],
                 fields: fields,
@@ -489,8 +575,8 @@ fn flat_ast_to_module(path: text) -> ParserModule:
             )
         elif tag == DECL_ENUM:
             val e_name = decl_name[idx]
-            print "[bridge] ParserEnum: {e_name} (stub)"
-            enums[e_name] = ParserEnum(
+            print "[bridge] Enum: {e_name} (stub)"
+            enums[e_name] = Enum(
                 name: e_name,
                 type_params: [],
                 variants: [],
@@ -498,8 +584,7 @@ fn flat_ast_to_module(path: text) -> ParserModule:
                 is_public: convert_decl_visibility(idx).is_public(),
                 has_doc_comment: false,
                 doc_comment: "",
-                span: span,
-                attributes: []
+                span: span
             )
         elif tag == DECL_VAL or tag == DECL_VAR:
             val c_name = decl_name[idx]
@@ -534,7 +619,7 @@ fn flat_ast_to_module(path: text) -> ParserModule:
                     alias: ""
                 ))
                 ii = ii + 1
-            imports = imports.push(ParserImport(
+            imports = imports.push(Import(
                 module: module_path,
                 items: import_items,
                 is_lazy: decl_is_lazy[idx] != 0,
@@ -547,16 +632,14 @@ fn flat_ast_to_module(path: text) -> ParserModule:
             print "[bridge] WARNING: unhandled decl tag {tag}"
         di = di + 1
 
-    ParserModule(
+    Module(
         name: path,
         imports: imports,
         exports: exports,
         domain_blocks: [],
         functions: functions,
-        function_order: function_order,
         classes: {},
         actors: {},
-        actor_order: [],
         structs: structs,
         enums: enums,
         bitfields: {},
@@ -573,9 +656,10 @@ fn flat_ast_to_module(path: text) -> ParserModule:
         layer_dag_edges: ""
     )
 
-fn parse_and_build_module(source: text, path: text) -> ParserModule:
+fn parse_and_build_module(source: text, path: text) -> Module:
     # Manually call parser steps instead of parse_module() to debug
     print "[bridge] Step A: ast_reset..."
+    flat_ast_conversion_error = ""
     ast_reset()
     print "[bridge] Step A done. decl_count={decl_count()}"
     print "[bridge] Step B: parser_init..."
@@ -600,7 +684,7 @@ fn parse_and_build_module(source: text, path: text) -> ParserModule:
 # ============================================================================
 
 fn main() -> i64:
-    val raw_args = unsafe(capabilities: [ffi]): sys_get_args()
+    val raw_args = sys_get_args()
     print "[c-compile] args: {raw_args}"
 
     # Parse CLI args
@@ -639,11 +723,11 @@ fn main() -> i64:
         output_file = source_file.replace(".spl", ".cpp")
 
     # Read source
-    val source_text = match read_file_text_result(source_file):
-        case Ok(value): value
-        case Err(error):
-            print "Error: Cannot read file: {source_file}: {error}"
-            return 1
+    val source_opt = rt_file_read_text(source_file)
+    if source_opt == nil:
+        print "Error: Cannot read file: {source_file}"
+        return 1
+    val source_text = source_opt ?? ""
 
     print "[c-compile] Compiling {source_file} to C++20..."
     print "[c-compile] Output: {output_file}"
@@ -651,7 +735,7 @@ fn main() -> i64:
     # Step 1: Parse source using core parser + flat-to-rich conversion
     print "[c-compile] Step 1: Parsing..."
     val ast_module = parse_and_build_module(source_text, source_file)
-    print "[c-compile] Step 1: Done (functions: {ast_module.functions.keys().len()})"
+    print "[c-compile] Step 1: Done (functions: {ast_module.functions.len()})"
     val fn_keys = ast_module.functions.keys()
     print "[c-compile] Step 1b: functions dict keys raw: {fn_keys}"
     print "[c-compile] Step 1b: fn_keys.len(): {fn_keys.len()}"
@@ -662,38 +746,38 @@ fn main() -> i64:
 
     # Step 2: Lower to HIR
     print "[c-compile] Step 2: Lowering to HIR..."
-    var sym_table = SymbolTable.new()
+    var sym_table = SymbolTable(
+        symbols: {},
+        scopes: {},
+        current_scope: ScopeId(id: 0),
+        next_symbol_id: 0,
+        next_scope_id: 1
+    )
     sym_table.scopes[0] = Scope(
         id: ScopeId(id: 0),
         parent: nil,
         kind: ScopeKind.Module,
         symbols: {}
     )
-    val retained_sources: [SourceFile] = [SourceFile(path: source_file, content: source_text, module_name: ast_module.name)]
-    val retained_modules: Dict<text, ParserModule> = {ast_module.name: ast_module}
-    val retained_module_surfaces: ModuleSurfacesByName = match module_surfaces_from_modules(retained_modules, retained_sources):
-        case Ok(value): value
-        case Err(error):
-            print "[c-compile] Module surface extraction error: {error}"
-            return 1
-    var hir_low = hirlowering_for_module(source_file, retained_module_surfaces)
-    hir_low.symbols = sym_table
+    var hir_low = HirLowering(
+        symbols: sym_table,
+        errors: [],
+        current_function: nil,
+        loop_depth: 0,
+        type_inference_config: nil,
+        module_filename: "",
+        module_resolver: nil,
+        loaded_modules: [],
+        modules_by_name: {}
+    )
     val hir_module = hir_low.lower_module(ast_module)
-    var hir_failed = false
-    for err in hir_low.errors:
-        print "[c-compile] HIR error: {err.message}"
-        if err.kind != LoweringErrorKind.Recovered:
-            hir_failed = true
-    if hir_failed:
-        return 1
-    print "[c-compile] Step 2: Done (HIR functions: {hir_module.functions.keys().len()})"
+    print "[c-compile] Step 2: Done (HIR functions: {hir_module.functions.len()})"
 
     # Step 3: Lower to MIR
     print "[c-compile] Step 3: Lowering to MIR..."
-    val target_context = backend_mir_target_context("c")
-    var mir_low = MirLowering.new_for_target(sym_table, target_context)
+    var mir_low = MirLowering.new(sym_table)
     var mir_module = mir_low.lower_module(hir_module)
-    print "[c-compile] Step 3: Done (MIR functions: {mir_module.functions.keys().len()}, types: {mir_module.types.keys().len()})"
+    print "[c-compile] Step 3: Done (MIR functions: {mir_module.functions.len()}, types: {mir_module.types.len()})"
 
     # Step 4: Generate C++
     print "[c-compile] Step 4: Generating C++..."
@@ -713,8 +797,7 @@ fn main() -> i64:
     print "[c-compile] Step 4: Done"
 
     # Step 5: Write output
-    val wrote = unsafe(capabilities: [ffi]): rt_file_write_text(output_file, cpp_source)
-    if not wrote:
+    if not rt_file_write_text(output_file, cpp_source):
         print "Error: Failed to write {output_file}"
         return 1
 

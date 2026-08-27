@@ -1,6 +1,30 @@
 # X86 32 Early Syscall Specification
 
-> Tests covering x86_32 freestanding early syscall ABI.
+> _Hosted coverage for the i386 live boot syscall subset._
+
+<!-- sdn-diagram:id=x86_32_early_syscall_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=x86_32_early_syscall_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+x86_32_early_syscall_spec -> std
+x86_32_early_syscall_spec -> os
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=x86_32_early_syscall_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -14,10 +38,11 @@
 ## Scenarios
 
 ### x86_32 freestanding early syscall ABI
+_Hosted coverage for the i386 live boot syscall subset._
 
 #### handles process, brk, reboot, diagnostics, and shell smoke syscalls
 
-- handles process, brk, reboot, diagnostics, and shell smoke syscalls
+1. x86 32 install early syscall runtime
    - Expected: pid equals `1001`
    - Expected: x86_32_dispatch_installed_syscall_abi(15u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32) equals `1`
    - Expected: x86_32_dispatch_installed_syscall_abi(15u32, 0x30001000u32, 0u32, 0u32, 0u32, 0u32, 0u32) equals `1`
@@ -31,13 +56,10 @@
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("handles process, brk, reboot, diagnostics, and shell smoke syscalls")
-"""The early ABI returns concrete non-error results without x86_64 helpers."""
 x86_32_install_early_syscall_runtime()
 
 val pid = x86_32_dispatch_installed_syscall_abi(2u32, 0x1000u32, 0u32, 0u32, 0u32, 0u32, 0u32)
@@ -60,12 +82,12 @@ expect(x86_32_dispatch_installed_syscall_abi(99u32, 0u32, 0u32, 0u32, 0u32, 0u32
 | Category | Hardware & OS |
 | Status | Active |
 | Source | `test/01_unit/os/kernel/arch/x86_32_early_syscall_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering x86_32 freestanding early syscall ABI.
+Tests covering:
 - x86_32 freestanding early syscall ABI
 
 ## Scenario Summary
@@ -80,48 +102,3 @@ Tests covering x86_32 freestanding early syscall ABI.
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-UNIT`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `5c12922fa00b22007d3d1666fbb0b953e07b5bc5090f56e74a620f00fe107156`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `5c12922fa00b22007d3d1666fbb0b953e07b5bc5090f56e74a620f00fe107156`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `5c12922fa00b22007d3d1666fbb0b953e07b5bc5090f56e74a620f00fe107156`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **89/100**; effective score: **89/100**; blockers: **0**.
-
-SSpec documentization score: 89/100
-source: test/01_unit/os/kernel/arch/x86_32_early_syscall_spec.spl
-mirror: doc/06_spec/01_unit/os/kernel/arch/x86_32_early_syscall_spec.md (current)
-findings: 4 blockers: 0
-  narrative=100 structure=100 oracle=70
-  traceability=100 evidence=90 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/os/kernel/arch/x86_32_early_syscall_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/os/kernel/arch/x86_32_early_syscall_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/os/kernel/arch/x86_32_early_syscall_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 8 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/01_unit/os/kernel/arch/x86_32_early_syscall_spec.spl:14:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'handles process, brk, reboot, diagnostics, and shell smoke syscalls' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

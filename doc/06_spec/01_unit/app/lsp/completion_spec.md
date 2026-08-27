@@ -1,6 +1,29 @@
 # Completion Specification
 
-> Tests covering CompletionItemKind, CompletionItem.
+> 1. expect completion item kind number
+
+<!-- sdn-diagram:id=completion_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=completion_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+completion_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=completion_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -17,22 +40,16 @@
 
 #### has Text kind
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- has Text kind
+1. expect completion item kind number
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("has Text kind")
 expect completion_item_kind_number(CompletionItemKind.Text) == 1
 ```
 
@@ -40,18 +57,16 @@ expect completion_item_kind_number(CompletionItemKind.Text) == 1
 
 #### has Method kind
 
-- has Method kind
+1. expect completion item kind number
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("has Method kind")
 expect completion_item_kind_number(CompletionItemKind.Method) == 2
 ```
 
@@ -59,18 +74,16 @@ expect completion_item_kind_number(CompletionItemKind.Method) == 2
 
 #### has Function kind
 
-- has Function kind
+1. expect completion item kind number
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("has Function kind")
 expect completion_item_kind_number(CompletionItemKind.Function) == 3
 ```
 
@@ -78,18 +91,16 @@ expect completion_item_kind_number(CompletionItemKind.Function) == 3
 
 #### has Variable kind
 
-- has Variable kind
+1. expect completion item kind number
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("has Variable kind")
 expect completion_item_kind_number(CompletionItemKind.Variable) == 6
 ```
 
@@ -97,18 +108,16 @@ expect completion_item_kind_number(CompletionItemKind.Variable) == 6
 
 #### has Keyword kind
 
-- has Keyword kind
+1. expect completion item kind number
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("has Keyword kind")
 expect completion_item_kind_number(CompletionItemKind.Keyword) == 14
 ```
 
@@ -116,18 +125,16 @@ expect completion_item_kind_number(CompletionItemKind.Keyword) == 14
 
 #### has Struct kind
 
-- has Struct kind
+1. expect completion item kind number
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("has Struct kind")
 expect completion_item_kind_number(CompletionItemKind.Struct) == 22
 ```
 
@@ -137,18 +144,13 @@ expect completion_item_kind_number(CompletionItemKind.Struct) == 22
 
 #### creates item with label and kind
 
-- creates item with label and kind
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates item with label and kind")
 val item = CompletionItem.new("test", CompletionItemKind.Variable)
 expect item.label == "test"
 expect item.kind == CompletionItemKind.Variable
@@ -158,18 +160,17 @@ expect item.kind == CompletionItemKind.Variable
 
 #### adds detail
 
-- adds detail
+1.  with detail
+2. expect item detail == Some
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("adds detail")
 val item = CompletionItem.new("fn", CompletionItemKind.Keyword)
     .with_detail("Function keyword")
 expect item.detail == Some("Function keyword")
@@ -179,18 +180,17 @@ expect item.detail == Some("Function keyword")
 
 #### adds documentation
 
-- adds documentation
+1.  with documentation
+2. expect item documentation == Some
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("adds documentation")
 val item = CompletionItem.new("fn", CompletionItemKind.Keyword)
     .with_documentation("Define a function")
 expect item.documentation == Some("Define a function")
@@ -200,18 +200,16 @@ expect item.documentation == Some("Define a function")
 
 #### adds insert text
 
-- adds insert text
+1.  with insert text
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("adds insert text")
 val item = CompletionItem.new("fn", CompletionItemKind.Snippet)
     .with_insert_text("fn ${1:name}():\n    ${0}")
 expect item.insert_text != nil
@@ -221,18 +219,17 @@ expect item.insert_text != nil
 
 #### chains builder methods
 
-- chains builder methods
+1.  with detail
+2.  with documentation
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("chains builder methods")
 val item = CompletionItem.new("struct", CompletionItemKind.Keyword)
     .with_detail("Define a struct")
     .with_documentation("Struct definitions create custom types")
@@ -249,12 +246,12 @@ expect item.documentation != nil
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/lsp/completion_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering CompletionItemKind, CompletionItem.
+Tests covering:
 - CompletionItemKind
 - CompletionItem
 
@@ -270,51 +267,3 @@ Tests covering CompletionItemKind, CompletionItem.
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-UNIT`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `b85ab1436eb1d5b81f5032323bb9705a8f0bc73109a879446ac8e5741cfc7dac`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `b85ab1436eb1d5b81f5032323bb9705a8f0bc73109a879446ac8e5741cfc7dac`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `b85ab1436eb1d5b81f5032323bb9705a8f0bc73109a879446ac8e5741cfc7dac`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/01_unit/app/lsp/completion_spec.spl
-mirror: doc/06_spec/01_unit/app/lsp/completion_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/app/lsp/completion_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/app/lsp/completion_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/app/lsp/completion_spec.spl:90:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'has Text kind' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/lsp/completion_spec.spl:95:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'has Method kind' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/lsp/completion_spec.spl:100:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'has Function kind' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

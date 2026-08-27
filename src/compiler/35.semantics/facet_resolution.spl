@@ -1,0 +1,858 @@
+# Typed facet semantic resolution.
+#
+# This module is the sole source-level binding resolver.  It deliberately
+# consumes authenticated concrete type identity rather than deriving identity
+# from source text, source order, or provider load order.
+
+use common.facet_abi.{FacetInterfaceId, FacetMethodId, FacetBindingId, ConcreteTypeId}
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolId}
+use compiler.hir.hir_definitions.{
+    HirTypePointcut, HirFacetAcquireMode, HirFacetInterfaceDecl,
+    HirFacetMethod, HirFacetImplDecl, HirFacetBindingDecl,
+    HirFacetRequirementDecl, HirFacetAccessMode, HirFacetBindingMode,
+    HirModule, HirExpr, HirExprKind, HirCallArg,
+}
+use compiler.hir.generated.hir_hash.{hir_hash_function}
+use compiler.hir.generated.hir_visitor.*
+use std.common.crypto.sha256.{sha256_text}
+
+pub struct FacetSemanticDiagnostic:
+    code: text
+    message: text
+
+pub struct ManifestSealAuthority:
+    # Identity authenticated by pack admission, never reconstructed from HIR.
+    aspect_id: text
+    aspect_version: i64
+    descriptor_digest: text
+    authority_id: text
+    signature_digest: text
+    module_id: text
+    type_name_by_symbol: Dict<i64, text>
+    type_by_name: Dict<text, HirType>
+    concrete_type_id_by_symbol: Dict<i64, text>
+    interface_id_by_symbol: Dict<i64, text>
+    interface_abi_by_symbol: Dict<i64, text>
+    method_id_by_symbol: Dict<i64, text>
+    method_signature_by_symbol: Dict<i64, text>
+    provider_by_impl_symbol: Dict<i64, text>
+    implementation_hash_by_impl_symbol: Dict<i64, text>
+    base_public_abi_by_impl_symbol: Dict<i64, text>
+    base_layout_by_impl_symbol: Dict<i64, text>
+    inspect_capability_by_impl_symbol: Dict<i64, bool>
+
+pub struct FacetSealResult:
+    module: HirModule
+    diagnostics: [FacetSemanticDiagnostic]
+
+# Reviewable inventory of every HIR owner that can contain an expression.
+# Nested expression variants (including patterns, StaticCall, asm operands,
+# closures, branches, and arguments) are covered by the generated fail-loud
+# walk_hir_expr/walk_hir_function machinery.
+val FACET_EXPRESSION_OWNER_INVENTORY: [text] = [
+    "module.functions", "module.constants", "module.static_asserts",
+    "class.fields.default", "struct.fields.default",
+    "enum.variant.discriminant", "enum.variant.struct.fields.default",
+    "trait.methods", "trait.defaults", "facet_interface.methods",
+    "facet_impl.methods", "function.params.default",
+    "function.verification_contract", "match.pattern", "inline_asm.operands",
+]
+
+fn facet_authority_admits(authority: ManifestSealAuthority,
+        aspect_id: text, aspect_version: i64) -> bool:
+    authority.aspect_id == aspect_id and authority.aspect_version == aspect_version and
+        authority.descriptor_digest != "" and authority.descriptor_digest != "!unsealed" and
+        authority.authority_id != "" and authority.signature_digest != ""
+
+pub fn facet_seal_interface_headers(module: HirModule,
+        authority: ManifestSealAuthority) -> FacetSealResult:
+    var diagnostics: [FacetSemanticDiagnostic] = []
+    var interfaces: [HirFacetInterfaceDecl] = []
+    for decl in module.facet_interfaces:
+        if not facet_authority_admits(authority, decl.aspect_id.value, decl.aspect_version):
+            diagnostics.push(FacetSemanticDiagnostic(code: "E-FACET004",
+                message: "facet interface is outside admitted manifest authority"))
+        else:
+            # Header phase authenticates identity only. Method signatures and
+            # ABI hashes remain provisional until every method-body expression
+            # is sealed; final facet_seal_module computes them afterward.
+            if not authority.interface_id_by_symbol.contains_key(decl.symbol.id) or
+                    authority.interface_id_by_symbol[decl.symbol.id] == "":
+                diagnostics.push(FacetSemanticDiagnostic(code: "E-FACET004",
+                    message: "facet interface is absent from authenticated manifest authority"))
+                continue
+            interfaces.push(HirFacetInterfaceDecl(
+                aspect_id: decl.aspect_id, aspect_version: decl.aspect_version,
+                symbol: decl.symbol, name: decl.name, type_params: decl.type_params,
+                composes: decl.composes, methods: decl.methods,
+                visibility: decl.visibility, is_public: decl.is_public,
+                attributes: decl.attributes,
+                interface_id: FacetInterfaceId(
+                    value: authority.interface_id_by_symbol[decl.symbol.id]),
+                interface_abi_hash: decl.interface_abi_hash, span: decl.span))
+    var staged = module
+    staged.facet_interfaces = interfaces
+    FacetSealResult(module: staged, diagnostics: diagnostics)
+
+fn facet_hash_field(value: text) -> text:
+    value.len().to_text() + ":" + value
+
+fn facet_canonical_type(type_: HirType, names: Dict<i64, text>) -> text:
+    match type_.kind:
+        case HirTypeKind.Int(bits, signed): if signed: "i{bits}" else: "u{bits}"
+        case HirTypeKind.Float(bits): "f{bits}"
+        case HirTypeKind.Bool: "bool"
+        case HirTypeKind.Char: "char"
+        case HirTypeKind.Str: "str"
+        case HirTypeKind.Unit: "unit"
+        case HirTypeKind.Tuple(elements):
+            var parts: [text] = []
+            for element in elements: parts.push(facet_canonical_type(element, names))
+            "(" + parts.join(",") + ")"
+        case HirTypeKind.Array(element, size):
+            "array<" + facet_canonical_type(element, names) + "," +
+                (if size == nil: "?" else: size.to_text()) + ">"
+        case HirTypeKind.Slice(element): "slice<" + facet_canonical_type(element, names) + ">"
+        case HirTypeKind.Dict(key, value):
+            "dict<" + facet_canonical_type(key, names) + "," + facet_canonical_type(value, names) + ">"
+        case HirTypeKind.Ref(inner, mutable):
+            (if mutable: "&mut " else: "&") + facet_canonical_type(inner, names)
+        case HirTypeKind.Ptr(inner, mutable):
+            (if mutable: "*mut " else: "*const ") + facet_canonical_type(inner, names)
+        case HirTypeKind.Optional(inner): "option<" + facet_canonical_type(inner, names) + ">"
+        case HirTypeKind.Result(ok, error):
+            "result<" + facet_canonical_type(ok, names) + "," + facet_canonical_type(error, names) + ">"
+        case HirTypeKind.Named(symbol, args):
+            var parts: [text] = []
+            for arg in args: parts.push(facet_canonical_type(arg, names))
+            val name = if names.contains_key(symbol.id): names[symbol.id] else: "!unknown-symbol"
+            if parts.len() == 0: name else: name + "<" + parts.join(",") + ">"
+        case HirTypeKind.TypeParam(name, _): "$" + name
+        case HirTypeKind.Union(members):
+            var parts: [text] = []
+            for member in members: parts.push(facet_canonical_type(member, names))
+            "union<" + parts.join("|") + ">"
+        case HirTypeKind.DynTrait(trait_):
+            "dyn " + (if names.contains_key(trait_.id): names[trait_.id] else: "!unknown-symbol")
+        case HirTypeKind.Function(params, ret, _):
+            var parts: [text] = []
+            for param in params: parts.push(facet_canonical_type(param, names))
+            "fn(" + parts.join(",") + ")->" + facet_canonical_type(ret, names)
+        case HirTypeKind.Projection(base, assoc): facet_canonical_type(base, names) + "." + assoc
+        case HirTypeKind.Isolated(inner): "iso " + facet_canonical_type(inner, names)
+        case HirTypeKind.Infer(_, _): "!infer"
+        case HirTypeKind.Error: "!error"
+        case HirTypeKind.Never: "never"
+        case HirTypeKind.Any: "any"
+        case HirTypeKind.Tensor(element, dims, _):
+            "tensor<" + facet_canonical_type(element, names) + ",rank=" + dims.len().to_text() + ">"
+        case HirTypeKind.Layer(input, output): "layer<" + input.len().to_text() + "," + output.len().to_text() + ">"
+
+fn facet_method_signature(method: HirFacetMethod, names: Dict<i64, text>) -> text:
+    var params: [text] = []
+    for param in method.function.params:
+        params.push(facet_canonical_type(param.type_, names))
+    method.name + "(" + params.join(",") + ")->" +
+        facet_canonical_type(method.function.return_type, names)
+
+pub fn facet_interface_id_v1(module_id: text, aspect_id: text,
+        aspect_version: i64, name: text) -> FacetInterfaceId:
+    FacetInterfaceId(value: sha256_text(
+        facet_hash_field("simple.facet.interface.v1") +
+        facet_hash_field(module_id) + facet_hash_field(aspect_id) +
+        facet_hash_field(aspect_version.to_text()) + facet_hash_field(name)))
+
+pub fn facet_method_id_v1(interface_id: FacetInterfaceId,
+        method_name: text, canonical_signature: text) -> FacetMethodId:
+    FacetMethodId(value: sha256_text(
+        facet_hash_field("simple.facet.method.v1") +
+        facet_hash_field(interface_id.value) + facet_hash_field(method_name) +
+        facet_hash_field(canonical_signature)))
+
+fn facet_split_top_level(value: text, separator: text) -> [text]:
+    var out: [text] = []
+    var depth = 0
+    var start = 0
+    var i = 0
+    while i < value.len():
+        val ch = value.substring(i, i + 1)
+        if ch == "(": depth = depth + 1
+        if ch == ")": depth = depth - 1
+        if ch == separator and depth == 0:
+            out.push(value.substring(start, i).trim())
+            start = i + 1
+        i = i + 1
+    out.push(value.substring(start, value.len()).trim())
+    out
+
+pub fn facet_parse_type_pointcut(raw: text,
+        types: Dict<text, HirType>) -> Result<HirTypePointcut, FacetResolveError>:
+    val value = raw.trim()
+    if value == "":
+        return Err(FacetResolveError.MalformedTypePointcut("pointcut is empty"))
+    val ors = facet_split_top_level(value, "|")
+    if ors.len() > 1:
+        var terms: [HirTypePointcut] = []
+        for part in ors:
+            match facet_parse_type_pointcut(part, types):
+                case Ok(term): terms.push(term)
+                case Err(error): return Err(error)
+        return facet_normalize_type_pointcut(HirTypePointcut.Or(terms))
+    val ands = facet_split_top_level(value, "&")
+    if ands.len() > 1:
+        var terms: [HirTypePointcut] = []
+        for part in ands:
+            match facet_parse_type_pointcut(part, types):
+                case Ok(term): terms.push(term)
+                case Err(error): return Err(error)
+        return facet_normalize_type_pointcut(HirTypePointcut.And(terms))
+    if value.starts_with("!"):
+        match facet_parse_type_pointcut(value.substring(1, value.len()), types):
+            case Ok(term): return facet_normalize_type_pointcut(HirTypePointcut.Not([term]))
+            case Err(error): return Err(error)
+    if value.starts_with("type(") and value.ends_with(")"):
+        return facet_normalize_type_pointcut(HirTypePointcut.TypeName(
+            value.substring(5, value.len() - 1)))
+    var prefix = ""
+    var is_implements = false
+    if value.starts_with("implements(") and value.ends_with(")"):
+        prefix = value.substring(11, value.len() - 1).trim()
+        is_implements = true
+    else if value.starts_with("subtype(") and value.ends_with(")"):
+        prefix = value.substring(8, value.len() - 1).trim()
+    else:
+        return Err(FacetResolveError.MalformedTypePointcut(
+            "only type(), implements(), subtype(), !, &, and | are allowed"))
+    if not types.contains_key(prefix):
+        return Err(FacetResolveError.MalformedTypePointcut("unknown type in pointcut: " + prefix))
+    if is_implements:
+        Ok(HirTypePointcut.Implements(types[prefix]))
+    else:
+        Ok(HirTypePointcut.Subtype(types[prefix]))
+
+fn facet_sorted_methods(methods: [HirFacetMethod]) -> [HirFacetMethod]:
+    var out = methods
+    var i = 1
+    while i < out.len():
+        val value = out[i]
+        var j = i
+        while j > 0 and value.name < out[j - 1].name:
+            out[j] = out[j - 1]
+            j = j - 1
+        out[j] = value
+        i = i + 1
+    out
+
+fn facet_seal_interface(decl: HirFacetInterfaceDecl,
+        authority: ManifestSealAuthority) -> Result<HirFacetInterfaceDecl, FacetSemanticDiagnostic>:
+    for composed in decl.composes:
+        match composed.kind:
+            case HirTypeKind.Named(symbol, _):
+                if not authority.type_name_by_symbol.contains_key(symbol.id):
+                    return Err(FacetSemanticDiagnostic(code: "E-FACET006",
+                        message: "facet composition names an unresolved business interface"))
+            case _:
+                return Err(FacetSemanticDiagnostic(code: "E-FACET006",
+                    message: "facet composition must name a facet interface"))
+    if not authority.interface_id_by_symbol.contains_key(decl.symbol.id) or
+            not authority.interface_abi_by_symbol.contains_key(decl.symbol.id):
+        return Err(FacetSemanticDiagnostic(code: "E-FACET004",
+            message: "facet interface lacks authenticated ID or ABI hash: " + decl.name))
+    val interface_id = FacetInterfaceId(value: authority.interface_id_by_symbol[decl.symbol.id])
+    val expected_interface_id = facet_interface_id_v1(authority.module_id,
+        decl.aspect_id.value, decl.aspect_version, decl.name)
+    if interface_id.value != expected_interface_id.value:
+        return Err(FacetSemanticDiagnostic(code: "E-FACET004",
+            message: "facet interface ID differs from authenticated canonical identity: " + decl.name))
+    var sealed_methods: [HirFacetMethod] = []
+    for method in facet_sorted_methods(decl.methods):
+        val signature = facet_method_signature(method, authority.type_name_by_symbol)
+        if signature.contains("!unknown-symbol") or signature.contains("!infer") or signature.contains("!error"):
+            return Err(FacetSemanticDiagnostic(code: "E-FACET004",
+                message: "facet method signature is unresolved: " + method.name))
+        if not authority.method_id_by_symbol.contains_key(method.symbol.id) or
+                not authority.method_signature_by_symbol.contains_key(method.symbol.id):
+            return Err(FacetSemanticDiagnostic(code: "E-FACET004",
+                message: "facet method lacks authenticated ID or signature hash: " + method.name))
+        val signature_hash = sha256_text(facet_hash_field("simple.facet.signature.v1") + facet_hash_field(signature))
+        val method_id = facet_method_id_v1(interface_id, method.name, signature)
+        if authority.method_id_by_symbol[method.symbol.id] != method_id.value or
+                authority.method_signature_by_symbol[method.symbol.id] != signature_hash:
+            return Err(FacetSemanticDiagnostic(code: "E-FACET004",
+                message: "facet method differs from authenticated manifest descriptor: " + method.name))
+        sealed_methods.push(HirFacetMethod(
+            symbol: method.symbol, name: method.name, function: method.function,
+            method_id: method_id,
+            signature_hash: signature_hash, span: method.span))
+    var abi_material = facet_hash_field("simple.facet.interface.abi.v1")
+    for method in sealed_methods:
+        abi_material = abi_material + facet_hash_field(method.method_id.value) +
+            facet_hash_field(method.signature_hash)
+    val computed_abi = sha256_text(abi_material)
+    if authority.interface_abi_by_symbol[decl.symbol.id] != computed_abi:
+        return Err(FacetSemanticDiagnostic(code: "E-FACET004",
+            message: "facet interface ABI differs from authenticated manifest descriptor: " + decl.name))
+    Ok(HirFacetInterfaceDecl(
+        aspect_id: decl.aspect_id, aspect_version: decl.aspect_version,
+        symbol: decl.symbol, name: decl.name, type_params: decl.type_params,
+        composes: decl.composes, methods: sealed_methods,
+        visibility: decl.visibility, is_public: decl.is_public,
+        attributes: decl.attributes, interface_id: interface_id,
+        interface_abi_hash: computed_abi, span: decl.span))
+
+fn facet_interface_by_type(type_: HirType,
+        interfaces: [HirFacetInterfaceDecl]) -> HirFacetInterfaceDecl?:
+    match type_.kind:
+        case HirTypeKind.Named(symbol, _):
+            for decl in interfaces:
+                if decl.symbol.id == symbol.id: return Some(decl)
+        case _: pass
+    nil
+
+fn facet_impl_method(methods: [HirFacetMethod], name: text) -> HirFacetMethod?:
+    for method in methods:
+        if method.name == name: return Some(method)
+    nil
+
+fn facet_seal_impl(decl: HirFacetImplDecl,
+        interfaces: [HirFacetInterfaceDecl], authority: ManifestSealAuthority
+        ) -> Result<HirFacetImplDecl, FacetSemanticDiagnostic>:
+    if not authority.provider_by_impl_symbol.contains_key(decl.symbol.id) or
+            authority.provider_by_impl_symbol[decl.symbol.id] == "":
+        return Err(FacetSemanticDiagnostic(code: "E-FACET004",
+            message: "facet implementation has no authenticated provider identity: " + decl.name))
+    val provider_id = authority.provider_by_impl_symbol[decl.symbol.id]
+    if not authority.implementation_hash_by_impl_symbol.contains_key(decl.symbol.id):
+        return Err(FacetSemanticDiagnostic(code: "E-FACET004",
+            message: "facet implementation has no authenticated implementation hash: " + decl.name))
+    if not authority.base_public_abi_by_impl_symbol.contains_key(decl.symbol.id):
+        return Err(FacetSemanticDiagnostic(code: "E-FACET007",
+            message: "facet implementation is missing required core public ABI hash"))
+    val base_abi = authority.base_public_abi_by_impl_symbol[decl.symbol.id]
+    var layout_hash = ""
+    match decl.access_mode:
+        case HirFacetAccessMode.InspectReadonly:
+            if not authority.inspect_capability_by_impl_symbol.contains_key(decl.symbol.id) or
+                    not authority.inspect_capability_by_impl_symbol[decl.symbol.id] or
+                    not authority.base_layout_by_impl_symbol.contains_key(decl.symbol.id):
+                return Err(FacetSemanticDiagnostic(code: "E-FACET007",
+                    message: "inspect facet requires capability and base layout hash"))
+            layout_hash = authority.base_layout_by_impl_symbol[decl.symbol.id]
+        case HirFacetAccessMode.PublicReadonly:
+            pass
+    var sealed_methods: [HirFacetMethod] = []
+    for interface_type in decl.interfaces:
+        val iface = facet_interface_by_type(interface_type, interfaces)
+        if iface == nil:
+            return Err(FacetSemanticDiagnostic(code: "E-FACET002",
+                message: "facet implementation names a non-facet interface"))
+        for required in iface.methods:
+            val actual = facet_impl_method(decl.methods, required.name)
+            if actual == nil:
+                return Err(FacetSemanticDiagnostic(code: "E-FACET004",
+                    message: "facet implementation is missing method: " + required.name))
+            val actual_signature = facet_method_signature(actual, authority.type_name_by_symbol)
+            val actual_hash = sha256_text(facet_hash_field("simple.facet.signature.v1") +
+                facet_hash_field(actual_signature))
+            if actual_hash != required.signature_hash:
+                return Err(FacetSemanticDiagnostic(code: "E-FACET004",
+                    message: "facet implementation method signature differs: " + required.name))
+            sealed_methods.push(HirFacetMethod(
+                symbol: actual.symbol, name: actual.name, function: actual.function,
+                method_id: required.method_id, signature_hash: actual_hash, span: actual.span))
+    var impl_material = facet_hash_field("simple.facet.implementation.v1") +
+        facet_hash_field(provider_id) + facet_hash_field(base_abi) + facet_hash_field(layout_hash)
+    for method in facet_sorted_methods(sealed_methods):
+        impl_material = impl_material + facet_hash_field(method.method_id.value) +
+            facet_hash_field(method.signature_hash) + facet_hash_field(hir_hash_function(method.function).to_text())
+    val implementation_hash = sha256_text(impl_material)
+    if authority.implementation_hash_by_impl_symbol[decl.symbol.id] != implementation_hash:
+        return Err(FacetSemanticDiagnostic(code: "E-FACET004",
+            message: "facet implementation hash differs from authenticated manifest descriptor: " + decl.name))
+    Ok(HirFacetImplDecl(
+        aspect_id: decl.aspect_id, aspect_version: decl.aspect_version,
+        symbol: decl.symbol, name: decl.name, type_params: decl.type_params,
+        base_type: decl.base_type, interfaces: decl.interfaces,
+        access_mode: decl.access_mode, methods: sealed_methods,
+        provider_id: provider_id, implementation_hash: implementation_hash,
+        required_base_abi_hash: base_abi, required_layout_hash: layout_hash,
+        span: decl.span))
+
+fn facet_pointcut_canonical(rule: HirTypePointcut,
+        names: Dict<i64, text>) -> text:
+    match rule:
+        case HirTypePointcut.TypeName(pattern): "type(" + pattern + ")"
+        case HirTypePointcut.Implements(type_): "implements(" + facet_canonical_type(type_, names) + ")"
+        case HirTypePointcut.Subtype(type_): "subtype(" + facet_canonical_type(type_, names) + ")"
+        case HirTypePointcut.And(terms):
+            var parts: [text] = []
+            for term in terms: parts.push(facet_pointcut_canonical(term, names))
+            "and(" + parts.join(",") + ")"
+        case HirTypePointcut.Or(terms):
+            var parts: [text] = []
+            for term in terms: parts.push(facet_pointcut_canonical(term, names))
+            "or(" + parts.join(",") + ")"
+        case HirTypePointcut.Not(terms): "not(" + facet_pointcut_canonical(terms[0], names) + ")"
+
+fn facet_impl_by_type(type_: HirType, impls: [HirFacetImplDecl]) -> HirFacetImplDecl?:
+    match type_.kind:
+        case HirTypeKind.Named(symbol, _):
+            for decl in impls:
+                if decl.symbol.id == symbol.id: return Some(decl)
+        case _: pass
+    nil
+
+fn facet_seal_binding(decl: HirFacetBindingDecl,
+        interfaces: [HirFacetInterfaceDecl], impls: [HirFacetImplDecl], authority: ManifestSealAuthority
+        ) -> Result<HirFacetBindingDecl, FacetSemanticDiagnostic>:
+    match decl.mode:
+        case HirFacetBindingMode.NominalStatic:
+            return Err(FacetSemanticDiagnostic(code: "E-FACET008",
+                message: "nominal static facet binding is unsupported"))
+        case HirFacetBindingMode.Attached: pass
+    val impl_decl = facet_impl_by_type(decl.implementation_type, impls)
+    if impl_decl == nil:
+        return Err(FacetSemanticDiagnostic(code: "E-FACET004",
+            message: "facet binding names an unresolved implementation"))
+    if decl.provider_id == "" or decl.provider_id != impl_decl.provider_id:
+        return Err(FacetSemanticDiagnostic(code: "E-FACET004",
+            message: "facet binding provider does not match authenticated implementation provider"))
+    val iface = facet_interface_by_type(decl.interface_type, interfaces)
+    if iface == nil:
+        return Err(FacetSemanticDiagnostic(code: "E-FACET002",
+            message: "facet binding type is not a facet interface"))
+    val raw = match decl.target_type_rule:
+        case HirTypePointcut.TypeName(pattern): pattern
+        case _: ""
+    val normalized = if raw != "":
+        match facet_parse_type_pointcut(raw, authority.type_by_name):
+            case Ok(rule): rule
+            case Err(error):
+                return Err(FacetSemanticDiagnostic(code: "E-FACET002", message: "{error}"))
+    else:
+        match facet_normalize_type_pointcut(decl.target_type_rule):
+            case Ok(rule): rule
+            case Err(error):
+                return Err(FacetSemanticDiagnostic(code: "E-FACET002", message: "{error}"))
+    val canonical = facet_pointcut_canonical(normalized, authority.type_name_by_symbol)
+    val binding_value = sha256_text(
+        facet_hash_field("simple.facet.binding.v1") +
+        facet_hash_field(decl.aspect_id.value) +
+        facet_hash_field(decl.aspect_version.to_text()) +
+        facet_hash_field(iface.interface_id.value) +
+        facet_hash_field(canonical) +
+        facet_hash_field(facet_canonical_type(decl.implementation_type, authority.type_name_by_symbol)) +
+        facet_hash_field(decl.provider_id) + facet_hash_field(decl.priority.to_text()) +
+        facet_hash_field("attached"))
+    Ok(HirFacetBindingDecl(
+        aspect_id: decl.aspect_id, aspect_version: decl.aspect_version,
+        interface_type: decl.interface_type, target_type_rule: normalized,
+        implementation_type: decl.implementation_type, mode: decl.mode,
+        priority: decl.priority, provider_id: decl.provider_id,
+        binding_id: FacetBindingId(value: binding_value), span: decl.span))
+
+pub fn facet_seal_module(module: HirModule,
+        authority: ManifestSealAuthority) -> FacetSealResult:
+    var diagnostics: [FacetSemanticDiagnostic] = []
+    var sealed_interfaces: [HirFacetInterfaceDecl] = []
+    for decl in module.facet_interfaces:
+        if not facet_authority_admits(authority, decl.aspect_id.value, decl.aspect_version):
+            diagnostics.push(FacetSemanticDiagnostic(code: "E-FACET004",
+                message: "facet interface is outside admitted manifest authority"))
+        else:
+            match facet_seal_interface(decl, authority):
+                case Ok(sealed): sealed_interfaces.push(sealed)
+                case Err(error): diagnostics.push(error)
+    var sealed_impls: [HirFacetImplDecl] = []
+    for decl in module.facet_impls:
+        if not facet_authority_admits(authority, decl.aspect_id.value, decl.aspect_version):
+            diagnostics.push(FacetSemanticDiagnostic(code: "E-FACET004",
+                message: "facet implementation is outside admitted manifest authority"))
+        else:
+            match facet_seal_impl(decl, sealed_interfaces, authority):
+                case Ok(sealed): sealed_impls.push(sealed)
+                case Err(error): diagnostics.push(error)
+    var sealed_bindings: [HirFacetBindingDecl] = []
+    var binding_ids: Dict<text, text> = {}
+    for decl in module.facet_bindings:
+        if not facet_authority_admits(authority, decl.aspect_id.value, decl.aspect_version):
+            diagnostics.push(FacetSemanticDiagnostic(code: "E-FACET004",
+                message: "facet binding is outside admitted manifest authority"))
+            continue
+        match facet_seal_binding(decl, sealed_interfaces, sealed_impls, authority):
+            case Ok(sealed):
+                val canonical = facet_pointcut_canonical(sealed.target_type_rule,
+                    authority.type_name_by_symbol)
+                if binding_ids.contains_key(sealed.binding_id.value) and
+                        binding_ids[sealed.binding_id.value] != canonical:
+                    diagnostics.push(FacetSemanticDiagnostic(code: "E-FACET005",
+                        message: "facet binding ID collision"))
+                else:
+                    binding_ids[sealed.binding_id.value] = canonical
+                    sealed_bindings.push(sealed)
+            case Err(error): diagnostics.push(error)
+    var sealed_requirements: [HirFacetRequirementDecl] = []
+    for decl in module.facet_requirements:
+        if not facet_authority_admits(authority, decl.aspect_id.value, decl.aspect_version):
+            diagnostics.push(FacetSemanticDiagnostic(code: "E-FACET004",
+                message: "facet requirement is outside admitted manifest authority"))
+            continue
+        val raw = match decl.target_type_rule:
+            case HirTypePointcut.TypeName(pattern): pattern
+            case _: ""
+        val parsed = if raw != "": facet_parse_type_pointcut(raw, authority.type_by_name)
+            else: facet_normalize_type_pointcut(decl.target_type_rule)
+        match parsed:
+            case Ok(rule): sealed_requirements.push(HirFacetRequirementDecl(
+                aspect_id: decl.aspect_id, aspect_version: decl.aspect_version,
+                interface_type: decl.interface_type, target_type_rule: rule, span: decl.span))
+            case Err(error): diagnostics.push(FacetSemanticDiagnostic(code: "E-FACET002", message: "{error}"))
+    var sealed_module = module
+    sealed_module.facet_interfaces = sealed_interfaces
+    sealed_module.facet_impls = sealed_impls
+    sealed_module.facet_bindings = sealed_bindings
+    sealed_module.facet_requirements = sealed_requirements
+    FacetSealResult(module: sealed_module, diagnostics: diagnostics)
+
+pub fn facet_module_has_unsealed_metadata(module: HirModule) -> bool:
+    for decl in module.facet_interfaces:
+        if decl.interface_id.value == "!unsealed" or decl.interface_abi_hash == "!unsealed": return true
+        for method in decl.methods:
+            if method.method_id.value == "!unsealed" or method.signature_hash == "!unsealed": return true
+    for decl in module.facet_impls:
+        if decl.provider_id == "!unsealed" or decl.implementation_hash == "!unsealed" or
+                decl.required_base_abi_hash == "!unsealed" or decl.required_layout_hash == "!unsealed": return true
+    for decl in module.facet_bindings:
+        if decl.binding_id.value == "!unsealed": return true
+    fn has_unsealed_expr_node(node: HirWalkNode, found: bool) -> bool:
+        if found: return true
+        match node:
+            case HirWalkNode.Expr(expr):
+                match expr.kind:
+                    case HirExprKind.FacetAcquire(_, _, interface_id, static_hint, _):
+                        if interface_id.value == "!unsealed": return true
+                        match static_hint:
+                            case Some(hint): hint.value == "!unsealed"
+                            case nil: false
+                    case _: false
+            case _: false
+    fn function_has_unsealed(function: HirFunction) -> bool:
+        if walk_hir_function(function, false, has_unsealed_expr_node): return true
+        match function.verification_contract:
+            case Some(contract):
+                for clause in contract.clauses:
+                    if walk_hir_expr(clause.predicate, false, has_unsealed_expr_node): return true
+            case nil: pass
+        false
+    for function in module.functions.values():
+        if function_has_unsealed(function): return true
+    for constant in module.constants.values():
+        if walk_hir_expr(constant.value, false, has_unsealed_expr_node): return true
+    for static_assert in module.static_asserts:
+        if walk_hir_expr(static_assert.condition, false, has_unsealed_expr_node): return true
+    for class_ in module.classes.values():
+        for field in class_.fields:
+            if field.has_default and walk_hir_expr(field.default, false, has_unsealed_expr_node): return true
+    for struct_ in module.structs.values():
+        for field in struct_.fields:
+            if field.has_default and walk_hir_expr(field.default, false, has_unsealed_expr_node): return true
+    for enum_ in module.enums.values():
+        for variant in enum_.variants:
+            if variant.has_discriminant and
+                    walk_hir_expr(variant.discriminant, false, has_unsealed_expr_node): return true
+            match variant.kind:
+                case HirVariantKind.Struct(fields):
+                    for field in fields:
+                        if field.has_default and
+                                walk_hir_expr(field.default, false, has_unsealed_expr_node): return true
+                case _: pass
+    for trait_ in module.traits.values():
+        for method in trait_.methods:
+            if function_has_unsealed(method): return true
+        for method in trait_.defaults:
+            if function_has_unsealed(method): return true
+    for decl in module.facet_interfaces:
+        for method in decl.methods:
+            if function_has_unsealed(method.function): return true
+    for decl in module.facet_impls:
+        for method in decl.methods:
+            if function_has_unsealed(method.function): return true
+    false
+
+pub fn facet_sealed_interface_id(interface_type: HirType,
+        interfaces: [HirFacetInterfaceDecl]) -> FacetInterfaceId?:
+    match facet_interface_for_type(interface_type, interfaces):
+        case Some(interface): Some(interface.interface_id)
+        case nil: nil
+
+pub fn facet_static_concrete_type_id_v1(type_: HirType,
+        authority: ManifestSealAuthority) -> ConcreteTypeId?:
+    match type_.kind:
+        case HirTypeKind.Named(symbol, args):
+            # Runtime lookup identity comes from the admitted descriptor. A
+            # generic instantiation needs its own manifest row; source/HIR text
+            # is never allowed to synthesize a runtime ConcreteTypeId.
+            if args.len() != 0 or
+                    not authority.concrete_type_id_by_symbol.contains_key(symbol.id) or
+                    authority.concrete_type_id_by_symbol[symbol.id] == "":
+                return nil
+            Some(ConcreteTypeId(
+                value: authority.concrete_type_id_by_symbol[symbol.id]))
+        case _: nil
+
+pub enum FacetResolveError:
+    MalformedTypePointcut(detail: text)
+    MissingBinding(interface_id: FacetInterfaceId, concrete_type_id: ConcreteTypeId)
+    AmbiguousBinding(interface_id: FacetInterfaceId, concrete_type_id: ConcreteTypeId, provider_ids: [text])
+    StaticTypeHintMismatch(authenticated: ConcreteTypeId, hinted: ConcreteTypeId)
+
+pub struct FacetCandidate:
+    interface_id: FacetInterfaceId
+    concrete_type_id: ConcreteTypeId
+    binding_id: FacetBindingId
+    provider_id: text
+    profile_selected: bool
+    concrete_base_match: bool
+    priority: i64
+    type_rule_matches: bool
+    base_constraint_satisfied: bool
+    methods_complete: bool
+    access_permitted: bool
+    abi_compatible: bool
+    layout_compatible: bool
+
+fn facet_candidate_eligible(candidate: FacetCandidate,
+        interface_id: FacetInterfaceId, concrete_type_id: ConcreteTypeId) -> bool:
+    candidate.interface_id.value == interface_id.value and
+        candidate.concrete_type_id.value == concrete_type_id.value and
+        candidate.type_rule_matches and
+        candidate.base_constraint_satisfied and
+        candidate.methods_complete and
+        candidate.access_permitted and
+        candidate.abi_compatible and
+        candidate.layout_compatible
+
+fn facet_rank_better(left: FacetCandidate, right: FacetCandidate) -> bool:
+    if left.profile_selected != right.profile_selected:
+        return left.profile_selected
+    if left.concrete_base_match != right.concrete_base_match:
+        return left.concrete_base_match
+    left.priority > right.priority
+
+fn facet_rank_equal(left: FacetCandidate, right: FacetCandidate) -> bool:
+    left.profile_selected == right.profile_selected and
+        left.concrete_base_match == right.concrete_base_match and
+        left.priority == right.priority
+
+fn facet_sorted_provider_ids(candidates: [FacetCandidate]) -> [text]:
+    var ids: [text] = []
+    for candidate in candidates:
+        if not ids.contains(candidate.provider_id):
+            ids.push(candidate.provider_id)
+    # Seed-interpreter [text].sort() is currently a no-op.  Keep ambiguity
+    # diagnostics deterministic on every compiler stage with insertion sort.
+    var i = 1
+    while i < ids.len():
+        val value = ids[i]
+        var j = i
+        while j > 0 and value < ids[j - 1]:
+            ids[j] = ids[j - 1]
+            j = j - 1
+        ids[j] = value
+        i = i + 1
+    ids
+
+pub fn facet_resolve_binding(candidates: [FacetCandidate],
+        interface_id: FacetInterfaceId,
+        authenticated_concrete_type_id: ConcreteTypeId) -> Result<FacetCandidate, FacetResolveError>:
+    var eligible: [FacetCandidate] = []
+    for candidate in candidates:
+        if facet_candidate_eligible(candidate, interface_id, authenticated_concrete_type_id):
+            eligible.push(candidate)
+    if eligible.len() == 0:
+        return Err(FacetResolveError.MissingBinding(
+            interface_id, authenticated_concrete_type_id))
+
+    var best = eligible[0]
+    var i = 1
+    while i < eligible.len():
+        if facet_rank_better(eligible[i], best):
+            best = eligible[i]
+        i = i + 1
+
+    var tied: [FacetCandidate] = []
+    for candidate in eligible:
+        if facet_rank_equal(candidate, best):
+            tied.push(candidate)
+    if tied.len() > 1:
+        return Err(FacetResolveError.AmbiguousBinding(
+            interface_id,
+            authenticated_concrete_type_id,
+            facet_sorted_provider_ids(tied),
+        ))
+    Ok(best)
+
+pub fn facet_validate_static_type_hint(authenticated: ConcreteTypeId,
+        static_hint: ConcreteTypeId?) -> Result<(), FacetResolveError>:
+    match static_hint:
+        case Some(hinted):
+            if hinted.value != authenticated.value:
+                return Err(FacetResolveError.StaticTypeHintMismatch(authenticated, hinted))
+        case nil:
+            pass
+    Ok(())
+
+pub fn facet_normalize_type_pointcut(rule: HirTypePointcut) -> Result<HirTypePointcut, FacetResolveError>:
+    match rule:
+        case HirTypePointcut.TypeName(pattern):
+            if pattern.trim() == "":
+                return Err(FacetResolveError.MalformedTypePointcut("type name pattern is empty"))
+            Ok(HirTypePointcut.TypeName(pattern.trim()))
+        case HirTypePointcut.Implements(interface_type):
+            Ok(HirTypePointcut.Implements(interface_type))
+        case HirTypePointcut.Subtype(base_type):
+            Ok(HirTypePointcut.Subtype(base_type))
+        case HirTypePointcut.And(terms):
+            if terms.len() == 0:
+                return Err(FacetResolveError.MalformedTypePointcut("and requires at least one term"))
+            var normalized: [HirTypePointcut] = []
+            for term in terms:
+                match facet_normalize_type_pointcut(term):
+                    case Ok(value): normalized.push(value)
+                    case Err(error): return Err(error)
+            Ok(HirTypePointcut.And(normalized))
+        case HirTypePointcut.Or(terms):
+            if terms.len() == 0:
+                return Err(FacetResolveError.MalformedTypePointcut("or requires at least one term"))
+            var normalized: [HirTypePointcut] = []
+            for term in terms:
+                match facet_normalize_type_pointcut(term):
+                    case Ok(value): normalized.push(value)
+                    case Err(error): return Err(error)
+            Ok(HirTypePointcut.Or(normalized))
+        case HirTypePointcut.Not(terms):
+            if terms.len() != 1:
+                return Err(FacetResolveError.MalformedTypePointcut("not requires exactly one term"))
+            match facet_normalize_type_pointcut(terms[0]):
+                case Ok(value): Ok(HirTypePointcut.Not([value]))
+                case Err(error): Err(error)
+
+pub fn facet_acquire_result_type(mode: HirFacetAcquireMode,
+        interface_type: HirType, facet_ref_symbol: SymbolId,
+        load_error_symbol: SymbolId) -> HirType:
+    val ref_type = HirType(
+        kind: HirTypeKind.Named(facet_ref_symbol, [interface_type]),
+        span: interface_type.span,
+    )
+    match mode:
+        case HirFacetAcquireMode.TryResident:
+            HirType(kind: HirTypeKind.Optional(ref_type), span: interface_type.span)
+        case HirFacetAcquireMode.LoadOptional:
+            val optional_ref = HirType(
+                kind: HirTypeKind.Optional(ref_type), span: interface_type.span)
+            val error_type = HirType(
+                kind: HirTypeKind.Named(load_error_symbol, []), span: interface_type.span)
+            HirType(kind: HirTypeKind.Result(optional_ref, error_type), span: interface_type.span)
+        case HirFacetAcquireMode.LoadRequired:
+            val error_type = HirType(
+                kind: HirTypeKind.Named(load_error_symbol, []), span: interface_type.span)
+            HirType(kind: HirTypeKind.Result(ref_type, error_type), span: interface_type.span)
+
+pub fn facet_substitute_type(type_: HirType, bindings: Dict<text, HirType>) -> HirType:
+    val kind = match type_.kind:
+        case HirTypeKind.TypeParam(name, _):
+            if bindings.contains_key(name):
+                return bindings[name]
+            match type_.kind:
+                case HirTypeKind.TypeParam(param_name, bounds):
+                    HirTypeKind.TypeParam(param_name,
+                        bounds.map(|bound| facet_substitute_type(bound, bindings)))
+                case _: type_.kind
+        case HirTypeKind.Tuple(elements):
+            HirTypeKind.Tuple(elements.map(|item| facet_substitute_type(item, bindings)))
+        case HirTypeKind.Array(element, size):
+            HirTypeKind.Array(facet_substitute_type(element, bindings), size)
+        case HirTypeKind.Slice(element):
+            HirTypeKind.Slice(facet_substitute_type(element, bindings))
+        case HirTypeKind.Dict(key, value):
+            HirTypeKind.Dict(facet_substitute_type(key, bindings), facet_substitute_type(value, bindings))
+        case HirTypeKind.Ref(inner, mutable):
+            HirTypeKind.Ref(facet_substitute_type(inner, bindings), mutable)
+        case HirTypeKind.Ptr(inner, mutable):
+            HirTypeKind.Ptr(facet_substitute_type(inner, bindings), mutable)
+        case HirTypeKind.Optional(inner):
+            HirTypeKind.Optional(facet_substitute_type(inner, bindings))
+        case HirTypeKind.Result(ok, error):
+            HirTypeKind.Result(facet_substitute_type(ok, bindings), facet_substitute_type(error, bindings))
+        case HirTypeKind.Named(symbol, args):
+            HirTypeKind.Named(symbol, args.map(|arg| facet_substitute_type(arg, bindings)))
+        case HirTypeKind.Union(members):
+            HirTypeKind.Union(members.map(|member| facet_substitute_type(member, bindings)))
+        case HirTypeKind.Function(params, ret, effects):
+            HirTypeKind.Function(
+                params.map(|param| facet_substitute_type(param, bindings)),
+                facet_substitute_type(ret, bindings), effects)
+        case HirTypeKind.Projection(base, assoc_name):
+            HirTypeKind.Projection(facet_substitute_type(base, bindings), assoc_name)
+        case HirTypeKind.Isolated(inner):
+            HirTypeKind.Isolated(facet_substitute_type(inner, bindings))
+        case HirTypeKind.Tensor(element, dims, device):
+            HirTypeKind.Tensor(facet_substitute_type(element, bindings), dims, device)
+        case _: type_.kind
+    HirType(kind: kind, span: type_.span)
+
+fn facet_interface_for_type(type_: HirType,
+        interfaces: [HirFacetInterfaceDecl]) -> HirFacetInterfaceDecl?:
+    match type_.kind:
+        case HirTypeKind.Named(symbol, _):
+            for facet_interface in interfaces:
+                if facet_interface.symbol.id == symbol.id:
+                    return Some(facet_interface)
+        case _:
+            pass
+    nil
+
+pub fn facet_resolve_acquire_intrinsic(receiver: HirExpr, method: text,
+        args: [HirCallArg], type_args: [HirType], normal_member_resolved: bool,
+        interfaces: [HirFacetInterfaceDecl],
+        static_concrete_type_hint: ConcreteTypeId?,
+        facet_ref_symbol: SymbolId, load_error_symbol: SymbolId
+        ) -> Result<HirExpr?, FacetSemanticDiagnostic>:
+    val is_facet_name = method == "try_facet" or method == "facet" or method == "require_facet"
+    if not is_facet_name or normal_member_resolved:
+        return Ok(nil)
+    if args.len() != 0 or type_args.len() != 1:
+        return Err(FacetSemanticDiagnostic(
+            code: "E-FACET001",
+            message: "facet acquisition requires exactly one type argument and no value arguments",
+        ))
+    val interface_type = type_args[0]
+    val facet_interface = facet_interface_for_type(interface_type, interfaces)
+    if facet_interface == nil:
+        return Err(FacetSemanticDiagnostic(
+            code: "E-FACET002",
+            message: "facet acquisition type argument is not a facet interface",
+        ))
+    if static_concrete_type_hint == nil:
+        return Err(FacetSemanticDiagnostic(
+            code: "E-FACET003",
+            message: "receiver has no concrete runtime type descriptor",
+        ))
+    val mode = if method == "try_facet":
+        HirFacetAcquireMode.TryResident
+    else if method == "facet":
+        HirFacetAcquireMode.LoadOptional
+    else:
+        HirFacetAcquireMode.LoadRequired
+    # Resident lookup intentionally carries no source-derived hint.  Runtime
+    # authenticates identity from the receiver descriptor for every mode.
+    val retained_hint = if method == "try_facet": nil else: static_concrete_type_hint
+    val result_type = facet_acquire_result_type(
+        mode, interface_type, facet_ref_symbol, load_error_symbol)
+    Ok(Some(HirExpr(
+        kind: HirExprKind.FacetAcquire(
+            receiver, interface_type, facet_interface.interface_id, retained_hint, mode),
+        has_type_: true,
+        type_: result_type,
+        span: receiver.span,
+    )))

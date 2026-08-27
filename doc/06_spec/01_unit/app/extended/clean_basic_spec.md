@@ -1,5 +1,30 @@
 # APP Extended Tool Test
 
+> 1. check
+
+<!-- sdn-diagram:id=clean_basic_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=clean_basic_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+clean_basic_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=clean_basic_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 12 | 12 | 0 | 0 |
@@ -16,7 +41,7 @@
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/extended/clean_basic_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Scenarios
@@ -25,22 +50,16 @@
 
 #### tool execution
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- tool execution
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("tool execution")
 check(true)
 ```
 
@@ -48,18 +67,16 @@ check(true)
 
 #### args parsing
 
-- args parsing
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("args parsing")
 val args = ["--flag"]
 check(args.len() == 1)
 ```
@@ -68,18 +85,16 @@ check(args.len() == 1)
 
 #### file handling
 
-- file handling
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("file handling")
 val file = "test.spl"
 check(file.ends_with(".spl"))
 ```
@@ -88,18 +103,16 @@ check(file.ends_with(".spl"))
 
 #### config loading
 
-- config loading
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("config loading")
 val cfg = {"key": "val"}
 check(cfg["key"] == "val")
 ```
@@ -108,18 +121,16 @@ check(cfg["key"] == "val")
 
 #### error handling
 
-- error handling
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("error handling")
 var err = nil
 check(err == nil)
 ```
@@ -128,18 +139,16 @@ check(err == nil)
 
 #### success path
 
-- success path
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("success path")
 check("success" == "success")
 ```
 
@@ -147,18 +156,13 @@ check("success" == "success")
 
 #### branch test
 
-- branch test
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("branch test")
 if true: check(true)
 else: check(false)
 ```
@@ -170,18 +174,16 @@ else: check(false)
 
 #### loop test
 
-- loop test
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("loop test")
 var c = 0
 for i in 0..3: c = c + 1
 check(c == 3)
@@ -194,18 +196,16 @@ check(c == 3)
 
 #### edge empty
 
-- edge empty
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("edge empty")
 val arr = []
 check(arr.len() == 0)
 ```
@@ -214,18 +214,16 @@ check(arr.len() == 0)
 
 #### edge nil
 
-- edge nil
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("edge nil")
 val opt = nil
 check(not opt.?)
 ```
@@ -234,18 +232,16 @@ check(not opt.?)
 
 #### integration
 
-- integration
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("integration")
 val in = "data"
 val out = in + "_proc"
 check(out == "data_proc")
@@ -255,18 +251,18 @@ check(out == "data_proc")
 
 #### validation
 
-- validation
+1. check
+2. check
+3. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("validation")
 check(1 == 1)
 check(2 > 1)
 check(0 < 1)
@@ -286,51 +282,3 @@ check(0 < 1)
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-UNIT`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `366d28d69fe52c171e0da03a34ebae2ee776c7f6bb0a56c1e638009f02ced774`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `366d28d69fe52c171e0da03a34ebae2ee776c7f6bb0a56c1e638009f02ced774`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `366d28d69fe52c171e0da03a34ebae2ee776c7f6bb0a56c1e638009f02ced774`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/01_unit/app/extended/clean_basic_spec.spl
-mirror: doc/06_spec/01_unit/app/extended/clean_basic_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/app/extended/clean_basic_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/app/extended/clean_basic_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/app/extended/clean_basic_spec.spl:20:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'tool execution' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/extended/clean_basic_spec.spl:24:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'args parsing' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/extended/clean_basic_spec.spl:29:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'file handling' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

@@ -11,104 +11,39 @@
 # SFFI calls reuse patterns from simd_platform.spl (_read_cpuinfo_flags,
 # _flags_contain) and add new externs for cpuid/getauxval/sysctlbyname.
 
-use std.io_runtime.{file_read_result}
-
 # ============================================================================
 # Extern SFFI — platform probe primitives
 # ============================================================================
 
 # x86 CPUID: returns (eax, ebx, ecx, edx) for given leaf/subleaf
 # Reuses rt_cpuid if available; declared here for this module's use.
-@unsafe(reason: "raw host CPUID register ABI", capabilities: [ffi])
 extern fn rt_cpuid(leaf: i32, subleaf: i32) -> (i32, i32, i32, i32)
 
 # AArch64: Linux getauxval(AT_HWCAP) / AT_HWCAP2
-@unsafe(reason: "raw host auxiliary-vector capability ABI; zero is a platform sentinel", capabilities: [ffi])
 extern fn rt_getauxval(key: i64) -> i64
 
 # macOS Apple Silicon detection: returns true iff running on Apple ARM macOS
-@unsafe(reason: "raw host architecture probe ABI", capabilities: [ffi])
 extern fn rt_is_darwin_arm64() -> bool
 
 # macOS sysctlbyname probe: returns the integer value, or 0 if absent/error
-@unsafe(reason: "raw sysctl capability ABI; zero conflates absence and provider failure", capabilities: [ffi])
 extern fn rt_sysctlbyname_i32(name: text) -> i32
 
 # RISC-V: inline assembly to read vlenb CSR (vector length in bytes)
 # Returns 0 if V extension absent (SIGILL guard must be external)
-@unsafe(reason: "raw RISC-V vector-length register ABI; zero is an unsupported sentinel", capabilities: [ffi])
 extern fn rt_riscv_read_vlenb() -> i32
 
 # Check whether the V extension misa bit is set (RISC-V only; returns 0 elsewhere)
-@unsafe(reason: "raw RISC-V vector-extension probe ABI", capabilities: [ffi])
 extern fn rt_riscv_has_v_ext() -> bool
 
 # Arch-gate: returns 1 if compiled for x86_64, 0 otherwise
-@unsafe(reason: "raw compiler-target architecture gate ABI", capabilities: [ffi])
 extern fn rt_cpu_is_x86_64() -> i32
 # Arch-gate: returns 1 if compiled for AArch64, 0 otherwise
-@unsafe(reason: "raw compiler-target architecture gate ABI", capabilities: [ffi])
 extern fn rt_cpu_is_aarch64() -> i32
 # Arch-gate: returns 1 if compiled for RISC-V 64, 0 otherwise
-@unsafe(reason: "raw compiler-target architecture gate ABI", capabilities: [ffi])
 extern fn rt_cpu_is_riscv64() -> i32
 
 # CUDA: query SM version from cuDeviceGetAttribute (returns 0 if CUDA unavailable)
-@unsafe(reason: "raw CUDA device capability ABI; zero conflates absence and provider failure", capabilities: [ffi])
 extern fn rt_cuda_sm_version(device: i32) -> i32
-
-# These owners deliberately remain direct and always-inline. Capability probing
-# occurs during target detection; admission, hashing, lookup, and locking must
-# stay outside this call path.
-@always_inline
-fn _sffi_cpuid(leaf: i32, subleaf: i32) -> (i32, i32, i32, i32):
-    unsafe(capabilities: [ffi]):
-        rt_cpuid(leaf, subleaf)
-
-@always_inline
-fn _sffi_getauxval(key: i64) -> i64:
-    unsafe(capabilities: [ffi]):
-        rt_getauxval(key)
-
-@always_inline
-fn _sffi_is_darwin_arm64() -> bool:
-    unsafe(capabilities: [ffi]):
-        rt_is_darwin_arm64()
-
-@always_inline
-fn _sffi_sysctlbyname_i32(name: text) -> i32:
-    unsafe(capabilities: [ffi]):
-        rt_sysctlbyname_i32(name)
-
-@always_inline
-fn _sffi_riscv_read_vlenb() -> i32:
-    unsafe(capabilities: [ffi]):
-        rt_riscv_read_vlenb()
-
-@always_inline
-fn _sffi_riscv_has_v_ext() -> bool:
-    unsafe(capabilities: [ffi]):
-        rt_riscv_has_v_ext()
-
-@always_inline
-fn _sffi_cpu_is_x86_64() -> i32:
-    unsafe(capabilities: [ffi]):
-        rt_cpu_is_x86_64()
-
-@always_inline
-fn _sffi_cpu_is_aarch64() -> i32:
-    unsafe(capabilities: [ffi]):
-        rt_cpu_is_aarch64()
-
-@always_inline
-fn _sffi_cpu_is_riscv64() -> i32:
-    unsafe(capabilities: [ffi]):
-        rt_cpu_is_riscv64()
-
-@always_inline
-fn _sffi_cuda_sm_version(device: i32) -> i32:
-    unsafe(capabilities: [ffi]):
-        rt_cuda_sm_version(device)
 
 # ============================================================================
 # HWCAP / HWCAP2 constants for AArch64 Linux
@@ -255,7 +190,7 @@ fn detect_x86_capabilities() -> SimdFeatureSet:
     """
     var f = _simd_features_none()
 
-    var leaf1 = _sffi_cpuid(1, 0)
+    var leaf1 = rt_cpuid(1, 0)
     var ecx1 = leaf1.2   # third element of tuple
     var edx1 = leaf1.3   # fourth element
 
@@ -271,7 +206,7 @@ fn detect_x86_capabilities() -> SimdFeatureSet:
     f = SimdFeatureSet(..f, has_avx:   (ecx1 & (1 << 28)) != 0)
 
     # Leaf 7.0
-    var leaf70 = _sffi_cpuid(7, 0)
+    var leaf70 = rt_cpuid(7, 0)
     var ebx70 = leaf70.1
     var ecx70 = leaf70.2
     var edx70 = leaf70.3
@@ -287,7 +222,7 @@ fn detect_x86_capabilities() -> SimdFeatureSet:
     f = SimdFeatureSet(..f, has_avx512fp16:       (edx70 & (1 << 23)) != 0)
 
     # Leaf 7.1 EAX: BF16 (Sapphire Rapids+)
-    var leaf71 = _sffi_cpuid(7, 1)
+    var leaf71 = rt_cpuid(7, 1)
     var eax71 = leaf71.0
     f = SimdFeatureSet(..f, has_avx512bf16: (eax71 & (1 << 5)) != 0)
 
@@ -315,11 +250,11 @@ fn detect_apple_m_capabilities() -> SimdFeatureSet:
     f = SimdFeatureSet(..f, has_neon: true)
 
     # FP16: hw.optional.arm.FEAT_FP16
-    var fp16_val = _sffi_sysctlbyname_i32("hw.optional.arm.FEAT_FP16")
+    var fp16_val = rt_sysctlbyname_i32("hw.optional.arm.FEAT_FP16")
     f = SimdFeatureSet(..f, has_neon_fp16: fp16_val != 0)
 
     # BF16: hw.optional.arm.FEAT_BF16
-    var bf16_val = _sffi_sysctlbyname_i32("hw.optional.arm.FEAT_BF16")
+    var bf16_val = rt_sysctlbyname_i32("hw.optional.arm.FEAT_BF16")
     f = SimdFeatureSet(..f, has_bf16: bf16_val != 0)
 
     # SVE: EXPLICITLY false — Apple M does not support SVE (§6-H)
@@ -346,13 +281,13 @@ fn detect_aarch64_capabilities() -> SimdFeatureSet:
 
     C3b §9.2.
     """
-    var is_apple = _sffi_is_darwin_arm64()
+    var is_apple = rt_is_darwin_arm64()
     if is_apple:
         return detect_apple_m_capabilities()
 
     var f = _simd_features_none()
-    var hwcap  = _sffi_getauxval(AT_HWCAP)
-    var hwcap2 = _sffi_getauxval(AT_HWCAP2)
+    var hwcap  = rt_getauxval(AT_HWCAP)
+    var hwcap2 = rt_getauxval(AT_HWCAP2)
 
     # NEON (ASIMD) — AArch64 baseline; always true if getauxval works
     f = SimdFeatureSet(..f, has_neon: (hwcap & HWCAP_ASIMD) != 0)
@@ -375,14 +310,12 @@ fn detect_aarch64_capabilities() -> SimdFeatureSet:
     var svl: i32 = 0
     if raw_sve and not is_apple:
         # Read minimum VL; on most systems this equals the hardware VL
-        match file_read_result("/proc/sys/abi/sve_default_vector_length"):
-            case Ok(svl_str):
-                if svl_str != "":
-                    # Parse integer bytes and convert to bits
-                    var svl_bytes = svl_str.trim().parse_i32()
-                    if svl_bytes > 0:
-                        svl = svl_bytes * 8
-            case Err(_): pass
+        var svl_str = rt_file_read_text("/proc/sys/abi/sve_default_vector_length")
+        if svl_str != "":
+            # Parse integer bytes and convert to bits
+            var svl_bytes = svl_str.trim().parse_i32()
+            if svl_bytes > 0:
+                svl = svl_bytes * 8
     f = SimdFeatureSet(..f, sve_vector_length: svl)
 
     f
@@ -406,11 +339,11 @@ fn detect_riscv_capabilities() -> SimdFeatureSet:
     """
     var f = _simd_features_none()
 
-    var has_v = _sffi_riscv_has_v_ext()
+    var has_v = rt_riscv_has_v_ext()
     f = SimdFeatureSet(..f, has_v: has_v)
 
     if has_v:
-        var vlenb = _sffi_riscv_read_vlenb()
+        var vlenb = rt_riscv_read_vlenb()
         f = SimdFeatureSet(..f, vlen: vlenb * 8)
         # Zvfh / Zvfbfmin: not detectable without riscv_hwprobe — left false
         # TODO: wire up hwprobe when available
@@ -431,11 +364,13 @@ fn ptx_compute_capability(device: i32) -> i32:
 
     C3b §9.4.
     """
-    _sffi_cuda_sm_version(device)
+    rt_cuda_sm_version(device)
 
 # ============================================================================
 # detect_capabilities — top-level dispatcher
 # ============================================================================
+
+extern fn rt_file_read_text(path: text) -> text
 
 fn detect_capabilities() -> SimdFeatureSet:
     """
@@ -450,11 +385,11 @@ fn detect_capabilities() -> SimdFeatureSet:
     Note: PTX/CUDA is not included here — use ptx_compute_capability(device)
     separately since it requires a device index.
     """
-    if _sffi_cpu_is_x86_64() != 0:
+    if rt_cpu_is_x86_64() != 0:
         return detect_x86_capabilities()
-    if _sffi_cpu_is_aarch64() != 0:
+    if rt_cpu_is_aarch64() != 0:
         return detect_aarch64_capabilities()
-    if _sffi_cpu_is_riscv64() != 0:
+    if rt_cpu_is_riscv64() != 0:
         return detect_riscv_capabilities()
     _simd_features_none()
 

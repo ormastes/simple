@@ -238,7 +238,13 @@ int epoll_wait(int epfd, struct epoll_event *events, int maxevents, int timeout)
 }
 
 int epoll_pwait(int epfd, struct epoll_event *events, int maxevents, int timeout, const void *sigmask) {
-    (void)sigmask;
+    /* A non-null mask promises an atomic mask installation plus wait. The
+     * SimpleOS signal facade has no kernel-owned mask transition, so silently
+     * delegating would create a race while reporting success. */
+    if (sigmask != NULL) {
+        errno = ENOSYS;
+        return -1;
+    }
     return epoll_wait(epfd, events, maxevents, timeout);
 }
 

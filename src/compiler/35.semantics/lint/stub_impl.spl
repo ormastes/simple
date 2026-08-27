@@ -30,15 +30,14 @@
 # Works with the arena-based core AST (integer-tagged nodes).
 
 use compiler.core.ast_expr.{
-    expr_get_tag, expr_get_int, expr_get_str, expr_get_left, expr_get_right,
-    expr_get_args, expr_get_stmts
+    expr_tag, expr_i_val, expr_s_val, expr_left, expr_right,
+    expr_args, expr_stmts
 }
 use compiler.frontend.core.ast_stmt.{
-    stmt_get_tag, stmt_get_expr, stmt_get_body
+    stmt_tag, stmt_expr, stmt_body
 }
 use compiler.core.ast.{
-    decl_get_tag, decl_get_name, decl_get_param_names, decl_get_body,
-    decl_get_span, span_is_valid, span_line
+    decl_get_tag, decl_get_name, decl_get_param_names, decl_get_body
 }
 use std.string_core.{char_code}
 use compiler.common.assurance.policy.{strictness_for_profile_name}
@@ -56,50 +55,80 @@ fn _empty_body_is_error(profile_name: text) -> bool:
     strictness_for_profile_name(profile_name).at_least(AssuranceStrictness.Critical)
 
 fn stub_expr_get_tag(idx: i64) -> i64:
-    expr_get_tag(idx)
+    if idx >= 0 and idx < expr_tag.len():
+        return expr_tag[idx]
+    -1
 
 fn stub_expr_get_int(idx: i64) -> i64:
-    expr_get_int(idx)
+    if idx >= 0 and idx < expr_i_val.len():
+        return expr_i_val[idx]
+    0
 
 fn stub_expr_get_str(idx: i64) -> text:
-    expr_get_str(idx)
+    if idx >= 0 and idx < expr_s_val.len():
+        return expr_s_val[idx]
+    ""
 
 fn stub_expr_get_left(idx: i64) -> i64:
-    expr_get_left(idx)
+    if idx >= 0 and idx < expr_left.len():
+        return expr_left[idx]
+    -1
 
 fn stub_expr_get_right(idx: i64) -> i64:
-    expr_get_right(idx)
+    if idx >= 0 and idx < expr_right.len():
+        return expr_right[idx]
+    -1
+
+fn stub_expr_get_extra(idx: i64) -> i64:
+    expr_get_extra(idx)
 
 fn stub_expr_get_args(idx: i64) -> [i64]:
-    expr_get_args(idx)
+    if idx >= 0 and idx < expr_args.len():
+        return expr_args[idx]
+    []
 
 fn stub_expr_get_stmts(idx: i64) -> [i64]:
-    expr_get_stmts(idx)
+    if idx >= 0 and idx < expr_stmts.len():
+        return expr_stmts[idx]
+    []
 
 fn stub_stmt_get_tag(idx: i64) -> i64:
-    stmt_get_tag(idx)
+    if idx >= 0 and idx < stmt_tag.len():
+        return stmt_tag[idx]
+    -1
 
 fn stub_stmt_get_expr(idx: i64) -> i64:
-    stmt_get_expr(idx)
+    if idx >= 0 and idx < stmt_expr.len():
+        return stmt_expr[idx]
+    -1
 
 fn stub_stmt_get_body(idx: i64) -> [i64]:
-    stmt_get_body(idx)
+    if idx >= 0 and idx < stmt_body.len():
+        return stmt_body[idx]
+    []
+
+fn stub_stmt_get_type(idx: i64) -> i64:
+    stmt_get_type(idx)
 
 fn stub_decl_get_tag(idx: i64) -> i64:
-    # Routed through the owning module's accessor (compiler.core.ast.decl_get_tag)
-    # rather than reading the imported `decl_tag` array directly — a direct
-    # cross-module read of the raw arena var is stale/empty under this
-    # interpreter (see lint_pipeline_array_index_out_of_bounds_2026-07-30.md).
-    decl_get_tag(idx)
+    if idx >= 0 and idx < decl_tag.len():
+        return decl_tag[idx]
+    -1
 
 fn stub_decl_get_name(idx: i64) -> text:
-    decl_get_name(idx)
+    if idx >= 0 and idx < decl_name.len():
+        return decl_name[idx]
+    ""
 
 fn stub_decl_get_param_names(idx: i64) -> [text]:
-    decl_get_param_names(idx)
+    if idx >= 0 and idx < decl_param_names.len():
+        return decl_param_names[idx]
+    []
 
 fn stub_decl_get_body(idx: i64) -> [i64]:
-    decl_get_body(idx)
+    if idx >= 0 and idx < decl_body_stmts.len():
+        return decl_body_stmts[idx]
+    []
 
 # ============================================================================
 # Warning Struct
@@ -111,7 +140,6 @@ struct StubImplWarning:
     message: text
     hint: text
     fn_name: text
-    line: i64 = 0
 
     fn fmt() -> text:
         "[" + self.code + "] " + self.severity + ": " + self.message + " in '" + self.fn_name + "' — " + self.hint
@@ -124,10 +152,7 @@ fn int_to_str(n: i64) -> text:
     if n < 0:
         neg = true
         v = 0 - n
-    # Collect digits least-significant-first into an array and join once
-    # (rather than `result = ch + result` per digit) to avoid an O(n^2)
-    # string-concat-in-loop (lint COLL006).
-    var digits: [text] = []
+    var result = ""
     for _ in 0..20:
         if v == 0:
             break
@@ -142,14 +167,8 @@ fn int_to_str(n: i64) -> text:
         if d == 7: ch = "7"
         if d == 8: ch = "8"
         if d == 9: ch = "9"
-        digits.push(ch)
+        result = ch + result
         v = v / 10
-    var reversed: [text] = []
-    var i = digits.len() - 1
-    while i >= 0:
-        reversed.push(digits[i])
-        i = i - 1
-    val result = reversed.join("")
     if neg:
         return "-" + result
     result
@@ -176,17 +195,15 @@ fn check_stub_impl(decl_indices: [i64], profile_name: text = "") -> [StubImplWar
     var warnings: [StubImplWarning] = []
 
     for idx in decl_indices:
-        val tag = stub_decl_get_tag(idx)
+        val tag = decl_get_tag(idx)
 
         # Skip non-function and extern declarations
         if tag != 1:
             continue
 
-        val fn_name = stub_decl_get_name(idx)
-        val params = stub_decl_get_param_names(idx)
-        val body = stub_decl_get_body(idx)
-        val decl_span = decl_get_span(idx)
-        val warning_line = if span_is_valid(decl_span): span_line(decl_span) else: 0
+        val fn_name = decl_get_name(idx)
+        val params = decl_get_param_names(idx)
+        val body = decl_get_body(idx)
 
         # WP-8: name-based exemption removed. The ONLY intent-based exemption
         # is the typed NoOp contract — a body that is exactly one
@@ -224,8 +241,7 @@ fn check_stub_impl(decl_indices: [i64], profile_name: text = "") -> [StubImplWar
                 severity: "ERROR",
                 message: "explicit placeholder function body",
                 hint: "replace the placeholder body with a real implementation or mark the function with an allow override",
-                fn_name: fn_name,
-                line: warning_line
+                fn_name: fn_name
             ))
             continue
 
@@ -287,8 +303,7 @@ fn check_stub_impl(decl_indices: [i64], profile_name: text = "") -> [StubImplWar
                     severity: "INFO",
                     message: "trivial default " + trivial_kind + " return (possible stub)",
                     hint: "if intentional, mark with pass_do_nothing; if stub, use pass_todo",
-                    fn_name: fn_name,
-                    line: warning_line
+                    fn_name: fn_name
                 ))
 
     warnings
@@ -313,15 +328,15 @@ fn get_single_trivial_expr(stmts: [i64]) -> i64:
     if s < 0:
         return -1
 
-    val tag = stub_stmt_get_tag(s)
+    val tag = stmt_get_tag(s)
 
     if tag == 1:
-        val e = stub_stmt_get_expr(s)
+        val e = stmt_get_expr(s)
         if e < 0:
             return -1
         # Check for explicit return: 19 wrapping a literal
-        if stub_expr_get_tag(e) == 19:
-            val inner = stub_expr_get_left(e)
+        if expr_get_tag(e) == 19:
+            val inner = expr_get_left(e)
             if inner >= 0:
                 return inner
             return -1
@@ -329,7 +344,7 @@ fn get_single_trivial_expr(stmts: [i64]) -> i64:
         return e
 
     if tag == 5:
-        val e = stub_stmt_get_expr(s)
+        val e = stmt_get_expr(s)
         if e >= 0:
             return e
         return -1
@@ -358,11 +373,11 @@ fn get_single_placeholder_expr(stmts: [i64]) -> i64:
     if s < 0:
         return -1
 
-    val tag = stub_stmt_get_tag(s)
+    val tag = stmt_get_tag(s)
     if tag != 1 and tag != 5:
         return -1
 
-    val e = stub_stmt_get_expr(s)
+    val e = stmt_get_expr(s)
     if e < 0:
         return -1
 
@@ -438,22 +453,22 @@ fn classify_trivial(e: i64) -> text:
     if e < 0:
         return ""
 
-    val tag = stub_expr_get_tag(e)
+    val tag = expr_get_tag(e)
 
     if tag == 1:
-        return "integer (" + int_to_str(stub_expr_get_int(e)) + ")"
+        return "integer (" + int_to_str(expr_get_int(e)) + ")"
 
     if tag == 2:
-        return "float (" + stub_expr_get_str(e) + ")"
+        return "float (" + expr_get_str(e) + ")"
 
     if tag == 3:
-        val s = stub_expr_get_str(e)
+        val s = expr_get_str(e)
         if s == "":
             return "empty string (\"\")"
         return "string (\"" + s + "\")"
 
     if tag == 4:
-        if stub_expr_get_int(e) == 0:
+        if expr_get_int(e) == 0:
             return "false"
         return "true"
 
@@ -461,12 +476,12 @@ fn classify_trivial(e: i64) -> text:
         return "nil"
 
     if tag == 13:
-        if stub_expr_get_args(e).len() == 0:
+        if expr_get_args(e).len() == 0:
             return "empty array ([])"
         return ""
 
     if tag == 25:
-        if stub_expr_get_args(e).len() == 0:
+        if expr_get_args(e).len() == 0:
             return "empty dict ({})"
         return ""
 
@@ -474,16 +489,16 @@ fn classify_trivial(e: i64) -> text:
         return "unit (())"
 
     if tag == 28:
-        if stub_expr_get_args(e).len() == 0:
+        if expr_get_args(e).len() == 0:
             return "unit (())"
         return ""
 
     # Ok(nil) or Ok(0) pattern — 9 with callee "Ok" and single trivial arg
     if tag == 9:
-        val callee = stub_expr_get_left(e)
-        if callee >= 0 and stub_expr_get_tag(callee) == 6:
-            if stub_expr_get_str(callee) == "Ok":
-                val call_args = stub_expr_get_args(e)
+        val callee = expr_get_left(e)
+        if callee >= 0 and expr_get_tag(callee) == 6:
+            if expr_get_str(callee) == "Ok":
+                val call_args = expr_get_args(e)
                 if call_args.len() == 1:
                     val inner = call_args[0]
                     if inner >= 0:
@@ -507,45 +522,45 @@ fn is_default_value(e: i64) -> bool:
     if e < 0:
         return false
 
-    val tag = stub_expr_get_tag(e)
+    val tag = expr_get_tag(e)
 
     if tag == 1:
-        return stub_expr_get_int(e) == 0
+        return expr_get_int(e) == 0
 
     if tag == 2:
-        val f = stub_expr_get_str(e)
+        val f = expr_get_str(e)
         return f == "0" or f == "0.0" or f == "0.00"
 
     if tag == 3:
-        return stub_expr_get_str(e) == ""
+        return expr_get_str(e) == ""
 
     if tag == 4:
-        return stub_expr_get_int(e) == 0  # false
+        return expr_get_int(e) == 0  # false
 
     if tag == 5:
         return true
 
     if tag == 13:
-        return stub_expr_get_args(e).len() == 0
+        return expr_get_args(e).len() == 0
 
     if tag == 25:
-        return stub_expr_get_args(e).len() == 0
+        return expr_get_args(e).len() == 0
 
     if tag == 33:
         return true
 
     if tag == 28:
-        return stub_expr_get_args(e).len() == 0
+        return expr_get_args(e).len() == 0
 
     if tag == 35:
         return true
 
     # Ok(nil) or Ok(default)
     if tag == 9:
-        val callee = stub_expr_get_left(e)
-        if callee >= 0 and stub_expr_get_tag(callee) == 6:
-            if stub_expr_get_str(callee) == "Ok":
-                val call_args = stub_expr_get_args(e)
+        val callee = expr_get_left(e)
+        if callee >= 0 and expr_get_tag(callee) == 6:
+            if expr_get_str(callee) == "Ok":
+                val call_args = expr_get_args(e)
                 if call_args.len() == 1:
                     return is_default_value(call_args[0])
 
@@ -571,16 +586,35 @@ fn stmt_has_pass_marker(s: i64) -> bool:
     if s < 0:
         return false
 
-    val tag = stub_stmt_get_tag(s)
+    val tag = stmt_get_tag(s)
+
+    if tag == STMT_IF_CHAIN:
+        val chain_id = stub_stmt_get_type(s)
+        var arm_id = flat_if_chain_first_arm_get(chain_id)
+        var remaining = flat_if_chain_arm_count_get(chain_id)
+        while arm_id >= 0 and remaining > 0:
+            if flat_if_arm_kind_get(arm_id) == ARM_CONDITION and expr_has_pass_marker(flat_if_arm_head_get(arm_id)): return true
+            if expr_has_pass_marker(flat_if_arm_init_get(arm_id)): return true
+            var bi = 0
+            while bi < flat_if_arm_body_count_get(arm_id):
+                if stmt_has_pass_marker(flat_if_arm_body_at(arm_id, bi)): return true
+                bi = bi + 1
+            arm_id = flat_if_arm_next_get(arm_id)
+            remaining = remaining - 1
+        var ei = 0
+        while ei < flat_if_chain_else_stmt_count_get(chain_id):
+            if stmt_has_pass_marker(flat_if_chain_else_stmt_at(chain_id, ei)): return true
+            ei = ei + 1
+        return false
 
     # Check the expression in this statement
-    val e = stub_stmt_get_expr(s)
+    val e = stmt_get_expr(s)
     if e >= 0:
         if expr_has_pass_marker(e):
             return true
 
     # Recurse into child statements
-    val children = stub_stmt_get_body(s)
+    val children = stmt_get_body(s)
     for child in children:
         if stmt_has_pass_marker(child):
             return true
@@ -592,7 +626,18 @@ fn expr_has_pass_marker(e: i64) -> bool:
     if e < 0:
         return false
 
-    val tag = stub_expr_get_tag(e)
+    val tag = expr_get_tag(e)
+
+    if tag == EXPR_IF_CHAIN:
+        val chain_id = stub_expr_get_extra(e)
+        var arm_id = flat_if_chain_first_arm_get(chain_id)
+        var remaining = flat_if_chain_arm_count_get(chain_id)
+        while arm_id >= 0 and remaining > 0:
+            if flat_if_arm_kind_get(arm_id) == ARM_CONDITION and expr_has_pass_marker(flat_if_arm_head_get(arm_id)): return true
+            if expr_has_pass_marker(flat_if_arm_init_get(arm_id)) or expr_has_pass_marker(flat_if_arm_then_expr_get(arm_id)): return true
+            arm_id = flat_if_arm_next_get(arm_id)
+            remaining = remaining - 1
+        return expr_has_pass_marker(flat_if_chain_else_expr_get(chain_id))
 
     if tag == 35:
         return true
@@ -604,16 +649,16 @@ fn expr_has_pass_marker(e: i64) -> bool:
         return true
 
     # Recurse into sub-expressions
-    if expr_has_pass_marker(stub_expr_get_left(e)):
+    if expr_has_pass_marker(expr_get_left(e)):
         return true
-    if expr_has_pass_marker(stub_expr_get_right(e)):
+    if expr_has_pass_marker(expr_get_right(e)):
         return true
 
-    for arg in stub_expr_get_args(e):
+    for arg in expr_get_args(e):
         if expr_has_pass_marker(arg):
             return true
 
-    for child_stmt in stub_expr_get_stmts(e):
+    for child_stmt in expr_get_stmts(e):
         if stmt_has_pass_marker(child_stmt):
             return true
 
@@ -622,99 +667,6 @@ fn expr_has_pass_marker(e: i64) -> bool:
 # ============================================================================
 # Parameter Usage Detection
 # ============================================================================
-
-fn stub_is_ident_char(ch: text) -> bool:
-    """Check if a single character is valid inside an identifier token."""
-    if ch.len() != 1:
-        return false
-    val c = char_code(ch)
-    if c >= 97 and c <= 122:  # a-z
-        return true
-    if c >= 65 and c <= 90:  # A-Z
-        return true
-    if c >= 48 and c <= 57:  # 0-9
-        return true
-    if c == 95:  # _
-        return true
-    false
-
-fn interpolation_hole_references_param(hole: text, params: [text]) -> bool:
-    """Check whether any identifier token inside an interpolation hole's raw
-    text (e.g. "a + b.c()" from "{a + b.c()}") matches a parameter name.
-
-    This is a textual token scan rather than a real sub-parse: it splits the
-    hole on non-identifier characters and compares each run against the
-    parameter names. Good enough to answer "is this param referenced",
-    including compound holes like `{a + b}` where both `a` and `b` matter.
-    """
-    var i = 0
-    val n = hole.len()
-    var start = -1
-    while i < n:
-        val ch = hole.slice(i, i + 1)
-        if stub_is_ident_char(ch):
-            if start < 0:
-                start = i
-        else:
-            if start >= 0:
-                val ident = hole.slice(start, i)
-                for p in params:
-                    if ident == p:
-                        return true
-                start = -1
-        i = i + 1
-    if start >= 0:
-        val ident = hole.slice(start, n)
-        for p in params:
-            if ident == p:
-                return true
-    false
-
-fn string_lit_references_param(s: text, params: [text]) -> bool:
-    """Scan a string literal's raw template text for `{...}` interpolation
-    holes and check whether any of them reference a parameter name.
-
-    Handles escaped braces (`{{` / `}}` render as literal `{` / `}`, not a
-    hole) and holes containing nested braces (brace-depth tracked so e.g.
-    `{a.f({x: 1})}` closes at the matching outer `}`).
-    """
-    if params.len() == 0:
-        return false
-    var i = 0
-    val n = s.len()
-    while i < n:
-        val ch = s.slice(i, i + 1)
-        if ch == "{":
-            if i + 1 < n and s.slice(i + 1, i + 2) == "{":
-                i = i + 2
-                continue
-            # Start of an interpolation hole — scan to the matching close,
-            # tracking nested brace depth, then slice the hole text out in
-            # one shot (no per-character concatenation).
-            var depth = 1
-            val hole_start = i + 1
-            var j = hole_start
-            while j < n and depth > 0:
-                val jch = s.slice(j, j + 1)
-                if jch == "{":
-                    depth = depth + 1
-                elif jch == "}":
-                    depth = depth - 1
-                j = j + 1
-            var hole_end = j
-            if depth == 0:
-                hole_end = j - 1  # exclude the matched closing brace
-            val hole = s.slice(hole_start, hole_end)
-            if interpolation_hole_references_param(hole, params):
-                return true
-            i = j
-            continue
-        if ch == "}":
-            if i + 1 < n and s.slice(i + 1, i + 2) == "}":
-                i = i + 2
-                continue
-        i = i + 1
-    false
 
 fn body_references_any_param(stmts: [i64], params: [text]) -> bool:
     """Check if any statement in the body references any of the given parameter names."""
@@ -730,10 +682,29 @@ fn stmt_references_param(s: i64, params: [text]) -> bool:
     if s < 0:
         return false
 
-    val tag = stub_stmt_get_tag(s)
+    val tag = stmt_get_tag(s)
+
+    if tag == STMT_IF_CHAIN:
+        val chain_id = stub_stmt_get_type(s)
+        var arm_id = flat_if_chain_first_arm_get(chain_id)
+        var remaining = flat_if_chain_arm_count_get(chain_id)
+        while arm_id >= 0 and remaining > 0:
+            if flat_if_arm_kind_get(arm_id) == ARM_CONDITION and expr_references_param(flat_if_arm_head_get(arm_id), params): return true
+            if expr_references_param(flat_if_arm_init_get(arm_id), params): return true
+            var bi = 0
+            while bi < flat_if_arm_body_count_get(arm_id):
+                if stmt_references_param(flat_if_arm_body_at(arm_id, bi), params): return true
+                bi = bi + 1
+            arm_id = flat_if_arm_next_get(arm_id)
+            remaining = remaining - 1
+        var ei = 0
+        while ei < flat_if_chain_else_stmt_count_get(chain_id):
+            if stmt_references_param(flat_if_chain_else_stmt_at(chain_id, ei), params): return true
+            ei = ei + 1
+        return false
 
     # Check expression
-    val e = stub_stmt_get_expr(s)
+    val e = stmt_get_expr(s)
     if e >= 0:
         if expr_references_param(e, params):
             return true
@@ -742,7 +713,7 @@ fn stmt_references_param(s: i64, params: [text]) -> bool:
     # Actually, we don't count shadowing as usage.
 
     # Recurse into child statements
-    for child in stub_stmt_get_body(s):
+    for child in stmt_get_body(s):
         if stmt_references_param(child, params):
             return true
 
@@ -753,37 +724,37 @@ fn expr_references_param(e: i64, params: [text]) -> bool:
     if e < 0:
         return false
 
-    val tag = stub_expr_get_tag(e)
+    val tag = expr_get_tag(e)
+
+    if tag == EXPR_IF_CHAIN:
+        val chain_id = stub_expr_get_extra(e)
+        var arm_id = flat_if_chain_first_arm_get(chain_id)
+        var remaining = flat_if_chain_arm_count_get(chain_id)
+        while arm_id >= 0 and remaining > 0:
+            if flat_if_arm_kind_get(arm_id) == ARM_CONDITION and expr_references_param(flat_if_arm_head_get(arm_id), params): return true
+            if expr_references_param(flat_if_arm_init_get(arm_id), params) or expr_references_param(flat_if_arm_then_expr_get(arm_id), params): return true
+            arm_id = flat_if_arm_next_get(arm_id)
+            remaining = remaining - 1
+        return expr_references_param(flat_if_chain_else_expr_get(chain_id), params)
 
     if tag == 6:
-        val name = stub_expr_get_str(e)
+        val name = expr_get_str(e)
         for p in params:
             if name == p:
                 return true
         return false
 
-    # String literal: params referenced only inside `{...}` interpolation
-    # holes are otherwise invisible to this walk (the raw template text is
-    # stored verbatim, unexpanded, in the literal's s_val — see
-    # doc/08_tracking/bug/lint_stub001_false_positive_on_string_interpolation_param_2026-07-29.md).
-    # Raw strings (i_val == 1, e.g. r"...") never interpolate, so `{...}`
-    # inside them is literal text, not a parameter reference.
-    if tag == 3:
-        if stub_expr_get_int(e) != 1:
-            if string_lit_references_param(stub_expr_get_str(e), params):
-                return true
-
     # Recurse into sub-expressions
-    if expr_references_param(stub_expr_get_left(e), params):
+    if expr_references_param(expr_get_left(e), params):
         return true
-    if expr_references_param(stub_expr_get_right(e), params):
+    if expr_references_param(expr_get_right(e), params):
         return true
 
-    for arg in stub_expr_get_args(e):
+    for arg in expr_get_args(e):
         if expr_references_param(arg, params):
             return true
 
-    for child_stmt in stub_expr_get_stmts(e):
+    for child_stmt in expr_get_stmts(e):
         if stmt_references_param(child_stmt, params):
             return true
 

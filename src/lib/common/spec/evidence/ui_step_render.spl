@@ -1,0 +1,135 @@
+# UI action-step manual projection (typed-UI-interface plan, phase 4 v1).
+#
+# Sibling of manual_render.spl: given a typed UI action record (action kind,
+# target id, canonical id, declaration site, before/after property pairs), it
+# emits the guide-style step block as generic ManualBlock records, which
+# manual_render.spl then turns into Markdown. Nothing here renders Markdown
+# itself — the step projection stays in the ManualBlock vocabulary so audience
+# filtering and escaping keep working unchanged.
+#
+# Also owns the annotated terminal-frame projection: an existing
+# TerminalSnapshot plus semantic-region annotations (focused/selected flags)
+# become one fenced terminal_grid block followed by per-region caption lines.
+# Text annotation only — no terminal parsing happens here (driver lane owns
+# that), and no screenshots/SVG overlays (later wave).
+#
+# Architecture: doc/04_architecture/ui/testing/typed_ui_interface_arch.md §Manuals
+
+use std.common.spec.evidence.model.{
+    ManualBlock, ManualBlockKind, EvidenceAudience, manual_block_for
+}
+use std.common.spec.evidence.format.terminal_grid.{
+    TerminalSnapshot, terminal_text_projection
+}
+
+# ---------------------------------------------------------------------------
+# Action step model
+# ---------------------------------------------------------------------------
+
+# One property that the action changed. `before`/`after` are already-rendered
+# text values: the projection documents what a reader would observe, it does
+# not re-evaluate state.
+pub struct UiStateChange:
+    property: text
+    before: text
+    after: text
+
+# One executed UI action, as recorded by the action trace. `declared_at` is
+# the manifest declaration site (file:line) of the target widget, so a manual
+# step is traceable back to the interface source that named the target.
+pub struct UiActionStep:
+    action_kind: text
+    target_id: text
+    canonical_id: text
+    declared_at: text
+    changes: [UiStateChange]
+    expected: text
+
+# ---------------------------------------------------------------------------
+# Step projection
+# ---------------------------------------------------------------------------
+
+fn or_placeholder(value: text) -> text:
+    if value == "":
+        return "(not recorded)"
+    value
+
+# Projects one action step into ManualBlocks in guide order:
+# header paragraph (**Action** / **Target ID** / **Declared at**), a
+# Property|Before|After table when any state changed, and an expected note.
+# `step_index` is 1-based and only names the block; ordering is the caller's.
+pub fn ui_action_step_blocks(step: UiActionStep, step_index: i64, audience: EvidenceAudience) -> [ManualBlock]:
+    var blocks: [ManualBlock] = []
+
+    var header: [text] = []
+    header.push("**Action**: " + or_placeholder(step.action_kind))
+    header.push("")
+    header.push("**Target ID**: `" + or_placeholder(step.target_id) + "`")
+    if step.canonical_id != "" and step.canonical_id != step.target_id:
+        header.push("")
+        header.push("**Canonical ID**: `" + step.canonical_id + "`")
+    header.push("")
+    header.push("**Declared at**: " + or_placeholder(step.declared_at))
+    blocks.push(manual_block_for(
+        ManualBlockKind.paragraph, "Step {step_index}", audience, header))
+
+    if step.changes.len() > 0:
+        var rows: [text] = []
+        rows.push("Property | Before | After")
+        for change in step.changes:
+            rows.push(change.property + " | " + change.before + " | " + change.after)
+        blocks.push(manual_block_for(
+            ManualBlockKind.table, "State change", audience, rows))
+
+    if step.expected != "":
+        blocks.push(manual_block_for(
+            ManualBlockKind.paragraph, "Expected", audience, ["Expected: " + step.expected]))
+
+    blocks
+
+# ---------------------------------------------------------------------------
+# Annotated terminal frame
+# ---------------------------------------------------------------------------
+
+# A semantic region annotation for one frame. Geometry mirrors
+# terminal_grid.TerminalRegion; `focused`/`selected` carry the access-tree
+# treatment recorded at evidence time (TerminalRegion itself is geometry-only).
+pub struct UiFrameRegion:
+    node_id: text
+    row: i64
+    col: i64
+    width: i64
+    height: i64
+    focused: bool
+    selected: bool
+
+fn region_caption(region: UiFrameRegion) -> text:
+    var caption = "`" + region.node_id + "` @ ({region.row},{region.col}) {region.width}x{region.height}"
+    if region.focused:
+        caption = caption + " · FOCUSED"
+    if region.selected:
+        caption = caption + " · SELECTED"
+    caption
+
+# Projects a terminal snapshot plus its region annotations into two blocks:
+# the frame itself (terminal_grid kind → fenced text block downstream) and a
+# field_tree of one caption line per region (id · geometry · FOCUSED/SELECTED).
+pub fn annotated_frame_blocks(
+    title: text,
+    snapshot: TerminalSnapshot,
+    regions: [UiFrameRegion],
+    audience: EvidenceAudience
+) -> [ManualBlock]:
+    var blocks: [ManualBlock] = []
+    blocks.push(manual_block_for(
+        ManualBlockKind.terminal_grid, title, audience,
+        terminal_text_projection(snapshot)))
+
+    var captions: [text] = []
+    for region in regions:
+        captions.push(region_caption(region))
+    if captions.len() == 0:
+        captions.push("(no semantic regions annotated)")
+    blocks.push(manual_block_for(
+        ManualBlockKind.field_tree, title + " — regions", audience, captions))
+    blocks

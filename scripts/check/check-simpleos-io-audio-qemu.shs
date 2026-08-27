@@ -111,12 +111,37 @@ validate_row() {
     echo "simpleos_io_audio_qemu_row=pass arch=$arch backend=$backend"
 }
 
+validate_host_wav_row() {
+    arch=$1
+    base=$evidence_dir/$arch-virtio-snd
+    wav=$base.playback.wav
+    wav_evidence=$base.host-wav.env
+    provenance=$base.provenance
+    test -f "$wav" && test ! -L "$wav" || fail "host-wav-file-invalid:$arch"
+    test -s "$wav_evidence" && test -s "$provenance" || fail "host-wav-evidence-missing:$arch"
+    test "$(sed -n 's/^host_wav_status=//p' "$wav_evidence")" = pass || fail "host-wav-status:$arch"
+    test "$(sed -n 's/^evidence_class=//p' "$wav_evidence")" = host-observed-playback-only || fail "host-wav-class:$arch"
+    test "$(sed -n 's/^capture_claim=//p' "$wav_evidence")" = none || fail "host-wav-capture-claim:$arch"
+    test "$(sed -n 's/^arch=//p' "$wav_evidence")" = "$arch" || fail "host-wav-arch:$arch"
+    test "$(sed -n 's/^backend=//p' "$wav_evidence")" = virtio-snd || fail "host-wav-backend:$arch"
+    test "$(sed -n 's/^host_wav_nonzero_samples=//p' "$wav_evidence")" = true || fail "host-wav-silent:$arch"
+    frames=$(sed -n 's/^host_wav_frames=//p' "$wav_evidence")
+    test -n "$frames" && test "$frames" -gt 0 || fail "host-wav-empty:$arch"
+    wav_sha=$(sha256sum "$wav" | awk '{print $1}')
+    test "$wav_sha" = "$(sed -n 's/^host_wav_sha256=//p' "$wav_evidence")" || fail "host-wav-hash:$arch"
+    test "$(sed -n 's/^kernel_sha256=//p' "$wav_evidence")" = "$(sed -n 's/^kernel_sha256=//p' "$provenance")" || fail "host-wav-kernel:$arch"
+    test "$(sed -n 's/^source_set_sha256=//p' "$wav_evidence")" = "$(sed -n 's/^source_set_sha256=//p' "$provenance")" || fail "host-wav-source:$arch"
+    echo "simpleos_io_audio_qemu_host_wav=pass arch=$arch backend=virtio-snd evidence_class=host-observed-playback-only capture_claim=none"
+}
+
 live() {
     preflight
     validate_row x86_64 virtio-snd "$evidence_dir/x86_64-virtio-snd.serial.log"
     validate_row x86_64 hda "$evidence_dir/x86_64-hda.serial.log"
     validate_row aarch64 virtio-snd "$evidence_dir/aarch64-virtio-snd.serial.log"
+    validate_host_wav_row aarch64
     validate_row riscv64 virtio-snd "$evidence_dir/riscv64-virtio-snd.serial.log"
+    validate_host_wav_row riscv64
     echo simpleos_io_audio_qemu_status=pass
 }
 

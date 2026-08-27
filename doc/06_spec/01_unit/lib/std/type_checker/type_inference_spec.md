@@ -1,6 +1,29 @@
 # Type Inference Specification
 
-> Tests covering Type Representation, Type Unification, Dependency Resolution, TypeChecker Integration.
+> 1. check
+
+<!-- sdn-diagram:id=type_inference_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=type_inference_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+type_inference_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=type_inference_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -17,22 +40,27 @@
 
 #### renders primitive and compound types
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- renders primitive and compound types
+1. check
+2. check
+3. check
+4. check
+5. check
+6. check
+7. check
+8. check
+9. check
+10. check
+11. check
+12. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("renders primitive and compound types")
 check(Type.Int.to_string() == "Int")
 check(Type.Bool.to_string() == "Bool")
 check(Type.Str.to_string() == "Str")
@@ -51,18 +79,21 @@ check(Type.Optional(Type.Int).to_string() == "Option<Int>")
 
 #### identifies primitive types
 
-- identifies primitive types
+1. check
+2. check
+3. check
+4. check
+5. check
+6. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("identifies primitive types")
 check(Type.Int.is_primitive())
 check(Type.Bool.is_primitive())
 check(Type.Str.is_primitive())
@@ -77,19 +108,17 @@ check(not Type.Var(0).is_primitive())
 
 #### unifies identical primitive types
 
-- unifies identical primitive types
+1. check
    - Expected: msg equals ``
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("unifies identical primitive types")
 val unifier = TypeUnifier.new()
 match unifier.unify(Type.Int, Type.Int):
     case Ok(()):
@@ -102,18 +131,17 @@ match unifier.unify(Type.Int, Type.Int):
 
 #### rejects different primitive types
 
-- rejects different primitive types
+1. check
+2. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("rejects different primitive types")
 val unifier = TypeUnifier.new()
 match unifier.unify(Type.Int, Type.Bool):
     case Ok(()):
@@ -126,18 +154,19 @@ match unifier.unify(Type.Int, Type.Bool):
 
 #### unifies variables and resolves chains
 
-- unifies variables and resolves chains
+1. check
+2. check
+3. check
+4. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("unifies variables and resolves chains")
 val unifier = TypeUnifier.new()
 val a = unifier.fresh_var()
 val b = unifier.fresh_var()
@@ -151,18 +180,17 @@ check(type_equals(unifier.resolve(b), Type.Int))
 
 #### detects occurs check failures
 
-- detects occurs check failures
+1. check
+2. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("detects occurs check failures")
 val unifier = TypeUnifier.new()
 val a = unifier.fresh_var()
 match unifier.unify(a, Type.Array(a)):
@@ -176,18 +204,31 @@ match unifier.unify(a, Type.Array(a)):
 
 #### unifies function, generic, tuple, array, and optional types
 
-- unifies function, generic, tuple, array, and optional types
+1. Type Function
+2. Type Function
+3. Type Function
+4. Type Function
+5. Type Generic
+6. Type Generic
+7. Type Generic
+8. Type Generic
+9. Type Tuple
+10. Type Tuple
+11. Type Tuple
+12. Type Tuple
+13. check
+14. check
+15. check
+16. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 31 lines folded for reproduction.
+Runnable source: 29 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("unifies function, generic, tuple, array, and optional types")
 val unifier = TypeUnifier.new()
 check(unifier.unify(
     Type.Function([Type.Int, Type.Bool], Type.Unit),
@@ -223,18 +264,18 @@ check(unifier.unify(Type.Optional(Type.Str), Type.Optional(Type.Bool)).is_err())
 
 #### rejects dyn trait mismatches
 
-- rejects dyn trait mismatches
+1. check
+2. check
+3. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("rejects dyn trait mismatches")
 val unifier = TypeUnifier.new()
 check(unifier.unify(Type.DynTrait("Read"), Type.DynTrait("Write")).is_err())
 check(unifier.unify(Type.DynTrait("Read"), Type.Int).is_err())
@@ -247,18 +288,25 @@ check(unifier.unify(Type.Int, Type.DynTrait("Read")).is_err())
 
 #### resolves transitive dependencies and deduplicates diamonds
 
-- resolves transitive dependencies and deduplicates diamonds
+1. resolver register dependency
+2. resolver register dependency
+3. resolver register dependency
+4. resolver register dependency
+5. check
+6. check
+7. check
+8. check
+9. check
+10. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 25 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("resolves transitive dependencies and deduplicates diamonds")
 val resolver = DependencyResolver.new()
 
 val base = DependencyInfo.new("base")
@@ -288,18 +336,18 @@ check(resolved.len() == 4)
 
 #### skips missing dependencies without breaking resolution
 
-- skips missing dependencies without breaking resolution
+1. resolver register dependency
+2. check
+3. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("skips missing dependencies without breaking resolution")
 val resolver = DependencyResolver.new()
 
 val leaf = DependencyInfo.new("leaf")
@@ -316,18 +364,21 @@ check(contains_text(resolved, "leaf"))
 
 #### collects fields without duplicates
 
-- collects fields without duplicates
+1. base fields = [
+2. extra fields = [
+3. resolver register dependency
+4. resolver register dependency
+5. check
+6. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("collects fields without duplicates")
 val resolver = DependencyResolver.new()
 
 val base = DependencyInfo.new("base")
@@ -351,18 +402,21 @@ check(same_pairs(fields, [("id", Type.Int), ("name", Type.Str), ("active", Type.
 
 #### creates fresh variables and binds trait interfaces
 
-- creates fresh variables and binds trait interfaces
+1. check
+2. checker bind interface
+3. check
+4. check
+5. check
+6. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates fresh variables and binds trait interfaces")
 val checker = TypeChecker.new()
 val first = checker.fresh_var()
 val second = checker.fresh_var()
@@ -379,18 +433,20 @@ check(checker.get_dispatch_mode("Missing") == DispatchMode.Dynamic)
 
 #### tracks trait implementations for dyn trait coercion
 
-- tracks trait implementations for dyn trait coercion
+1. checker register trait impl
+2. checker register trait impl
+3. check
+4. check
+5. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("tracks trait implementations for dyn trait coercion")
 val checker = TypeChecker.new()
 checker.register_trait_impl("Display", Type.Int)
 checker.register_trait_impl("Display", Type.Bool)
@@ -403,18 +459,23 @@ check(not checker.can_coerce_to_dyn_trait(Type.Str, "Display"))
 
 #### resolves transitive dependencies through the checker
 
-- resolves transitive dependencies through the checker
+1. core fields = [
+2. model fields = [
+3. checker register dependency
+4. checker register dependency
+5. check
+6. check
+7. check
+8. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("resolves transitive dependencies through the checker")
 val checker = TypeChecker.new()
 
 val core = DependencyInfo.new("core")
@@ -443,12 +504,12 @@ check(same_pairs(checker.collect_fields(["model"]), [("id", Type.Int), ("name", 
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/01_unit/lib/std/type_checker/type_inference_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering Type Representation, Type Unification, Dependency Resolution, TypeChecker Integration.
+Tests covering:
 - Type Representation
 - Type Unification
 - Dependency Resolution
@@ -466,51 +527,3 @@ Tests covering Type Representation, Type Unification, Dependency Resolution, Typ
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-UNIT`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `7528bde6db19d8f85e73ecfc62f6afb4e03876fe35b5daaf352fb6c718616156`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `7528bde6db19d8f85e73ecfc62f6afb4e03876fe35b5daaf352fb6c718616156`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `7528bde6db19d8f85e73ecfc62f6afb4e03876fe35b5daaf352fb6c718616156`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/01_unit/lib/std/type_checker/type_inference_spec.spl
-mirror: doc/06_spec/01_unit/lib/std/type_checker/type_inference_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/lib/std/type_checker/type_inference_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/lib/std/type_checker/type_inference_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/lib/std/type_checker/type_inference_spec.spl:521:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'renders primitive and compound types' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/lib/std/type_checker/type_inference_spec.spl:537:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'identifies primitive types' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/lib/std/type_checker/type_inference_spec.spl:548:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'unifies identical primitive types' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

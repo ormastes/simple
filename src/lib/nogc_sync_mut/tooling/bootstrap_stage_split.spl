@@ -1,0 +1,132 @@
+# codex-impl: fail-closed Stage-3 artifact / Stage-4 tools-only boundary.
+use std.common.crypto.sha256.{sha256_text}
+use std.common.encoding.sha256_contract.{sha256_lower_hex_valid}
+
+pub const COMPILER_ARTIFACT_MANIFEST_SCHEMA_V1: text = "CompilerArtifactManifestV1"
+pub const TOOL_COMPILE_JOURNAL_SCHEMA_V1: text = "ToolCompileJournalV1"
+pub const TOOLING_LINK_RECEIPT_SCHEMA_V1: text = "ToolingLinkReceiptV1"
+
+fn _frame(name: text, value: text) -> text:
+    name.len().to_text() + ":" + name + value.len().to_text() + ":" + value
+
+fn _tool_path(path: text) -> bool:
+    if path == "" or path.starts_with("/") or path.starts_with("../") or path.contains("/../") or path.contains("//"):
+        return false
+    if path == "src/compiler" or path.starts_with("src/compiler/") or path == "./src/compiler" or path.starts_with("./src/compiler/"):
+        return false
+    path.starts_with("src/app/") or path.starts_with("src/lib/") or path.starts_with("./src/app/") or path.starts_with("./src/lib/")
+
+pub struct CompilerArtifactManifestV1:
+    schema_version: text
+    source_hash: text
+    producer_hash: text
+    backend: text
+    target: text
+    compiler_abi: text
+    runtime_abi: text
+    compiler_identity: text
+    admission_receipt_path: text
+    admission_receipt_hash: text
+    compiler_executable_path: text
+    compiler_executable_hash: text
+    compiler_archive_path: text
+    compiler_archive_hash: text
+    compiler_interface_path: text
+    compiler_interface_hash: text
+    runtime_archive_path: text
+    runtime_archive_hash: text
+
+impl CompilerArtifactManifestV1:
+    pub fn diagnostic() -> text:
+        if self.schema_version != COMPILER_ARTIFACT_MANIFEST_SCHEMA_V1: return "BSPLIT-E-MANIFEST-SCHEMA"
+        if self.backend == "": return "BSPLIT-E-MANIFEST-BACKEND"
+        if self.target == "" or self.compiler_abi == "" or self.runtime_abi == "": return "BSPLIT-E-MANIFEST-IDENTITY"
+        if self.compiler_identity == "" or self.compiler_identity.contains("Rust-built") or self.compiler_identity.contains("bootstrap seed only"): return "BSPLIT-E-MANIFEST-IDENTITY"
+        if self.admission_receipt_path == "" or not sha256_lower_hex_valid(self.admission_receipt_hash): return "BSPLIT-E-MANIFEST-ADMISSION"
+        if not sha256_lower_hex_valid(self.source_hash) or not sha256_lower_hex_valid(self.producer_hash): return "BSPLIT-E-MANIFEST-PROVENANCE"
+        if self.compiler_executable_path == "" or not sha256_lower_hex_valid(self.compiler_executable_hash): return "BSPLIT-E-MANIFEST-EXECUTABLE"
+        if self.compiler_archive_path == "" or not sha256_lower_hex_valid(self.compiler_archive_hash): return "BSPLIT-E-MANIFEST-ARCHIVE"
+        if self.compiler_interface_path == "" or not sha256_lower_hex_valid(self.compiler_interface_hash): return "BSPLIT-E-MANIFEST-INTERFACE"
+        if self.runtime_archive_path == "" or not sha256_lower_hex_valid(self.runtime_archive_hash): return "BSPLIT-E-MANIFEST-RUNTIME"
+        ""
+
+    pub fn canonical_text() -> text:
+        _frame("schema", self.schema_version) + _frame("source", self.source_hash) + _frame("producer", self.producer_hash) +
+            _frame("backend", self.backend) + _frame("target", self.target) + _frame("compiler_abi", self.compiler_abi) +
+            _frame("runtime_abi", self.runtime_abi) + _frame("compiler_identity", self.compiler_identity) +
+            _frame("admission_receipt_path", self.admission_receipt_path) + _frame("admission_receipt_hash", self.admission_receipt_hash) +
+            _frame("compiler_executable_path", self.compiler_executable_path) + _frame("compiler_executable_hash", self.compiler_executable_hash) +
+            _frame("compiler_archive_path", self.compiler_archive_path) + _frame("compiler_archive_hash", self.compiler_archive_hash) +
+            _frame("compiler_interface_path", self.compiler_interface_path) + _frame("compiler_interface_hash", self.compiler_interface_hash) +
+            _frame("runtime_archive_path", self.runtime_archive_path) + _frame("runtime_archive_hash", self.runtime_archive_hash)
+
+    pub fn hash() -> text: sha256_text(self.canonical_text())
+
+pub struct ToolCompileUnitV1:
+    source_path: text
+    source_hash: text
+    object_path: text
+    object_hash: text
+
+impl ToolCompileUnitV1:
+    pub fn diagnostic() -> text:
+        if not _tool_path(self.source_path): return "BSPLIT-E-TOOL-OWNER"
+        if not sha256_lower_hex_valid(self.source_hash): return "BSPLIT-E-TOOL-SOURCE"
+        if self.object_path == "" or not sha256_lower_hex_valid(self.object_hash): return "BSPLIT-E-TOOL-OBJECT"
+        ""
+
+pub fn stage4_tool_units_diagnostic(units: [ToolCompileUnitV1]) -> text:
+    if units.is_empty(): return "BSPLIT-E-TOOL-EMPTY"
+    var sources: [text] = []
+    var objects: [text] = []
+    for unit in units:
+        val issue = unit.diagnostic()
+        if issue != "": return issue
+        if sources.contains(unit.source_path) or objects.contains(unit.object_path): return "BSPLIT-E-TOOL-DUPLICATE"
+        sources.push(unit.source_path)
+        objects.push(unit.object_path)
+    ""
+
+pub struct ToolCompileJournalV1:
+    schema_version: text
+    compiler_manifest_hash: text
+    compiler_executable_hash: text
+    target: text
+    compiler_sources_compiled: i64
+    units: [ToolCompileUnitV1]
+
+impl ToolCompileJournalV1:
+    pub fn diagnostic(manifest: CompilerArtifactManifestV1) -> text:
+        val issue = manifest.diagnostic()
+        if issue != "": return issue
+        if self.schema_version != TOOL_COMPILE_JOURNAL_SCHEMA_V1: return "BSPLIT-E-JOURNAL-SCHEMA"
+        if self.compiler_manifest_hash != manifest.hash() or self.compiler_executable_hash != manifest.compiler_executable_hash: return "BSPLIT-E-JOURNAL-AUTHORITY"
+        if self.target != manifest.target: return "BSPLIT-E-JOURNAL-TARGET"
+        if self.compiler_sources_compiled != 0: return "BSPLIT-E-COMPILER-TRAVERSAL"
+        stage4_tool_units_diagnostic(self.units)
+
+pub struct ToolingLinkReceiptV1:
+    schema_version: text
+    compiler_manifest_hash: text
+    target: text
+    compiler_abi: text
+    runtime_abi: text
+    tool_compile_journal_hash: text
+    compiler_sources_compiled: i64
+    output_path: text
+    output_hash: text
+    help_smoke_passed: bool
+    version_smoke_passed: bool
+
+impl ToolingLinkReceiptV1:
+    pub fn diagnostic(manifest: CompilerArtifactManifestV1) -> text:
+        val issue = manifest.diagnostic()
+        if issue != "": return issue
+        if self.schema_version != TOOLING_LINK_RECEIPT_SCHEMA_V1: return "BSPLIT-E-RECEIPT-SCHEMA"
+        if self.compiler_manifest_hash != manifest.hash(): return "BSPLIT-E-RECEIPT-MANIFEST"
+        if self.target != manifest.target or self.compiler_abi != manifest.compiler_abi or self.runtime_abi != manifest.runtime_abi: return "BSPLIT-E-RECEIPT-ABI"
+        if not sha256_lower_hex_valid(self.tool_compile_journal_hash): return "BSPLIT-E-RECEIPT-JOURNAL"
+        if self.compiler_sources_compiled != 0: return "BSPLIT-E-COMPILER-TRAVERSAL"
+        if self.output_path == "" or not sha256_lower_hex_valid(self.output_hash): return "BSPLIT-E-RECEIPT-OUTPUT"
+        if not self.help_smoke_passed or not self.version_smoke_passed: return "BSPLIT-E-RECEIPT-SMOKE"
+        ""

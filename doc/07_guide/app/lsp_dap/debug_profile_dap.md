@@ -1,5 +1,10 @@
 # Target-neutral DAP session: debug + profile
 
+> **Unified-service migration:** DAP remains IDE-facing, but new mutable
+> sessions are owned by `DebugServiceV1`. Clients retain a `DebugSessionId`;
+> `TargetDapSession`, `DebugTarget`, `ProfileTarget`, and legacy `DebugBackend`
+> are compatibility adapters, not independent session owners.
+
 The DAP session in `src/app/dap/target_session.spl` (`TargetDapSession`) speaks
 one protocol over any `DebugTarget`/`ProfileTarget` implementation — host today,
 GPU backends once a lowering path exists.
@@ -63,6 +68,70 @@ and the injected `GpuBackendProbe`. The resolver and the `debug-doctor` CLI
 `src/lib/nogc_sync_mut/debug_doctor/matrix.spl`) share that routing, so
 `debug-doctor` is the way to see what a given host would resolve to before you
 launch.
+
+The unified command is `simple debug doctor [profile.sdn]`. Its
+`DebugCapabilityV1` rows report support (`Native | Emulated | Unavailable`),
+verification (`LiveVerified | FixtureVerified | Unverified | Blocked`), and
+perturbation (`Passive | Cooperative | Stopping | Mutating`) independently.
+Source/binary presence and fixture parsing do not prove live support. A required
+blocked row prevents the profile passing; optional blocked rows remain visible.
+
+## Evidence-driven investigation
+
+Use D0–D12 rather than attaching first: intake; preserve exact-build evidence;
+doctor; classify; set perturbation/privacy/downtime budgets; choose the cheapest
+decisive observation; reproduce; state a falsifiable hypothesis; attach/probe
+with a `DebugReceiptV1`; assign the root-cause owner; choose regression levels;
+fix/verify; then clean up and update knowledge.
+
+For external or multiprocess behavior, reuse or create the production-shaped
+System SSpec first. Narrow the owning protocol with Integration SSpec, then add
+Unit/property coverage for a local invariant only when the defect justifies it.
+Preserve the original failure as the final gate. If System cannot reproduce
+faithfully, resume environment/evidence/reachability debugging; if Integration
+cannot, resume boundary/hypothesis debugging. Add adjacent tests only after
+both required reproducers are faithful.
+Then add a same-mechanism similar scenario at System, Integration, and Unit
+levels. Bug-fixed unit owners require 100% branch coverage, and the fix, tests,
+coverage evidence, and bug/token receipt land in the same commit.
+
+`simple debug replay <bundle>` and `simple debug reproduce <bundle>` currently
+execute a digest-bound Simple semantic trace through the existing semantic
+replay backend. They reject unsafe paths and ambiguous traces. A successful
+run reports deterministic replay separately from `original_defect_fixed`,
+which remains false until the original failure and its regression gate pass.
+
+At closure record the bug and provider-reported input/output/cache-read/
+cache-create tokens (or explicit `unavailable`), comparable bug-fix cohort
+average, and ratio in the bug database. A cost above 2× that average blocks closure until a linked
+knowledge, skill, or tool update records the reusable lesson.
+
+## Embedded dump-first evidence
+
+`os.realtime.jtag.embedded_dump_service_v1` adapts artifacts already captured
+by the existing OpenOCD, TRACE32, JTAG, or product-specific mechanism. It does
+not add a transport or native dump parser. The central service authorizes
+passive Evidence before filesystem access; the existing bundle writer then
+retains the native bytes under `raw/`, verifies their digest, and emits the
+manifest and outcome receipt without copying payloads into receipts.
+
+Retention is only `FixtureVerified`. Until a real decoder and symbol owner are
+connected, SourceAnchor, SymbolId, and RTOS task/ISR rows remain visibly
+`Unavailable / Blocked`. A retained or successfully parsed dump is evidence,
+not proof that its originating defect was fixed.
+
+## Offline browser provenance
+
+`app.debug.browser.offline_provenance_v1` accepts metadata supplied by the
+existing compiler/CDP owners; it is not another source-map, DWARF, or CDP
+parser. It emits a fixture-verified `BoundaryFrameV1` only when session and
+artifact build identities match exactly, source revisions match exactly, and
+SourceAnchor, SymbolId, generated location, and producer verification are all
+present. Any mismatch emits no frame and leaves a visible Blocked capability.
+
+This offline match never upgrades a browser row to `LiveVerified`. That claim
+still requires a reachable browser, real source breakpoint, and observed
+JS/Wasm/Simple logical stack.
 
 ## GPU attach is ROUTING-ONLY
 

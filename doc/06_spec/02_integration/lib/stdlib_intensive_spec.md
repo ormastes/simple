@@ -707,6 +707,18 @@ val result = parts.join("")
 check(result.len() > 2500)
 ```
 
+<details>
+<summary>Rendered scenario source</summary>
+
+> var parts: [text] = []<br>
+> for i in 0..500:<br>
+>     parts = parts + ["ite$i$,"]<br>
+> val result = parts.join("")<br>
+> <br>
+> check(result.len() > 2500)
+
+</details>
+
 </details>
 
 
@@ -808,26 +820,6 @@ check(extracts.len() == 10)
 
 
 </details>
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Standard Library |
-| Status | Active |
-| Source | `test/02_integration/lib/stdlib_intensive_spec.spl` |
-| Updated | 2026-08-26 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering String + Collections Integration - Intensive, Math + Collections Integration - Intensive, Path + String Integration - Intensive, Multi-Module Workflow - Intensive, Collections Stress Test - Intensive, String Operations Stress Test - Intensive.
-- String + Collections Integration - Intensive
-- Math + Collections Integration - Intensive
-- Path + String Integration - Intensive
-- Multi-Module Workflow - Intensive
-- Collections Stress Test - Intensive
-- String Operations Stress Test - Intensive
 
 ## Scenario Summary
 

@@ -2,6 +2,29 @@
 
 > Integration tests for the full experiment tracking workflow: config loading, run lifecycle, metric logging, artifact storage, and querying.
 
+<!-- sdn-diagram:id=experiment_tracking_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=experiment_tracking_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+experiment_tracking_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=experiment_tracking_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 6 | 6 | 0 | 0 |
@@ -22,7 +45,7 @@ Integration tests for the full experiment tracking workflow: config loading, run
 | Difficulty | 3/5 |
 | Status | In Progress |
 | Source | `test/03_system/feature/usage/experiment_tracking_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -48,20 +71,25 @@ and querying.
 
 #### creates a run, logs metrics, and completes
 
-- creates a run, logs metrics, and completes
+1. values ["lr"] = ConfigValue Float
+2. values ["epochs"] = ConfigValue Int
+3. var run = start run
    - Expected: is_running is true
+4. run log metric
+5. run log metric
+6. run log metric
+7. run log metric
+8. run complete
    - Expected: is_completed is true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 26 lines folded for reproduction.
+Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("creates a run, logs metrics, and completes")
 var values_ = {}
 values_["lr"] = ConfigValue.Float(0.001)
 values_["epochs"] = ConfigValue.Int(10)
@@ -92,7 +120,8 @@ expect(is_completed).to_equal(true)
 
 #### stores and retrieves artifacts
 
-- stores and retrieves artifacts
+1. var run = start run
+2. var store = ArtifactStore
    - Expected: hash equals `results.sdn`
    - Expected: content equals `loss: 0.1`
 
@@ -100,12 +129,10 @@ expect(is_completed).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("stores and retrieves artifacts")
 val config = ExpConfig(values: {}, source_files: [])
 var run = start_run(config, [])
 var store = ArtifactStore(run_id: run.run_id, data: {})
@@ -125,20 +152,22 @@ expect(content).to_equal("loss: 0.1")
 
 #### merges configs with overlay winning
 
-- merges configs with overlay winning
+1. base vals ["lr"] = ConfigValue Float
+2. base vals ["batch size"] = ConfigValue Int
+3. overlay vals ["lr"] = ConfigValue Float
+4. ConfigValue Float
    - Expected: lr_ok is true
+5. ConfigValue Int
    - Expected: bs_ok is true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 23 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("merges configs with overlay winning")
 var base_vals_ = {}
 base_vals_["lr"] = ConfigValue.Float(0.001)
 base_vals_["batch_size"] = ConfigValue.Int(32)
@@ -168,19 +197,13 @@ expect(bs_ok).to_equal(true)
 
 #### lists runs from empty state
 
-- lists runs from empty state
-   - Expected: runs_.len() equals `0`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("lists runs from empty state")
 var runs_ = []
 expect(runs_.len()).to_equal(0)
 ```
@@ -189,21 +212,13 @@ expect(runs_.len()).to_equal(0)
 
 #### filters runs by completed status
 
-- filters runs by completed status
-   - Expected: done_ok is true
-   - Expected: done_run.run_id equals `done-1`
-   - Expected: active_run.run_id equals `active-1`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 24 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("filters runs by completed status")
 val config = ExpConfig(values: {}, source_files: [])
 # Directly construct runs with known statuses
 val done_run = Run(
@@ -234,18 +249,23 @@ expect(active_run.run_id).to_equal("active-1")
 
 #### diffs two runs with different configs
 
-- diffs two runs with different configs
+1. vals a ["lr"] = ConfigValue Float
+2. vals b ["lr"] = ConfigValue Float
+3. var run a = start run
+4. run a log metric
+5. run a complete
+6. var run b = start run
+7. run b log metric
+8. run b complete
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("diffs two runs with different configs")
 var vals_a_ = {}
 vals_a_["lr"] = ConfigValue.Float(0.001)
 val config_a = ExpConfig(values: vals_a_, source_files: [])
@@ -282,54 +302,3 @@ expect(a_loss).to_be_greater_than(b_loss)
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `f4270618f2c71ae9c448d75a8315784613fbd0f7081087b1f05042b3571a6455`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `f4270618f2c71ae9c448d75a8315784613fbd0f7081087b1f05042b3571a6455`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `f4270618f2c71ae9c448d75a8315784613fbd0f7081087b1f05042b3571a6455`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **90/100**; effective score: **90/100**; blockers: **0**.
-
-SSpec documentization score: 90/100
-source: test/03_system/feature/usage/experiment_tracking_spec.spl
-mirror: doc/06_spec/03_system/feature/usage/experiment_tracking_spec.md (current)
-findings: 6 blockers: 0
-  narrative=100 structure=100 oracle=90
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/feature/usage/experiment_tracking_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/feature/usage/experiment_tracking_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, evidence, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/feature/usage/experiment_tracking_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-10): 1 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/03_system/feature/usage/experiment_tracking_spec.spl:110:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates a run, logs metrics, and completes' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/usage/experiment_tracking_spec.spl:138:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'stores and retrieves artifacts' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/usage/experiment_tracking_spec.spl:154:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'merges configs with overlay winning' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

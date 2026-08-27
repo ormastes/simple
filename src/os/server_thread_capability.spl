@@ -1,0 +1,61 @@
+"""Honest SimpleOS server background-worker capability boundary.
+
+The kernel scheduler can represent tasks, but the filesystem-executable ABI
+does not yet turn a Simple closure record into a scheduler-owned user thread.
+In particular, the libc pthread entry returns ENOSYS and the kernel thread
+shim rejects creation.  Server launch policy must therefore retain the
+caller-owned inline lane until a receipt can prove the entire spawn/join ABI.
+"""
+
+pub struct SimpleOsServerThreadCapability:
+    profile: text
+    scheduler_task_records: bool
+    closure_handoff: bool
+    worker_stack_ownership: bool
+    join_completion: bool
+    background_worker: bool
+    available_parallelism: i64
+    fallback: text
+    reason: text
+
+pub fn simpleos_server_thread_capability() -> SimpleOsServerThreadCapability:
+    SimpleOsServerThreadCapability(
+        profile: "simpleos-single-worker-v1",
+        scheduler_task_records: true,
+        closure_handoff: false,
+        worker_stack_ownership: false,
+        join_completion: false,
+        background_worker: false,
+        available_parallelism: 1,
+        fallback: "caller-thread-inline",
+        reason: "missing-userspace-closure-spawn-join-abi"
+    )
+
+pub fn simpleos_server_background_worker_admitted(
+    capability: SimpleOsServerThreadCapability
+) -> bool:
+    (capability.scheduler_task_records and capability.closure_handoff and
+        capability.worker_stack_ownership and capability.join_completion and
+        capability.background_worker and capability.available_parallelism > 1)
+
+pub fn simpleos_server_worker_count(
+    requested: i64,
+    capability: SimpleOsServerThreadCapability
+) -> i64:
+    if requested > 1 and simpleos_server_background_worker_admitted(capability):
+        requested
+    else:
+        1
+
+pub fn simpleos_server_thread_receipt_text(
+    capability: SimpleOsServerThreadCapability
+) -> text:
+    ("thread_profile=" + capability.profile + "\n" +
+        "scheduler_task_records=" + capability.scheduler_task_records.to_text() + "\n" +
+        "closure_handoff=" + capability.closure_handoff.to_text() + "\n" +
+        "worker_stack_ownership=" + capability.worker_stack_ownership.to_text() + "\n" +
+        "join_completion=" + capability.join_completion.to_text() + "\n" +
+        "background_worker=" + capability.background_worker.to_text() + "\n" +
+        "available_parallelism=" + capability.available_parallelism.to_text() + "\n" +
+        "fallback=" + capability.fallback + "\n" +
+        "thread_reason=" + capability.reason + "\n")

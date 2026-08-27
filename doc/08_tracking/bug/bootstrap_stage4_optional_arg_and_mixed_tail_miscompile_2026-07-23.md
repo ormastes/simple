@@ -1,40 +1,9 @@
 # Seed stage4 lane: optional-in-argument + mixed-tail miscompiles
 
-> ## 2026-08-17 (worker W5): BLOCKED on verification lane; workarounds confirmed still load-bearing
->
-> Both defects are properties of the Rust seed's `SIMPLE_BOOTSTRAP=1` stage4 NATIVE
-> lane. Reproducing or ablating either requires a stage4 full-CLI build, which this
-> session must not run, and the ordinary seed `run` path does not exercise that lane.
-> No probe in this session can speak to it, so none is quoted.
->
-> What IS verifiable here is that the mandatory workarounds are still in place and
-> still commented as such -- e.g. `operand_type` in
-> `src/compiler/70.backend/backend/cranelift_codegen_adapter.spl:1420` carries
-> `val local_value = local ?? LocalId(id: -1)` with the note that "Stage4 `if val`
-> can lose the LocalId payload", which is Defect 1's flat-optional shape, and
-> `local_type` just above it records a removed `local.?` gate that "is FALSE on the
-> stage4 lane and skipped EVERY local". So the lane's optional-handling hazard is
-> still being routed around rather than fixed.
->
-> Consequence worth stating plainly: these workarounds are load-bearing, so any
-> future cleanup that "simplifies" them back to `if val` / `.?` will silently
-> reintroduce Defect 1. Still OPEN.
->
-> **FAMILY checked and REJECTED:** this row's Defect 1 (optional in argument
-> position) was grouped with `pure_simple_text_extern_abi_audit_2026-07-30` as a
-> possible shared argument-passing-ABI cause. They are NOT the same defect. This row
-> is about an OPTIONAL argument's flat-nullable representation being lost on one
-> backend lane; that row is about `text` being deliberately passed as ONE word
-> instead of a `(ptr, len)` PAIR, i.e. an argument-count/convention mismatch that is
-> uniform across all three pure-Simple backends by design. Different mechanism,
-> different fix, correctly filed apart.
-
-
 - **Date:** 2026-07-23
 - **Component:** Rust seed `SIMPLE_BOOTSTRAP=1` native lane (stage4 full-CLI build)
 - **Severity:** critical (silently wrong code in the self-hosted AOT driver)
-- Status: OPEN (P1)
-- Status re-verified 2026-08-17 by source inspection (triage shard 00).
+- **Status:** open (seed defect; .spl call sites worked around, fix pinned by probes)
 
 ## Defect 1 — optional in argument position never invokes the callee
 
@@ -97,33 +66,6 @@ conclusion-bearing verification build.
 **Workaround:** free functions taking the underlying Dict handle as a plain
 argument (`borrowset_active_list` / `borrowset_conflicting` in
 `borrow_graph.spl`, used by `nll.spl` check paths).
-
-## Pairing rule (sharpest form of the optional defect)
-
-The defect is a PRODUCER/CONSUMER REPRESENTATION MISMATCH, not "Some is always
-wrong": Some-box producer + `case Some(x)` consumer works (both boxed); flat
-producer (bare-lift) + if-val consumer works; ANY mix breaks (if-val binds a
-box un-unwrapped; `case Some`/`.unwrap()` on a flat value gives garbage or a
-trap). Bare-lift a producer ONLY together with flipping every consumer of that
-payload to if-val (grep for `case Some(`/`.unwrap()` on it first). Hit twice:
-`end_function` (match-Some on freshly flattened `current_function`) and the
-`HirStmtKind.Let` type payload (flat flip broke `mir_lowering_stmts` case-Some
-consumers → universal SIGILL; producer flip reverted instead).
-
-## Fixed alongside (real shared-MIR bugs found while peeling, not lane-specific)
-
-- `lower_enum_match` dropped wildcard positions from the payload-bind list:
-  `A(_,_,v)` bound v to the tuple BOX (bind-count-1 fast path misfire) and
-  `A(_,t,v)` shifted every bind left (bind index used as tuple slot). Fixed
-  with `enum_pat_binding_positions`/`enum_pat_arity` + declared-slot indexing
-  + per-slot text retag via `enum_tuple_text_slots` (construction-site
-  tracking in `box_tuple_payload`). Affected the LLVM lane too.
-- `rt_enum_new` id/disc were emitted as I32 consts against the cranelift
-  lane's uniform-i64 convention — every payload-enum construct failed
-  cranelift verification. Emitted as I64 now (C ABI reads low 32 bits).
-- `compile_module_with_backend` had no return-type annotation — the receiver
-  was void-typed at method resolution and `.is_err()`/`.unwrap_err()`
-  dispatched as `void.*` (masked every real backend error as an empty string).
 
 ## Separate defect (filed, not in this family): `void.unwrap_err`
 

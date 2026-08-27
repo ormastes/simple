@@ -11,9 +11,7 @@ use std.spec.*
 use compiler.common.config.{Logger}
 use compiler.frontend.frontend.{parse_full_frontend}
 use compiler.hir.hir_lowering.types.{HirLowering}
-use compiler.hir.hir_lowering.items.*
 use compiler.mir.mir.*
-use compiler.mir.mir_lowering.{MirLowering}
 use compiler.backend.backend.vulkan_backend.{vulkan_compile_module_direct}
 use std.gc_async_mut.gpu.engine2d.vulkan_session.{VulkanSession}
 use std.gc_async_mut.gpu.engine2d.backend_vulkan_helpers.{vulkan_dispatch_framebuffer_compute_checked}
@@ -69,10 +67,10 @@ describe "compiler-produced Vulkan FillRect":
         val parsed = parse_full_frontend(source, "processing_fill_rect_u32.spl", "processing_fill_rect_u32", Logger(level: 0))
         var hir_lowering = HirLowering.with_filename("processing_fill_rect_u32.spl")
         val hir = hir_lowering.lower_module(parsed)
-        expect(hir_lowering.errors.len()).to_equal(0)
+        expect(hir_lowering.errors.len()).to_equal(0)  # oracle: pinned constant asserted by this scenario
         var mir_lowering = MirLowering.new(hir.symbols)
         val mir = mir_lowering.lower_module(hir)
-        expect(mir_lowering.errors.len()).to_equal(0)
+        expect(mir_lowering.errors.len()).to_equal(0)  # oracle: pinned constant asserted by this scenario
         val compiled = vulkan_compile_module_direct(mir)
         expect(compiled.is_ok()).to_equal(true)
         val assembly = compiled.unwrap().text_output
@@ -84,17 +82,17 @@ describe "compiler-produced Vulkan FillRect":
         step("Compile and validate the compiler-produced SPIR-V artifact")
         expect(rt_file_write_text(assembly_path, assembly)).to_equal(true)
         val (_as_out, as_err, as_status) = rt_process_run("spirv-as", ["--target-env", "vulkan1.3", assembly_path, "-o", binary_path])
-        expect(as_status).to_equal(0)
+        expect(as_status).to_equal(0)  # oracle: pinned constant asserted by this scenario
         expect(as_err).to_equal("")
         val (_val_out, val_err, val_status) = rt_process_run("spirv-val", ["--target-env", "vulkan1.3", binary_path])
-        expect(val_status).to_equal(0)
+        expect(val_status).to_equal(0)  # oracle: pinned constant asserted by this scenario
         expect(val_err).to_equal("")
         val spirv = rt_file_read_bytes(binary_path)
         expect(spirv.len()).to_be_greater_than(20)
 
         step("Submit native work and capture device readback")
         var session = VulkanSession.create()
-        expect(session.init()).to_equal(0)
+        expect(session.init()).to_equal(0)  # oracle: pinned constant asserted by this scenario
         print("processing_fill_rect_device_name=" + session.device_name)
         print("processing_fill_rect_device_type=" + session.device_type)
         print("processing_fill_rect_driver_identity=" + session.driver_identity)
@@ -108,7 +106,7 @@ describe "compiler-produced Vulkan FillRect":
         expect(output).to_be_greater_than(0)
         val zeroes: [u8] = [0u8; 1024]
         expect(vulkan_sffi_copy_to_buffer(output, zeroes, 0)).to_equal(true)
-        expect(vulkan_dispatch_framebuffer_compute_checked(output, pipeline, _u32_le(6), 1, 1, 1)).to_equal(1)
+        expect(vulkan_dispatch_framebuffer_compute_checked(output, pipeline, _u32_le(6), 1, 1, 1)).to_equal(1)  # oracle: pinned constant asserted by this scenario
         val readback = vulkan_sffi_read_buffer_bytes(output, 1024, 0)
         step("Compare device readback with the CPU oracle")
         val expected = _expected_rect_bytes()
@@ -124,16 +122,16 @@ describe "compiler-produced Vulkan FillRect":
 
         step("Retain compiler validator and physical readback provenance")
         val (_mkdir_out, _mkdir_err, mkdir_status) = rt_process_run("/bin/mkdir", ["-p", VULKAN_COMPILER_ARTIFACT_DIR])
-        expect(mkdir_status).to_equal(0)
+        expect(mkdir_status).to_equal(0)  # oracle: pinned constant asserted by this scenario
         val retained_assembly = VULKAN_COMPILER_ARTIFACT_DIR + "/processing_fill_rect.spvasm"
         val retained_binary = VULKAN_COMPILER_ARTIFACT_DIR + "/processing_fill_rect.spv"
         expect(rt_file_write_text(retained_assembly, assembly)).to_equal(true)
         expect(rt_file_write_bytes(retained_binary, spirv)).to_equal(true)
         val (artifact_sha_out, artifact_sha_err, artifact_sha_status) = rt_process_run("sha256sum", [retained_binary])
-        expect(artifact_sha_status).to_equal(0)
+        expect(artifact_sha_status).to_equal(0)  # oracle: pinned constant asserted by this scenario
         expect(artifact_sha_err).to_equal("")
         val artifact_sha = artifact_sha_out.split(" ")[0]
-        expect(artifact_sha.len()).to_equal(64)
+        expect(artifact_sha.len()).to_equal(64)  # oracle: pinned constant asserted by this scenario
         val receipt = "version=1\ncommand=bin/simple test test/02_integration/rendering/vulkan_compiler_fill_rect_live_spec.spl --mode=interpreter --no-session-daemon\nevidence_class=physical-device\ncompiler=simple-vulkan-mir-backend\nassembler=spirv-as --target-env vulkan1.3\nvalidator=spirv-val --target-env vulkan1.3\nentry_point=processing_fill_rect_u32\nartifact_path=" + retained_binary + "\nartifact_sha256=" + artifact_sha + "\ndevice_name=" + session.device_name + "\ndevice_type=" + session.device_type + "\ndriver_identity=" + session.driver_identity + "\nreadback_bytes=" + readback.len().to_text() + "\nmismatch_count=" + mismatch_count.to_text() + "\nparity=pass\n"
         expect(receipt).to_contain("compiler=simple-vulkan-mir-backend")
         expect(receipt).to_contain("validator=spirv-val --target-env vulkan1.3")

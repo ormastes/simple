@@ -21,8 +21,7 @@
 
 use src.lib.nogc_async_mut_noalloc.tls.types.{
     TlsState, TlsError, ContentType, content_type_from_byte,
-    HASH_SIZE_SHA256, X25519_KEY_SIZE, TLS_RECORD_BUFFER_SIZE,
-    TLS_MAX_FRAGMENT
+    HASH_SIZE_SHA256, X25519_KEY_SIZE, TLS_RECORD_BUFFER_SIZE
 }
 use src.lib.nogc_async_mut_noalloc.tls.transport.{BaremetalTransport}
 use src.lib.nogc_async_mut_noalloc.tls.transcript.{Transcript, transcript_new, transcript_add, transcript_hash}
@@ -165,7 +164,7 @@ fn tls_do_handshake(client: TlsClient, client_random: [u8]) -> Result<TlsClient,
     # Step 1: Send ClientHello
     val ch_msg = build_client_hello(client.pubkey, client_random, client.config.hostname)
     val ch_record = _wrap_handshake_record(ch_msg)
-    val send_result = _send_complete_record(client.transport, ch_record)
+    val send_result = client.transport.send(ch_record)
     match send_result:
         Result.Err(msg): return Result.Err(TlsError.TransportError(msg))
         Result.Ok(_): pass_dn
@@ -280,7 +279,7 @@ fn tls_do_handshake(client: TlsClient, client_random: [u8]) -> Result<TlsClient,
 
             val c_hs_write = RecordKey(key: c_hs_keys.key, iv: c_hs_keys.iv)
             val finished_record = record_encrypt(c_hs_write, 0, 0x16u8, finished_msg)
-            val f_send = _send_complete_record(client.transport, finished_record)
+            val f_send = client.transport.send(finished_record)
             match f_send:
                 Result.Err(msg): return Result.Err(TlsError.TransportError(msg))
                 Result.Ok(_): pass_dn
@@ -306,7 +305,7 @@ fn tls_send(client: TlsClient, data: [u8]) -> Result<TlsClient, TlsError>:
     if client.state != TlsState.Connected:
         return Result.Err(TlsError.Internal("not connected"))
     val record = record_encrypt(client.client_write, client.send_seq, 0x17u8, data)
-    val result = _send_complete_record(client.transport, record)
+    val result = client.transport.send(record)
     match result:
         Result.Err(msg): return Result.Err(TlsError.TransportError(msg))
         Result.Ok(_): pass_dn
@@ -332,58 +331,6 @@ fn tls_recv(client: TlsClient) -> Result<(TlsClient, [u8]), TlsError>:
 # Internal Transport Helpers
 # ============================================================================
 
-fn _send_complete_record(transport: BaremetalTransport, record: [u8]) -> Result<i64, text>:
-    """Send one complete record, failing closed on a partial transport write."""
-    val result = transport.send(record)
-    match result:
-        Result.Err(msg): Result.Err(msg)
-        Result.Ok(n):
-            if n < 0 or n.to_u64() != record.len().to_u64():
-                return Result.Err("transport: short write on TLS record")
-            Result.Ok(n)
-
-fn _recv_exact_into(transport: BaremetalTransport, out: [u8], needed: u64) -> Result<i64, text>:
-    """Fill out[0..needed], accumulating valid fragmented transport reads."""
-    if needed == 0:
-        return Result.Ok(0)
-
-    # Preserve the allocation-free common path: receive directly into the
-    # caller's buffer first, and allocate a tail scratch buffer only when the
-    # transport returns a valid fragment.
-    val first = transport.recv(out, needed.to_i64())
-    var received: u64 = 0
-    match first:
-        Result.Err(msg): return Result.Err(msg)
-        Result.Ok(n):
-            if n <= 0 or n.to_u64() > needed:
-                return Result.Err("transport: invalid TLS read count")
-            received = n.to_u64()
-
-    while received < needed:
-        val remaining = needed - received
-        var tail: [u8] = []
-        var i: u64 = 0
-        while i < remaining:
-            tail.push(0x00u8)
-            i = i + 1
-
-        val next = transport.recv(tail, remaining.to_i64())
-        var count: u64 = 0
-        match next:
-            Result.Err(msg): return Result.Err(msg)
-            Result.Ok(n):
-                if n <= 0 or n.to_u64() > remaining:
-                    return Result.Err("transport: invalid TLS read count")
-                count = n.to_u64()
-
-        i = 0
-        while i < count:
-            out[(received + i).to_i64()] = _cli_u8_at(tail, i)
-            i = i + 1
-        received = received + count
-
-    Result.Ok(received.to_i64())
-
 fn _wrap_handshake_record(payload: [u8]) -> [u8]:
     """Wrap a plaintext handshake message in a TLS record (no encryption)."""
     val payload_len = payload.len().to_u64()
@@ -407,33 +354,24 @@ fn _recv_handshake_record(transport: BaremetalTransport) -> Result<[u8], text>:
     while i < 5:
         header.push(0x00u8)
         i = i + 1
-    val hr = _recv_exact_into(transport, header, 5)
+    val hr = transport.recv(header, 5)
     match hr:
         Result.Err(msg): return Result.Err(msg)
         Result.Ok(n):
-            if n != 5:
+            if n < 5:
                 return Result.Err("transport: short read on record header")
 
-    val content_type = _cli_u8_at(header, 0)
-    if content_type != 0x14 and content_type != 0x15 and content_type != 0x16 and content_type != 0x17:
-        return Result.Err("transport: invalid TLS record content type")
-    # RFC 8446 requires TLS 1.3 implementations to ignore the plaintext
-    # legacy_record_version. Authenticated ciphertext records are checked as
-    # 0x0303 by record_decrypt after this framing boundary.
     val payload_len = (_cli_u8_at(header, 3).to_u64() << 8) | _cli_u8_at(header, 4).to_u64()
-    val max_payload = if content_type == 0x17: TLS_MAX_FRAGMENT + 256 else: TLS_MAX_FRAGMENT
-    if payload_len == 0 or payload_len > max_payload:
-        return Result.Err("transport: invalid TLS record payload length")
     var payload: [u8] = []
     i = 0
     while i < payload_len:
         payload.push(0x00u8)
         i = i + 1
-    val pr = _recv_exact_into(transport, payload, payload_len)
+    val pr = transport.recv(payload, payload_len.to_i64())
     match pr:
         Result.Err(msg): return Result.Err(msg)
         Result.Ok(n):
-            if n < 0 or n.to_u64() != payload_len:
+            if n.to_u64() < payload_len:
                 return Result.Err("transport: short read on record payload")
 
     # Return header || payload
@@ -462,9 +400,6 @@ fn _record_payload(raw_record: [u8]) -> [u8]:
     if raw_len < 5:
         return []
     val payload_len = (_cli_u8_at(raw_record, 3).to_u64() << 8) | _cli_u8_at(raw_record, 4).to_u64()
-    val max_payload = if _cli_u8_at(raw_record, 0) == 0x17: TLS_MAX_FRAGMENT + 256 else: TLS_MAX_FRAGMENT
-    if payload_len == 0 or payload_len > max_payload or raw_len != 5 + payload_len:
-        return []
     var out: [u8] = []
     var i: u64 = 5
     while i < 5 + payload_len and i < raw_len:

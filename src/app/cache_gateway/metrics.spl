@@ -1,0 +1,180 @@
+# Gateway metrics / admin surface.
+#
+# Counters only — no dicts. Every lookup is a linear scan over a small tier
+# array, which sidesteps the native-codegen dict pitfalls entirely and keeps
+# the whole surface trivially serialisable.
+#
+# What is measured, per design §15.5 (observability):
+#   - hit rate per tier (main / branch / cas)
+#   - quarantine events (with the reason, bounded)
+#   - promotion accept / reject counts (with the last reject reasons, bounded)
+
+# ============================================================================
+# Per-tier counters
+# ============================================================================
+
+struct TierCounters:
+    tier: text
+    hits: i64
+    misses: i64
+    write_rejects: i64
+
+fn tier_counters_new(tier: text) -> TierCounters:
+    TierCounters(tier: tier, hits: 0, misses: 0, write_rejects: 0)
+
+# Permille rather than a float — integer arithmetic keeps this exact and stable
+# across engines.
+fn tier_hit_rate_permille(c: TierCounters) -> i64:
+    val total = c.hits + c.misses
+    if total <= 0:
+        return 0
+    (c.hits * 1000) / total
+
+# ============================================================================
+# Metrics
+# ============================================================================
+
+val METRICS_MAX_EVENTS: i64 = 64
+
+struct GatewayMetrics:
+    tiers: [TierCounters]
+    quarantine_count: i64
+    quarantine_events: [text]       # bounded ring, newest appended
+    promotion_accepts: i64
+    promotion_rejects: i64
+    promotion_reject_reasons: [text]
+
+fn gateway_metrics_new() -> GatewayMetrics:
+    var tiers: [TierCounters] = []
+    tiers.push(tier_counters_new("main"))
+    tiers.push(tier_counters_new("branch"))
+    tiers.push(tier_counters_new("cas"))
+    GatewayMetrics(
+        tiers: tiers,
+        quarantine_count: 0,
+        quarantine_events: [],
+        promotion_accepts: 0,
+        promotion_rejects: 0,
+        promotion_reject_reasons: []
+    )
+
+fn metrics_tier_index(m: GatewayMetrics, tier: text) -> i64:
+    var i: i64 = 0
+    while i < m.tiers.len():
+        if m.tiers[i].tier == tier:
+            return i
+        i = i + 1
+    -1
+
+# Keeps the newest METRICS_MAX_EVENTS entries. An unbounded event log is a
+# memory leak in a long-lived service, so this drops the oldest.
+fn metrics_append_bounded(events: [text], entry: text) -> [text]:
+    var out: [text] = []
+    var start: i64 = 0
+    if events.len() >= METRICS_MAX_EVENTS:
+        start = events.len() - METRICS_MAX_EVENTS + 1
+    var i = start
+    while i < events.len():
+        out.push(events[i])
+        i = i + 1
+    out.push(entry)
+    out
+
+fn metrics_replace_tier(m: GatewayMetrics, idx: i64, updated: TierCounters) -> [TierCounters]:
+    var tiers: [TierCounters] = []
+    var i: i64 = 0
+    while i < m.tiers.len():
+        if i == idx:
+            tiers.push(updated)
+        else:
+            tiers.push(m.tiers[i])
+        i = i + 1
+    tiers
+
+fn metrics_record_read(m: GatewayMetrics, tier: text, hit: bool) -> GatewayMetrics:
+    val idx = metrics_tier_index(m, tier)
+    if idx < 0:
+        return m
+    val c = m.tiers[idx]
+    var updated = TierCounters(tier: c.tier, hits: c.hits, misses: c.misses + 1, write_rejects: c.write_rejects)
+    if hit:
+        updated = TierCounters(tier: c.tier, hits: c.hits + 1, misses: c.misses, write_rejects: c.write_rejects)
+    GatewayMetrics(
+        tiers: metrics_replace_tier(m, idx, updated),
+        quarantine_count: m.quarantine_count,
+        quarantine_events: m.quarantine_events,
+        promotion_accepts: m.promotion_accepts,
+        promotion_rejects: m.promotion_rejects,
+        promotion_reject_reasons: m.promotion_reject_reasons
+    )
+
+fn metrics_record_write_reject(m: GatewayMetrics, tier: text) -> GatewayMetrics:
+    val idx = metrics_tier_index(m, tier)
+    if idx < 0:
+        return m
+    val c = m.tiers[idx]
+    val updated = TierCounters(tier: c.tier, hits: c.hits, misses: c.misses, write_rejects: c.write_rejects + 1)
+    GatewayMetrics(
+        tiers: metrics_replace_tier(m, idx, updated),
+        quarantine_count: m.quarantine_count,
+        quarantine_events: m.quarantine_events,
+        promotion_accepts: m.promotion_accepts,
+        promotion_rejects: m.promotion_rejects,
+        promotion_reject_reasons: m.promotion_reject_reasons
+    )
+
+fn metrics_record_quarantine(m: GatewayMetrics, reason: text, now: i64) -> GatewayMetrics:
+    GatewayMetrics(
+        tiers: m.tiers,
+        quarantine_count: m.quarantine_count + 1,
+        quarantine_events: metrics_append_bounded(m.quarantine_events, now.to_text() + " " + reason),
+        promotion_accepts: m.promotion_accepts,
+        promotion_rejects: m.promotion_rejects,
+        promotion_reject_reasons: m.promotion_reject_reasons
+    )
+
+fn metrics_record_promotion(m: GatewayMetrics, accepted: bool, reason: text) -> GatewayMetrics:
+    if accepted:
+        return GatewayMetrics(
+            tiers: m.tiers,
+            quarantine_count: m.quarantine_count,
+            quarantine_events: m.quarantine_events,
+            promotion_accepts: m.promotion_accepts + 1,
+            promotion_rejects: m.promotion_rejects,
+            promotion_reject_reasons: m.promotion_reject_reasons
+        )
+    GatewayMetrics(
+        tiers: m.tiers,
+        quarantine_count: m.quarantine_count,
+        quarantine_events: m.quarantine_events,
+        promotion_accepts: m.promotion_accepts,
+        promotion_rejects: m.promotion_rejects + 1,
+        promotion_reject_reasons: metrics_append_bounded(m.promotion_reject_reasons, reason)
+    )
+
+# ============================================================================
+# Admin rendering
+# ============================================================================
+
+fn gateway_metrics_report(m: GatewayMetrics) -> [text]:
+    var lines: [text] = []
+    var i: i64 = 0
+    while i < m.tiers.len():
+        val c = m.tiers[i]
+        val head = "tier " + c.tier + ": hits=" + c.hits.to_text() + " misses=" + c.misses.to_text()
+        val rate = " hit_rate_permille=" + tier_hit_rate_permille(c).to_text()
+        val rej = " write_rejects=" + c.write_rejects.to_text()
+        lines.push(head + rate + rej)
+        i = i + 1
+    lines.push("quarantine_events=" + m.quarantine_count.to_text())
+    lines.push("promotion_accepts=" + m.promotion_accepts.to_text())
+    lines.push("promotion_rejects=" + m.promotion_rejects.to_text())
+    var j: i64 = 0
+    while j < m.promotion_reject_reasons.len():
+        lines.push("  reject: " + m.promotion_reject_reasons[j])
+        j = j + 1
+    var k: i64 = 0
+    while k < m.quarantine_events.len():
+        lines.push("  quarantine: " + m.quarantine_events[k])
+        k = k + 1
+    lines

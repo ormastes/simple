@@ -33,10 +33,7 @@ export use app.llm_caret.chat.{AgentResult, run_agent_loop, run_agent_loop_rende
 # Interactive chat UI (std.tui) + its renderer seam.
 export use app.llm_caret.chat_tui.{
     ChatTui, make_chat_tui, caret_chat, run_chat_tui, run_chat_plain,
-    render_turn, render_tool_call, tui_tool_renderer
-}
-export use app.llm_caret.tui_io.{CaretIo, CaretLoopResult, production_caret_io}
-export use app.llm_caret.tui_input.{
+    render_turn, render_tool_call, tui_tool_renderer,
     select_renderer_mode, caret_is_tty
 }
 
@@ -52,6 +49,11 @@ fn _RB() -> text:
 
 fn _Q() -> text:
     "\""
+
+fn _unwrap_idx(opt) -> i64:
+    match opt:
+        Some(i): return i
+        nil: return -1
 
 fn _escape_json(s: text) -> text:
     var parts = []
@@ -73,11 +75,63 @@ fn _escape_json(s: text) -> text:
         i = i + 1
     parts.join("")
 
+fn _extract_json_string(json: text, key: text) -> text:
+    val quote = "\""
+    val search = quote + key + quote + ":"
+    val idx = json_find(json, search)
+    if idx < 0:
+        return ""
+    val slen = search.len()
+    val start = idx + slen
+    val after = json.substring(start)
+    val trimmed = after.trim()
+    if trimmed.starts_with(quote):
+        val rest = trimmed.substring(1)
+        var end = 0
+        var escaped = false
+        while end < rest.len():
+            val ch = rest[end]
+            if escaped:
+                escaped = false
+            elif ch == "\\":
+                escaped = true
+            elif ch == "\"":
+                return rest.substring(0, end)
+            end = end + 1
+    ""
+
+fn _extract_json_value(json: text, key: text) -> text:
+    val search = _Q() + key + _Q() + ":"
+    val idx = json_find(json, search)
+    if idx < 0:
+        return "null"
+    val slen = search.len()
+    val start = idx + slen
+    val after = json.substring(start)
+    val trimmed = after.trim()
+    var end = 0
+    while end < trimmed.len():
+        val ch = trimmed[end]
+        if ch == "," or ch == _RB() or ch == "]":
+            break
+        end = end + 1
+    trimmed.substring(0, end).trim()
+
+fn _extract_json_bool(json: text, key: text) -> bool:
+    val raw = _extract_json_value(json, key)
+    raw == "true"
+
+fn _extract_json_int(json: text, key: text) -> i64:
+    val raw = _extract_json_value(json, key)
+    if raw == "null" or raw == "":
+        return 0
+    json_parse_int(raw)
+
 # ============================================================================
 # Module-level state
 # ============================================================================
 
-var LLM_INITIALIZED: bool = false
+var LLM_INITIALIZED = false
 var LLM_PROVIDER = "claude_cli"
 var LLM_MODEL = ""
 var LLM_CLI_PATH = "claude"
@@ -99,12 +153,7 @@ fn llm_init_defaults():
     LLM_INITIALIZED = true
     LLM_PROVIDER = "claude_cli"
     LLM_MODEL = ""
-    LLM_CLI_PATH = ""
-    LLM_API_KEY = ""
-    LLM_BASE_URL = ""
-    LLM_SYSTEM_PROMPT = ""
-    LLM_SESSION_ID = ""
-    LLM_MAX_TURNS = 0
+    LLM_CLI_PATH = "claude"
     LLM_ROLES = []
     LLM_CONTENTS = []
 
@@ -112,15 +161,6 @@ fn llm_init(provider: text, model: text):
     LLM_INITIALIZED = true
     LLM_PROVIDER = provider
     LLM_MODEL = model
-    # A new public client initialization is a new logical backend and
-    # conversation. Provider credentials, endpoints, executable overrides,
-    # session state, and prompt policy must never bleed across initialization.
-    LLM_CLI_PATH = ""
-    LLM_API_KEY = ""
-    LLM_BASE_URL = ""
-    LLM_SYSTEM_PROMPT = ""
-    LLM_SESSION_ID = ""
-    LLM_MAX_TURNS = 0
     LLM_ROLES = []
     LLM_CONTENTS = []
 
@@ -189,32 +229,6 @@ fn _build_messages_json() -> text:
         j = j + 1
     parts.append("]")
     parts.join("")
-
-fn _build_direct_messages_json(prompt: text) -> text:
-    "[" + _LB() +
-        _Q() + "role" + _Q() + ":" + _Q() + "user" + _Q() + "," +
-        _Q() + "content" + _Q() + ":" + _Q() +
-        _escape_json(prompt) + _Q() + _RB() + "]"
-
-fn _effective_api_key() -> text:
-    if LLM_API_KEY != "":
-        return LLM_API_KEY
-    if LLM_PROVIDER == "claude_api":
-        return env_get("ANTHROPIC_API_KEY") ?? ""
-    if LLM_PROVIDER == "openai":
-        return env_get("OPENAI_API_KEY") ?? ""
-    ""
-
-fn _dispatch_current(prompt: text, messages_json: text) -> LLMResponse:
-    dispatch_send(
-        LLM_PROVIDER, prompt, LLM_MODEL, _effective_api_key(),
-        LLM_BASE_URL, LLM_CLI_PATH, LLM_SYSTEM_PROMPT, LLM_SESSION_ID,
-        LLM_MAX_TURNS, 0, messages_json
-    )
-
-fn _record_provider_session(response: LLMResponse):
-    if response.session_id != "":
-        LLM_SESSION_ID = response.session_id
 
 # ============================================================================
 # Chat (main entry point)

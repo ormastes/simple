@@ -1,0 +1,37 @@
+use std.spec.*
+use compiler.mir.hwir.types.{CoreConfig}
+use compiler.mir.hwir.riscv_scalar_runtime_restoring_divider_datapath.{
+    strict_riscv_scalar_runtime_restoring_divider_datapath}
+
+fn config(xlen: i32, profile: text) -> CoreConfig:
+    CoreConfig(xlen: xlen, physical_address_bits: xlen, register_count: 32,
+        profile: "riscv-gen2-" + profile, isa_profile: profile,
+        compressed_decode_profile: "none")
+
+describe "RISC-V runtime restoring divider datapath":
+    it "binds one dynamic RV32 divide/remainder geometry without a frozen instruction":
+        val graph = strict_riscv_scalar_runtime_restoring_divider_datapath(
+            config(32, "rv32im"), 32).unwrap()
+        expect(graph.operand_width).to_equal(32)
+        expect(graph.remainder_width).to_equal(33)
+        expect(graph.input_fields.any(_[0] == "select_remainder")).to_be(true)
+        expect(graph.input_fields.any(_[0] == "word_result_mode")).to_be(true)
+        expect(graph.constants.any(_.name.contains("instruction"))).to_be(false)
+        expect(graph.select_ops.any(_.result == "normal_result" and
+            _.condition == "select_remainder")).to_be(true)
+
+    it "has dynamic special controls and RV64 W sign-extension selection":
+        val graph = strict_riscv_scalar_runtime_restoring_divider_datapath(
+            config(64, "rv64im"), 32).unwrap()
+        expect(graph.count_width).to_equal(6)
+        expect(graph.output_fields.any(_[0] == "architectural_result" and _[1] == 64)).to_be(true)
+        expect(graph.comb_ops.any(_.result == "sign_extended_result" and _.op == "sext")).to_be(true)
+        expect(graph.select_ops.any(_.result == "architectural_result" and
+            _.condition == "word_result_mode")).to_be(true)
+        expect(graph.comb_ops.any(_.result == "special_is_divzero" and _.lhs == "special_reg")).to_be(true)
+
+    it "rejects impossible runtime geometry":
+        expect(strict_riscv_scalar_runtime_restoring_divider_datapath(
+            config(32, "rv32im"), 64).is_err()).to_be(true)
+        expect(strict_riscv_scalar_runtime_restoring_divider_datapath(
+            config(64, "rv64im"), 16).is_err()).to_be(true)

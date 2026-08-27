@@ -1,0 +1,258 @@
+# Plan-bound base-I control admission and normalized completion projection.
+
+use compiler.mir.hwir.types.{CoreConfig, HwClockDomain, HwCombOp, HwConstant,
+    HwCostModel, HwModule, HwModuleDef, HwNodeId, HwOrigin, HwPort, HwSelectOp,
+    HwSignal}
+use lib.hardware.riscv_common.isa.scalar_database.{RiscvScalarDecoderPlan,
+    RiscvScalarIsaEntry, riscv_scalar_semantic_opcode}
+
+fn control_row_width(count: i32) -> i32:
+    var width = 1; var capacity = 2
+    while capacity <= count:
+        width = width + 1; capacity = capacity * 2
+    width
+
+fn control_kind(entry: RiscvScalarIsaEntry) -> text:
+    if entry.id == "rv.i.jal": return "jal"
+    if entry.id == "rv.i.jalr": return "jalr"
+    if entry.id == "rv.i.beq": return "branch_eq"
+    if entry.id == "rv.i.bne": return "branch_ne"
+    if entry.id == "rv.i.blt": return "branch_lt"
+    if entry.id == "rv.i.bge": return "branch_ge"
+    if entry.id == "rv.i.bltu": return "branch_ltu"
+    if entry.id == "rv.i.bgeu": return "branch_geu"
+    ""
+
+fn control_effective_predicate(kind: text) -> text:
+    if kind == "branch_eq": return "effective_eq"
+    if kind == "branch_ne": return "effective_ne"
+    if kind == "branch_lt": return "effective_lt"
+    if kind == "branch_ge": return "effective_ge"
+    if kind == "branch_ltu": return "effective_ltu"
+    if kind == "branch_geu": return "effective_geu"
+    "one1"
+
+fn control_ports(x: i32, row_width: i32) -> [HwPort]:
+    var ports = [HwPort.input("uop_valid", "Bits", 1),
+        HwPort.input("decode_legal", "Bits", 1),
+        HwPort.input("decoded_row_index", "Bits", row_width),
+        HwPort.input("decoded_execution_class", "Bits", 3),
+        HwPort.input("decoded_memory_effect", "Bits", 3),
+        HwPort.input("decoded_semantic_opcode", "Bits", 6),
+        HwPort.input("decoded_declared_operand_width_is_32", "Bits", 1),
+        HwPort.input("canonical_instruction", "Bits", 32),
+        HwPort.input("original_instruction", "Bits", 32),
+        HwPort.input("instruction_length_bytes", "Bits", 3),
+        HwPort.input("instruction_rd_field", "Bits", 5),
+        HwPort.input("instruction_rs1_field", "Bits", 5),
+        HwPort.input("instruction_rs2_field", "Bits", 5),
+        HwPort.input("rs1_value", "Bits", x), HwPort.input("rs2_value", "Bits", x),
+        HwPort.input("pc_before", "Bits", x), HwPort.input("fallthrough_pc", "Bits", x),
+        HwPort.input("privilege", "Bits", 2),
+        HwPort.input("provider_event_id", "Bits", 64),
+        HwPort.input("decode_event_id", "Bits", 64), HwPort.input("lineage_valid", "Bits", 1)]
+    for field in [("branch_target", x), ("jal_target", x), ("jalr_target", x),
+            ("branch_target_misaligned", 1),
+            ("jal_target_misaligned", 1), ("jalr_target_misaligned", 1)]:
+        ports.push(HwPort.input(field[0], "Bits", field[1]))
+    ports.push(HwPort.output("completion_valid", "Bits", 1))
+    ports.push(HwPort.output("protocol_fault", "Bits", 1))
+    for field in [("privilege", 2), ("original_instruction", 32),
+            ("canonical_instruction", 32), ("instruction_length_bytes", 3),
+            ("pc_before", x), ("pc_after", x), ("rd", 5), ("rd_write", 1),
+            ("rd_value", x), ("memory_address", x), ("memory_read_mask", 32),
+            ("memory_write_mask", 32), ("memory_read_data", x),
+            ("memory_write_data", x), ("execute_trap_valid", 1),
+            ("execute_trap_cause", x), ("execute_trap_tval", x),
+            ("memory_trap_valid", 1), ("memory_trap_cause", x),
+            ("memory_trap_tval", x), ("redirect_valid", 1),
+            ("redirect_target", x), ("provider_event_id", 64),
+            ("decode_event_id", 64), ("illegal_valid", 1)]:
+        ports.push(HwPort.output("completion_" + field[0], "Bits", field[1]))
+    ports
+
+pub fn strict_riscv_scalar_runtime_control_provider(module_name: text,
+    config: CoreConfig, plan: RiscvScalarDecoderPlan) -> Result<HwModuleDef, text>:
+    if module_name == "": return Err("HWIR-E-RISCV-RUNTIME-CONTROL-ID: runtime control provider requires a module name")
+    val config_error = config.diagnostic(); if config_error != "": return Err(config_error)
+    val plan_error = plan.diagnostic(); if plan_error != "": return Err(plan_error)
+    if config.compressed_decode_profile != "none":
+        return Err("HWIR-E-RISCV-RUNTIME-CONTROL-COMPRESSED: v1 requires canonical four-byte instructions")
+    if config.xlen as u32 != plan.xlen or config.isa_profile != plan.isa_profile:
+        return Err("HWIR-E-RISCV-RUNTIME-CONTROL-CONFIG: provider requires its exact decoder plan")
+    val x = config.xlen; val row_width = control_row_width(plan.entries.len())
+    var constants = [HwConstant.bits("zero1", 1, 0), HwConstant.bits("one1", 1, 1),
+        HwConstant.bits("zero2", 2, 0), HwConstant.bits("zero3", 3, 0),
+        HwConstant.bits("zero5", 5, 0), HwConstant.bits("zero6", 6, 0),
+        HwConstant.bits("zero32", 32, 0), HwConstant.bits("zero64", 64, 0),
+        HwConstant.bits("zero_xlen", x, 0), HwConstant.bits("control_class", 3, 2),
+        HwConstant.bits("length4", 3, 4), HwConstant.bits("four_xlen", x, 4),
+        HwConstant.bits("shift7", 32, 7), HwConstant.bits("shift15", 32, 15),
+        HwConstant.bits("shift20", 32, 20)]
+    var signals = [HwSignal.comb("rd_shift", "Bits", 32),
+        HwSignal.comb("rs1_shift", "Bits", 32), HwSignal.comb("rs2_shift", "Bits", 32),
+        HwSignal.comb("canonical_rd", "Bits", 5), HwSignal.comb("canonical_rs1", "Bits", 5),
+        HwSignal.comb("canonical_rs2", "Bits", 5), HwSignal.comb("rd_bound", "Bits", 1),
+        HwSignal.comb("rs1_bound", "Bits", 1), HwSignal.comb("rs2_bound", "Bits", 1),
+        HwSignal.comb("fields01", "Bits", 1), HwSignal.comb("fields_bound", "Bits", 1),
+        HwSignal.comb("class_valid", "Bits", 1), HwSignal.comb("memory_valid", "Bits", 1),
+        HwSignal.comb("width_valid", "Bits", 1), HwSignal.comb("length_valid", "Bits", 1),
+        HwSignal.comb("event_valid", "Bits", 1), HwSignal.comb("original_valid", "Bits", 1),
+        HwSignal.comb("expected_fallthrough", "Bits", x), HwSignal.comb("fallthrough_valid", "Bits", 1),
+        HwSignal.comb("rs1_nonzero", "Bits", 1), HwSignal.comb("rs2_nonzero", "Bits", 1),
+        HwSignal.comb("effective_rs1", "Bits", x), HwSignal.comb("effective_rs2", "Bits", x),
+        HwSignal.comb("base01", "Bits", 1), HwSignal.comb("base23", "Bits", 1),
+        HwSignal.comb("base45", "Bits", 1), HwSignal.comb("base67", "Bits", 1),
+        HwSignal.comb("base_a", "Bits", 1), HwSignal.comb("base_b", "Bits", 1),
+        HwSignal.comb("base_c", "Bits", 1), HwSignal.comb("base_pre", "Bits", 1),
+        HwSignal.comb("base_valid", "Bits", 1), HwSignal.comb("control_claim", "Bits", 1),
+        HwSignal.comb("effective_eq", "Bits", 1), HwSignal.comb("effective_ne", "Bits", 1),
+        HwSignal.comb("effective_lt", "Bits", 1), HwSignal.comb("effective_ge", "Bits", 1),
+        HwSignal.comb("effective_ltu", "Bits", 1), HwSignal.comb("effective_geu", "Bits", 1),
+        HwSignal.comb("selected_any", "Bits", 1), HwSignal.comb("selected_taken", "Bits", 1),
+        HwSignal.comb("selected_target", "Bits", x), HwSignal.comb("selected_misaligned", "Bits", 1),
+        HwSignal.comb("selected_rd", "Bits", 5), HwSignal.comb("selected_jump", "Bits", 1),
+        HwSignal.comb("selection_missing", "Bits", 1), HwSignal.comb("taken_valid", "Bits", 1),
+        HwSignal.comb("aligned", "Bits", 1), HwSignal.comb("aligned_taken", "Bits", 1),
+        HwSignal.comb("trap_valid", "Bits", 1), HwSignal.comb("rd_nonzero", "Bits", 1),
+        HwSignal.comb("jump_write_pre", "Bits", 1), HwSignal.comb("jump_write", "Bits", 1),
+        HwSignal.comb("pc_taken", "Bits", x),
+        HwSignal.comb("pc_after_value", "Bits", x)]
+    var ops = [HwCombOp.binary("shr", "rd_shift", "canonical_instruction", "shift7", 32),
+        HwCombOp.binary("shr", "rs1_shift", "canonical_instruction", "shift15", 32),
+        HwCombOp.binary("shr", "rs2_shift", "canonical_instruction", "shift20", 32),
+        HwCombOp.unary("trunc", "canonical_rd", "rd_shift", 5),
+        HwCombOp.unary("trunc", "canonical_rs1", "rs1_shift", 5),
+        HwCombOp.unary("trunc", "canonical_rs2", "rs2_shift", 5),
+        HwCombOp.binary("eq", "rd_bound", "canonical_rd", "instruction_rd_field", 5),
+        HwCombOp.binary("eq", "rs1_bound", "canonical_rs1", "instruction_rs1_field", 5),
+        HwCombOp.binary("eq", "rs2_bound", "canonical_rs2", "instruction_rs2_field", 5),
+        HwCombOp.binary("and", "fields01", "rd_bound", "rs1_bound", 1),
+        HwCombOp.binary("and", "fields_bound", "fields01", "rs2_bound", 1),
+        HwCombOp.binary("eq", "class_valid", "decoded_execution_class", "control_class", 3),
+        HwCombOp.binary("eq", "memory_valid", "decoded_memory_effect", "zero3", 3),
+        HwCombOp.binary("eq", "width_valid", "decoded_declared_operand_width_is_32", "zero1", 1),
+        HwCombOp.binary("eq", "length_valid", "instruction_length_bytes", "length4", 3),
+        HwCombOp.binary("eq", "event_valid", "provider_event_id", "decode_event_id", 64),
+        HwCombOp.binary("eq", "original_valid", "original_instruction", "canonical_instruction", 32),
+        HwCombOp.binary("add", "expected_fallthrough", "pc_before", "four_xlen", x),
+        HwCombOp.binary("eq", "fallthrough_valid", "fallthrough_pc", "expected_fallthrough", x),
+        HwCombOp.binary("ne", "rs1_nonzero", "canonical_rs1", "zero5", 5),
+        HwCombOp.binary("ne", "rs2_nonzero", "canonical_rs2", "zero5", 5),
+        HwCombOp.binary("and", "base01", "uop_valid", "decode_legal", 1),
+        HwCombOp.binary("and", "base23", "class_valid", "memory_valid", 1),
+        HwCombOp.binary("and", "base45", "width_valid", "length_valid", 1),
+        HwCombOp.binary("and", "base67", "event_valid", "lineage_valid", 1),
+        HwCombOp.binary("and", "base_a", "base01", "base23", 1),
+        HwCombOp.binary("and", "base_b", "base45", "base67", 1),
+        HwCombOp.binary("and", "base_c", "original_valid", "fallthrough_valid", 1),
+        HwCombOp.binary("and", "base_pre", "base_a", "base_b", 1),
+        HwCombOp.binary("and", "base_valid", "base_pre", "base_c", 1),
+        HwCombOp.binary("and", "control_claim", "base01", "class_valid", 1)]
+    var selects = [HwSelectOp.mux("effective_rs1", "rs1_nonzero", "rs1_value", "zero_xlen", x),
+        HwSelectOp.mux("effective_rs2", "rs2_nonzero", "rs2_value", "zero_xlen", x)]
+    for predicate in [("eq", "effective_eq"), ("ne", "effective_ne"),
+            ("slt", "effective_lt"), ("sge", "effective_ge"),
+            ("ult", "effective_ltu"), ("uge", "effective_geu")]:
+        ops.push(HwCombOp.binary(predicate[0], predicate[1], "effective_rs1", "effective_rs2", x))
+    var prior_valid = "zero1"; var prior_taken = "zero1"; var prior_target = "zero_xlen"
+    var prior_misaligned = "zero1"; var prior_rd = "zero5"; var prior_jump = "zero1"
+    var row_index = 0; var admitted = 0
+    var origins = [HwOrigin(node_id: HwNodeId.child(module_name, "plan"),
+        source_name: "riscv.scalar.runtime.control.plan." + plan.structural_sha256())]
+    for entry in plan.entries:
+        val kind = control_kind(entry)
+        if kind != "":
+            val suffix = admitted.to_text(); val mask = "mask_" + suffix
+            val value = "value_" + suffix; val opcode = "opcode_" + suffix
+            val row = "row_" + suffix; val masked = "masked_" + suffix
+            val form = "form_" + suffix; val semantic = "semantic_" + suffix
+            val row_match = "row_match_" + suffix; val match01 = "match01_" + suffix
+            val match23 = "match23_" + suffix; val candidate = "candidate_" + suffix
+            val accepted = "accepted_" + suffix; val next_valid = "selected_valid_" + suffix
+            val next_taken = "selected_taken_" + suffix; val next_target = "selected_target_" + suffix
+            val next_misaligned = "selected_misaligned_" + suffix
+            val next_rd = "selected_rd_" + suffix; val next_jump = "selected_jump_" + suffix
+            constants.push(HwConstant.bits(mask, 32, entry.encoding_mask as i64))
+            constants.push(HwConstant.bits(value, 32, entry.encoding_value as i64))
+            constants.push(HwConstant.bits(opcode, 6, riscv_scalar_semantic_opcode(entry.semantic_operation)))
+            constants.push(HwConstant.bits(row, row_width, (row_index + 1) as i64))
+            for signal in [(masked, 32), (form, 1), (semantic, 1), (row_match, 1),
+                    (match01, 1), (match23, 1), (candidate, 1), (accepted, 1),
+                    (next_valid, 1), (next_taken, 1), (next_target, x),
+                    (next_misaligned, 1), (next_rd, 5), (next_jump, 1)]:
+                signals.push(HwSignal.comb(signal[0], "Bits", signal[1]))
+            ops.push(HwCombOp.binary("and", masked, "canonical_instruction", mask, 32))
+            ops.push(HwCombOp.binary("eq", form, masked, value, 32))
+            ops.push(HwCombOp.binary("eq", semantic, "decoded_semantic_opcode", opcode, 6))
+            ops.push(HwCombOp.binary("eq", row_match, "decoded_row_index", row, row_width))
+            ops.push(HwCombOp.binary("and", match01, form, semantic, 1))
+            ops.push(HwCombOp.binary("and", match23, row_match, "fields_bound", 1))
+            val taken = control_effective_predicate(kind)
+            ops.push(HwCombOp.binary("and", candidate, match01, match23, 1))
+            ops.push(HwCombOp.binary("and", accepted, candidate, "base_valid", 1))
+            val target = if kind == "jal": "jal_target" elif kind == "jalr": "jalr_target" else: "branch_target"
+            val misaligned = if kind == "jal": "jal_target_misaligned" elif kind == "jalr": "jalr_target_misaligned" else: "branch_target_misaligned"
+            val jump = if kind == "jal" or kind == "jalr": "one1" else: "zero1"
+            selects.push(HwSelectOp.mux(next_valid, accepted, "one1", prior_valid, 1))
+            selects.push(HwSelectOp.mux(next_taken, accepted, taken, prior_taken, 1))
+            selects.push(HwSelectOp.mux(next_target, accepted, target, prior_target, x))
+            selects.push(HwSelectOp.mux(next_misaligned, accepted, misaligned, prior_misaligned, 1))
+            selects.push(HwSelectOp.mux(next_rd, accepted, "canonical_rd", prior_rd, 5))
+            selects.push(HwSelectOp.mux(next_jump, accepted, jump, prior_jump, 1))
+            prior_valid = next_valid; prior_taken = next_taken; prior_target = next_target
+            prior_misaligned = next_misaligned; prior_rd = next_rd; prior_jump = next_jump
+            origins.push(HwOrigin(node_id: HwNodeId.child(module_name, "row." + entry.id), source_name: entry.id))
+            admitted = admitted + 1
+        row_index = row_index + 1
+    if admitted != 8: return Err("HWIR-E-RISCV-RUNTIME-CONTROL-SCOPE: provider requires the exact eight base-I control rows")
+    ops.push(HwCombOp.unary("passthrough", "selected_any", prior_valid, 1))
+    ops.push(HwCombOp.unary("passthrough", "selected_taken", prior_taken, 1))
+    ops.push(HwCombOp.unary("passthrough", "selected_target", prior_target, x))
+    ops.push(HwCombOp.unary("passthrough", "selected_misaligned", prior_misaligned, 1))
+    ops.push(HwCombOp.unary("passthrough", "selected_rd", prior_rd, 5))
+    ops.push(HwCombOp.unary("passthrough", "selected_jump", prior_jump, 1))
+    ops.push(HwCombOp.binary("eq", "selection_missing", "selected_any", "zero1", 1))
+    ops.push(HwCombOp.binary("and", "protocol_fault", "control_claim", "selection_missing", 1))
+    ops.push(HwCombOp.binary("and", "taken_valid", "selected_any", "selected_taken", 1))
+    ops.push(HwCombOp.binary("eq", "aligned", "selected_misaligned", "zero1", 1))
+    ops.push(HwCombOp.binary("and", "aligned_taken", "taken_valid", "aligned", 1))
+    ops.push(HwCombOp.binary("and", "trap_valid", "taken_valid", "selected_misaligned", 1))
+    ops.push(HwCombOp.binary("ne", "rd_nonzero", "selected_rd", "zero5", 5))
+    ops.push(HwCombOp.binary("and", "jump_write_pre", "selected_jump", "rd_nonzero", 1))
+    ops.push(HwCombOp.binary("and", "jump_write", "jump_write_pre", "aligned_taken", 1))
+    selects.push(HwSelectOp.mux("pc_taken", "selected_taken", "selected_target", "fallthrough_pc", x))
+    selects.push(HwSelectOp.mux("pc_after_value", "trap_valid", "pc_before", "pc_taken", x))
+    ops.push(HwCombOp.unary("passthrough", "completion_valid", "selected_any", 1))
+    for field in [("memory_address", "zero_xlen", x), ("memory_read_mask", "zero32", 32),
+            ("memory_write_mask", "zero32", 32), ("memory_read_data", "zero_xlen", x),
+            ("memory_write_data", "zero_xlen", x), ("execute_trap_cause", "zero_xlen", x),
+            ("memory_trap_valid", "zero1", 1), ("memory_trap_cause", "zero_xlen", x),
+            ("memory_trap_tval", "zero_xlen", x), ("illegal_valid", "zero1", 1)]:
+        ops.push(HwCombOp.unary("passthrough", "completion_" + field[0], field[1], field[2]))
+    for field in [("privilege", "privilege", "zero2", 2),
+            ("original_instruction", "original_instruction", "zero32", 32),
+            ("canonical_instruction", "canonical_instruction", "zero32", 32),
+            ("instruction_length_bytes", "instruction_length_bytes", "zero3", 3),
+            ("pc_before", "pc_before", "zero_xlen", x),
+            ("pc_after", "pc_after_value", "zero_xlen", x),
+            ("provider_event_id", "provider_event_id", "zero64", 64),
+            ("decode_event_id", "decode_event_id", "zero64", 64)]:
+        selects.push(HwSelectOp.mux("completion_" + field[0], "selected_any", field[1], field[2], field[3]))
+    selects.push(HwSelectOp.mux("completion_rd", "jump_write", "selected_rd", "zero5", 5))
+    selects.push(HwSelectOp.mux("completion_rd_write", "selected_any", "jump_write", "zero1", 1))
+    selects.push(HwSelectOp.mux("completion_rd_value", "jump_write", "fallthrough_pc", "zero_xlen", x))
+    selects.push(HwSelectOp.mux("completion_execute_trap_valid", "selected_any", "trap_valid", "zero1", 1))
+    selects.push(HwSelectOp.mux("completion_execute_trap_tval", "trap_valid", "selected_target", "zero_xlen", x))
+    selects.push(HwSelectOp.mux("completion_redirect_valid", "selected_any", "aligned_taken", "zero1", 1))
+    selects.push(HwSelectOp.mux("completion_redirect_target", "aligned_taken", "selected_target", "zero_xlen", x))
+    val ports = control_ports(x, row_width)
+    val module = HwModuleDef(summary: HwModule(name: module_name, profile: config.profile,
+            port_count: ports.len(), signal_count: signals.len(), register_count: 0,
+            comb_op_count: ops.len() + selects.len(), memory_count: 0,
+            clock_domain_count: 1, fallback_function: "", cost: HwCostModel.empty()),
+        config: config, node_id: HwNodeId.module_root(module_name), origins: origins,
+        ports: ports, signals: signals, constants: constants, comb_ops: ops,
+        compare_ops: [], select_ops: selects, clock_domains: [HwClockDomain.default_domain()])
+    val diagnostic = module.shape_diagnostic(); if diagnostic != "": return Err(diagnostic)
+    Ok(module)

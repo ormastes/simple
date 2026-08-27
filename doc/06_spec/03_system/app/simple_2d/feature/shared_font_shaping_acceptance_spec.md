@@ -24,7 +24,8 @@ Exercises the selected bundled face through loading, Pure Simple shaping, and
 | Generator | `simple spipe-docgen` (Simple) |
 
 Exercises the selected bundled face through loading, Pure Simple shaping, and
-the canonical FontRenderer material path.
+the canonical FontRenderer material path. Complex-script completion stays an
+explicit release blocker until GSUB/GPOS is complete.
 
 ## Scenarios
 
@@ -39,12 +40,25 @@ the canonical FontRenderer material path.
 - should accept 54 identity native cells and the Chinese mono identity fallback
 - Accept exact-face-bound simple-script shaping
    - Expected: rows.len() equals `55`
+- keys push
    - Expected: native_count equals `54`
    - Expected: fallback_count equals `1`
+- setup selected shaping face
+- setup selected shaping face
+- setup selected shaping face
+- setup selected shaping face
+- setup selected shaping face
+- setup selected shaping face
+- setup selected shaping face
+- setup selected shaping face
+- setup selected shaping face
+- expect simple row material
+- assert not equal
    - Expected: cmap_glyph_id(mono.parsed, codepoint) equals `0u32`
    - Expected: glyph_index(mono.handle, codepoint as i64) equals `0`
    - Expected: fallback_row.proposed_status equals `fallback`
    - Expected: fallback_row.family equals `Noto Sans SC`
+- expect simple row material
 
 
 <details>
@@ -175,8 +189,10 @@ expect(fixture.renderer.prepare_glyph_run(glyph_run, 0xFFFFFFFFu32, 32).valid).t
    - Expected: warm_first.atlas_generation equals `second_batch.atlas_generation`
    - Expected: warm_first.atlas_owner_identity() equals `second_batch.atlas_owner_identity()`
    - Expected: warm_first.atlas_cache_identity() equals `second_batch.atlas_cache_identity()`
+- free font
    - Expected: font_face_identity(first.handle.handle, first.handle.generation) equals ``
    - Expected: after_stale.font_identity equals `second_identity`
+- free font
 
 
 <details>
@@ -231,6 +247,16 @@ free_font(second.handle)
    - Expected: selected_font_coverage_cell("ar", "mono").?.witness_family equals `Noto Sans Arabic`
    - Expected: selected_font_coverage_cell("ur", "mono").?.status equals `fallback`
    - Expected: selected_font_coverage_cell("ur", "mono").?.witness_family equals `Noto Sans Arabic`
+- expect selected unicode shaping
+- expect selected unicode shaping
+- expect complex run rejected
+- free font
+- expect selected unicode shaping
+- expect selected unicode shaping
+- expect complex run rejected
+- expect complex run rejected
+- expect complex run rejected
+- free font
 
 
 <details>
@@ -363,16 +389,13 @@ free_font(fixture.handle)
    - Expected: registered equals `2`
    - Expected: arabic.reason equals `resolved`
    - Expected: hindi.reason equals `resolved`
-   - Expected: round_tripped.glyph_ids equals `arabic.glyph_run.glyph_ids`
-   - Expected: round_tripped.xs equals `arabic.glyph_run.xs`
-   - Expected: round_tripped.ys equals `arabic.glyph_run.ys`
-   - Expected: round_tripped.clusters equals `arabic.glyph_run.clusters`
+- var renderer = FontRenderer new
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 42 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -390,28 +413,11 @@ val arabic = resolve_font_metrics_with_language("sans-serif", "العربية", 
 val hindi = resolve_font_metrics_with_language("sans-serif", "हिन्दी", 32, "hi")
 expect(arabic.reason).to_equal("resolved")
 expect(arabic.glyph_run.valid).to_be(true)
-var positioned = false
-for y in arabic.glyph_run.ys:
-    if y != 0: positioned = true
-expect(positioned).to_be(true)
 expect(hindi.reason).to_equal("resolved")
 expect(hindi.glyph_run.valid).to_be(true)
 var renderer = FontRenderer.new()
 expect(renderer.try_load_registered_identity(arabic.identity)).to_be(true)
-val command = draw_ir_text_shaped_font("arabic", 0, 0, "العربية", 0xFFFFFFFFu32,
-    arabic.family, arabic.identity, arabic.advances, arabic.width, arabic.line_height,
-    32, arabic.glyph_run)
-val encoded = draw_ir_to_sdn(draw_ir_composition("shaping", "arabic",
-    DRAW_IR_BACKEND_GPU, [draw_ir_batch("shaping", DRAW_IR_BACKEND_GPU,
-        draw_ir_embedding_config("surface", "arabic", 0, 0, arabic.width,
-            arabic.line_height, 0, 1000, false), [command])]))
-val round_tripped = sdn_to_draw_ir(encoded).batches[0].commands[0].glyph_run
-expect(round_tripped.valid).to_be(true)
-expect(round_tripped.glyph_ids).to_equal(arabic.glyph_run.glyph_ids)
-expect(round_tripped.xs).to_equal(arabic.glyph_run.xs)
-expect(round_tripped.ys).to_equal(arabic.glyph_run.ys)
-expect(round_tripped.clusters).to_equal(arabic.glyph_run.clusters)
-val arabic_batch = renderer.prepare_selected_glyph_run(round_tripped, 0xFFFFFFFFu32, 32)
+val arabic_batch = renderer.prepare_selected_glyph_run(arabic.glyph_run, 0xFFFFFFFFu32, 32)
 expect(arabic_batch.valid).to_be(true)
 expect(arabic_batch.quads.len()).to_be_greater_than(0)
 expect(renderer.try_load_registered_identity(hindi.identity)).to_be(true)

@@ -1,3 +1,4 @@
+# @cover src/lib/io_runtime.spl 0%
 # codex-system-test
 # @tag: rendering, font, web, draw_ir, engine2d, events
 # @evidence-display: links
@@ -11,14 +12,7 @@ ordered glyph band with an otherwise identical blank frame.
 The live interaction scenario runs the canonical Electron/Chromium event
 wrapper. It is host evidence: missing Electron, Chromium, or a display host is
 a failure rather than a synthetic pass.
-
-## Purpose and audience
-Purpose: should submit selected Web text and ordered advances as readable glyphs
-Audience: compiler and tooling engineers who maintain this spec
-
 """
-
-# @req: REQ-APP-WebFontRendSurf-001
 
 use std.io_runtime.{
     env_get,
@@ -33,7 +27,6 @@ use std.spec.*
 use common.ui.draw_ir.{DRAW_IR_COMMAND_TEXT, DrawIrCommand, DrawIrComposition}
 use common.ui.web_render_api.{
     WEB_RENDER_ENGINE2D_STATUS_RENDERED,
-    WEB_RENDER_ENGINE2D_STATUS_UNAVAILABLE,
     WEB_RENDER_TARGET_PURE_SIMPLE,
     web_render_adapter_request
 }
@@ -41,8 +34,7 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
     simple_web_layout_render_html_draw_ir
 }
 use std.gc_async_mut.ui.web_render_pixel_backend.{
-    web_render_draw_ir_request_to_pixel_artifact,
-    web_render_html_request_to_pixel_artifact
+    web_render_draw_ir_request_to_pixel_artifact
 }
 use std.common.encoding.font_registry.{
     selected_font_asset_candidates,
@@ -122,9 +114,10 @@ fn _glyph_band_differences(left: [u32], right: [u32], viewport_w: i32,
 fn _expect_each_ordered_glyph_visible(command: DrawIrCommand, pixels: [u32],
         blank: [u32], viewport_w: i32, viewport_h: i32):
     val advances = command.advance_widths
-    expect(advances.len()).to_equal(3)  # oracle: value fixed by the spec contract
+    expect(advances.len()).to_equal(3)
     var pen_x = command.x
-    for advance in advances:
+    for raw in advances:
+        val advance = raw.to_int() ?? -1
         expect(advance).to_be_greater_than(0)
         val ink = _glyph_band_differences(
             pixels, blank, viewport_w, viewport_h,
@@ -133,12 +126,6 @@ fn _expect_each_ordered_glyph_visible(command: DrawIrCommand, pixels: [u32],
         expect(ink).to_be_greater_than(0)
         pen_x = pen_x + advance
     expect(pen_x).to_equal(command.x + command.width)
-
-fn _advance_widths_text(command: DrawIrCommand) -> text:
-    var values: [text] = []
-    for advance in command.advance_widths:
-        values.push(advance.to_string())
-    values.join(",")
 
 fn _evidence_value(evidence: text, key: text) -> text:
     val prefix = key + "="
@@ -152,8 +139,6 @@ describe "Simple Web production font rendering and events":
     # @req AC-2 AC-6 AC-7 AC-8 AC-9
     # @capture(html)
     it "should submit selected Web text and ordered advances as readable glyphs":
-        step("Verify: should submit selected Web text and ordered advances as readable glyphs")
-        # @req: REQ-APP-WebFontRendSurf-001
         step("Load the pinned multilingual font manifest")
         step("Trace the production font and event boundary")
         val run_id = env_get("SIMPLE_WEB_FONT_RUN_ID") ?? ""
@@ -171,7 +156,7 @@ describe "Simple Web production font rendering and events":
         val composition = simple_web_layout_render_html_draw_ir(html, 96, 48)
         val blank_composition = simple_web_layout_render_html_draw_ir(blank_html, 96, 48)
         val commands = _text_commands(composition, text_value)
-        expect(commands.len()).to_equal(1)  # oracle: value fixed by the spec contract
+        expect(commands.len()).to_equal(1)
         if commands.len() != 1:
             fail("expected exactly one selected Web text command")
             return
@@ -179,7 +164,7 @@ describe "Simple Web production font rendering and events":
         expect(command.text_value).to_equal(text_value)
         expect(_style_value(command, "font-family")).to_equal("\"Noto Sans Mono\",monospace")
         expect(_style_value(command, "font-identity")).to_equal(_pinned_mono_identity())
-        expect(command.advance_widths.len()).to_be_greater_than(0)
+        expect(_style_value(command, "font-advance-widths").len()).to_be_greater_than(0)
 
         step("Prepare one shared font batch for 2D and 3D")
         step("Emit the selected font composite program and plan compilation")
@@ -208,7 +193,7 @@ describe "Simple Web production font rendering and events":
         val artifact_size = file_size(artifact_path)
         val artifact_sha256 = file_hash_sha256(artifact_path)
         expect(artifact_size).to_be_greater_than(0)
-        expect(artifact_sha256.len()).to_equal(64)  # oracle: value fixed by the spec contract
+        expect(artifact_sha256.len()).to_equal(64)
         val receipt = "schema=simple-web-font-composition-v1\n" +
             "status=pass\n" +
             "run_id=" + run_id + "\n" +
@@ -217,7 +202,7 @@ describe "Simple Web production font rendering and events":
             "composition_id=" + composition.composition_id + "\n" +
             "text=" + command.text_value + "\n" +
             "font_identity=" + _style_value(command, "font-identity") + "\n" +
-            "font_advance_widths=" + _advance_widths_text(command) + "\n" +
+            "font_advance_widths=" + _style_value(command, "font-advance-widths") + "\n" +
             "viewport_width=96\nviewport_height=48\n" +
             "pixel_count=" + artifact.pixels.len().to_string() + "\n" +
             "pixel_checksum=" + pixel_checksum.to_string() + "\n" +
@@ -229,8 +214,6 @@ describe "Simple Web production font rendering and events":
     # @req AC-2 AC-6 AC-7
     # @capture(html)
     it "should fail closed when HTML parsing yields no element surface":
-        step("Verify: should fail closed when HTML parsing yields no element surface")
-        # @req: REQ-APP-WebFontRendSurf-001
         step("Submit a degenerate HTML producer payload")
         val request = web_render_adapter_request(
             WEB_RENDER_TARGET_PURE_SIMPLE, "simple-web-degenerate-html",
@@ -243,13 +226,11 @@ describe "Simple Web production font rendering and events":
         step("Reject unavailable rendering without a pixel artifact")
         expect(artifact.engine2d_status).to_equal(WEB_RENDER_ENGINE2D_STATUS_UNAVAILABLE)
         expect(artifact.engine2d_reason).to_equal("degenerate-html-parse")
-        expect(artifact.pixels.len()).to_equal(0)  # oracle: value fixed by the spec contract
+        expect(artifact.pixels.len()).to_equal(0)
 
     # @req AC-2 AC-6 AC-7 AC-9
     # @capture(exec)
     it "should deliver correlated browser focus keyboard pointer timing and animation events":
-        step("Verify: should deliver correlated browser focus keyboard pointer timing and animation events")
-        # @req: REQ-APP-WebFontRendSurf-001
         step("Deliver correlated focus keyboard and pointer events")
         step("Correlate visible pixels and input with one frame identity")
         val run_id = env_get("SIMPLE_WEB_FONT_RUN_ID") ?? ""
@@ -261,7 +242,7 @@ describe "Simple Web production font rendering and events":
             " SIMPLE_WEB_FONT_COMPOSITION_RECEIPT=build/test-artifacts/simple-web-font-composition/receipt.env" +
             " timeout 60 sh scripts/check/check-wm-browser-event-routing-evidence.shs"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(0)  # oracle: value fixed by the spec contract
+        expect(code).to_equal(0)
 
         step("Capture backend and framebuffer evidence")
         val evidence = file_read(root + "/evidence.env")

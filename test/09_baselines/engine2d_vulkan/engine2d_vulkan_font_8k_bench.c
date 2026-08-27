@@ -15,6 +15,7 @@ extern int64_t rt_vulkan_bind_pipeline(int64_t, int64_t), rt_vulkan_bind_descrip
 extern int64_t rt_vulkan_dispatch(int64_t, int64_t, int64_t, int64_t), rt_vulkan_end_compute(int64_t);
 extern int64_t rt_vulkan_submit_and_wait_fence(int64_t), rt_vulkan_wait_fence(int64_t, int64_t);
 extern int64_t rt_vulkan_destroy_fence(int64_t);
+extern const char *rt_vulkan_selected_device_name(void), *rt_vulkan_selected_device_type(void);
 extern int64_t rt_vulkan_copy_to_buffer_raw(int64_t, int64_t, int64_t, int64_t);
 extern int64_t rt_vulkan_copy_from_buffer_raw(int64_t, int64_t, int64_t, int64_t);
 
@@ -76,6 +77,8 @@ int main(int argc,char**argv){
     uint64_t mismatch=0,changed=0;
     for(uint64_t i=0;i<pixels;i++){uint32_t x=(uint32_t)(i%w),y=(uint32_t)(i/w);uint32_t gx=x/20,gy=y/20;int ink=gx<256&&(x%20)<gw&&(y%20)<gh&&(gy*256+gx)<glyphs;uint32_t expected=ink?0xffffffffu:0xff101010u;if(seed[i]!=expected)mismatch++;if(seed[i]!=0xff101010u)changed++;}
     printf("engine2d_vulkan_font_schema=%s\nengine2d_vulkan_font_width=%u\nengine2d_vulkan_font_height=%u\n",packed?"font-packed-v1":"font-warm-pool-v1",w,h);
+    printf("engine2d_vulkan_font_adapter_name=%s\nengine2d_vulkan_font_adapter_type=%s\n",
+        rt_vulkan_selected_device_name(), rt_vulkan_selected_device_type());
     printf("engine2d_vulkan_font_glyphs=%u\nengine2d_vulkan_font_samples=%u\n",glyphs,samples);
     printf("engine2d_vulkan_font_frame_p50_ns=%llu\nengine2d_vulkan_font_frame_p95_ns=%llu\n",(unsigned long long)times[(samples-1)/2],(unsigned long long)times[p95]);
     printf("engine2d_vulkan_font_within_80fps_budget=%s\n",times[p95]<=12500000?"true":"false");

@@ -2,14 +2,32 @@
 
 > Tests covering init_services spm_port wiring.
 
-| Tests | Active | Skipped | Pending |
-|-------|--------|---------|--------:|
-| 4 | 4 | 0 | 0 |
+```sdn id=spm_init_register_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+spm_init_register_spec -> std
+spm_init_register_spec -> os
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=spm_init_register_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Spm Init Register Specification
+# spm_init_register_spec
+
+Verifies the spm init register behaviour end to end so maintainers of this
 
 ## Scenarios
 
@@ -86,23 +104,8 @@ expect(spm_port_registered_task()).to_equal(spm_well_known_task_id())
 | Category | Hardware & OS |
 | Status | Active |
 | Source | `test/01_unit/os/kernel/ipc/spm_init_register_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering init_services spm_port wiring.
-- init_services spm_port wiring
-
-## Scenario Summary
-
-| Metric | Count |
-|--------|------:|
-| Total scenarios | 4 |
-| Active scenarios | 4 |
-| Slow scenarios | 0 |
-| Skipped scenarios | 0 |
-| Pending scenarios | 0 |
 
 
 </details>

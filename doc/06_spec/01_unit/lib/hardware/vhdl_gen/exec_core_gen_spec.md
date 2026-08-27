@@ -25,7 +25,7 @@ RISC-V exec cores used to be six hand-maintained `.vhd` files. Every change to t
 | Design | doc/05_design/hardware/riscv/vhdl_exec_core_generator_design.md |
 | Research | doc/01_research/hardware/riscv/python_rtl_generation_survey_2026-07-26.md |
 | Source | `test/01_unit/lib/hardware/vhdl_gen/exec_core_gen_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-07-27 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -95,8 +95,6 @@ Or call the library directly. Every entry point returns the finished VHDL as
 text, so callers compare or write it themselves:
 
 ```simple
-use std.spec.step
-
 use lib.hardware.riscv_common.xlen.XlenConfig
 use lib.hardware.vhdl_gen.exec_core_gen.generate_exec_core
 use lib.hardware.vhdl_gen.exec_core_variant_gen.generate_exec_core_flat
@@ -194,20 +192,18 @@ for core and bitstream digests, build commands, and board markers.
 
 #### emits rv32_exec_core byte-identical to the golden
 
-- emits rv32_exec_core byte-identical to the golden
 - Run the generator for the rv32 base lane with no firmware directory prefix
 - Load the proven rv32_exec_core.vhd golden shipped under examples
+- Then matches golden
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("emits rv32_exec_core byte-identical to the golden")
 step("Run the generator for the rv32 base lane with no firmware directory prefix")
 val generated = generate_rv32_text()
 step("Load the proven rv32_exec_core.vhd golden shipped under examples")
@@ -219,20 +215,18 @@ Then_matches_golden(generated, golden)
 
 #### emits rv64_exec_core byte-identical to the golden
 
-- emits rv64_exec_core byte-identical to the golden
 - Run the generator for the rv64 base lane with no firmware directory prefix
 - Load the proven rv64_exec_core.vhd golden shipped under examples
+- Then matches golden
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("emits rv64_exec_core byte-identical to the golden")
 step("Run the generator for the rv64 base lane with no firmware directory prefix")
 val generated = generate_rv64_text()
 step("Load the proven rv64_exec_core.vhd golden shipped under examples")
@@ -244,20 +238,20 @@ Then_matches_golden(generated, golden)
 
 #### drops every JTAG debug tap when the debug aspect is switched off
 
-- drops every JTAG debug tap when the debug aspect is switched off
 - Generate the rv32 and rv64 base cores with the debug aspect off
+- Then debug taps are absent
+- Then debug taps are absent
 - Generate the rv32 core again with the debug aspect back on
+- Then debug taps are woven in
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("drops every JTAG debug tap when the debug aspect is switched off")
 step("Generate the rv32 and rv64 base cores with the debug aspect off")
 val off32 = generate_exec_core(XlenConfig.rv32(), "", false)
 val off64 = generate_exec_core(XlenConfig.rv64(), "", false)
@@ -272,20 +266,19 @@ Then_debug_taps_are_woven_in(on32)
 
 #### produces the same base cores on every run
 
-- produces the same base cores on every run
 - Generate the rv32 base core twice in the same session
+- Then both runs are identical
 - Generate the rv64 base core twice in the same session
+- Then both runs are identical
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("produces the same base cores on every run")
 step("Generate the rv32 base core twice in the same session")
 val a32 = generate_rv32_text()
 val b32 = generate_rv32_text()
@@ -302,19 +295,17 @@ Then_both_runs_are_identical(a64, b64)
 
 #### emits rv32_exec_core_flat byte-identical to the golden
 
-- emits rv32_exec_core_flat byte-identical to the golden
 - Run the generator for the rv32 flat testbench lane
+- Then matches golden
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("emits rv32_exec_core_flat byte-identical to the golden")
 step("Run the generator for the rv32 flat testbench lane")
 val generated = generate_exec_core_flat(XlenConfig.rv32(), "")
 val golden = read_golden(RV32_FLAT_GOLDEN_PATH)
@@ -325,19 +316,17 @@ Then_matches_golden(generated, golden)
 
 #### emits rv64_exec_core_flat byte-identical to the golden
 
-- emits rv64_exec_core_flat byte-identical to the golden
 - Run the generator for the rv64 flat testbench lane
+- Then matches golden
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("emits rv64_exec_core_flat byte-identical to the golden")
 step("Run the generator for the rv64 flat testbench lane")
 val generated = generate_exec_core_flat(XlenConfig.rv64(), "")
 val golden = read_golden(RV64_FLAT_GOLDEN_PATH)
@@ -348,19 +337,17 @@ Then_matches_golden(generated, golden)
 
 #### emits rv32_exec_core_axi byte-identical to the golden
 
-- emits rv32_exec_core_axi byte-identical to the golden
 - Run the generator for the rv32 synthesizable AXI silicon lane
+- Then matches golden
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("emits rv32_exec_core_axi byte-identical to the golden")
 step("Run the generator for the rv32 synthesizable AXI silicon lane")
 val generated = generate_exec_core_axi(XlenConfig.rv32())
 val golden = read_golden(RV32_AXI_GOLDEN_PATH)
@@ -371,19 +358,17 @@ Then_matches_golden(generated, golden)
 
 #### emits rv64_exec_core_axi byte-identical to the golden
 
-- emits rv64_exec_core_axi byte-identical to the golden
 - Run the generator for the rv64 synthesizable AXI silicon lane
+- Then matches golden
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("emits rv64_exec_core_axi byte-identical to the golden")
 step("Run the generator for the rv64 synthesizable AXI silicon lane")
 val generated = generate_exec_core_axi(XlenConfig.rv64())
 val golden = read_golden(RV64_AXI_GOLDEN_PATH)
@@ -394,20 +379,19 @@ Then_matches_golden(generated, golden)
 
 #### produces the same variant cores on every run
 
-- produces the same variant cores on every run
 - Generate the rv32 flat core twice in the same session
+- Then both runs are identical
 - Generate the rv64 AXI core twice in the same session
+- Then both runs are identical
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("produces the same variant cores on every run")
 step("Generate the rv32 flat core twice in the same session")
 val f1 = generate_exec_core_flat(XlenConfig.rv32(), "")
 val f2 = generate_exec_core_flat(XlenConfig.rv32(), "")
@@ -422,20 +406,19 @@ Then_both_runs_are_identical(x1, x2)
 
 #### points flat RAM and ramdisk loads at the firmware directory the operator names
 
-- points flat RAM and ramdisk loads at the firmware directory the operator names
 - Generate the rv32 flat core with the firmware directory /tmp/fw/
+- Then flat images use prefix
 - Generate the rv64 flat core with the same firmware directory
+- Then flat images use prefix
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("points flat RAM and ramdisk loads at the firmware directory the operator names")
 step("Generate the rv32 flat core with the firmware directory /tmp/fw/")
 val p32 = generate_exec_core_flat(XlenConfig.rv32(), "/tmp/fw/")
 val ram32 = "is \"/tmp/fw/rv32_flat.mem\";"
@@ -457,19 +440,18 @@ Then_flat_images_use_prefix(p64, ram64, disk64)
 
 #### rewrites the base memory-init images only when a prefix is given
 
-- rewrites the base memory-init images only when a prefix is given
 - Generate the rv32 base core with the firmware directory /tmp/fw/
+- Then base images use prefix
+- Then default images stay relative
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("rewrites the base memory-init images only when a prefix is given")
 step("Generate the rv32 base core with the firmware directory /tmp/fw/")
 val prefixed = generate_exec_core(XlenConfig.rv32(), "/tmp/fw/", true)
 val payload_image = "is \"/tmp/fw/rv32_payload.mem\";"
@@ -504,51 +486,3 @@ Then_default_images_stay_relative(plain)
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-LIB`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `b202088c90573b8bfef7629793c0649e2a0ac571e9a0b7562421ee4c530e2de6`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `b202088c90573b8bfef7629793c0649e2a0ac571e9a0b7562421ee4c530e2de6`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `b202088c90573b8bfef7629793c0649e2a0ac571e9a0b7562421ee4c530e2de6`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/01_unit/lib/hardware/vhdl_gen/exec_core_gen_spec.spl
-mirror: doc/06_spec/01_unit/lib/hardware/vhdl_gen/exec_core_gen_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/lib/hardware/vhdl_gen/exec_core_gen_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/lib/hardware/vhdl_gen/exec_core_gen_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, scope, assumptions/preconditions, primary workflow, unsupported/limitations
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/lib/hardware/vhdl_gen/exec_core_gen_spec.spl:253:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'emits rv32_exec_core byte-identical to the golden' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/lib/hardware/vhdl_gen/exec_core_gen_spec.spl:263:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'emits rv64_exec_core byte-identical to the golden' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/lib/hardware/vhdl_gen/exec_core_gen_spec.spl:273:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'drops every JTAG debug tap when the debug aspect is switched off' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

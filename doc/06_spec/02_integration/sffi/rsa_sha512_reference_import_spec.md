@@ -2,6 +2,29 @@
 
 > Compiled-mode SFFI proof for the RSA host-key signing contract:
 
+<!-- sdn-diagram:id=rsa_sha512_reference_import_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=rsa_sha512_reference_import_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+rsa_sha512_reference_import_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=rsa_sha512_reference_import_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 3 | 3 | 0 | 0 |
@@ -20,7 +43,7 @@ Compiled-mode SFFI proof for the RSA host-key signing contract:
 | Category | SFFI |
 | Status | Active |
 | Source | `test/02_integration/sffi/rsa_sha512_reference_import_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 Compiled-mode SFFI proof for the RSA host-key signing contract:
@@ -35,20 +58,13 @@ Compiled-mode SFFI proof for the RSA host-key signing contract:
 
 #### compiles the OpenSSL-backed reference library
 
-- compiles the OpenSSL-backed reference library
-   - Expected: generate_crypto_fixtures() is true
-   - Expected: build_reference_library() is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("compiles the OpenSSL-backed reference library")
 if not has_build_tools():
     return "skip: missing cc/gcc, openssl, or pkg-config openssl"
 expect(generate_crypto_fixtures()).to_equal(true)
@@ -59,21 +75,30 @@ expect(build_reference_library()).to_equal(true)
 
 #### signs valid PKCS#8, re-signs deterministically, verifies, and rejects malformed and wrong-key inputs
 
-- signs valid PKCS#8, re-signs deterministically, verifies, and rejects malformed and wrong-key inputs
-   - Expected: rt_file_write_bytes(malformed_path, [0x30, 0x03, 0x02, 0x01, 0x00]) is true
+1. "extern fn rsa sha512 sign file
+2. "extern fn rsa sha512 verify file
+3. "extern fn rt file read bytes
+4. "assert rsa sha512 sign file
+5. "assert rsa sha512 sign file
+6. "val sig a = rt file read bytes
+7. "val sig b = rt file read bytes
+8. "assert sig a len
+9. "assert rsa sha512 verify file
+10. "assert rsa sha512 sign file
+11. "assert rsa sha512 sign file
    - Expected: write_source(spl_source, spl_code) is true
+12. print
+13. print
    - Expected: code equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 38 lines folded for reproduction.
+Runnable source: 36 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("signs valid PKCS#8, re-signs deterministically, verifies, and rejects malformed and wrong-key inputs")
 if not has_build_tools():
     return "skip: missing cc/gcc, openssl, or pkg-config openssl"
 if not rt_file_exists(LIB_PATH):
@@ -116,7 +141,8 @@ expect(out).to_contain("PASS")
 
 #### reports a missing symbol when the linked library does not export the verify entrypoint
 
-- reports a missing symbol when the linked library does not export the verify entrypoint
+1. "extern fn rsa sha512 verify file
+2. "val rc = rsa sha512 verify file
    - Expected: write_source(spl_source, spl_code) is true
    - Expected: "missing symbol should fail" equals ``
 
@@ -124,12 +150,10 @@ expect(out).to_contain("PASS")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-INTEGRATION
-step("reports a missing symbol when the linked library does not export the verify entrypoint")
 if not has_build_tools():
     return "skip: missing cc/gcc, openssl, or pkg-config openssl"
 if not rt_file_exists(PARTIAL_LIB_PATH):
@@ -164,54 +188,3 @@ expect(out).to_contain("rsa_sha512_verify_file")
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-INTEGRATION`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `4c6f839947e913956757abace0d0017e1dc981bcd50d43b4f1dca885470b4fdc`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `4c6f839947e913956757abace0d0017e1dc981bcd50d43b4f1dca885470b4fdc`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `4c6f839947e913956757abace0d0017e1dc981bcd50d43b4f1dca885470b4fdc`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **90/100**; effective score: **90/100**; blockers: **0**.
-
-SSpec documentization score: 90/100
-source: test/02_integration/sffi/rsa_sha512_reference_import_spec.spl
-mirror: doc/06_spec/02_integration/sffi/rsa_sha512_reference_import_spec.md (current)
-findings: 6 blockers: 0
-  narrative=100 structure=100 oracle=90
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/02_integration/sffi/rsa_sha512_reference_import_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/02_integration/sffi/rsa_sha512_reference_import_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/02_integration/sffi/rsa_sha512_reference_import_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-10): 1 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/02_integration/sffi/rsa_sha512_reference_import_spec.spl:210:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'compiles the OpenSSL-backed reference library' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/02_integration/sffi/rsa_sha512_reference_import_spec.spl:218:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'signs valid PKCS#8, re-signs deterministically, verifies, and rejects malformed and wrong-key inputs' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/02_integration/sffi/rsa_sha512_reference_import_spec.spl:258:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'reports a missing symbol when the linked library does not export the verify entrypoint' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

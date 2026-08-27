@@ -20,7 +20,7 @@ Proves the canonical Web, GUI widget, and WM producers retain resolved font
 | Category | Application |
 | Status | Active |
 | Source | `test/03_system/app/simple_2d/feature/legacy_web_gui_wm_font_route_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-07-19 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 Proves the canonical Web, GUI widget, and WM producers retain resolved font
@@ -34,18 +34,19 @@ font atlas or its owning GPU pipeline.
 
 ### legacy Web GUI and WM shared font route
 
-#### preserve resolved font metadata and geometry through canonical CPU execution
+#### should preserve resolved font metadata and geometry through canonical CPU execution
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- preserve resolved font metadata and geometry through canonical CPU execution
 - Render legacy Web GUI and WM text through DrawIR
 - Resolve one selected font for layout and DrawIR paint
 - Render legacy and WebIR text with one face identity
    - Expected: gui_identity equals `web_identity`
    - Expected: wm_identity equals `web_identity`
+- var ink engine = Engine2D create with backend
+- ink engine clear
+- ink engine shutdown
+- var blank engine = Engine2D create with backend
+- blank engine clear
+- blank engine shutdown
    - Expected: ink_result.pixels.len() equals `32 * 24`
 - Check the production Simple Browser uses the same DrawIR route
    - Expected: host_web_source does not contain `simple_web_engine2d_render_html_pixels(html, width, height, backend_name)`
@@ -58,12 +59,10 @@ font atlas or its owning GPU pipeline.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 83 lines folded for reproduction.
+Runnable source: 79 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("preserve resolved font metadata and geometry through canonical CPU execution")
 step("Render legacy Web GUI and WM text through DrawIR")
 step("Resolve one selected font for layout and DrawIR paint")
 val web_backend = WebRenderBackend.create("pure_simple", 160, 80)
@@ -124,12 +123,12 @@ expect(browser_source).to_contain("if registered_fonts != required_fonts")
 expect(browser_source).to_contain("if result.skipped_command_count != 0")
 expect(browser_source).to_contain("if non_bg <= 0 or not captured")
 expect(browser_source.contains("simple_web_layout_render_html_software_pixels")).to_equal(false)
-val mode_pos = browser_source.index_of("    font_renderer_use_registered_selected_bytes_only()")
-val register_pos = browser_source.index_of("font_renderer_register_selected_bytes(candidate.local_path, blob)")
-val catalog_pos = browser_source.index_of("if registered_fonts != required_fonts")
-val render_pos = browser_source.index_of("    val result = simple_web_layout_render_html_engine2d_result(")
-val capture_gate_pos = browser_source.index_of("    if non_bg <= 0 or not captured:")
-val marker_pos = browser_source.index_of("    serial_println(simple_browser_render_marker(")
+val mode_pos = browser_source.index_of("    font_renderer_use_registered_selected_bytes_only()") ?? -1
+val register_pos = browser_source.index_of("font_renderer_register_selected_bytes(candidate.local_path, blob)") ?? -1
+val catalog_pos = browser_source.index_of("if registered_fonts != required_fonts") ?? -1
+val render_pos = browser_source.index_of("    val result = simple_web_layout_render_html_engine2d_result(") ?? -1
+val capture_gate_pos = browser_source.index_of("    if non_bg <= 0 or not captured:") ?? -1
+val marker_pos = browser_source.index_of("    serial_println(simple_browser_render_marker(") ?? -1
 expect(mode_pos).to_be_greater_than(-1)
 expect(register_pos).to_be_greater_than(mode_pos)
 expect(catalog_pos).to_be_greater_than(register_pos)
@@ -139,19 +138,16 @@ expect(marker_pos).to_be_greater_than(capture_gate_pos)
 
 val vfs_source = rt_file_read_text("src/os/services/vfs/vfs_init.spl")
 val adapter_source = rt_file_read_text("src/os/services/vfs/c_nvme_block_adapter.spl")
-val boot_vfs_source = (rt_file_read_text("src/os/services/vfs/vfs_boot_init.spl") + rt_file_read_text("src/os/services/vfs/vfs_boot_core.spl") + rt_file_read_text("src/os/services/vfs/vfs_boot_state.spl") + rt_file_read_text("src/os/services/vfs/vfs_ambient_context.spl") + rt_file_read_text("src/os/services/vfs/nvme_boot_runtime_owner.spl") + rt_file_read_text("src/os/services/vfs/nvme_filesystem_direct_io.spl") + rt_file_read_text("src/os/services/vfs/nvme_q35_lease_perf.spl") + rt_file_read_text("src/os/services/vfs/direct_fat32_boot_reader.spl"))
+val boot_vfs_source = rt_file_read_text("src/os/services/vfs/vfs_boot_init.spl")
 expect(vfs_source).to_contain("FAT32_PATH_READ_BUFFER_MAX: u64 = 33554432")
 expect(adapter_source).to_contain("FAT32_PATH_READ_BUFFER_MAX: u64 = 33554432")
 expect(boot_vfs_source).to_contain("PURE_FAT32_FILE_READ_MAX: u64 = 33554432")
-
-# @req REQ-SSPEC-SYSTEM
 ```
 
 </details>
 
-#### keep canonical selected-font owners independent from the legacy game atlas
+#### should keep canonical selected-font owners independent from the legacy game atlas
 
-- keep canonical selected-font owners independent from the legacy game atlas
 - Verify canonical selected-font owners do not depend on the legacy game font atlas
    - Expected: source does not contain `use std.nogc_sync_mut.engine.render.font_atlas`
    - Expected: source does not contain `use std.nogc_async_mut.engine.render.font_atlas`
@@ -162,13 +158,10 @@ expect(boot_vfs_source).to_contain("PURE_FAT32_FILE_READ_MAX: u64 = 33554432")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 24 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("keep canonical selected-font owners independent from the legacy game atlas")
-# evidence(protocol_json): asserted result fields below are the complete typed oracle
 step("Verify canonical selected-font owners do not depend on the legacy game font atlas")
 val canonical_font_owners = [
     "src/lib/nogc_sync_mut/text_layout/font_renderer.spl",
@@ -206,46 +199,3 @@ for path in canonical_font_owners:
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `66f71cd55bc8ca64c79bb086444e974c395534b031ccc3a000858e9e2dd7eaac`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `66f71cd55bc8ca64c79bb086444e974c395534b031ccc3a000858e9e2dd7eaac`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `66f71cd55bc8ca64c79bb086444e974c395534b031ccc3a000858e9e2dd7eaac`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **87/100**; effective score: **49/100**; blockers: **1**.
-
-SSpec documentization score: 49/100
-source: test/03_system/app/simple_2d/feature/legacy_web_gui_wm_font_route_spec.spl
-mirror: doc/06_spec/03_system/app/simple_2d/feature/legacy_web_gui_wm_font_route_spec.md (current)
-findings: 3 blockers: 1
-  narrative=100 structure=100 oracle=50
-  traceability=100 evidence=100 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-  raw=87; blocker cap makes effective=49
-doc/06_spec/03_system/app/simple_2d/feature/legacy_web_gui_wm_font_route_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/app/simple_2d/feature/legacy_web_gui_wm_font_route_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/app/simple_2d/feature/legacy_web_gui_wm_font_route_spec.spl:1:1: blocker SSDOC-ORA-002 [oracle] (-50): scenario relies on source-text inspection as system evidence
-  why: Source presence or self-created arithmetic does not demonstrate production behavior.
-  improve: Observe runtime behavior or a stable generated artifact instead.
-<!-- sspec-maintain:scorecard:end -->

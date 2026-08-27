@@ -9,7 +9,8 @@ use app.pkg.version.{SemVer, VersionConstraint}
 use app.pkg.lock.{LockEntry, LockFile, parse_lock_file, write_lock_file}
 use app.io.mod.{env_get, process_run}
 
-use std.io_runtime.{file_exists, read_file_text_result}
+use std.io_runtime.{file_exists}
+extern fn rt_file_read_text(path: text) -> text
 
 # Resolved dependency with exact version/commit info
 struct ResolvedDep:
@@ -66,25 +67,12 @@ fn run_shell(command: text) -> (text, text, i64):
         process_run("/bin/sh", ["-c", command])
 
 
-fn _dependency_manifest_version(path: text) -> Result<text, text>:
-    if not file_exists(path):
-        return Ok("0.0.0")
-    val source = read_file_text_result(path)?
-    if source == "":
-        return Err("Dependency manifest is empty: {path}")
-    val manifest = parse_manifest(source)?
-    if manifest.version == "":
-        Ok("0.0.0")
-    else:
-        Ok(manifest.version)
-
-
 # Clone or fetch a git repository to the cache
 fn git_clone_or_fetch(dep: Dependency, cache_dir: text) -> Result<ResolvedDep, text>:
     val cache_key = dep.cache_key()
     val dest = "{cache_dir}/{cache_key}"
 
-    if file_exists("{dest}/.git"):
+    if rt_file_exists("{dest}/.git"):
         # Already cloned, fetch latest
         print "  Fetching {dep.name}..."
         val (_, fetch_err, fetch_code) = run_shell("cd \"{dest}\" && git fetch --quiet 2>&1")
@@ -130,8 +118,18 @@ fn git_clone_or_fetch(dep: Dependency, cache_dir: text) -> Result<ResolvedDep, t
     val commit = commit_out.trim()
 
     # Try to read version from the dep's own package.sdn
+    var version = "0.0.0"
     val dep_manifest_path = "{dest}/package.sdn"
-    val version = _dependency_manifest_version(dep_manifest_path)?
+    if file_exists(dep_manifest_path):
+        val dep_source = rt_file_read_text(dep_manifest_path)
+        if dep_source != "" and dep_source != nil:
+            val dep_manifest = parse_manifest(dep_source)
+            match dep_manifest:
+                case Ok(m):
+                    if m.version != "":
+                        version = m.version
+                case Err(_):
+                    pass
 
     Ok(ResolvedDep(
         name: dep.name,
@@ -146,12 +144,22 @@ fn git_clone_or_fetch(dep: Dependency, cache_dir: text) -> Result<ResolvedDep, t
 
 # Resolve a path dependency
 fn resolve_path_dep(dep: Dependency) -> Result<ResolvedDep, text>:
-    if not file_exists(dep.path):
+    if not rt_file_exists(dep.path):
         return Err("Path dependency '{dep.name}' not found at: {dep.path}")
 
     # Try to read version from the dep's own package.sdn
+    var version = "0.0.0"
     val dep_manifest_path = "{dep.path}/package.sdn"
-    val version = _dependency_manifest_version(dep_manifest_path)?
+    if file_exists(dep_manifest_path):
+        val dep_source = rt_file_read_text(dep_manifest_path)
+        if dep_source != "" and dep_source != nil:
+            val dep_manifest = parse_manifest(dep_source)
+            match dep_manifest:
+                case Ok(m):
+                    if m.version != "":
+                        version = m.version
+                case Err(_):
+                    pass
 
     Ok(ResolvedDep(
         name: dep.name,
@@ -176,7 +184,7 @@ fn resolve_dep(dep: Dependency, cache_dir: text, lock_entry: LockEntry?) -> Resu
                 # Check if already cached at this commit
                 val cache_key = dep.cache_key()
                 val dest = "{cache_dir}/{cache_key}"
-                if file_exists("{dest}/.git"):
+                if rt_file_exists("{dest}/.git"):
                     # Verify commit matches
                     val (commit_out, _, _) = run_shell("cd \"{dest}\" && git rev-parse HEAD")
                     val current_commit = commit_out.trim()
@@ -202,10 +210,8 @@ fn check_conflicts(resolved: [ResolvedDep]) -> [text]:
     var seen: Dict<text, text> = {}
 
     for dep in resolved:
-        # NOTE: Dict.get() is unsafe under native codegen —
-        # see doc/07_guide/language/dict_native_pitfalls.md
-        if seen.contains_key(dep.name):
-            val prev_version = seen[dep.name]
+        val existing = seen.get(dep.name)
+        if val Some(prev_version) = existing:
             if prev_version != dep.version:
                 conflicts.push("Conflict: {dep.name} required as {prev_version} and {dep.version}")
         else:

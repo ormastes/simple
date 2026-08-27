@@ -7,19 +7,37 @@ use app.ui.web.tls_serve_loop.{ConnStream}
 use app.ui.web.origin_guard.{OriginGuard, AuthError}
 use app.ui.web.auth_params.{ui_web_extract_bearer, ui_web_ws_response_protocol}
 use app.ui.web.session_token.{verify}
-use std.nogc_sync_mut.websocket.handshake.{compute_websocket_accept}
-use std.nogc_sync_mut.io.time_ops.{current_time_ms}
+# Local SHA-1/base64 helpers wrap runtime hooks to avoid as_bytes() interpreter limitation.
+extern fn rt_sha1_new() -> i64
+extern fn rt_sha1_write(handle: i64, data: text) -> i64
+extern fn rt_sha1_finish_base64(handle: i64) -> text
+extern fn rt_sha1_free(handle: i64)
 use std.common.string_core.{text_to_bytes}
+extern fn rt_time_ms() -> u64
 
 fn ui_web_ws_time_ms() -> u64:
-    current_time_ms() as u64
+    rt_time_ms()
 
 fn ui_web_ws_text_to_bytes(s: text) -> [u8]:
     text_to_bytes(s)
 
+fn ui_web_ws_sha1_new() -> i64:
+    rt_sha1_new()
+
+fn ui_web_ws_sha1_write(handle: i64, data: text) -> i64:
+    rt_sha1_write(handle, data)
+
+fn ui_web_ws_sha1_finish_base64(handle: i64) -> text:
+    rt_sha1_finish_base64(handle)
+
+fn ui_web_ws_sha1_free(handle: i64):
+    rt_sha1_free(handle)
+
 # =========================================================================
 # WebSocket Upgrade
 # =========================================================================
+
+val WS_MAGIC: text = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 fn _header_value(headers: text, name: text) -> text:
     val target = "{name.lower()}:"
@@ -55,9 +73,13 @@ fn handle_ws_upgrade(stream: ConnStream, path: text, headers: text, guard: Origi
 
     Checks Origin header against the allowlist and verifies the bearer token
     before completing the WebSocket handshake. On failure writes 403 and returns."""
-    # --- Security gate ---
-    val origin_result = guard.check(headers)
-    match origin_result:
+    # --- Security gate + per-session state ---
+    # NOTE: the local cannot be named `admit` — that is a reserved lexer
+    # keyword (src/compiler_rust/parser/src/lexer/identifiers.rs:280).
+    val admission = ui_web_ws_admit(path, headers, guard, secret, ui_web_ws_time_ms())
+    var session_id = ""
+    var session_resume = ""
+    match admission:
         Err(_):
             stream.write_all("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
             return
@@ -95,7 +117,10 @@ fn handle_ws_upgrade(stream: ConnStream, path: text, headers: text, guard: Origi
         response = "{response}Sec-WebSocket-Protocol: {protocol}\r\n"
     response = "{response}\r\n"
     stream.write_all(response)
-    # The WebRuntimeAdapter sends the initial snapshot via send_snapshot()
+    # First protocol frame: session identity + resume token, revision -1
+    # (no baseline yet). The WebRuntimeAdapter follows with the initial
+    # full `snapshot` frame via send_snapshot().
+    send_ws_text(stream, ui_ws_encode_hello(session_id, session_resume, -1))
 
 fn handle_ws_wm_upgrade(stream: ConnStream, path: text, headers: text, guard: OriginGuard, secret: text):
     """Compatibility WM upgrade entrypoint.
@@ -111,8 +136,13 @@ fn extract_ws_key(headers: text) -> text:
 fn compute_ws_accept(key: text) -> text:
     """Compute the Sec-WebSocket-Accept value.
     WebSocket spec requires: base64(SHA-1(key + magic)).
-    Uses the canonical pure-Simple RFC 6455 handshake owner."""
-    compute_websocket_accept(key)
+    Uses runtime functions directly to avoid as_bytes() interpreter limitation."""
+    val combined = key + WS_MAGIC
+    val handle = ui_web_ws_sha1_new()
+    ui_web_ws_sha1_write(handle, combined)
+    val result = ui_web_ws_sha1_finish_base64(handle)
+    ui_web_ws_sha1_free(handle)
+    return result
 
 # =========================================================================
 # WebSocket Frame Operations
@@ -173,25 +203,6 @@ fn send_ws_close(stream: ConnStream, code: i64, reason: text) -> bool:
         Ok(()):
             return true
 
-fn escape_json_string(value: text) -> text:
-    var result = ""
-    for ch in value.split(""):
-        if ch == "":
-            pass_dn
-        elif ch == "\\":
-            result = result + "\\\\"
-        elif ch == "\"":
-            result = result + "\\\""
-        elif ch == "\n":
-            result = result + "\\n"
-        elif ch == "\r":
-            result = result + "\\r"
-        elif ch == "\t":
-            result = result + "\\t"
-        else:
-            result = result + ch
-    result
-
 # =========================================================================
 # Bearer Token Extraction Helper
 # =========================================================================
@@ -199,5 +210,3 @@ fn escape_json_string(value: text) -> text:
 fn _extract_bearer(headers: text, path: text) -> text:
     """Extract bearer token from header/subprotocol first; query tokens require explicit compatibility opt-in."""
     return ui_web_extract_bearer(headers, path)
-
-export extract_ws_key, compute_ws_accept, send_ws_text, send_ws_close, escape_json_string

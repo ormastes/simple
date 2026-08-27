@@ -3,7 +3,6 @@
 # RDC to XML; Simple parses stable driver/chunk/action/resource markers.
 
 use app.io.mod.{dir_create_all, file_delete, file_exists, file_read_text, file_size, process_run_timeout}
-use app.io.args_ops.{get_args}
 use std.common.crypto.sha256.{sha256_text}
 
 struct RenderDocReplayInspection:
@@ -35,40 +34,6 @@ fn _count_marker(content: text, marker: text) -> i64:
         offset = offset + relative + marker.len()
     count
 
-fn _renderdoc_header_driver(xml: text) -> text:
-    val header_marker = "<header>"
-    if _count_marker(xml, header_marker) != 1 or
-       _count_marker(xml, "</header>") != 1:
-        return "unknown"
-    val header_start = xml.index_of(header_marker) + header_marker.len()
-    val header_tail = xml[header_start:xml.len()]
-    val header_length = header_tail.index_of("</header>")
-    if header_length < 0:
-        return "unknown"
-    val header = header_tail[0:header_length]
-    val driver_count = (
-        _count_marker(header, "<driver ") + _count_marker(header, "<driver>")
-    )
-    if driver_count != 1 or _count_marker(header, "</driver>") != 1:
-        return "unknown"
-    val driver_start = header.index_of("<driver")
-    val driver_tail = header[driver_start:header.len()]
-    val value_offset = driver_tail.index_of(">")
-    if value_offset < 0:
-        return "unknown"
-    val value_tail = driver_tail[value_offset + 1:driver_tail.len()]
-    val value_length = value_tail.index_of("</driver>")
-    if value_length < 0:
-        return "unknown"
-    val value = value_tail[0:value_length].trim()
-    if value == "Vulkan":
-        return "vulkan"
-    if value == "D3D12":
-        return "d3d12"
-    if value == "D3D11":
-        return "d3d11"
-    "unknown"
-
 fn _inspection_failure(reason: text, capture_path: text, xml_path: text, exit_code: i64, log: text) -> RenderDocReplayInspection:
     RenderDocReplayInspection(
         status: "fail", reason: reason, driver: "", capture_path: capture_path,
@@ -83,15 +48,19 @@ fn parse_renderdoc_capture_xml(xml: text, capture_path: text, xml_path: text, ex
     if exit_code != 0: return _inspection_failure("capture-open-failed", capture_path, xml_path, exit_code, convert_log)
     if not xml.contains("<rdc>") or not xml.contains("<chunks version="):
         return _inspection_failure("invalid-renderdoc-xml", capture_path, xml_path, exit_code, convert_log)
-    val driver = _renderdoc_header_driver(xml)
+    var driver = "unknown"
+    if xml.contains(">Vulkan</driver>"):
+        driver = "vulkan"
+    else if xml.contains(">D3D12</driver>"):
+        driver = "d3d12"
+    else if xml.contains(">D3D11</driver>"):
+        driver = "d3d11"
     val chunks = _count_marker(xml, "<chunk ")
-    # RenderDoc does not guarantee attribute order. Current XML emits id and
-    # chunkIndex before name, while older fixtures put name first.
-    val dispatches = _count_marker(xml, "name=\"vkCmdDispatch\"")
-    val draws = _count_marker(xml, "name=\"vkCmdDraw")
-    val pipelines = _count_marker(xml, "name=\"vkCreateComputePipelines\"") + _count_marker(xml, "name=\"vkCreateGraphicsPipelines\"")
-    val shaders = _count_marker(xml, "name=\"vkCreateShaderModule\"")
-    val resources = _count_marker(xml, "name=\"vkCreateBuffer\"") + _count_marker(xml, "name=\"vkCreateImage\"")
+    val dispatches = _count_marker(xml, "<chunk name=\"vkCmdDispatch\"")
+    val draws = _count_marker(xml, "<chunk name=\"vkCmdDraw")
+    val pipelines = _count_marker(xml, "<chunk name=\"vkCreateComputePipelines\"") + _count_marker(xml, "<chunk name=\"vkCreateGraphicsPipelines\"")
+    val shaders = _count_marker(xml, "<chunk name=\"vkCreateShaderModule\"")
+    val resources = _count_marker(xml, "<chunk name=\"vkCreateBuffer\"") + _count_marker(xml, "<chunk name=\"vkCreateImage\"")
     val relevant = dispatches + draws
     var reason = "pass"
     if driver == "unknown": reason = "unsupported-capture-driver"
@@ -167,15 +136,14 @@ fn renderdoc_replay_evidence_text(
 
 fn main() -> i64:
     val args = get_args()
-    if args.len() < 6:
+    if args.len() != 7:
         print("rdoc_simple_replay_status=fail\nrdoc_simple_replay_reason=invalid-arguments\n")
         return 2
-    val base = args.len() - 6
-    val inspection = inspect_renderdoc_capture(args[base], args[base + 1], args[base + 2], 120000)
+    val inspection = inspect_renderdoc_capture(args[1], args[2], args[3], 120000)
     val evidence = renderdoc_replay_evidence_text(
-        inspection, args[base + 3], args[base + 4], args[base + 5])
+        inspection, args[4], args[5], args[6])
     print evidence
     if inspection.status == "pass" and
-       validate_renderdoc_owner_agreement(inspection, args[base + 3], args[base + 4], args[base + 5]) == "pass":
+       validate_renderdoc_owner_agreement(inspection, args[4], args[5], args[6]) == "pass":
         return 0
     1

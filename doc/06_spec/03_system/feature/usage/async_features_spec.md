@@ -2,6 +2,29 @@
 
 > async features - runtime parser cannot handle async/await/spawn/yield/generator syntax
 
+<!-- sdn-diagram:id=async_features_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=async_features_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+async_features_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=async_features_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 42 | 42 | 0 | 0 |
@@ -21,7 +44,7 @@ async features - runtime parser cannot handle async/await/spawn/yield/generator 
 | Category | Runtime \| Async |
 | Status | Implemented |
 | Source | `test/03_system/feature/usage/async_features_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 async features - runtime parser cannot handle async/await/spawn/yield/generator syntax
@@ -46,22 +69,16 @@ Features not supported by runtime parser:
 
 #### basic lambda with single param
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- basic lambda with single param
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("basic lambda with single param")
 val double = \x: x * 2
 check(double(21) == 42)
 ```
@@ -70,18 +87,16 @@ check(double(21) == 42)
 
 #### lambda with multiple params
 
-- lambda with multiple params
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("lambda with multiple params")
 val add = \x, y: x + y
 check(add(15, 27) == 42)
 ```
@@ -90,28 +105,7 @@ check(add(15, 27) == 42)
 
 #### lambda capturing outer variable
 
-- lambda capturing outer variable
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 5 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-SYSTEM
-step("lambda capturing outer variable")
-val multiplier = 10
-val multiply = \x: x * multiplier
-check(multiply(4) == 40)
-```
-
-</details>
-
-#### immediately invoked lambda
-
-- immediately invoked lambda
+1. check
 
 
 <details>
@@ -121,8 +115,25 @@ Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("immediately invoked lambda")
+val multiplier = 10
+val multiply = \x: x * multiplier
+check(multiply(4) == 40)
+```
+
+</details>
+
+#### immediately invoked lambda
+
+1. check
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
 check((\x: x + 5)(37) == 42)
 ```
 
@@ -130,18 +141,16 @@ check((\x: x + 5)(37) == 42)
 
 #### nested lambda calls
 
-- nested lambda calls
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("nested lambda calls")
 val double = \x: x * 2
 val add_one = \x: x + 1
 check(add_one(double(20)) == 41)
@@ -151,18 +160,16 @@ check(add_one(double(20)) == 41)
 
 #### lambda with no params
 
-- lambda with no params
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("lambda with no params")
 val answer = \: 42
 check(answer() == 42)
 ```
@@ -173,18 +180,16 @@ check(answer() == 42)
 
 #### creates and awaits basic future
 
-- creates and awaits basic future
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("creates and awaits basic future")
 check(true)
 ```
 
@@ -192,18 +197,16 @@ check(true)
 
 #### future with function call
 
-- future with function call
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("future with function call")
 check(true)
 ```
 
@@ -211,18 +214,16 @@ check(true)
 
 #### multiple futures
 
-- multiple futures
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("multiple futures")
 check(true)
 ```
 
@@ -230,18 +231,16 @@ check(true)
 
 #### future function call with params
 
-- future function call with params
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("future function call with params")
 check(true)
 ```
 
@@ -251,18 +250,16 @@ check(true)
 
 #### basic async function
 
-- basic async function
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("basic async function")
 check(true)
 ```
 
@@ -270,18 +267,16 @@ check(true)
 
 #### async fn returns auto-awaited
 
-- async fn returns auto-awaited
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("async fn returns auto-awaited")
 check(true)
 ```
 
@@ -289,18 +284,16 @@ check(true)
 
 #### async fn can call other async
 
-- async fn can call other async
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("async fn can call other async")
 check(true)
 ```
 
@@ -308,18 +301,16 @@ check(true)
 
 #### async fn can use await
 
-- async fn can use await
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("async fn can use await ")
 check(true)
 ```
 
@@ -327,18 +318,16 @@ check(true)
 
 #### async fn allows print
 
-- async fn allows print
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("async fn allows print")
 check(true)
 ```
 
@@ -348,18 +337,16 @@ check(true)
 
 #### single value generator
 
-- single value generator
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("single value generator")
 check(true)
 ```
 
@@ -367,18 +354,16 @@ check(true)
 
 #### multiple yields
 
-- multiple yields
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("multiple yields")
 check(true)
 ```
 
@@ -386,18 +371,16 @@ check(true)
 
 #### generator exhaustion returns nil
 
-- generator exhaustion returns nil
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("generator exhaustion returns nil")
 check(true)
 ```
 
@@ -405,18 +388,16 @@ check(true)
 
 #### generator with captured variable
 
-- generator with captured variable
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("generator with captured variable")
 check(true)
 ```
 
@@ -424,18 +405,16 @@ check(true)
 
 #### arithmetic in yield
 
-- arithmetic in yield
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("arithmetic in yield")
 check(true)
 ```
 
@@ -443,18 +422,16 @@ check(true)
 
 #### nested iteration
 
-- nested iteration
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("nested iteration")
 check(true)
 ```
 
@@ -462,18 +439,16 @@ check(true)
 
 #### collects generator values
 
-- collects generator values
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("collects generator values")
 check(true)
 ```
 
@@ -483,18 +458,16 @@ check(true)
 
 #### await requires future type
 
-- await requires future type
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("await requires future type")
 # This would be a compile error in full compiler
 check(true)
 ```
@@ -505,18 +478,16 @@ check(true)
 
 #### state preserved across yields
 
-- state preserved across yields
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("state preserved across yields")
 check(true)
 ```
 
@@ -524,18 +495,16 @@ check(true)
 
 #### multiple captures
 
-- multiple captures
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("multiple captures")
 check(true)
 ```
 
@@ -543,18 +512,16 @@ check(true)
 
 #### capture and compute
 
-- capture and compute
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("capture and compute")
 check(true)
 ```
 
@@ -564,18 +531,16 @@ check(true)
 
 #### future with single capture
 
-- future with single capture
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("future with single capture")
 check(true)
 ```
 
@@ -583,18 +548,16 @@ check(true)
 
 #### future with multiple captures
 
-- future with multiple captures
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("future with multiple captures")
 check(true)
 ```
 
@@ -604,18 +567,16 @@ check(true)
 
 #### basic actor spawn
 
-- basic actor spawn
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("basic actor spawn")
 check(true)
 ```
 
@@ -625,18 +586,16 @@ check(true)
 
 #### state and capture combined
 
-- state and capture combined
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("state and capture combined")
 check(true)
 ```
 
@@ -644,18 +603,16 @@ check(true)
 
 #### exhaustion with capture
 
-- exhaustion with capture
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("exhaustion with capture")
 check(true)
 ```
 
@@ -663,18 +620,16 @@ check(true)
 
 #### nested generator captures
 
-- nested generator captures
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("nested generator captures")
 check(true)
 ```
 
@@ -684,18 +639,17 @@ check(true)
 
 #### nested control flow
 
-- nested control flow
+1. fn compute
+2. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("nested control flow")
 fn compute(n: i64) -> i64:
     var sum = 0
     var i = 0
@@ -714,18 +668,18 @@ check(compute(10) == 25)
 
 #### recursive function
 
-- recursive function
+1. fn factorial
+2. n * factorial
+3. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("recursive function")
 fn factorial(n: i64) -> i64:
     if n <= 1:
         1
@@ -741,18 +695,16 @@ check(factorial(3) == 6)
 
 #### struct field access
 
-- struct field access
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("struct field access")
 struct Point:
     x: i64
     y: i64
@@ -765,18 +717,16 @@ check(p.x * p.y == 200)
 
 #### enum pattern match
 
-- enum pattern match
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("enum pattern match")
 # enum Result with dot access syntax may have issues
 check(true)
 ```
@@ -785,18 +735,17 @@ check(true)
 
 #### array operations
 
-- array operations
+1. fn sum array
+2. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("array operations")
 fn sum_array(arr: [i64]) -> i64:
     var sum = 0
     var i = 0
@@ -812,18 +761,16 @@ check(sum_array(arr) == 150)
 
 #### tuple indexing
 
-- tuple indexing
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("tuple indexing")
 # tuple.0 dot-number syntax may have issues
 check(true)
 ```
@@ -832,18 +779,16 @@ check(true)
 
 #### dictionary access
 
-- dictionary access
+1. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("dictionary access")
 val d = {"a": 10, "b": 20, "c": 30}
 check(d["a"] + d["b"] + d["c"] == 60)
 ```
@@ -854,18 +799,18 @@ check(d["a"] + d["b"] + d["c"] == 60)
 
 #### function composition
 
-- function composition
+1. fn double
+2. fn add one
+3. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("function composition")
 fn double(x: i64) -> i64:
     x * 2
 
@@ -879,18 +824,17 @@ check(double(add_one(double(5))) == 22)
 
 #### early return
 
-- early return
+1. fn find first even
+2. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("early return")
 fn find_first_even(limit: i64) -> i64:
     var i = 1
     while i <= limit:
@@ -906,18 +850,17 @@ check(find_first_even(10) == 2)
 
 #### boolean logic
 
-- boolean logic
+1. fn verify
+2. check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("boolean logic")
 fn verify(a: i64, b: i64) -> i64:
     if a > 0 and b > 0:
         1
@@ -943,51 +886,3 @@ check(verify(1, 1) * 100 + verify(1, 0) * 10 + verify(0, 0) == 120)
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `e592443e4d44d293d519af52937c02de7ec3838c88ab07e4080c9c09673cdb6a`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `e592443e4d44d293d519af52937c02de7ec3838c88ab07e4080c9c09673cdb6a`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `e592443e4d44d293d519af52937c02de7ec3838c88ab07e4080c9c09673cdb6a`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/03_system/feature/usage/async_features_spec.spl
-mirror: doc/06_spec/03_system/feature/usage/async_features_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/feature/usage/async_features_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/feature/usage/async_features_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/feature/usage/async_features_spec.spl:48:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'basic lambda with single param' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/usage/async_features_spec.spl:54:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'lambda with multiple params' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/usage/async_features_spec.spl:60:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'lambda capturing outer variable' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

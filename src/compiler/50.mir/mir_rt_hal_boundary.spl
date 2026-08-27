@@ -1,65 +1,1387 @@
 # codex-impl
-# Lower typed @rt(hal) metadata to a real runtime dispatch at each normal
-# function exit. Static non-HAL functions never call this pass and receive no
-# instruction, branch, allocation, or runtime dependency.
+# RT/HAL V2 exit capture is typed MIR metadata. The lowering never calls a
+# scalar receipt helper: a backend receives the original operand and exact
+# descriptor, then either encodes it into a bounded preallocated envelope or
+# fails closed. Pure-only @rt(hal) returns unchanged.
 
 use compiler.mir.mir_instructions.*
 use compiler.mir.mir_types.{MirConstValue, MirType, MirTypeKind, MirSignature}
 
-fn rt_hal_boundary_receipt(value: MirOperand?) -> MirOperand:
+# Compiler-only, bounded provenance ledger.  A marker contains only a slot;
+# the authority tuple itself is recorded here at the resolved HIR->MIR choke
+# point and checked by the boundary transform.  This avoids re-deriving a
+# canonical executor from a text path after resolution.  The ledger is reset
+# for each authored function and consumed before normal MIR leaves lowering.
+struct RtHalEnvExecutorProvenanceRecord:
+    executor_kind: i64
+    executor_symbol: i64
+    expected_callee: MirOperand
+    plan: MirOperand
+
+var rt_hal_env_executor_provenance_records: [RtHalEnvExecutorProvenanceRecord] = []
+var rt_hal_env_executor_provenance_sealed = false
+
+pub fn rt_hal_env_executor_provenance_reset() -> ():
+    rt_hal_env_executor_provenance_records = []
+    rt_hal_env_executor_provenance_sealed = false
+
+pub fn rt_hal_env_executor_provenance_register(executor_kind: i64,
+        executor_symbol: i64, expected_callee: MirOperand, plan: MirOperand) -> i64:
+    if rt_hal_env_executor_provenance_sealed or executor_kind < 1 or
+       executor_kind > 3 or executor_symbol < 0:
+        return -1
+    if rt_hal_env_executor_provenance_records.len() >= 64:
+        # One function that needs more than 64 direct physical-plan actions is
+        # not representable by the bounded V3 effect transcript.  Emit no
+        # marker; semantic admission/normal backend handling stays fail-closed.
+        return -1
+    val id = rt_hal_env_executor_provenance_records.len()
+    rt_hal_env_executor_provenance_records.push(RtHalEnvExecutorProvenanceRecord(
+        executor_kind: executor_kind, executor_symbol: executor_symbol,
+        expected_callee: expected_callee, plan: plan))
+    id
+
+fn rt_hal_exit_local_type(function: MirFunction, local: LocalId) -> MirType?:
+    for candidate in function.locals:
+        if candidate.id.id == local.id: return Some(candidate.type_)
+    nil
+
+fn rt_hal_exit_operand_type(function: MirFunction, value: MirOperand?) -> MirType?:
     match value:
         Some(operand):
             match operand.kind:
-                case Move(local): MirOperand.copy(local)
-                case _: operand
-        nil: MirOperand.const_int(-1)
+                case MirOperandKind.Const(_, type_): Some(type_)
+                case MirOperandKind.Copy(local) | MirOperandKind.Move(local):
+                    rt_hal_exit_local_type(function, local)
+        nil: Some(MirType.unit())
 
-fn rt_hal_boundary_call(operation_id: text, compare_c: bool, compare_rust: bool, receipt: MirOperand) -> MirInst:
-    val function = MirOperand(kind: MirOperandKind.Const(
-        MirConstValue.Str("rt_hal_boundary_dispatch"),
-        MirType(kind: MirTypeKind.FuncPtr(MirSignature(
-            params: [MirType(kind: MirTypeKind.Opaque("str")), MirType.bool(), MirType.bool(), MirType.i64()],
-            return_type: MirType.i64(), is_variadic: false
-        )))
-    ))
-    val operation = MirOperand(kind: MirOperandKind.Const(
-        MirConstValue.Str(operation_id), MirType(kind: MirTypeKind.Opaque("str"))
-    ))
-    MirInst(
-        kind: MirInstKind.Call(nil, function, [
-            operation, MirOperand.const_bool(compare_c),
-            MirOperand.const_bool(compare_rust), receipt
-        ]),
-        span: nil
-    )
+# Canonical V2 descriptor grammar shared with the exact type parser.  Only
+# canonical scalar, array, tuple, and Result forms are admitted here:
+# `v2;i64`, `v2;array;<n>;<len>:<child>`,
+# `v2;tuple;<n>;<len>:<child>...`, and
+# `v2;result;<len>:<ok><len>:<err>`.  Empty is the documented fail-closed
+# marker for representations without a V2 codec.  In particular it is never
+# a pseudo ABI spelling for a pointer, struct, enum, or opaque host object.
+fn rt_hal_exit_type_descriptor_v2(type_: MirType) -> text:
+    match type_.kind:
+        case I8: "v2;i8"
+        case I16: "v2;i16"
+        case I32: "v2;i32"
+        case I64: "v2;i64"
+        case U8: "v2;u8"
+        case U16: "v2;u16"
+        case U32: "v2;u32"
+        case U64: "v2;u64"
+        case F32: "v2;f32"
+        case F64: "v2;f64"
+        case Bool: "v2;bool"
+        case Char: "v2;char"
+        case Unit: "v2;unit"
+        case Array(element, size):
+            if size < 0: ""
+            else:
+                val child = rt_hal_exit_type_descriptor_v2(element)
+                if child == "": "" else: "v2;array;" + size.to_text() + ";" + rt_hal_exit_descriptor_field(child)
+        case Tuple(elements): rt_hal_exit_tuple_descriptor_v2(elements)
+        case Result(ok, err):
+            val ok_descriptor = rt_hal_exit_type_descriptor_v2(ok)
+            val err_descriptor = rt_hal_exit_type_descriptor_v2(err)
+            if ok_descriptor == "" or err_descriptor == "": ""
+            else: "v2;result;" + rt_hal_exit_descriptor_field(ok_descriptor) + rt_hal_exit_descriptor_field(err_descriptor)
+        case Opaque(name):
+            if name == "text":
+                "v2;text:utf8"
+            else:
+                ""
+        # No guessed ABI representations. These must fail closed until their
+        # canonical codec is added, including pointer/reference/dynamic host
+        # handles and nominal forms whose field layout is not in this MIR node.
+        case Vec4f | Vec8f | Vec4d | Vec4i | Vec8i | Ptr(_, _) | Ref(_, _) |
+             FuncPtr(_) | Dict(_, _) | Slice(_) | Struct(_) | Enum(_) | Bits(_, _) |
+             Union(_) | Never | ScalableVec(_, _) | Promise(_) |
+             Generator(_, _) | ActorType(_): ""
 
-pub fn inject_rt_hal_boundary(function: MirFunction, operation_id: text, compare_c: bool, compare_rust: bool) -> MirFunction:
+fn rt_hal_exit_descriptor_field(value: text) -> text:
+    value.len().to_text() + ":" + value
+
+# The pre-registration key is deterministic over the exact descriptor.  It is
+# an identity key, never a payload word; the backend/runtime validates the
+# descriptor before admitting the matching bounded codec table entry.
+# Stable schema key, never a dense type-table index. The cold runtime plan
+# registers every descriptor then binds this key to its per-domain dense IDs.
+fn rt_hal_exit_schema_id_v2(descriptor: text) -> i64:
+    if descriptor == "": return -1
+    var hash = 17
+    for byte in descriptor.bytes():
+        hash = (hash * 131 + byte.to_i64()) % 2147483647
+    hash + 1
+
+fn rt_hal_exit_identity_lane_v2(descriptor: text, salt: i64) -> i64:
+    var hash = 31 + salt
+    for byte in descriptor.bytes():
+        hash = (hash * 257 + byte.to_i64() + salt) % 2147483647
+    hash + 1
+
+fn rt_hal_exit_encoding_code_v2(descriptor: text) -> i64:
+    if descriptor == "v2;unit": return 0
+    if descriptor == "v2;bytes": return 1
+    if descriptor == "v2;text:utf8":
+        return 2
+    if descriptor.contains(";f32") or descriptor.contains(";f64"): return 5
+    if descriptor.contains(";i"): return 3
+    if descriptor.contains(";u") or descriptor == "v2;bool" or descriptor == "v2;char": return 4
+    6
+
+fn rt_hal_exit_codec_plan_v2(type_: MirType, descriptor: text) -> RtHalExitCodecPlan:
+    if descriptor == "": return RtHalExitCodecPlan.Reject
+    match type_.kind:
+        case I8 | I16 | I32 | I64: RtHalExitCodecPlan.Scalar(3)
+        case U8 | U16 | U32 | U64 | Bool | Char: RtHalExitCodecPlan.Scalar(4)
+        case F32 | F64: RtHalExitCodecPlan.Scalar(5)
+        case Unit: RtHalExitCodecPlan.Scalar(0)
+        case Array(element, size):
+            RtHalExitCodecPlan.ArrayIterate(size, rt_hal_exit_type_descriptor_v2(element))
+        case Tuple(elements):
+            if elements.len() == 0: RtHalExitCodecPlan.Scalar(0)
+            else: RtHalExitCodecPlan.TupleProject(0, rt_hal_exit_type_descriptor_v2(elements[0]))
+        case Result(ok, err):
+            RtHalExitCodecPlan.ResultBranch(rt_hal_exit_type_descriptor_v2(ok), rt_hal_exit_type_descriptor_v2(err))
+        case _: RtHalExitCodecPlan.Reject
+
+fn rt_hal_exit_codec_ops_v2(type_: MirType, descriptor: text) -> [RtHalExitCodecPlan]:
+    val root = rt_hal_exit_codec_plan_v2(type_, descriptor)
+    match type_.kind:
+        case Tuple(elements):
+            var ops: [RtHalExitCodecPlan] = []
+            var index = 0
+            for element in elements:
+                ops.push(RtHalExitCodecPlan.TupleProject(index, rt_hal_exit_type_descriptor_v2(element)))
+                index = index + 1
+            ops
+        case Result(ok, err): [RtHalExitCodecPlan.ResultDiscriminator,
+            RtHalExitCodecPlan.ResultBranch(rt_hal_exit_type_descriptor_v2(ok), rt_hal_exit_type_descriptor_v2(err))]
+        case _: [root]
+
+fn rt_hal_exit_tuple_descriptor_v2(elements: [MirType]) -> text:
+    var result = "v2;tuple;" + elements.len().to_text() + ";"
+    for element in elements:
+        val child = rt_hal_exit_type_descriptor_v2(element)
+        if child == "": return ""
+        result = result + rt_hal_exit_descriptor_field(child)
+    result
+
+fn rt_hal_exit_capture(operation_id: text, compare_c: bool, compare_rust: bool,
+        exit_kind: i64, value: MirOperand?, value_type: MirType) -> MirInst:
+    val descriptor = rt_hal_exit_type_descriptor_v2(value_type)
+    val schema_id = rt_hal_exit_schema_id_v2(descriptor)
+    # Dense role IDs are resolved by the cold schema-register instruction
+    # before backend_begin(case,schema,kind). -1 means "resolve by schema";
+    # it is never a guessed hash index or a valid dense type ID.
+    MirInst(kind: MirInstKind.RtHalExitCapture(operation_id, compare_c,
+        compare_rust, exit_kind, value, value_type, descriptor, schema_id,
+        -1, -1, -1, rt_hal_exit_codec_plan_v2(value_type, descriptor),
+        rt_hal_exit_codec_ops_v2(value_type, descriptor)), span: nil)
+
+fn rt_hal_abort_operand(message: text) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Const(MirConstValue.Str(message),
+        MirType(kind: MirTypeKind.Opaque("text"))))
+
+fn rt_hal_abort_capture(operation_id: text, compare_c: bool, compare_rust: bool,
+        message: text) -> MirInst:
+    # This is the only nominal terminal exception: Abort's MIR payload is a
+    # source message, so it uses the explicit bounded UTF-8 error domain,
+    # not generic Opaque serialization.
+    val descriptor = "v2;text:utf8"
+    val schema_id = rt_hal_exit_schema_id_v2(descriptor)
+    val payload = rt_hal_abort_operand(message)
+    MirInst(kind: MirInstKind.RtHalExitCapture(operation_id, compare_c,
+        compare_rust, 5, Some(payload), MirType(kind: MirTypeKind.Opaque("text")),
+        descriptor, schema_id, -1, -1, -1,
+        RtHalExitCodecPlan.Utf8Text(4096), [RtHalExitCodecPlan.Utf8Text(4096)]), span: nil)
+
+fn rt_hal_exit_token_local(function: MirFunction) -> LocalId:
+    var next = 0
+    for local in function.locals:
+        if local.id.id >= next: next = local.id.id + 1
+    LocalId(id: next)
+
+fn rt_hal_exit_runtime_fn(name: text, params: [MirType], return_type: MirType) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Const(MirConstValue.Str(name),
+        MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: params,
+            return_type: return_type, is_variadic: false)))))
+
+fn rt_hal_exit_schema_resolve_fn() -> MirOperand:
+    rt_hal_exit_runtime_fn("rt_hal_exact_exit_schema_resolve",
+        [MirType.i64(), MirType.i64()], MirType.i64())
+
+# Composite lowering consumes these typed-call constructors.  They use only
+# ordinary MIR Call nodes, preserving local/SSA ownership and allowing the
+# normal compiler bridge to lower the language-level Result/array operations.
+# No caller may replace them with rt_enum_* calls or layout/ordinal constants.
+pub fn rt_hal_exit_typed_result_is_ok_fn(ok: MirType, err: MirType) -> MirOperand:
+    rt_hal_exit_runtime_fn("rt_hal_exact_exit_typed_result_is_ok",
+        [MirType(kind: MirTypeKind.Result(ok, err))], MirType.bool())
+
+pub fn rt_hal_exit_typed_result_ok_payload_fn(ok: MirType, err: MirType) -> MirOperand:
+    rt_hal_exit_runtime_fn("rt_hal_exact_exit_typed_result_ok_payload",
+        [MirType(kind: MirTypeKind.Result(ok, err))], ok)
+
+pub fn rt_hal_exit_typed_result_err_payload_fn(ok: MirType, err: MirType) -> MirOperand:
+    rt_hal_exit_runtime_fn("rt_hal_exact_exit_typed_result_err_payload",
+        [MirType(kind: MirTypeKind.Result(ok, err))], err)
+
+pub fn rt_hal_exit_typed_array_length_fn(element: MirType, size: i64) -> MirOperand:
+    rt_hal_exit_runtime_fn("rt_hal_exact_exit_typed_array_length",
+        [MirType(kind: MirTypeKind.Array(element, size))], MirType.i64())
+
+pub fn rt_hal_exit_typed_array_at_fn(element: MirType, size: i64) -> MirOperand:
+    rt_hal_exit_runtime_fn("rt_hal_exact_exit_typed_array_at",
+        [MirType(kind: MirTypeKind.Array(element, size)), MirType.i64()], element)
+
+pub fn rt_hal_exit_typed_text_length_fn() -> MirOperand:
+    rt_hal_exit_runtime_fn("rt_hal_exact_exit_typed_text_length",
+        [MirType(kind: MirTypeKind.Opaque("text"))], MirType.i64())
+
+# Transcript events are written before the projected payload.  The composite
+# CFG transform must emit begin -> zero or more append -> end in each selected
+# Result arm / bounded array body, then emit the child payload writer.
+pub fn rt_hal_exit_events_begin_fn() -> MirOperand:
+    rt_hal_exit_runtime_fn("rt_hal_exact_exit_backend_events_begin",
+        [MirType.i64(), MirType.i64()], MirType.bool())
+
+pub fn rt_hal_exit_events_append_fn() -> MirOperand:
+    rt_hal_exit_runtime_fn("rt_hal_exact_exit_backend_write_event",
+        [MirType.i64(), MirType.i64(), MirType.i64()], MirType.bool())
+
+pub fn rt_hal_exit_events_end_fn() -> MirOperand:
+    rt_hal_exit_runtime_fn("rt_hal_exact_exit_backend_events_end",
+        [MirType.i64()], MirType.bool())
+
+pub fn rt_hal_exit_codec_scalar_fn() -> MirOperand:
+    rt_hal_exit_runtime_fn("rt_hal_exact_exit_backend_write_codec_scalar",
+        [MirType.i64(), MirType.i64(), MirType(kind: MirTypeKind.Opaque("text")),
+         MirType.i64(), MirType.i64(), MirType.i64()], MirType.bool())
+
+pub fn rt_hal_exit_codec_utf8_fn() -> MirOperand:
+    rt_hal_exit_runtime_fn("rt_hal_exact_exit_backend_write_codec_utf8",
+        [MirType.i64(), MirType.i64(), MirType(kind: MirTypeKind.Opaque("text")),
+         MirType.i64(), MirType.i64(), MirType(kind: MirTypeKind.Opaque("text"))], MirType.bool())
+
+fn rt_hal_exit_descriptor_operand(descriptor: text) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Const(MirConstValue.Str(descriptor),
+        MirType(kind: MirTypeKind.Opaque("text"))))
+
+fn rt_hal_exit_scalar_call(token: LocalId, role: i64, leaf_descriptor: text,
+        payload: MirOperand, encoding: i64, width: i64, transform: i64,
+        bits_local: LocalId, wide_local: LocalId,
+        scalar: MirOperand) -> [MirInst]:
+    var writes: [MirInst] = []
+    var value = payload
+    # `width` is canonical byte width (1/2/4/8), never a source bit count.
+    # 1 = numeric cast to i64, 2 = f32 bits then zero/sign-independent i64,
+    # 3 = f64 bitcast to i64. These preserve the canonical writer ABI without
+    # passing a narrower value as an i64 argument.
+    if transform == 1:
+        writes.push(MirInst(kind: MirInstKind.Cast(wide_local, payload, MirType.i64()), span: nil))
+        value = mir_operand_copy(wide_local)
+    elif transform == 2:
+        writes.push(MirInst(kind: MirInstKind.Bitcast(bits_local, payload, MirType(kind: MirTypeKind.I32)), span: nil))
+        writes.push(MirInst(kind: MirInstKind.Cast(wide_local, mir_operand_copy(bits_local), MirType.i64()), span: nil))
+        value = mir_operand_copy(wide_local)
+    elif transform == 3:
+        writes.push(MirInst(kind: MirInstKind.Bitcast(wide_local, payload, MirType.i64()), span: nil))
+        value = mir_operand_copy(wide_local)
+    writes.push(MirInst(kind: MirInstKind.Call(nil, scalar, [mir_operand_copy(token),
+        mir_operand_const_int(role), rt_hal_exit_descriptor_operand(leaf_descriptor),
+        mir_operand_const_int(encoding), mir_operand_const_int(width), value]), span: nil))
+    writes
+
+fn rt_hal_exit_direct_scalar_call(token: LocalId, payload: MirOperand, encoding: i64,
+        width: i64, transform: i64, bits_local: LocalId, wide_local: LocalId,
+        scalar: MirOperand) -> [MirInst]:
+    var writes: [MirInst] = []
+    var value = payload
+    if transform == 1:
+        writes.push(MirInst(kind: MirInstKind.Cast(wide_local, payload, MirType.i64()), span: nil)); value = mir_operand_copy(wide_local)
+    elif transform == 2:
+        writes.push(MirInst(kind: MirInstKind.Bitcast(bits_local, payload, MirType(kind: MirTypeKind.I32)), span: nil))
+        writes.push(MirInst(kind: MirInstKind.Cast(wide_local, mir_operand_copy(bits_local), MirType.i64()), span: nil)); value = mir_operand_copy(wide_local)
+    elif transform == 3:
+        writes.push(MirInst(kind: MirInstKind.Bitcast(wide_local, payload, MirType.i64()), span: nil)); value = mir_operand_copy(wide_local)
+    writes.push(MirInst(kind: MirInstKind.Call(nil, scalar, [mir_operand_copy(token), value,
+        mir_operand_const_int(encoding), mir_operand_const_int(width)]), span: nil))
+    writes
+
+fn rt_hal_exit_is_composite(type_: MirType) -> bool:
+    match type_.kind:
+        case Array(_, _) | Tuple(_) | Result(_, _): true
+        case _: false
+
+# Every arena-owner operation is fallible.  The expansion must not leave a
+# Bool return in a discarded Call: that converts a rejected transcript into a
+# normal producer terminal and silently bypasses the C/Rust comparison.
+#
+# This pass is deliberately applied after scalar and composite CFG expansion,
+# so one implementation covers begin/schema/event/write/end/finish in every
+# generated route.  A failure rolls back the active arena when a token exists
+# and then uses MIR Abort (a backend hard trap), while the success edge keeps
+# the producer's original terminal unchanged.
+fn rt_hal_exit_checked_bool_helper(name: text) -> bool:
+    name == "rt_hal_exact_exit_backend_events_begin" or
+    name == "rt_hal_exact_exit_backend_events_end" or
+    name == "rt_hal_exact_exit_backend_write_event" or
+    name == "rt_hal_exact_exit_backend_write_codec_scalar" or
+    name == "rt_hal_exact_exit_backend_write_codec_utf8" or
+    name == "rt_hal_exact_exit_backend_write_scalar" or
+    name == "rt_hal_exact_exit_backend_write_utf8" or
+    name == "rt_hal_exact_exit_backend_finish" or
+    name == "rt_hal_exact_exit_schema_bind_descriptors" or
+    name == "rt_hal_exact_exit_schema_policy_register" or
+    name == "rt_hal_exact_exit_operation_effect_policy_register" or
+    name == "rt_hal_exact_exit_type_seal" or
+    name == "rt_hal_exact_exit_controller_seal" or
+    name == "rt_hal_exact_request_events_begin" or
+    name == "rt_hal_exact_request_write_event" or
+    name == "rt_hal_exact_request_events_end" or
+    name == "rt_hal_exact_request_payload_begin" or
+    name == "rt_hal_exact_request_write_scalar" or
+    name == "rt_hal_exact_request_write_utf8" or
+    name == "rt_hal_exact_request_payload_end" or
+    name == "rt_hal_exact_request_finish" or
+    name == "rt_hal_exact_request_effect_begin" or
+    name == "rt_hal_exact_request_effect_write_event" or
+    name == "rt_hal_exact_request_effect_events_end" or
+    name == "rt_hal_exact_request_effect_write_byte" or
+    name == "rt_hal_exact_request_effect_finish" or
+    name == "rt_hal_exact_request_effect_capture_env_plan" or
+    name == "rt_hal_exact_request_effect_reject_dynamic"
+
+fn rt_hal_exit_checked_i64_helper(name: text) -> bool:
+    # Arena tokens and dense schema IDs are positive.  Zero is not a usable
+    # token/type identity either, so admit strictly greater than zero.
+    name == "rt_hal_exact_exit_backend_begin_next" or
+    name == "rt_hal_exact_exit_backend_begin_next_with_request" or
+    name == "rt_hal_exact_request_begin" or
+    name == "rt_hal_exact_exit_schema_resolve"
+
+fn rt_hal_exit_checked_helper_self_reclaims(name: text) -> bool:
+    # These writers call `rt_hal_exact_exit_abort` before every false return.
+    # The checked failure CFG must trap, but must not abort the same active
+    # record a second time (a later token could otherwise be misinterpreted).
+    name == "rt_hal_exact_exit_backend_events_begin" or
+    name == "rt_hal_exact_exit_backend_events_end" or
+    name == "rt_hal_exact_exit_backend_write_codec_scalar" or
+    name == "rt_hal_exact_exit_backend_write_codec_utf8" or
+    name == "rt_hal_exact_exit_backend_write_scalar" or
+    name == "rt_hal_exact_exit_backend_write_utf8"
+
+# The direct-call choke point has already resolved and sealed this marker from
+# a SymbolId plus defining-module identity.  Boundary capture intentionally
+# cannot recover that authority from the MIR call spelling: imports and a
+# same-name user function may serialize to the same text.  The marker must be
+# marker -> Call adjacency is mandatory; malformed/orphaned markers survive
+# this pass and generic backends reject them fail-closed.
+fn rt_hal_env_access_same_direct_operand(left: MirOperand, right: MirOperand) -> bool:
+    # This is not authority discovery: authority came from the sealed SymbolId
+    # at lowering. It only proves that no MIR transform separated the marker
+    # from the exact direct-call operand it was minted beside.
+    match left.kind:
+        case MirOperandKind.Const(MirConstValue.Str(left_name), _):
+            match right.kind:
+                case MirOperandKind.Const(MirConstValue.Str(right_name), _):
+                    left_name == right_name
+                case _: false
+        case MirOperandKind.Copy(left_local):
+            match right.kind:
+                case MirOperandKind.Copy(right_local): left_local.id == right_local.id
+                case _: false
+        case MirOperandKind.Move(left_local):
+            match right.kind:
+                case MirOperandKind.Move(right_local): left_local.id == right_local.id
+                case _: false
+
+fn rt_hal_env_access_same_plan_operand(left: MirOperand, right: MirOperand) -> bool:
+    # Plans are scoped locals at this boundary. Constants/pointers are not an
+    # admissible substitute; rejecting them prevents a forged marker from
+    # observing a different host plan than its paired direct call.
+    match left.kind:
+        case MirOperandKind.Copy(left_local) | MirOperandKind.Move(left_local):
+            match right.kind:
+                case MirOperandKind.Copy(right_local) | MirOperandKind.Move(right_local):
+                    left_local.id == right_local.id
+                case _: false
+        case _: false
+
+fn rt_hal_env_access_provenance_record_matches(provenance_id: i64,
+        executor_kind: i64, executor_symbol: i64, expected_callee: MirOperand,
+        plan: MirOperand, call_callee: MirOperand, call_plan: MirOperand) -> bool:
+    if provenance_id < 0 or provenance_id >= rt_hal_env_executor_provenance_records.len():
+        return false
+    val record = rt_hal_env_executor_provenance_records[provenance_id]
+    # The opaque record, populated only from resolved HIR lowering, binds the
+    # marker's scalar identity to its kind and both original operands. This is
+    # the authority check; the operand comparison below only proves adjacency.
+    record.executor_kind == executor_kind and
+    record.executor_symbol == executor_symbol and
+    rt_hal_env_access_same_direct_operand(record.expected_callee, expected_callee) and
+    rt_hal_env_access_same_plan_operand(record.plan, plan) and
+    rt_hal_env_access_same_direct_operand(record.expected_callee, call_callee) and
+    rt_hal_env_access_same_plan_operand(record.plan, call_plan)
+
+fn rt_hal_env_access_marked_plan(instructions: [MirInst], index: i64) -> MirOperand?:
+    if index < 0 or index + 1 >= instructions.len(): return nil
+    match instructions[index].kind:
+        case RtHalEnvExecutorProvenance(provenance_id, kind, executor_symbol, expected_callee, plan):
+            if kind < 1 or kind > 3 or executor_symbol < 0: return nil
+            match instructions[index + 1].kind:
+                case Call(_, callee, arguments):
+                    # The direct-call emitter derives the marker plan from
+                    # argument zero. Recheck the shape here so a future MIR
+                    # transform cannot attach a provenance row to a zero-arg
+                    # call and obtain an effect capture by accident.
+                    if arguments.len() >= 1 and rt_hal_env_access_provenance_record_matches(
+                       provenance_id, kind, executor_symbol, expected_callee, plan,
+                       callee, arguments[0]): Some(plan)
+                    else: nil
+                case _: nil
+        case _: nil
+
+# Lower a real environment-executor call into one bounded V3 record capture
+# immediately before the original parent-owned call.  The original call is
+# retained: this transform never moves host authority to C/Rust.  The runtime
+# helper validates all 24 closed instruction kinds and their declared bounds,
+# writes directly to the preallocated request slot, and seals the plan before
+# the parent can observe the effect.  The preceding semantic capability pass
+# has already rejected aliases, wrappers, indirect calls and unresolved
+# callable identities.  Do not reintroduce a name/prefix heuristic here: a
+# non-environment function merely containing `env_access` in its name is not
+# an effect authority and must retain normal Pure lowering.
+fn inject_rt_hal_env_access_effect_capture(function: MirFunction,
+        request_token: LocalId) -> MirFunction:
+    val capture = rt_hal_exit_runtime_fn("rt_hal_exact_request_effect_capture_env_plan",
+        [MirType.i64(), MirType(kind: MirTypeKind.Opaque("EnvAccessPlan"))], MirType.bool())
     var blocks: [MirBlock] = []
-    for original_block in function.blocks:
+    for original in function.blocks:
+        var instructions: [MirInst] = []
+        var index = 0
+        while index < original.instructions.len():
+            val instruction = original.instructions[index]
+            if val plan = rt_hal_env_access_marked_plan(original.instructions, index):
+                # A source call may consume its plan with Move. The capture is
+                # a read-only scoped observation, so materialise a preceding
+                # Copy local operand rather than duplicating that move or
+                # transferring the plan into the foreign boundary.
+                val observed_plan = match plan.kind:
+                    case MirOperandKind.Copy(local) | MirOperandKind.Move(local):
+                        mir_operand_copy(local)
+                    case _: plan
+                instructions.push(MirInst(kind: MirInstKind.Call(nil, capture,
+                    [mir_operand_copy(request_token), observed_plan]), span: instruction.span))
+                # Marker has been consumed. Retain only the original authored
+                # call; no provenance instruction reaches normal MIR passes.
+                index = index + 1
+                instructions.push(original.instructions[index])
+            else:
+                instructions.push(instruction)
+            index = index + 1
+        blocks.push(MirBlock(id: original.id, label: original.label,
+            instructions: instructions, terminator: original.terminator))
+    val captured = MirFunction.with_blocks(function, blocks)
+    # No later lowering phase may mint another marker against this function's
+    # ledger. Any orphaned/malformed row remains in MIR for backend rejection.
+    rt_hal_env_executor_provenance_sealed = true
+    captured
+
+# Cold collection uses this after boundary injection and before metadata
+# stripping.  Adapter 4 is registered only for operations that actually have
+# a recognized parent environment effect. Registering it for every query
+# forces effect-capability policy where none was declared and makes otherwise
+# valid query-only operation-plan rows fail closed during installation.
+pub fn rt_hal_function_has_env_effect_capture(function: MirFunction) -> bool:
+    for block in function.blocks:
+        for instruction in block.instructions:
+            match instruction.kind:
+                case Call(_, callee, _):
+                    match rt_hal_exit_helper_name(callee):
+                        case Some("rt_hal_exact_request_effect_capture_env_plan"): return true
+                        case _: ()
+                case _: ()
+    false
+
+fn rt_hal_exit_helper_name(operand: MirOperand) -> text?:
+    match operand.kind:
+        case Const(MirConstValue.Str(name), _): Some(name)
+        case _: nil
+
+fn rt_hal_exit_checked_failure_block(id: BlockId, name: text,
+        token: LocalId?, request_token: LocalId?) -> MirBlock:
+    var instructions: [MirInst] = []
+    # Begin/schema-resolution failures have no usable token.  All later
+    # failures reclaim their one active fixed-arena slot before trapping.
+    val rollback_token = if name.starts_with("rt_hal_exact_request_"):
+        request_token else: token
+    if val active_token = rollback_token:
+        # Entry requests are a distinct pre-Pure owner.  Rolling one back
+        # through the exit writer could reclaim an unrelated terminal slot.
+        val abort_name = if name.starts_with("rt_hal_exact_request_"):
+            "rt_hal_exact_request_abort" else: "rt_hal_exact_exit_abort"
+        instructions.push(MirInst(kind: MirInstKind.Call(nil,
+            rt_hal_exit_runtime_fn(abort_name, [MirType.i64()],
+                MirType.unit()), [mir_operand_copy(active_token)]), span: nil))
+    val diagnostic = if name == "rt_hal_exact_request_effect_reject_dynamic":
+        "RTHAL-E-ENV-EFFECT-DYNAMIC-UNREPRESENTABLE" else:
+        "E-RTHAL-EXIT-HELPER-FAILURE:" + name
+    MirBlock(id: id, label: Some("rt_hal_exit_checked_failure_" + name),
+        instructions: instructions,
+        terminator: MirTerminator.Abort(diagnostic))
+
+fn rt_hal_exit_check_helper_failures(function: MirFunction,
+        active_token: LocalId?, request_token: LocalId?) -> MirFunction:
+    var next_local = 0
+    for local in function.locals:
+        if local.id.id >= next_local: next_local = local.id.id + 1
+    var next_block = 0
+    for block in function.blocks:
+        if block.id.id >= next_block: next_block = block.id.id + 1
+    var locals = function.locals
+    var output: [MirBlock] = []
+    for original in function.blocks:
+        var current_id = original.id
+        var current_label = original.label
+        var current_instructions: [MirInst] = []
+        var index = 0
+        while index < original.instructions.len():
+            val instruction = original.instructions[index]
+            var helper: text? = nil
+            var is_bool = false
+            var is_i64 = false
+            match instruction.kind:
+                case Call(_, func, _):
+                    helper = rt_hal_exit_helper_name(func)
+                    if val name = helper:
+                        is_bool = rt_hal_exit_checked_bool_helper(name)
+                        is_i64 = rt_hal_exit_checked_i64_helper(name)
+                case _: ()
+            if not is_bool and not is_i64:
+                current_instructions.push(instruction)
+                index = index + 1
+            else:
+                val name = helper ?? "unknown"
+                val checked_type = if is_bool: MirType.bool() else: MirType.i64()
+                var checked = LocalId(id: next_local)
+                var preserve_dest = false
+                var call_func = MirOperand(kind: MirOperandKind.Const(
+                    MirConstValue.Str("rt_hal_exit_internal_invalid"),
+                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [],
+                        return_type: checked_type, is_variadic: false)))))
+                var call_args: [MirOperand] = []
+                match instruction.kind:
+                    case Call(destination, func, args):
+                        call_func = func
+                        call_args = args
+                        # Keep a generated destination as the checked value;
+                        # do not replace a live token/type local with a
+                        # temporary and pass an uninitialized value onward.
+                        if val destination_local = destination:
+                            # Preserve any existing result destination. This
+                            # makes the pass safe for future generated Bool
+                            # calls as well as begin/schema i64 calls.
+                            checked = destination_local
+                            preserve_dest = true
+                    case _: ()
+                if not preserve_dest:
+                    next_local = next_local + 1
+                    locals.push(MirLocal(id: checked,
+                        name: Some("rt_hal_exit_checked_" + name), type_: checked_type,
+                        kind: LocalKind.Temp, is_ghost: false))
+                current_instructions.push(MirInst(kind: MirInstKind.Call(Some(checked),
+                    call_func, call_args), span: instruction.span))
+                val failure_id = BlockId(id: next_block)
+                val success_id = BlockId(id: next_block + 1)
+                next_block = next_block + 2
+                var condition = mir_operand_copy(checked)
+                if is_i64:
+                    val nonnegative = LocalId(id: next_local)
+                    next_local = next_local + 1
+                    locals.push(MirLocal(id: nonnegative,
+                        name: Some("rt_hal_exit_checked_nonnegative_" + name),
+                        type_: MirType.bool(), kind: LocalKind.Temp, is_ghost: false))
+                    current_instructions.push(MirInst(kind: MirInstKind.BinOp(nonnegative,
+                        MirBinOp.Gt, mir_operand_copy(checked), mir_operand_const_int(0)),
+                        span: instruction.span))
+                    condition = mir_operand_copy(nonnegative)
+                output.push(MirBlock(id: current_id, label: current_label,
+                    instructions: current_instructions,
+                    terminator: MirTerminator.If(condition, success_id, failure_id)))
+                # Begin/schema-resolution failures have no token.  Most
+                # payload writers reclaim internally on false; event append,
+                # event end, and finish do not, so their failure edge owns the
+                # sole rollback before hard trapping.
+                val reclaim_token = if is_i64 or
+                    rt_hal_exit_checked_helper_self_reclaims(name): nil
+                    else: active_token
+                val reclaim_request = if name.starts_with("rt_hal_exact_request_"):
+                    request_token else: nil
+                output.push(rt_hal_exit_checked_failure_block(failure_id, name,
+                    reclaim_token, reclaim_request))
+                current_id = success_id
+                current_label = Some("rt_hal_exit_checked_success_" + name)
+                current_instructions = []
+                index = index + 1
+        output.push(MirBlock(id: current_id, label: current_label,
+            instructions: current_instructions, terminator: original.terminator))
+    MirFunction.with_locals_and_blocks(function, locals, output)
+
+# A transcript is a bounded prepass, not an interleaved payload format.  The
+# capacity includes the selected value only; callers add RootBegin/RootEnd.
+# Arrays in this MIR type are fixed-size, so their maximum transcript is known
+# cold and their prepass verifies that the typed length is exactly that size.
+fn rt_hal_exit_event_capacity_v2(type_: MirType) -> i64:
+    match type_.kind:
+        case Array(element, size):
+            val child = rt_hal_exit_event_capacity_v2(element)
+            if size < 0 or child <= 0 or size > (65536 - 2) / child: -1
+            else: 2 + size * child
+        case Tuple(elements):
+            var total = 2
+            for element in elements:
+                val child = rt_hal_exit_event_capacity_v2(element)
+                if child <= 0 or total > 65536 - child: return -1
+                total = total + child
+            total
+        case Result(ok, err):
+            val ok_count = rt_hal_exit_event_capacity_v2(ok)
+            val err_count = rt_hal_exit_event_capacity_v2(err)
+            if ok_count <= 0 or err_count <= 0: -1
+            elif ok_count > err_count: 2 + ok_count
+            else: 2 + err_count
+        case Opaque(name): if name == "text": 2 else: -1
+        case _: 1
+
+fn rt_hal_exit_direct_writer(token: LocalId, bits: LocalId, wide: LocalId,
+        payload: MirOperand, type_: MirType) -> [MirInst]:
+    val scalar = rt_hal_exit_runtime_fn("rt_hal_exact_exit_backend_write_scalar", [MirType.i64(), MirType.i64(), MirType.i64(), MirType.i64()], MirType.bool())
+    val utf8 = rt_hal_exit_runtime_fn("rt_hal_exact_exit_backend_write_utf8", [MirType.i64(), MirType(kind: MirTypeKind.Opaque("text"))], MirType.bool())
+    match type_.kind:
+        case I8: rt_hal_exit_direct_scalar_call(token, payload, 3, 1, 1, bits, wide, scalar)
+        case I16: rt_hal_exit_direct_scalar_call(token, payload, 3, 2, 1, bits, wide, scalar)
+        case I32: rt_hal_exit_direct_scalar_call(token, payload, 3, 4, 1, bits, wide, scalar)
+        case I64: rt_hal_exit_direct_scalar_call(token, payload, 3, 8, 0, bits, wide, scalar)
+        case U8: rt_hal_exit_direct_scalar_call(token, payload, 4, 1, 1, bits, wide, scalar)
+        case U16: rt_hal_exit_direct_scalar_call(token, payload, 4, 2, 1, bits, wide, scalar)
+        case U32: rt_hal_exit_direct_scalar_call(token, payload, 4, 4, 1, bits, wide, scalar)
+        case U64: rt_hal_exit_direct_scalar_call(token, payload, 4, 8, 0, bits, wide, scalar)
+        case F32: rt_hal_exit_direct_scalar_call(token, payload, 5, 4, 2, bits, wide, scalar)
+        case F64: rt_hal_exit_direct_scalar_call(token, payload, 5, 8, 3, bits, wide, scalar)
+        case Bool: rt_hal_exit_direct_scalar_call(token, payload, 4, 1, 1, bits, wide, scalar)
+        case Char: rt_hal_exit_direct_scalar_call(token, payload, 4, 4, 1, bits, wide, scalar)
+        case Opaque(name):
+            if name == "text": [MirInst(kind: MirInstKind.Call(nil, utf8, [mir_operand_copy(token), payload]), span: nil)] else: []
+        case _: []
+
+# Entry request capture deliberately uses ordinary typed MIR operands.  It is
+# a separate lowering from terminal capture: the foreign request exists before
+# the authored Pure body runs and contains no return/throw/effect receipt.
+fn rt_hal_request_tuple_descriptor(params: [MirType]) -> text:
+    rt_hal_exit_tuple_descriptor_v2(params)
+
+fn rt_hal_request_arg_local(function: MirFunction, index: i64) -> LocalId?:
+    for local in function.locals:
+        match local.kind:
+            case Arg(position):
+                if position == index: return Some(local.id)
+            case _: ()
+    nil
+
+fn rt_hal_request_leaf_supported(type_: MirType) -> bool:
+    match type_.kind:
+        case I8 | I16 | I32 | I64 | U8 | U16 | U32 | U64 | F32 | F64 |
+             Bool | Char | Unit: true
+        case Opaque(name): name=="text"
+        case _: false
+
+fn rt_hal_request_leaf_event(type_: MirType) -> (i64,i64):
+    match type_.kind:
+        case Unit: (11,0)
+        case Bool: (12,1)
+        case I8: (13,1)
+        case I16: (14,2)
+        case I32: (15,4)
+        case I64: (16,8)
+        case U8: (17,1)
+        case U16: (18,2)
+        case U32: (19,4)
+        case U64: (20,8)
+        case F32: (21,4)
+        case F64: (22,8)
+        case Char: (27,4)
+        case _: (-1,-1)
+
+fn rt_hal_request_write_leaf(token: LocalId, bits: LocalId, wide: LocalId,
+        payload: MirOperand, type_: MirType) -> [MirInst]:
+    val writer=rt_hal_exit_runtime_fn("rt_hal_exact_request_write_scalar",
+        [MirType.i64(),MirType.i64(),MirType.i64()],MirType.bool())
+    val utf8=rt_hal_exit_runtime_fn("rt_hal_exact_request_write_utf8",
+        [MirType.i64(),MirType(kind:MirTypeKind.Opaque("text"))],MirType.bool())
+    var result: [MirInst]=[];var value=payload;var width=0;var transform=0
+    match type_.kind:
+        case I8:
+            width=1
+            transform=1
+        case I16:
+            width=2
+            transform=1
+        case I32:
+            width=4
+            transform=1
+        case I64: width=8
+        case U8:
+            width=1
+            transform=1
+        case U16:
+            width=2
+            transform=1
+        case U32:
+            width=4
+            transform=1
+        case U64: width=8
+        case Bool:
+            width=1
+            transform=1
+        case Char:
+            width=4
+            transform=1
+        case F32:
+            width=4
+            transform=2
+        case F64:
+            width=8
+            transform=3
+        case Unit: width=0
+        case Opaque(name):
+            if name == "text":
+                return [MirInst(kind:MirInstKind.Call(nil,utf8,[mir_operand_copy(token),payload]),span:nil)]
+            else:
+                return []
+        case _: return []
+    if transform == 1:
+        result.push(MirInst(kind:MirInstKind.Cast(wide,payload,MirType.i64()),span:nil))
+        value=mir_operand_copy(wide)
+    elif transform == 2:
+        result.push(MirInst(kind:MirInstKind.Bitcast(bits,payload,MirType(kind:MirTypeKind.I32)),span:nil))
+        result.push(MirInst(kind:MirInstKind.Cast(wide,mir_operand_copy(bits),MirType.i64()),span:nil))
+        value=mir_operand_copy(wide)
+    elif transform == 3:
+        result.push(MirInst(kind:MirInstKind.Bitcast(wide,payload,MirType.i64()),span:nil))
+        value=mir_operand_copy(wide)
+    result.push(MirInst(kind:MirInstKind.Call(nil,writer,[mir_operand_copy(token),value,mir_operand_const_int(width)]),span:nil));result
+
+### Entry request serialization is a typed CFG transform.  It owns neither
+### foreign output nor an aggregate ABI view: tuple fields, fixed-array cells,
+### Result payloads, and text all cross through ordinary typed MIR operations.
+class RtHalRequestCfgBuilder:
+    locals: [MirLocal]
+    blocks: [MirBlock]
+    next_local: i64
+    next_block: i64
+    token: LocalId
+    bits: LocalId
+    wide: LocalId
+
+    me local(type_: MirType, name: text) -> LocalId:
+        val id=LocalId(id:self.next_local);self.next_local=self.next_local+1
+        self.locals=self.locals.push(MirLocal(id:id,name:Some(name),type_:type_,kind:LocalKind.Temp,is_ghost:false));id
+    me mutable_local(type_: MirType, name: text) -> LocalId:
+        val id=LocalId(id:self.next_local);self.next_local=self.next_local+1
+        self.locals=self.locals.push(MirLocal(id:id,name:Some(name),type_:type_,kind:LocalKind.Var,is_ghost:false));id
+    me block(label: text, instructions: [MirInst], terminator: MirTerminator) -> BlockId:
+        val id=BlockId(id:self.next_block);self.next_block=self.next_block+1
+        self.blocks=self.blocks.push(MirBlock(id:id,label:Some(label),instructions:instructions,terminator:terminator));id
+    me event(tag: i64, arg: MirOperand) -> MirInst:
+        MirInst(kind:MirInstKind.Call(nil,rt_hal_exit_runtime_fn("rt_hal_exact_request_write_event",
+            [MirType.i64(),MirType.i64(),MirType.i64()],MirType.bool()),
+            [mir_operand_copy(self.token),mir_operand_const_int(tag),arg]),span:nil)
+    me reject(label: text) -> BlockId:
+        self.block(label,[MirInst(kind:MirInstKind.Call(nil,rt_hal_exit_runtime_fn("rt_hal_exact_request_abort",[MirType.i64()],MirType.unit()),[mir_operand_copy(self.token)]),span:nil)],MirTerminator.Abort("E-RTHAL-REQUEST-TYPE-REJECT"))
+
+    me events_value(value: MirOperand, type_: MirType, next: BlockId) -> BlockId:
+        match type_.kind:
+            case Tuple(items): self.events_tuple(value,items,next)
+            case Array(element,size): self.events_array(value,element,size,next)
+            case Result(ok,err): self.events_result(value,ok,err,next)
+            case Opaque(name):
+                if name != "text": return self.reject("rt_hal_request_event_opaque_reject")
+                val length=self.local(MirType.i64(),"rt_hal_request_text_length")
+                val nonnegative=self.local(MirType.bool(),"rt_hal_request_text_nonnegative")
+                val within=self.local(MirType.bool(),"rt_hal_request_text_within_cap")
+                val append=self.block("rt_hal_request_text_event_append",[self.event(25,mir_operand_copy(length)),self.event(26,mir_operand_const_int(0))],MirTerminator.Goto(next))
+                val reject=self.reject("rt_hal_request_text_event_reject")
+                val cap=self.block("rt_hal_request_text_event_cap",[MirInst(kind:MirInstKind.BinOp(within,MirBinOp.Le,mir_operand_copy(length),mir_operand_const_int(1048576)),span:nil)],MirTerminator.If(mir_operand_copy(within),append,reject))
+                self.block("rt_hal_request_text_event_length",[MirInst(kind:MirInstKind.Call(Some(length),rt_hal_exit_typed_text_length_fn(),[value]),span:nil),MirInst(kind:MirInstKind.BinOp(nonnegative,MirBinOp.Ge,mir_operand_copy(length),mir_operand_const_int(0)),span:nil)],MirTerminator.If(mir_operand_copy(nonnegative),cap,reject))
+            case _:
+                val leaf=rt_hal_request_leaf_event(type_)
+                if leaf.0 < 0:
+                    self.reject("rt_hal_request_event_leaf_reject")
+                else:
+                    self.block("rt_hal_request_event_leaf",[self.event(leaf.0,mir_operand_const_int(leaf.1))],MirTerminator.Goto(next))
+
+    me events_tuple(value: MirOperand, items: [MirType], next: BlockId) -> BlockId:
+        var fields: [LocalId]=[];var instructions: [MirInst]=[self.event(3,mir_operand_const_int(items.len()))];var index=0
+        for item in items:
+            val field=self.local(item,"rt_hal_request_tuple_field");fields.push(field)
+            instructions.push(MirInst(kind:MirInstKind.GetField(field,value,index),span:nil));index=index+1
+        val close=self.block("rt_hal_request_tuple_end",[self.event(4,mir_operand_const_int(0))],MirTerminator.Goto(next));var cursor=close;var reverse=items.len()-1
+        while reverse>=0:
+            cursor=self.events_value(mir_operand_copy(fields[reverse]),items[reverse],cursor);reverse=reverse-1
+        self.block("rt_hal_request_tuple_begin",instructions,MirTerminator.Goto(cursor))
+
+    me events_array(value: MirOperand, element: MirType, size: i64, next: BlockId) -> BlockId:
+        if size < 0: return self.reject("rt_hal_request_array_static_reject")
+        val state=self.mutable_local(MirType.i64(),"rt_hal_request_array_index_state");val current=self.local(MirType.i64(),"rt_hal_request_array_index");val following=self.local(MirType.i64(),"rt_hal_request_array_next");val length=self.local(MirType.i64(),"rt_hal_request_array_length");val exact=self.local(MirType.bool(),"rt_hal_request_array_length_exact");val cond=self.local(MirType.bool(),"rt_hal_request_array_cond");val item=self.local(element,"rt_hal_request_array_item")
+        val cond_id=BlockId(id:self.next_block);val body_id=BlockId(id:self.next_block+1);val increment_id=BlockId(id:self.next_block+2);val length_check=BlockId(id:self.next_block+3);self.next_block=self.next_block+4
+        val child=self.events_value(mir_operand_copy(item),element,increment_id);val close=self.block("rt_hal_request_array_end",[self.event(6,mir_operand_const_int(0))],MirTerminator.Goto(next));val bad=self.reject("rt_hal_request_array_length_reject")
+        val entry=self.block("rt_hal_request_array_begin",[MirInst(kind:MirInstKind.Const(state,MirConstValue.Int(0),MirType.i64()),span:nil),MirInst(kind:MirInstKind.Call(Some(length),rt_hal_exit_typed_array_length_fn(element,size),[value]),span:nil),self.event(5,mir_operand_const_int(size))],MirTerminator.Goto(length_check))
+        self.blocks=self.blocks.push(MirBlock(id:length_check,label:Some("rt_hal_request_array_length_check"),instructions:[MirInst(kind:MirInstKind.BinOp(exact,MirBinOp.Eq,mir_operand_copy(length),mir_operand_const_int(size)),span:nil)],terminator:MirTerminator.If(mir_operand_copy(exact),cond_id,bad)))
+        self.blocks=self.blocks.push(MirBlock(id:cond_id,label:Some("rt_hal_request_array_cond"),instructions:[MirInst(kind:MirInstKind.Copy(current,state),span:nil),MirInst(kind:MirInstKind.BinOp(cond,MirBinOp.Lt,mir_operand_copy(current),mir_operand_const_int(size)),span:nil)],terminator:MirTerminator.If(mir_operand_copy(cond),body_id,close)))
+        self.blocks=self.blocks.push(MirBlock(id:body_id,label:Some("rt_hal_request_array_body"),instructions:[MirInst(kind:MirInstKind.Call(Some(item),rt_hal_exit_typed_array_at_fn(element,size),[value,mir_operand_copy(current)]),span:nil)],terminator:MirTerminator.Goto(child)))
+        self.blocks=self.blocks.push(MirBlock(id:increment_id,label:Some("rt_hal_request_array_increment"),instructions:[MirInst(kind:MirInstKind.BinOp(following,MirBinOp.Add,mir_operand_copy(current),mir_operand_const_int(1)),span:nil),MirInst(kind:MirInstKind.Copy(state,following),span:nil)],terminator:MirTerminator.Goto(cond_id)));entry
+
+    me events_result(value: MirOperand, ok: MirType, err: MirType, next: BlockId) -> BlockId:
+        val is_ok=self.local(MirType.bool(),"rt_hal_request_result_is_ok");val ok_value=self.local(ok,"rt_hal_request_result_ok");val err_value=self.local(err,"rt_hal_request_result_err");val ok_id=BlockId(id:self.next_block);val err_id=BlockId(id:self.next_block+1);self.next_block=self.next_block+2
+        val ok_end=self.block("rt_hal_request_result_ok_end",[self.event(8,mir_operand_const_int(0))],MirTerminator.Goto(next));val err_end=self.block("rt_hal_request_result_err_end",[self.event(10,mir_operand_const_int(0))],MirTerminator.Goto(next));val ok_child=self.events_value(mir_operand_copy(ok_value),ok,ok_end);val err_child=self.events_value(mir_operand_copy(err_value),err,err_end)
+        val entry=self.block("rt_hal_request_result_branch",[MirInst(kind:MirInstKind.Call(Some(is_ok),rt_hal_exit_typed_result_is_ok_fn(ok,err),[value]),span:nil)],MirTerminator.If(mir_operand_copy(is_ok),ok_id,err_id))
+        self.blocks=self.blocks.push(MirBlock(id:ok_id,label:Some("rt_hal_request_result_ok"),instructions:[self.event(7,mir_operand_const_int(1)),MirInst(kind:MirInstKind.Call(Some(ok_value),rt_hal_exit_typed_result_ok_payload_fn(ok,err),[value]),span:nil)],terminator:MirTerminator.Goto(ok_child)))
+        self.blocks=self.blocks.push(MirBlock(id:err_id,label:Some("rt_hal_request_result_err"),instructions:[self.event(9,mir_operand_const_int(1)),MirInst(kind:MirInstKind.Call(Some(err_value),rt_hal_exit_typed_result_err_payload_fn(ok,err),[value]),span:nil)],terminator:MirTerminator.Goto(err_child)));entry
+
+    me payload_value(value: MirOperand, type_: MirType, next: BlockId) -> BlockId:
+        match type_.kind:
+            case Tuple(items):
+                var fields: [LocalId]=[];var instructions: [MirInst]=[];var index=0
+                for item in items:
+                    val field=self.local(item,"rt_hal_request_payload_tuple_field");fields.push(field);instructions.push(MirInst(kind:MirInstKind.GetField(field,value,index),span:nil));index=index+1
+                var cursor=next;var reverse=items.len()-1
+                while reverse>=0:cursor=self.payload_value(mir_operand_copy(fields[reverse]),items[reverse],cursor);reverse=reverse-1
+                self.block("rt_hal_request_payload_tuple",instructions,MirTerminator.Goto(cursor))
+            case Array(element,size): self.payload_array(value,element,size,next)
+            case Result(ok,err): self.payload_result(value,ok,err,next)
+            case _:
+                val writes=rt_hal_request_write_leaf(self.token,self.bits,self.wide,value,type_)
+                if writes.len() == 0:
+                    self.reject("rt_hal_request_payload_leaf_reject")
+                else:
+                    self.block("rt_hal_request_payload_leaf",writes,MirTerminator.Goto(next))
+
+    me payload_array(value: MirOperand, element: MirType, size: i64, next: BlockId) -> BlockId:
+        if size < 0: return self.reject("rt_hal_request_payload_array_static_reject")
+        val state=self.mutable_local(MirType.i64(),"rt_hal_request_payload_array_state");val current=self.local(MirType.i64(),"rt_hal_request_payload_array_index");val following=self.local(MirType.i64(),"rt_hal_request_payload_array_next");val cond=self.local(MirType.bool(),"rt_hal_request_payload_array_cond");val item=self.local(element,"rt_hal_request_payload_array_item");val cond_id=BlockId(id:self.next_block);val body_id=BlockId(id:self.next_block+1);val inc_id=BlockId(id:self.next_block+2);self.next_block=self.next_block+3
+        val child=self.payload_value(mir_operand_copy(item),element,inc_id);val entry=self.block("rt_hal_request_payload_array_begin",[MirInst(kind:MirInstKind.Const(state,MirConstValue.Int(0),MirType.i64()),span:nil)],MirTerminator.Goto(cond_id))
+        self.blocks=self.blocks.push(MirBlock(id:cond_id,label:Some("rt_hal_request_payload_array_cond"),instructions:[MirInst(kind:MirInstKind.Copy(current,state),span:nil),MirInst(kind:MirInstKind.BinOp(cond,MirBinOp.Lt,mir_operand_copy(current),mir_operand_const_int(size)),span:nil)],terminator:MirTerminator.If(mir_operand_copy(cond),body_id,next)))
+        self.blocks=self.blocks.push(MirBlock(id:body_id,label:Some("rt_hal_request_payload_array_body"),instructions:[MirInst(kind:MirInstKind.Call(Some(item),rt_hal_exit_typed_array_at_fn(element,size),[value,mir_operand_copy(current)]),span:nil)],terminator:MirTerminator.Goto(child)))
+        self.blocks=self.blocks.push(MirBlock(id:inc_id,label:Some("rt_hal_request_payload_array_increment"),instructions:[MirInst(kind:MirInstKind.BinOp(following,MirBinOp.Add,mir_operand_copy(current),mir_operand_const_int(1)),span:nil),MirInst(kind:MirInstKind.Copy(state,following),span:nil)],terminator:MirTerminator.Goto(cond_id)));entry
+
+    me payload_result(value: MirOperand, ok: MirType, err: MirType, next: BlockId) -> BlockId:
+        val is_ok=self.local(MirType.bool(),"rt_hal_request_payload_result_is_ok");val ok_value=self.local(ok,"rt_hal_request_payload_result_ok");val err_value=self.local(err,"rt_hal_request_payload_result_err");val ok_id=BlockId(id:self.next_block);val err_id=BlockId(id:self.next_block+1);self.next_block=self.next_block+2
+        val ok_child=self.payload_value(mir_operand_copy(ok_value),ok,next);val err_child=self.payload_value(mir_operand_copy(err_value),err,next);val entry=self.block("rt_hal_request_payload_result_branch",[MirInst(kind:MirInstKind.Call(Some(is_ok),rt_hal_exit_typed_result_is_ok_fn(ok,err),[value]),span:nil)],MirTerminator.If(mir_operand_copy(is_ok),ok_id,err_id))
+        self.blocks=self.blocks.push(MirBlock(id:ok_id,label:Some("rt_hal_request_payload_result_ok"),instructions:[MirInst(kind:MirInstKind.Call(Some(ok_value),rt_hal_exit_typed_result_ok_payload_fn(ok,err),[value]),span:nil)],terminator:MirTerminator.Goto(ok_child)))
+        self.blocks=self.blocks.push(MirBlock(id:err_id,label:Some("rt_hal_request_payload_result_err"),instructions:[MirInst(kind:MirInstKind.Call(Some(err_value),rt_hal_exit_typed_result_err_payload_fn(ok,err),[value]),span:nil)],terminator:MirTerminator.Goto(err_child)));entry
+
+fn inject_rt_hal_request_capture(function: MirFunction, operation_id: text, request_token: LocalId, bits: LocalId, wide: LocalId) -> MirFunction:
+    val descriptor=rt_hal_request_tuple_descriptor(function.signature.params)
+    if descriptor == "": return function
+    var args: [LocalId]=[];var index=0
+    while index<function.signature.params.len():
+        val arg=rt_hal_request_arg_local(function,index)
+        if arg == nil: return function
+        args.push(arg.unwrap());index=index+1
+    var event_count=4
+    for type_ in function.signature.params:
+        val capacity=rt_hal_exit_event_capacity_v2(type_)
+        if capacity<=0 or event_count>65534-capacity:
+            var rejected: [MirBlock]=[]
+            for original in function.blocks:
+                if original.id.id==function.entry_block.id:
+                    rejected.push(MirBlock(id:original.id,label:original.label,instructions:[],terminator:MirTerminator.Abort("E-RTHAL-REQUEST-EVENT-CAPACITY-REJECT")))
+                else:rejected.push(original)
+            return MirFunction.with_blocks(function,rejected)
+        event_count=event_count+capacity
+    var next_block=0
+    for block in function.blocks:
+        if block.id.id >= next_block: next_block=block.id.id+1
+    var next_local=0
+    for local in function.locals:
+        if local.id.id >= next_local: next_local=local.id.id+1
+    var cfg=RtHalRequestCfgBuilder(locals:function.locals,blocks:[],next_local:next_local,next_block:next_block,token:request_token,bits:bits,wide:wide)
+    var output: [MirBlock]=[]
+    for original in function.blocks:
+        if original.id.id != function.entry_block.id:
+            output.push(original)
+            continue
+        var finish_instructions: [MirInst]=[MirInst(kind:MirInstKind.Call(nil,rt_hal_exit_runtime_fn("rt_hal_exact_request_finish",[MirType.i64()],MirType.bool()),[mir_operand_copy(request_token)]),span:nil)]
+        for instruction in original.instructions:finish_instructions.push(instruction)
+        val finish=cfg.block("rt_hal_request_finish",finish_instructions,original.terminator)
+        val payload_end=cfg.block("rt_hal_request_payload_end",[MirInst(kind:MirInstKind.Call(nil,rt_hal_exit_runtime_fn("rt_hal_exact_request_payload_end",[MirType.i64()],MirType.bool()),[mir_operand_copy(request_token)]),span:nil)],MirTerminator.Goto(finish))
+        var payload=payload_end;var reverse=args.len()-1
+        while reverse>=0:payload=cfg.payload_value(mir_operand_copy(args[reverse]),function.signature.params[reverse],payload);reverse=reverse-1
+        # Function parameters are the canonical outer tuple, including the
+        # empty tuple.  Its close event must precede RootEnd after all child
+        # branches have selected their own transcript.
+        val events_end=cfg.block("rt_hal_request_events_end",[cfg.event(4,mir_operand_const_int(0)),cfg.event(2,mir_operand_const_int(0)),MirInst(kind:MirInstKind.Call(nil,rt_hal_exit_runtime_fn("rt_hal_exact_request_events_end",[MirType.i64()],MirType.bool()),[mir_operand_copy(request_token)]),span:nil),MirInst(kind:MirInstKind.Call(nil,rt_hal_exit_runtime_fn("rt_hal_exact_request_payload_begin",[MirType.i64(),MirType.i64()],MirType.bool()),[mir_operand_copy(request_token),mir_operand_const_int(-1)]),span:nil)],MirTerminator.Goto(payload))
+        var events=events_end;reverse=args.len()-1
+        while reverse>=0:events=cfg.events_value(mir_operand_copy(args[reverse]),function.signature.params[reverse],events);reverse=reverse-1
+        val begin=rt_hal_exit_runtime_fn("rt_hal_exact_request_begin",[MirType(kind:MirTypeKind.Opaque("text")),MirType(kind:MirTypeKind.Opaque("text"))],MirType.i64())
+        val events_begin=rt_hal_exit_runtime_fn("rt_hal_exact_request_events_begin",[MirType.i64(),MirType.i64()],MirType.bool())
+        output.push(MirBlock(id:original.id,label:original.label,instructions:[MirInst(kind:MirInstKind.Call(Some(request_token),begin,[rt_hal_exit_descriptor_operand(operation_id),rt_hal_exit_descriptor_operand(descriptor)]),span:nil),MirInst(kind:MirInstKind.Call(nil,events_begin,[mir_operand_copy(request_token),mir_operand_const_int(event_count)]),span:nil),cfg.event(1,mir_operand_const_int(2<<32)),cfg.event(3,mir_operand_const_int(function.signature.params.len()))],terminator:MirTerminator.Goto(events)))
+    for generated in cfg.blocks:output.push(generated)
+    # The outer boundary performs the one shared checked-helper expansion
+    # after it has appended terminal lowering.  Running it here would leave
+    # the rewritten Calls visible to that outer pass and invoke every request
+    # owner operation twice.
+    MirFunction.with_locals_and_blocks(function,cfg.locals,output)
+
+### The boundary is expanded before backend lowering.  In particular, the
+### legacy RtHalExitArenaWrite* pseudo opcodes are intentionally not emitted:
+### a backend receives ordinary typed Calls/GetField/CFG and never needs to
+### infer the representation of a tuple, Result, or fixed array.
+class RtHalExitCfgBuilder:
+    locals: [MirLocal]
+    blocks: [MirBlock]
+    next_local: i64
+    next_block: i64
+    token: LocalId
+    bits: LocalId
+    wide: LocalId
+
+    me local(type_: MirType, name: text) -> LocalId:
+        val id = LocalId(id: self.next_local)
+        self.next_local = self.next_local + 1
+        self.locals = self.locals.push(MirLocal(id: id, name: Some(name), type_: type_, kind: LocalKind.Temp, is_ghost: false))
+        id
+
+    me mutable_local(type_: MirType, name: text) -> LocalId:
+        val id = LocalId(id: self.next_local)
+        self.next_local = self.next_local + 1
+        self.locals = self.locals.push(MirLocal(id: id, name: Some(name), type_: type_, kind: LocalKind.Var, is_ghost: false))
+        id
+
+    me block(label: text, instructions: [MirInst], terminator: MirTerminator) -> BlockId:
+        val id = BlockId(id: self.next_block)
+        self.next_block = self.next_block + 1
+        self.blocks = self.blocks.push(MirBlock(id: id, label: Some(label), instructions: instructions, terminator: terminator))
+        id
+
+    me event_append(tag: i64, argument: MirOperand) -> MirInst:
+        MirInst(kind: MirInstKind.Call(nil, rt_hal_exit_events_append_fn(),
+            [mir_operand_copy(self.token), mir_operand_const_int(tag), argument]), span: nil)
+
+    # Event CFG is deliberately separate from `value`: every event is emitted
+    # before events_end hands the arena to the payload CFG.  This preserves the
+    # wire format's transcript-before-payload invariant even for Result arms.
+    me event_leaf(payload: MirOperand, type_: MirType, continuation: BlockId) -> BlockId:
+        var instructions: [MirInst] = []
+        match type_.kind:
+            case Unit: instructions.push(self.event_append(11, mir_operand_const_int(0)))
+            case Bool: instructions.push(self.event_append(12, mir_operand_const_int(1)))
+            case I8: instructions.push(self.event_append(13, mir_operand_const_int(1)))
+            case U8: instructions.push(self.event_append(17, mir_operand_const_int(1)))
+            case I16: instructions.push(self.event_append(14, mir_operand_const_int(2)))
+            case I32: instructions.push(self.event_append(15, mir_operand_const_int(4)))
+            case I64: instructions.push(self.event_append(16, mir_operand_const_int(8)))
+            case U16: instructions.push(self.event_append(18, mir_operand_const_int(2)))
+            case U32 | Char: instructions.push(self.event_append(19, mir_operand_const_int(4)))
+            case U64: instructions.push(self.event_append(20, mir_operand_const_int(8)))
+            case F32: instructions.push(self.event_append(21, mir_operand_const_int(4)))
+            case F64: instructions.push(self.event_append(22, mir_operand_const_int(8)))
+            case Opaque(name):
+                if name == "text":
+                    val length = self.local(MirType.i64(), "rt_hal_exit_text_event_length")
+                    val nonnegative = self.local(MirType.bool(), "rt_hal_exit_text_event_nonnegative")
+                    val within_cap = self.local(MirType.bool(), "rt_hal_exit_text_event_within_cap")
+                    val append = self.block("rt_hal_exit_text_event_append", [
+                        self.event_append(25, mir_operand_copy(length)),
+                        self.event_append(26, mir_operand_const_int(0))], MirTerminator.Goto(continuation))
+                    val reject = self.block("rt_hal_exit_text_event_reject", [
+                        MirInst(kind: MirInstKind.Call(nil, rt_hal_exit_runtime_fn("rt_hal_exact_exit_abort", [MirType.i64()], MirType.unit()), [mir_operand_copy(self.token)]), span: nil)], MirTerminator.Abort("E-RTHAL-EXIT-TEXT-EVENT-REJECT"))
+                    val cap_check = self.block("rt_hal_exit_text_event_cap_check", [
+                        MirInst(kind: MirInstKind.BinOp(within_cap, MirBinOp.Le, mir_operand_copy(length), mir_operand_const_int(1048576)), span: nil)], MirTerminator.If(mir_operand_copy(within_cap), append, reject))
+                    return self.block("rt_hal_exit_text_event_length", [
+                        MirInst(kind: MirInstKind.Call(Some(length), rt_hal_exit_typed_text_length_fn(), [payload]), span: nil),
+                        MirInst(kind: MirInstKind.BinOp(nonnegative, MirBinOp.Ge, mir_operand_copy(length), mir_operand_const_int(0)), span: nil)], MirTerminator.If(mir_operand_copy(nonnegative), cap_check, reject))
+            case _: ()
+        self.block("rt_hal_exit_event_leaf", instructions, MirTerminator.Goto(continuation))
+
+    me event_value(payload: MirOperand, type_: MirType, continuation: BlockId) -> BlockId:
+        match type_.kind:
+            case Tuple(elements): self.event_tuple(payload, elements, continuation)
+            case Array(element, size): self.event_array(payload, element, size, continuation)
+            case Result(ok, err): self.event_result(payload, ok, err, continuation)
+            case _: self.event_leaf(payload, type_, continuation)
+
+    me event_tuple(payload: MirOperand, elements: [MirType], continuation: BlockId) -> BlockId:
+        var fields: [LocalId] = []
+        var instructions: [MirInst] = [self.event_append(3, mir_operand_const_int(elements.len()))]
+        var index = 0
+        for element in elements:
+            val field = self.local(element, "rt_hal_exit_event_tuple_field")
+            fields.push(field)
+            instructions.push(MirInst(kind: MirInstKind.GetField(field, payload, index), span: nil))
+            index = index + 1
+        val close = self.block("rt_hal_exit_event_tuple_end", [self.event_append(4, mir_operand_const_int(0))], MirTerminator.Goto(continuation))
+        var next = close
+        var reverse = elements.len() - 1
+        while reverse >= 0:
+            next = self.event_value(mir_operand_copy(fields[reverse]), elements[reverse], next)
+            reverse = reverse - 1
+        self.block("rt_hal_exit_event_tuple_begin", instructions, MirTerminator.Goto(next))
+
+    me event_array(payload: MirOperand, element: MirType, size: i64, continuation: BlockId) -> BlockId:
+        val index_state = self.mutable_local(MirType.i64(), "rt_hal_exit_event_array_index_state")
+        val index_current = self.local(MirType.i64(), "rt_hal_exit_event_array_index_current")
+        val index_next = self.local(MirType.i64(), "rt_hal_exit_event_array_index_next")
+        val length = self.local(MirType.i64(), "rt_hal_exit_event_array_length")
+        val length_ok = self.local(MirType.bool(), "rt_hal_exit_event_array_length_exact")
+        val cond = self.local(MirType.bool(), "rt_hal_exit_event_array_in_bounds")
+        val value = self.local(element, "rt_hal_exit_event_array_element")
+        val cond_block = BlockId(id: self.next_block)
+        val body_block = BlockId(id: self.next_block + 1)
+        val increment_block = BlockId(id: self.next_block + 2)
+        val length_bad_block = BlockId(id: self.next_block + 3)
+        val length_check_block = BlockId(id: self.next_block + 4)
+        self.next_block = self.next_block + 5
+        val child = self.event_value(mir_operand_copy(value), element, increment_block)
+        val close = self.block("rt_hal_exit_event_array_end", [self.event_append(6, mir_operand_const_int(0))], MirTerminator.Goto(continuation))
+        val entry = self.block("rt_hal_exit_event_array_begin", [
+            MirInst(kind: MirInstKind.Const(index_state, MirConstValue.Int(0), MirType.i64()), span: nil),
+            MirInst(kind: MirInstKind.Call(Some(length), rt_hal_exit_typed_array_length_fn(element, size), [payload]), span: nil),
+            self.event_append(5, mir_operand_const_int(size))], MirTerminator.Goto(length_check_block))
+        self.blocks = self.blocks.push(MirBlock(id: length_check_block, label: Some("rt_hal_exit_event_array_length_check"), instructions: [
+            MirInst(kind: MirInstKind.BinOp(length_ok, MirBinOp.Eq, mir_operand_copy(length), mir_operand_const_int(size)), span: nil)], terminator: MirTerminator.If(mir_operand_copy(length_ok), cond_block, length_bad_block)))
+        self.blocks = self.blocks.push(MirBlock(id: length_bad_block, label: Some("rt_hal_exit_event_array_length_reject"), instructions: [
+            MirInst(kind: MirInstKind.Call(nil, rt_hal_exit_runtime_fn("rt_hal_exact_exit_abort", [MirType.i64()], MirType.unit()), [mir_operand_copy(self.token)]), span: nil)], terminator: MirTerminator.Abort("E-RTHAL-EXIT-EVENT-ARRAY-REJECT")))
+        self.blocks = self.blocks.push(MirBlock(id: cond_block, label: Some("rt_hal_exit_event_array_cond"), instructions: [
+            MirInst(kind: MirInstKind.Copy(index_current, index_state), span: nil),
+            MirInst(kind: MirInstKind.BinOp(cond, MirBinOp.Lt, mir_operand_copy(index_current), mir_operand_const_int(size)), span: nil)], terminator: MirTerminator.If(mir_operand_copy(cond), body_block, close)))
+        self.blocks = self.blocks.push(MirBlock(id: body_block, label: Some("rt_hal_exit_event_array_body"), instructions: [
+            MirInst(kind: MirInstKind.Call(Some(value), rt_hal_exit_typed_array_at_fn(element, size), [payload, mir_operand_copy(index_current)]), span: nil)], terminator: MirTerminator.Goto(child)))
+        self.blocks = self.blocks.push(MirBlock(id: increment_block, label: Some("rt_hal_exit_event_array_increment"), instructions: [
+            MirInst(kind: MirInstKind.BinOp(index_next, MirBinOp.Add, mir_operand_copy(index_current), mir_operand_const_int(1)), span: nil),
+            MirInst(kind: MirInstKind.Copy(index_state, index_next), span: nil)], terminator: MirTerminator.Goto(cond_block)))
+        entry
+
+    me event_result(payload: MirOperand, ok: MirType, err: MirType, continuation: BlockId) -> BlockId:
+        val is_ok = self.local(MirType.bool(), "rt_hal_exit_event_result_is_ok")
+        val ok_payload = self.local(ok, "rt_hal_exit_event_result_ok")
+        val err_payload = self.local(err, "rt_hal_exit_event_result_err")
+        val ok_block = BlockId(id: self.next_block)
+        val err_block = BlockId(id: self.next_block + 1)
+        self.next_block = self.next_block + 2
+        val ok_end = self.block("rt_hal_exit_event_result_ok_end", [self.event_append(8, mir_operand_const_int(0))], MirTerminator.Goto(continuation))
+        val err_end = self.block("rt_hal_exit_event_result_err_end", [self.event_append(10, mir_operand_const_int(0))], MirTerminator.Goto(continuation))
+        val ok_child = self.event_value(mir_operand_copy(ok_payload), ok, ok_end)
+        val err_child = self.event_value(mir_operand_copy(err_payload), err, err_end)
+        val entry = self.block("rt_hal_exit_event_result_branch", [
+            MirInst(kind: MirInstKind.Call(Some(is_ok), rt_hal_exit_typed_result_is_ok_fn(ok, err), [payload]), span: nil)], MirTerminator.If(mir_operand_copy(is_ok), ok_block, err_block))
+        self.blocks = self.blocks.push(MirBlock(id: ok_block, label: Some("rt_hal_exit_event_result_ok"), instructions: [
+            self.event_append(7, mir_operand_const_int(1)),
+            MirInst(kind: MirInstKind.Call(Some(ok_payload), rt_hal_exit_typed_result_ok_payload_fn(ok, err), [payload]), span: nil)], terminator: MirTerminator.Goto(ok_child)))
+        self.blocks = self.blocks.push(MirBlock(id: err_block, label: Some("rt_hal_exit_event_result_err"), instructions: [
+            self.event_append(9, mir_operand_const_int(1)),
+            MirInst(kind: MirInstKind.Call(Some(err_payload), rt_hal_exit_typed_result_err_payload_fn(ok, err), [payload]), span: nil)], terminator: MirTerminator.Goto(err_child)))
+        entry
+
+    me leaf(payload: MirOperand, type_: MirType, continuation: BlockId,
+            schema_id: i64, kind_code: i64) -> BlockId:
+        # The root transcript is emitted once in the terminal block, before
+        # this CFG is entered.  Child blocks only project and encode values;
+        # a second RootBegin would violate the exact codec state machine.
+        var instructions: [MirInst] = []
+        val scalar = rt_hal_exit_codec_scalar_fn()
+        val role = if kind_code == 1: 2 else: 3
+        # Abort is the explicit UTF-8 terminal domain; generic Opaque values
+        # otherwise remain rejected by the canonical descriptor gate.
+        val descriptor = if kind_code == 5: "v2;text:utf8" else: rt_hal_exit_type_descriptor_v2(type_)
+        match type_.kind:
+            case I8: for write in rt_hal_exit_scalar_call(self.token, role, descriptor, payload, 3, 1, 1, self.bits, self.wide, scalar): instructions.push(write)
+            case I16: for write in rt_hal_exit_scalar_call(self.token, role, descriptor, payload, 3, 2, 1, self.bits, self.wide, scalar): instructions.push(write)
+            case I32: for write in rt_hal_exit_scalar_call(self.token, role, descriptor, payload, 3, 4, 1, self.bits, self.wide, scalar): instructions.push(write)
+            case I64: for write in rt_hal_exit_scalar_call(self.token, role, descriptor, payload, 3, 8, 0, self.bits, self.wide, scalar): instructions.push(write)
+            case U8: for write in rt_hal_exit_scalar_call(self.token, role, descriptor, payload, 4, 1, 1, self.bits, self.wide, scalar): instructions.push(write)
+            case U16: for write in rt_hal_exit_scalar_call(self.token, role, descriptor, payload, 4, 2, 1, self.bits, self.wide, scalar): instructions.push(write)
+            case U32: for write in rt_hal_exit_scalar_call(self.token, role, descriptor, payload, 4, 4, 1, self.bits, self.wide, scalar): instructions.push(write)
+            case U64: for write in rt_hal_exit_scalar_call(self.token, role, descriptor, payload, 4, 8, 0, self.bits, self.wide, scalar): instructions.push(write)
+            case F32: for write in rt_hal_exit_scalar_call(self.token, role, descriptor, payload, 5, 4, 2, self.bits, self.wide, scalar): instructions.push(write)
+            case F64: for write in rt_hal_exit_scalar_call(self.token, role, descriptor, payload, 5, 8, 3, self.bits, self.wide, scalar): instructions.push(write)
+            case Bool: for write in rt_hal_exit_scalar_call(self.token, role, descriptor, payload, 4, 1, 1, self.bits, self.wide, scalar): instructions.push(write)
+            case Char: for write in rt_hal_exit_scalar_call(self.token, role, descriptor, payload, 4, 4, 1, self.bits, self.wide, scalar): instructions.push(write)
+            case Opaque(name):
+                if name == "text":
+                    # A composite field is normally a local, not a string
+                    # literal.  Never pass the old constant-only -1 width to
+                    # the codec: derive it through the typed bridge and
+                    # reject it before the byte writer if it exceeds the
+                    # fixed exit arena ceiling.
+                    val text_length = self.local(MirType.i64(), "rt_hal_exit_text_payload_length")
+                    val text_nonnegative = self.local(MirType.bool(), "rt_hal_exit_text_payload_nonnegative")
+                    val text_within_cap = self.local(MirType.bool(), "rt_hal_exit_text_payload_within_cap")
+                    val utf8_write = self.block("rt_hal_exit_text_payload_write", [
+                        MirInst(kind: MirInstKind.Call(nil, rt_hal_exit_codec_utf8_fn(), [mir_operand_copy(self.token), mir_operand_const_int(role), rt_hal_exit_descriptor_operand("v2;text:utf8"), mir_operand_const_int(2), mir_operand_copy(text_length), payload]), span: nil)], MirTerminator.Goto(continuation))
+                    val utf8_reject = self.block("rt_hal_exit_text_payload_reject", [
+                        MirInst(kind: MirInstKind.Call(nil, rt_hal_exit_runtime_fn("rt_hal_exact_exit_abort", [MirType.i64()], MirType.unit()), [mir_operand_copy(self.token)]), span: nil)], MirTerminator.Abort("E-RTHAL-EXIT-TEXT-PAYLOAD-REJECT"))
+                    val utf8_cap_check = self.block("rt_hal_exit_text_payload_cap_check", [
+                        MirInst(kind: MirInstKind.BinOp(text_within_cap, MirBinOp.Le, mir_operand_copy(text_length), mir_operand_const_int(1048576)), span: nil)], MirTerminator.If(mir_operand_copy(text_within_cap), utf8_write, utf8_reject))
+                    return self.block("rt_hal_exit_text_payload_length", [
+                        MirInst(kind: MirInstKind.Call(Some(text_length), rt_hal_exit_typed_text_length_fn(), [payload]), span: nil),
+                        MirInst(kind: MirInstKind.BinOp(text_nonnegative, MirBinOp.Ge, mir_operand_copy(text_length), mir_operand_const_int(0)), span: nil)], MirTerminator.If(mir_operand_copy(text_nonnegative), utf8_cap_check, utf8_reject))
+            case Unit: ()
+            case _: ()
+        self.block("rt_hal_exit_leaf", instructions, MirTerminator.Goto(continuation))
+
+    me value(payload: MirOperand, type_: MirType, continuation: BlockId,
+            schema_id: i64, kind_code: i64) -> BlockId:
+        match type_.kind:
+            case Tuple(elements): self.tuple(payload, elements, continuation, schema_id, kind_code)
+            case Array(element, size): self.array(payload, element, size, continuation, schema_id, kind_code)
+            case Result(ok, err): self.result(payload, ok, err, continuation, schema_id, kind_code)
+            case _: self.leaf(payload, type_, continuation, schema_id, kind_code)
+
+    me tuple(payload: MirOperand, elements: [MirType], continuation: BlockId,
+            schema_id: i64, kind_code: i64) -> BlockId:
+        var fields: [LocalId] = []
+        var instructions: [MirInst] = []
+        var index = 0
+        for element in elements:
+            val field = self.local(element, "rt_hal_exit_tuple_field")
+            fields.push(field)
+            instructions.push(MirInst(kind: MirInstKind.GetField(field, payload, index), span: nil))
+            index = index + 1
+        var next = continuation
+        var reverse = elements.len() - 1
+        while reverse >= 0:
+            next = self.value(mir_operand_copy(fields[reverse]), elements[reverse], next,
+                rt_hal_exit_schema_id_v2(rt_hal_exit_type_descriptor_v2(elements[reverse])), kind_code)
+            reverse = reverse - 1
+        self.block("rt_hal_exit_tuple_project", instructions, MirTerminator.Goto(next))
+
+    me array(payload: MirOperand, element: MirType, size: i64, continuation: BlockId,
+            schema_id: i64, kind_code: i64) -> BlockId:
+        # `index_state` is the sole mutable loop carrier. Every calculated
+        # iteration value is a distinct SSA temp, so a backend never sees a
+        # BinOp redefining its own destination.
+        val index_state = self.mutable_local(MirType.i64(), "rt_hal_exit_array_index_state")
+        val index_current = self.local(MirType.i64(), "rt_hal_exit_array_index_current")
+        val index_next = self.local(MirType.i64(), "rt_hal_exit_array_index_next")
+        val length = self.local(MirType.i64(), "rt_hal_exit_array_length")
+        val length_ok = self.local(MirType.bool(), "rt_hal_exit_array_length_within_schema")
+        val cond = self.local(MirType.bool(), "rt_hal_exit_array_in_bounds")
+        val value = self.local(element, "rt_hal_exit_array_element")
+        val cond_block = BlockId(id: self.next_block)
+        val body_block = BlockId(id: self.next_block + 1)
+        val increment_block = BlockId(id: self.next_block + 2)
+        val length_bad_block = BlockId(id: self.next_block + 3)
+        val length_check_block = BlockId(id: self.next_block + 4)
+        self.next_block = self.next_block + 5
+        val child = self.value(mir_operand_copy(value), element, increment_block,
+            rt_hal_exit_schema_id_v2(rt_hal_exit_type_descriptor_v2(element)), kind_code)
+        val entry = self.block("rt_hal_exit_array_begin", [
+            MirInst(kind: MirInstKind.Const(index_state, MirConstValue.Int(0), MirType.i64()), span: nil),
+            MirInst(kind: MirInstKind.Call(Some(length), rt_hal_exit_typed_array_length_fn(element, size), [payload]), span: nil)], MirTerminator.Goto(length_check_block))
+        self.blocks = self.blocks.push(MirBlock(id: length_check_block, label: Some("rt_hal_exit_array_length_check"), instructions: [
+            MirInst(kind: MirInstKind.BinOp(length_ok, MirBinOp.Le, mir_operand_copy(length), mir_operand_const_int(size)), span: nil)], terminator: MirTerminator.If(mir_operand_copy(length_ok), cond_block, length_bad_block)))
+        self.blocks = self.blocks.push(MirBlock(id: length_bad_block, label: Some("rt_hal_exit_array_length_reject"), instructions: [
+            MirInst(kind: MirInstKind.Call(nil, rt_hal_exit_runtime_fn("rt_hal_exact_exit_abort", [MirType.i64()], MirType.unit()), [mir_operand_copy(self.token)]), span: nil)], terminator: MirTerminator.Abort("E-RTHAL-EXIT-ARRAY-REJECT")))
+        self.blocks = self.blocks.push(MirBlock(id: cond_block, label: Some("rt_hal_exit_array_cond"), instructions: [
+            MirInst(kind: MirInstKind.Copy(index_current, index_state), span: nil),
+            MirInst(kind: MirInstKind.BinOp(cond, MirBinOp.Lt, mir_operand_copy(index_current), mir_operand_copy(length)), span: nil)], terminator: MirTerminator.If(mir_operand_copy(cond), body_block, continuation)))
+        self.blocks = self.blocks.push(MirBlock(id: body_block, label: Some("rt_hal_exit_array_body"), instructions: [
+            MirInst(kind: MirInstKind.Call(Some(value), rt_hal_exit_typed_array_at_fn(element, size), [payload, mir_operand_copy(index_current)]), span: nil)], terminator: MirTerminator.Goto(child)))
+        self.blocks = self.blocks.push(MirBlock(id: increment_block, label: Some("rt_hal_exit_array_increment"), instructions: [
+            MirInst(kind: MirInstKind.BinOp(index_next, MirBinOp.Add, mir_operand_copy(index_current), mir_operand_const_int(1)), span: nil),
+            MirInst(kind: MirInstKind.Copy(index_state, index_next), span: nil)], terminator: MirTerminator.Goto(cond_block)))
+        entry
+
+    me result(payload: MirOperand, ok: MirType, err: MirType, continuation: BlockId,
+            schema_id: i64, kind_code: i64) -> BlockId:
+        val is_ok = self.local(MirType.bool(), "rt_hal_exit_result_is_ok")
+        val ok_payload = self.local(ok, "rt_hal_exit_result_ok")
+        val err_payload = self.local(err, "rt_hal_exit_result_err")
+        val ok_block = BlockId(id: self.next_block)
+        val err_block = BlockId(id: self.next_block + 1)
+        self.next_block = self.next_block + 2
+        val ok_child = self.value(mir_operand_copy(ok_payload), ok, continuation,
+            rt_hal_exit_schema_id_v2(rt_hal_exit_type_descriptor_v2(ok)), kind_code)
+        val err_child = self.value(mir_operand_copy(err_payload), err, continuation,
+            rt_hal_exit_schema_id_v2(rt_hal_exit_type_descriptor_v2(err)), kind_code)
+        val entry = self.block("rt_hal_exit_result_branch", [
+            MirInst(kind: MirInstKind.Call(Some(is_ok), rt_hal_exit_typed_result_is_ok_fn(ok, err), [payload]), span: nil)], MirTerminator.If(mir_operand_copy(is_ok), ok_block, err_block))
+        self.blocks = self.blocks.push(MirBlock(id: ok_block, label: Some("rt_hal_exit_result_ok"), instructions: [
+            MirInst(kind: MirInstKind.Call(Some(ok_payload), rt_hal_exit_typed_result_ok_payload_fn(ok, err), [payload]), span: nil)], terminator: MirTerminator.Goto(ok_child)))
+        self.blocks = self.blocks.push(MirBlock(id: err_block, label: Some("rt_hal_exit_result_err"), instructions: [
+            MirInst(kind: MirInstKind.Call(Some(err_payload), rt_hal_exit_typed_result_err_payload_fn(ok, err), [payload]), span: nil)], terminator: MirTerminator.Goto(err_child)))
+        entry
+
+pub fn inject_rt_hal_boundary(function: MirFunction, operation_id: text,
+        compare_c: bool, compare_rust: bool) -> MirFunction:
+    if not compare_c and not compare_rust: return function
+    val token = rt_hal_exit_token_local(function)
+    val bits_local = LocalId(id: token.id + 1)
+    val wide_local = LocalId(id: token.id + 2)
+    val request_token = LocalId(id: token.id + 3)
+    var request_locals=function.locals
+    # Request CFG projection is emitted before terminal CFG expansion, so its
+    # scalar conversion temporaries must already have stable, non-overlapping
+    # local IDs.  Do not add them after generated request blocks exist.
+    request_locals.push(MirLocal(id:token,name:Some("rt_hal_exit_token"),type_:MirType.i64(),kind:LocalKind.Temp,is_ghost:false))
+    request_locals.push(MirLocal(id:bits_local,name:Some("rt_hal_exit_bits"),type_:MirType(kind:MirTypeKind.I32),kind:LocalKind.Temp,is_ghost:false))
+    request_locals.push(MirLocal(id:wide_local,name:Some("rt_hal_exit_wide"),type_:MirType.i64(),kind:LocalKind.Temp,is_ghost:false))
+    request_locals.push(MirLocal(id:request_token,name:Some("rt_hal_request_token"),type_:MirType.i64(),kind:LocalKind.Temp,is_ghost:false))
+    val request_prepared=inject_rt_hal_env_access_effect_capture(inject_rt_hal_request_capture(
+        MirFunction.with_locals_and_blocks(function,request_locals,function.blocks),
+        operation_id,request_token,bits_local,wide_local),request_token)
+    var next_block = 0
+    for candidate in request_prepared.blocks:
+        if candidate.id.id >= next_block: next_block = candidate.id.id + 1
+    var next_local = 0
+    for candidate in request_prepared.locals:
+        if candidate.id.id >= next_local: next_local = candidate.id.id + 1
+    var cfg = RtHalExitCfgBuilder(locals: request_prepared.locals, blocks: [],
+        next_local: next_local, next_block: next_block, token: token,
+        bits: bits_local, wide: wide_local)
+    val begin = rt_hal_exit_runtime_fn("rt_hal_exact_exit_backend_begin_next_with_request",
+        [MirType.i64(), MirType.i64(), MirType(kind: MirTypeKind.Opaque("text")),MirType.i64()], MirType.i64())
+    val operation = rt_hal_exit_descriptor_operand(operation_id)
+    val finish = rt_hal_exit_runtime_fn("rt_hal_exact_exit_backend_finish",
+        [MirType.i64()], MirType.bool())
+    var needs_token = false
+    var blocks: [MirBlock] = []
+    for original_block in request_prepared.blocks:
         var block = original_block
+        var instructions = block.instructions
+        var terminal: MirTerminator? = nil
+        var payload: MirOperand? = nil
+        var type_ = MirType(kind: MirTypeKind.Never)
+        var schema_id = 0
+        var kind_code = 0
         match block.terminator:
             case Ret(value):
-                var instructions = block.instructions
-                instructions.push(rt_hal_boundary_call(
-                    operation_id, compare_c, compare_rust,
-                    rt_hal_boundary_receipt(value)
-                ))
-                blocks.push(MirBlock(
-                    id: block.id, label: block.label,
-                    instructions: instructions, terminator: block.terminator
-                ))
-            case _:
-                blocks.push(block)
-    MirFunction.with_blocks(function, blocks)
+                type_ = rt_hal_exit_operand_type(request_prepared, value) ?? MirType(kind: MirTypeKind.Never)
+                instructions.push(rt_hal_exit_capture(operation_id, compare_c, compare_rust, 1, value, type_))
+                payload = value
+                terminal = Some(block.terminator)
+                kind_code = 1
+            case Throw(payload, _):
+                type_ = rt_hal_exit_operand_type(request_prepared, Some(payload)) ?? MirType(kind: MirTypeKind.Never)
+                instructions.push(rt_hal_exit_capture(operation_id, compare_c, compare_rust, 3, Some(payload), type_))
+                terminal = Some(block.terminator)
+                kind_code = 3
+            case Resume(payload, _):
+                type_ = rt_hal_exit_operand_type(request_prepared, Some(payload)) ?? MirType(kind: MirTypeKind.Never)
+                instructions.push(rt_hal_exit_capture(operation_id, compare_c, compare_rust, 4, Some(payload), type_))
+                terminal = Some(block.terminator)
+                kind_code = 4
+            case Abort(message):
+                instructions.push(rt_hal_abort_capture(operation_id, compare_c, compare_rust, message))
+                payload = Some(rt_hal_abort_operand(message))
+                type_ = MirType(kind: MirTypeKind.Opaque("text"))
+                terminal = Some(block.terminator)
+                kind_code = 5
+            case _: ()
+        val descriptor = if kind_code == 5: "v2;text:utf8" else: rt_hal_exit_type_descriptor_v2(type_)
+        if descriptor != "" and terminal != nil:
+            schema_id = rt_hal_exit_schema_id_v2(descriptor)
+            if val observed = payload:
+                val final_terminal = terminal ?? MirTerminator.Unreachable
+                if not rt_hal_exit_is_composite(type_):
+                    instructions.push(MirInst(kind: MirInstKind.Call(Some(token), begin, [mir_operand_const_int(schema_id), mir_operand_const_int(kind_code), operation,mir_operand_copy(request_token)]), span: nil))
+                    for write in rt_hal_exit_direct_writer(token, bits_local, wide_local, observed, type_): instructions.push(write)
+                    instructions.push(MirInst(kind: MirInstKind.Call(nil, finish, [mir_operand_copy(token)]), span: nil))
+                    blocks.push(MirBlock(id: block.id, label: block.label, instructions: instructions, terminator: final_terminal))
+                    needs_token = true
+                    continue
+                # Schema role (Output=2/Error=3) is intentionally distinct
+                # from the codec transcript's root-domain code
+                # (Output=3/Error=4).  The former indexes the sealed schema;
+                # the latter is replayed by the parent shape cursor.
+                val role = if kind_code == 1: 2 else: 3
+                val root_domain = if kind_code == 1: 3 else: 4
+                # Resolve the cold-admitted dense type ID once per terminal.
+                # It is then carried in RootBegin's low word; no schema hash
+                # or target-layout surrogate leaks into the hot envelope.
+                val root_type = cfg.local(MirType.i64(), "rt_hal_exit_root_type")
+                val root_argument = cfg.local(MirType.i64(), "rt_hal_exit_root_argument")
+                val finish_block = cfg.block("rt_hal_exit_finish", [MirInst(kind: MirInstKind.Call(nil, finish, [mir_operand_copy(token)]), span: nil)], final_terminal)
+                val writer = cfg.value(observed, type_, finish_block, schema_id, kind_code)
+                val event_capacity = rt_hal_exit_event_capacity_v2(type_)
+                # Descriptor admission has already bounded the arena.  A
+                # malformed/unrepresentable compile-time shape remains a
+                # fail-closed capture rather than a partial transcript.
+                if event_capacity <= 0 or event_capacity > 65534:
+                    # This is a compile-time shape rejection before begin,
+                    # so there is no arena token to reclaim.  It must still
+                    # be a deterministic hard trap rather than a normal
+                    # terminal that silently skips exact comparison.
+                    blocks.push(MirBlock(id: block.id, label: block.label,
+                        instructions: instructions,
+                        terminator: MirTerminator.Abort("E-RTHAL-EXIT-EVENT-CAPACITY-REJECT")))
+                    continue
+                val event_finish = cfg.block("rt_hal_exit_events_finish", [
+                    cfg.event_append(2, mir_operand_const_int(0)),
+                    MirInst(kind: MirInstKind.Call(nil, rt_hal_exit_events_end_fn(), [mir_operand_copy(token)]), span: nil)], MirTerminator.Goto(writer))
+                val event_writer = cfg.event_value(observed, type_, event_finish)
+                instructions.push(MirInst(kind: MirInstKind.Call(Some(root_type), rt_hal_exit_schema_resolve_fn(), [mir_operand_const_int(schema_id), mir_operand_const_int(role)]), span: nil))
+                instructions.push(MirInst(kind: MirInstKind.BinOp(root_argument, MirBinOp.BitOr,
+                    mir_operand_const_int(root_domain << 32), mir_operand_copy(root_type)), span: nil))
+                instructions.push(MirInst(kind: MirInstKind.Call(Some(token), begin, [mir_operand_const_int(schema_id), mir_operand_const_int(kind_code), operation,mir_operand_copy(request_token)]), span: nil))
+                # The preallocated event capacity is only a bounded arena
+                # reservation.  `events_end` closes the exact selected
+                # stream before any typed payload writer is reachable.
+                instructions.push(MirInst(kind: MirInstKind.Call(nil, rt_hal_exit_events_begin_fn(), [mir_operand_copy(token), mir_operand_const_int(event_capacity + 2)]), span: nil))
+                instructions.push(MirInst(kind: MirInstKind.Call(nil, rt_hal_exit_events_append_fn(), [mir_operand_copy(token), mir_operand_const_int(1), mir_operand_copy(root_argument)]), span: nil))
+                blocks.push(MirBlock(id: block.id, label: block.label, instructions: instructions, terminator: MirTerminator.Goto(event_writer)))
+                needs_token = true
+            else:
+                blocks.push(MirBlock(id: block.id, label: block.label, instructions: instructions, terminator: block.terminator))
+        elif instructions.len() == block.instructions.len(): blocks.push(block)
+        else: blocks.push(MirBlock(id: block.id, label: block.label, instructions: instructions, terminator: block.terminator))
+    if not needs_token:
+        # A tagged library/body can have no locally observed terminal in this
+        # MIR function, but its pre-Pure request is still fallible and must
+        # receive the same exactly-once helper failure expansion.
+        return rt_hal_exit_check_helper_failures(
+            MirFunction.with_blocks(request_prepared, blocks), Some(request_token), Some(request_token))
+    var locals = cfg.locals
+    for generated in cfg.blocks: blocks.push(generated)
+    rt_hal_exit_check_helper_failures(
+        MirFunction.with_locals_and_blocks(request_prepared, locals, blocks), Some(token), Some(request_token))
 
-# Cold program-controller hook. The process owner drains every receipt for the
-# current producer and terminates nonzero on overflow/mismatch/timeout.
-pub fn inject_rt_hal_controller_finalize(function: MirFunction, plan_path: text) -> MirFunction:
+# Library setup has no arbitrary controller function: every exported tagged
+# boundary receives this idempotent cold prefix. The runtime accepts only the
+# same sealed plan on later entries, so no exported call can race ahead of
+# installation/sealing. Finalization remains a separate library shutdown edge.
+pub fn inject_rt_hal_controller_initialize(function: MirFunction, plan_path: text,
+        required_assurance_rank: i64, plan_identity: text) -> MirFunction:
+    val installer=MirOperand(kind:MirOperandKind.Const(
+        MirConstValue.Str("rt_hal_compiler_stage_isolated_exact_host_from_plan_path_or_fail"),
+        MirType(kind:MirTypeKind.FuncPtr(MirSignature(params:[MirType(kind:MirTypeKind.Opaque("str")),MirType.i64(),MirType(kind:MirTypeKind.Opaque("str"))],return_type:MirType.unit(),is_variadic:false)))))
+    val arena=MirOperand(kind:MirOperandKind.Const(
+        MirConstValue.Str("rt_hal_exact_exit_arena_install_or_fail"),
+        MirType(kind:MirTypeKind.FuncPtr(MirSignature(params:[MirType.i64(),MirType.i64()],return_type:MirType.unit(),is_variadic:false)))))
+    val plan=MirOperand(kind:MirOperandKind.Const(MirConstValue.Str(plan_path),MirType(kind:MirTypeKind.Opaque("str"))))
+    val identity=MirOperand(kind:MirOperandKind.Const(MirConstValue.Str(plan_identity),MirType(kind:MirTypeKind.Opaque("str"))))
+    var blocks: [MirBlock]=[];var index=0
+    for original in function.blocks:
+        if index==0:
+            var entry: [MirInst]=[MirInst(kind:MirInstKind.Call(nil,installer,[plan,mir_operand_const_int(required_assurance_rank),identity]),span:nil),
+                MirInst(kind:MirInstKind.Call(nil,arena,[mir_operand_const_int(256),mir_operand_const_int(1048576)]),span:nil)]
+            for instruction in original.instructions:entry.push(instruction)
+            blocks.push(MirBlock(id:original.id,label:original.label,instructions:entry,terminator:original.terminator))
+        else:blocks.push(original)
+        index=index+1
+    MirFunction.with_blocks(function,blocks)
+
+pub fn inject_rt_hal_controller_finalize(function: MirFunction, plan_path: text,
+        required_assurance_rank: i64, plan_identity: text) -> MirFunction:
     val finalize = MirOperand(kind: MirOperandKind.Const(
         MirConstValue.Str("rt_hal_process_finalize_current_owner"),
-        MirType(kind: MirTypeKind.FuncPtr(MirSignature(
-            params: [], return_type: MirType.unit(), is_variadic: false
-        )))
+        MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.unit(), is_variadic: false)))
     ))
     var blocks: [MirBlock] = []
     var block_index = 0
@@ -67,48 +1389,160 @@ pub fn inject_rt_hal_controller_finalize(function: MirFunction, plan_path: text)
         var block = original_block
         if block_index == 0:
             val installer = MirOperand(kind: MirOperandKind.Const(
-                MirConstValue.Str("rt_hal_install_isolated_exact_host_from_plan_path_or_fail"),
-                MirType(kind: MirTypeKind.FuncPtr(MirSignature(
-                    params: [MirType(kind: MirTypeKind.Opaque("str"))],
-                    return_type: MirType.unit(), is_variadic: false
-                )))
+                MirConstValue.Str("rt_hal_compiler_stage_isolated_exact_host_from_plan_path_or_fail"),
+                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params:[MirType(kind:MirTypeKind.Opaque("str")),MirType.i64(),MirType(kind:MirTypeKind.Opaque("str"))],return_type:MirType.unit(),is_variadic:false)))
             ))
-            val plan = MirOperand(kind: MirOperandKind.Const(
-                MirConstValue.Str(plan_path), MirType(kind: MirTypeKind.Opaque("str"))
+            val plan = MirOperand(kind: MirOperandKind.Const(MirConstValue.Str(plan_path), MirType(kind: MirTypeKind.Opaque("str"))))
+            val identity = MirOperand(kind: MirOperandKind.Const(MirConstValue.Str(plan_identity), MirType(kind: MirTypeKind.Opaque("str"))))
+            val arena_installer = MirOperand(kind: MirOperandKind.Const(
+                MirConstValue.Str("rt_hal_exact_exit_arena_install_or_fail"),
+                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64(), MirType.i64()], return_type: MirType.unit(), is_variadic: false)))
             ))
-            var entry: [MirInst] = [MirInst(
-                kind: MirInstKind.Call(nil, installer, [plan]), span: nil
-            )]
+            # This allocation belongs to the foreign-comparison controller
+            # only. Static Pure-only @rt(hal) never reaches this transform.
+            var entry: [MirInst] = [MirInst(kind:MirInstKind.Call(nil,installer,[plan,mir_operand_const_int(required_assurance_rank),identity]),span:nil),
+                MirInst(kind: MirInstKind.Call(nil, arena_installer,
+                    [mir_operand_const_int(256), mir_operand_const_int(1048576)]), span: nil)]
             for instruction in block.instructions: entry.push(instruction)
-            block = MirBlock(id: block.id, label: block.label,
-                instructions: entry, terminator: block.terminator)
+            block = MirBlock(id: block.id, label: block.label, instructions: entry, terminator: block.terminator)
         match block.terminator:
-            case Ret(_):
+            # A controller must drain and release its bounded arena on every
+            # process-terminal path, not only a successful return.  The
+            # finalizer preserves the original terminator, so an exception or
+            # abort still propagates after its exact failure state is made
+            # authoritative.
+            case Ret(_) | Throw(_, _) | Resume(_, _) | Abort(_):
                 var instructions = block.instructions
                 instructions.push(MirInst(kind: MirInstKind.Call(nil, finalize, []), span: nil))
-                blocks.push(MirBlock(id: block.id, label: block.label,
-                    instructions: instructions, terminator: block.terminator))
+                blocks.push(MirBlock(id: block.id, label: block.label, instructions: instructions, terminator: block.terminator))
             case _: blocks.push(block)
         block_index = block_index + 1
     MirFunction.with_blocks(function, blocks)
 
-export inject_rt_hal_boundary, inject_rt_hal_controller_finalize
+# Lowered only into the controller entry after the module has collected every
+# capture schema. Backends translate this cold prefix to type_register x3,
+# schema_register(schema, output_dense, error_dense, effect_dense), then one
+# seal. It is outside every producer exit path.
+pub fn inject_rt_hal_cold_schema_registration(function: MirFunction,
+        schema_ids: [i64], output_descriptors: [text], error_descriptors: [text],
+        effect_descriptors: [text], compare_c: [bool],
+        compare_rust: [bool], effect_operations: [text],
+        effect_captures: [bool], effect_compare_c: [bool],
+        effect_compare_rust: [bool]) -> MirFunction:
+    if schema_ids.len() == 0: return function
+    var blocks: [MirBlock] = []
+    var block_index = 0
+    for original_block in function.blocks:
+        if block_index != 0:
+            blocks.push(original_block)
+        else:
+            var prefix: [MirInst] = []
+            # Registration is a cold ordinary-call ABI.  Do not leave
+            # compiler-private RtHalExitSchema* opcodes for a backend to
+            # rediscover (or silently erase): the runtime owner validates,
+            # binds, and seals the exact descriptor table itself.
+            val bind = rt_hal_exit_runtime_fn(
+                "rt_hal_exact_exit_schema_bind_descriptors",
+                [MirType.i64(), MirType(kind: MirTypeKind.Opaque("text")), MirType.i64(),
+                 MirType(kind: MirTypeKind.Opaque("text")), MirType.i64(),
+                 MirType(kind: MirTypeKind.Opaque("text")), MirType.i64()],
+                MirType.bool())
+            val policy = rt_hal_exit_runtime_fn(
+                "rt_hal_exact_exit_schema_policy_register",
+                [MirType.i64(), MirType.bool(), MirType.bool()], MirType.bool())
+            val effect_policy = rt_hal_exit_runtime_fn(
+                "rt_hal_exact_exit_operation_effect_policy_register",
+                [MirType(kind: MirTypeKind.Opaque("text")), MirType.bool(),
+                 MirType.bool(), MirType.bool()], MirType.bool())
+            val seal = rt_hal_exit_runtime_fn("rt_hal_exact_exit_type_seal", [], MirType.bool())
+            val controller_seal = rt_hal_exit_runtime_fn("rt_hal_exact_exit_controller_seal", [], MirType.bool())
+            var index = 0
+            while index < schema_ids.len():
+                val output = output_descriptors[index]
+                val error = error_descriptors[index]
+                val effect = effect_descriptors[index]
+                val output_operand = MirOperand(kind: MirOperandKind.Const(
+                    MirConstValue.Str(output), MirType(kind: MirTypeKind.Opaque("text"))))
+                val error_operand = MirOperand(kind: MirOperandKind.Const(
+                    MirConstValue.Str(error), MirType(kind: MirTypeKind.Opaque("text"))))
+                val effect_operand = MirOperand(kind: MirOperandKind.Const(
+                    MirConstValue.Str(effect), MirType(kind: MirTypeKind.Opaque("text"))))
+                prefix.push(MirInst(kind: MirInstKind.Call(nil, bind,
+                    [mir_operand_const_int(schema_ids[index]), output_operand,
+                     mir_operand_const_int(rt_hal_exit_encoding_code_v2(output)), error_operand,
+                     mir_operand_const_int(rt_hal_exit_encoding_code_v2(error)), effect_operand,
+                     mir_operand_const_int(rt_hal_exit_encoding_code_v2(effect))]), span: nil))
+                # Keep foreign-provider requirements in the cold runtime
+                # owner before the capture metadata is stripped.  A schema
+                # shared by several tagged functions unions these flags in
+                # the owner, preventing metadata stripping from downgrading
+                # C/Rust comparison to Pure-only execution.
+                prefix.push(MirInst(kind: MirInstKind.Call(nil, policy,
+                    [mir_operand_const_int(schema_ids[index]),
+                     MirOperand(kind: MirOperandKind.Const(MirConstValue.Bool(compare_c[index]), MirType.bool())),
+                     MirOperand(kind: MirOperandKind.Const(MirConstValue.Bool(compare_rust[index]), MirType.bool()))]), span: nil))
+                index = index + 1
+            # Reconcile every foreign-tagged operation independently of its
+            # exit descriptor.  This must happen before type/controller seal:
+            # later capture only queries this immutable admission table.
+            index = 0
+            while index < effect_operations.len():
+                val operation_operand=MirOperand(kind:MirOperandKind.Const(
+                    MirConstValue.Str(effect_operations[index]),
+                    MirType(kind:MirTypeKind.Opaque("text"))))
+                prefix.push(MirInst(kind:MirInstKind.Call(nil,effect_policy,
+                    [operation_operand,
+                     MirOperand(kind:MirOperandKind.Const(MirConstValue.Bool(effect_captures[index]),MirType.bool())),
+                     MirOperand(kind:MirOperandKind.Const(MirConstValue.Bool(effect_compare_c[index]),MirType.bool())),
+                     MirOperand(kind:MirOperandKind.Const(MirConstValue.Bool(effect_compare_rust[index]),MirType.bool()))]),span:nil))
+                index=index+1
+            prefix.push(MirInst(kind: MirInstKind.Call(nil, seal, []), span: nil))
+            prefix.push(MirInst(kind: MirInstKind.Call(nil, controller_seal, []), span: nil))
+            for instruction in original_block.instructions: prefix.push(instruction)
+            blocks.push(MirBlock(id: original_block.id, label: original_block.label,
+                instructions: prefix, terminator: original_block.terminator))
+        block_index = block_index + 1
+    # Binding and sealing are cold but still security-critical: do not permit
+    # a failed schema admission to fall through into a producer body.
+    rt_hal_exit_check_helper_failures(MirFunction.with_blocks(function, blocks), nil, nil)
+
+# RtHalExitCapture is deliberately retained through module-wide cold-schema
+# collection, then removed.  The executable observation is entirely the
+# ordinary helper-call sequence injected beside its terminal; keeping this
+# metadata opcode past collection makes otherwise valid native backends fail
+# closed before they can execute that sequence.
+pub fn strip_rt_hal_exit_capture_metadata(function: MirFunction) -> MirFunction:
+    var blocks: [MirBlock] = []
+    for block in function.blocks:
+        var instructions: [MirInst] = []
+        for instruction in block.instructions:
+            match instruction.kind:
+                case RtHalExitCapture(_, _, _, _, _, _, _, _, _, _, _, _, _): ()
+                case _: instructions.push(instruction)
+        blocks.push(MirBlock(id: block.id, label: block.label,
+            instructions: instructions, terminator: block.terminator))
+    MirFunction.with_blocks(function, blocks)
+
+export inject_rt_hal_boundary, inject_rt_hal_controller_initialize, inject_rt_hal_controller_finalize
+export inject_rt_hal_cold_schema_registration, strip_rt_hal_exit_capture_metadata
+export rt_hal_function_has_env_effect_capture
+export rt_hal_env_executor_provenance_reset, rt_hal_env_executor_provenance_register
+export rt_hal_exit_typed_result_is_ok_fn
+export rt_hal_exit_typed_result_ok_payload_fn, rt_hal_exit_typed_result_err_payload_fn
+export rt_hal_exit_typed_array_length_fn, rt_hal_exit_typed_array_at_fn
+export rt_hal_exit_typed_text_length_fn
+export rt_hal_exit_events_begin_fn, rt_hal_exit_events_append_fn, rt_hal_exit_events_end_fn
+export rt_hal_exit_codec_scalar_fn, rt_hal_exit_codec_utf8_fn
 
 pub fn inject_rt_hal_worker_complete(function: MirFunction) -> MirFunction:
-    val complete = MirOperand(kind: MirOperandKind.Const(
-        MirConstValue.Str("rt_hal_boundary_worker_complete_hook"),
-        MirType(kind: MirTypeKind.FuncPtr(MirSignature(
-            params: [], return_type: MirType.unit(), is_variadic: false
-        )))
-    ))
+    val complete = MirOperand(kind: MirOperandKind.Const(MirConstValue.Str("rt_hal_boundary_worker_complete_hook"), MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.unit(), is_variadic: false)))))
     var blocks: [MirBlock] = []
     for block in function.blocks:
         match block.terminator:
             case Ret(_):
                 var instructions = block.instructions
                 instructions.push(MirInst(kind: MirInstKind.Call(nil, complete, []), span: nil))
-                blocks.push(MirBlock(id: block.id, label: block.label,
-                    instructions: instructions, terminator: block.terminator))
+                blocks.push(MirBlock(id: block.id, label: block.label, instructions: instructions, terminator: block.terminator))
             case _: blocks.push(block)
     MirFunction.with_blocks(function, blocks)
 

@@ -1,4 +1,4 @@
-# rv32_nvme_nand_read_level_spec
+# RV32 NVMe NAND Read-Level System Specification
 
 > RV32 RAM-backed NAND read-level recovery and prevention contract.
 
@@ -31,13 +31,25 @@ remain hard failures when the compiler, Vivado, board, or JTAG path is absent.
 
 ## Scenarios
 
-### RV32 NVMe RAM-backed NAND read-level policy
+1. Inspect the pure policy for fixed downward and upward retry ladders, bounded
+   error counts, ECC gating, corrected-payload gating, block disturb, and legal
+   queue/lifecycle transitions.
+2. Execute the shell self-test and require its fail-closed wrapper contract.
+3. Execute the ELF through the full AXI4 adapter into wait-state-injected RAM;
+   require nonzero accesses inside `.nandram`, prevention, recovery, and final
+   firmware markers.
+4. Execute the same ELF on the behavioral core and exact synthesizable BRAM SoC
+   with clean and garbage-filled RAM.
+5. Program KV260, read the USER4 observation tunnel, require a complete transcript
+   and every ordered NAND marker, and retain hashes for the ELF, bitstream,
+   decoder, and raw log.
 
-#### should model sensing, bounded read retry, prevention, and recovery
+## Required evidence
 
 **Manual warnings:**
 - invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
 
+## Model boundary
 
 - should model sensing, bounded read retry, prevention, and recovery
 - Inspect the pure RV32 NAND policy

@@ -7,13 +7,10 @@
 #   - Shorthand property expansion (flex, border, background, margin/padding, font)
 
 use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
-use std.gc_async_mut.gpu.browser_engine.dom_color.{
-    parse_color_value, parse_color_value_checked
-}
+use std.gc_async_mut.gpu.browser_engine.dom_color.{parse_color_value}
 use std.gc_async_mut.gpu.browser_engine.style.supports.{eval_supports_query}
 use std.gc_async_mut.gpu.browser_engine.style.custom_properties.{has_var_reference, parse_var_function}
 use std.gc_async_mut.gpu.browser_engine.style.animation.{Keyframe, CSSValue, CSSDeclaration}
-use std.common.color.types.{from_rgba}
 use std.gc_async_mut.gpu.browser_engine.style_block.{
     CssRule, CssDecl,
     sb_find, sb_split_char, sb_split_selector_list, sb_split_ws, sb_skip_ws_comments,
@@ -22,9 +19,6 @@ use std.gc_async_mut.gpu.browser_engine.style_block.{
 # =========================================================================
 # @keyframes registry
 # =========================================================================
-
-val MAX_KEYFRAMES_PER_RULE: i32 = 256
-val MAX_KEYFRAME_RULES: i32 = 1024
 
 pub class KeyframeEntry:
     name: text
@@ -44,7 +38,7 @@ pub fn extract_keyframes(css: text) -> KeyframeRegistry:
     val registry = KeyframeRegistry.new()
     val lower = css.lower()
     var pos = 0
-    while pos < css.len() and registry.entries.len() < MAX_KEYFRAME_RULES:
+    while pos < css.len():
         val kf_pos = sb_find(lower, "@keyframes", pos)
         if kf_pos >= 999999999:
             break
@@ -63,54 +57,10 @@ pub fn extract_keyframes(css: text) -> KeyframeRegistry:
         pos = close + 1
     registry
 
-fn _insert_keyframe_by_offset(
-    frames: [Keyframe], frame: Keyframe
-) -> [Keyframe]:
-    # ponytail: bounded insertion sort keeps this parser compiler-safe; replace
-    # only if 256-frame stylesheets show measurable parse cost.
-    var sorted: [Keyframe] = []
-    var inserted = false
-    for existing in frames:
-        if not inserted and frame.offset == existing.offset:
-            sorted.push(Keyframe.create(
-                existing.offset,
-                _cascade_keyframe_declarations(
-                    existing.properties, frame.properties
-                )
-            ))
-            inserted = true
-        else:
-            if not inserted and frame.offset < existing.offset:
-                sorted.push(frame)
-                inserted = true
-            sorted.push(existing)
-    if not inserted:
-        sorted.push(frame)
-    sorted
-
-fn _cascade_keyframe_declarations(
-    earlier: [CSSDeclaration], later: [CSSDeclaration]
-) -> [CSSDeclaration]:
-    var cascaded: [CSSDeclaration] = []
-    for earlier_decl in earlier:
-        var overridden = false
-        for later_decl in later:
-            if later_decl.property == earlier_decl.property:
-                overridden = true
-        if not overridden:
-            cascaded.push(earlier_decl)
-    for later_decl in later:
-        cascaded.push(later_decl)
-    cascaded
-
 fn _parse_keyframe_body(body: text) -> [Keyframe]:
     var frames: [Keyframe] = []
     var pos = 0
-    var parsed_offset_count = 0
-    while (
-        pos < body.len() and
-        parsed_offset_count < MAX_KEYFRAMES_PER_RULE
-    ):
+    while pos < body.len():
         val open = sb_find(body, "{", pos)
         if open >= 999999999:
             break
@@ -119,42 +69,21 @@ fn _parse_keyframe_body(body: text) -> [Keyframe]:
         if close >= 999999999:
             break
         val decl_text = body.slice(open + 1, close).trim()
-        var offsets = sb_split_selector_list(offset_text)
-        if offset_text.len() == 0 or offset_text.ends_with(","):
-            offsets.push("")
-        var parsed_offsets: [f64] = []
-        var selector_list_valid = offsets.len() > 0
+        val raw_decls = parse_declarations(decl_text)
+        var css_decls: [CSSDeclaration] = []
+        var di = 0
+        while di < raw_decls.len():
+            val d = raw_decls[di]
+            di = di + 1
+            css_decls.push(CSSDeclaration(property: d.property, value: CSSValue.Keyword(v: d.value), important: false))
+        val offsets = sb_split_selector_list(offset_text)
         var oi = 0
-        while (
-            oi < offsets.len() and
-            parsed_offset_count < MAX_KEYFRAMES_PER_RULE
-        ):
+        while oi < offsets.len():
             val off_raw = offsets[oi]
             oi = oi + 1
-            parsed_offset_count = parsed_offset_count + 1
-            if val Some(offset_val) = _parse_keyframe_offset(off_raw):
-                parsed_offsets.push(offset_val)
-            else:
-                selector_list_valid = false
-        if oi != offsets.len():
-            selector_list_valid = false
-        if selector_list_valid:
-            val raw_decls = parse_declarations(decl_text)
-            var css_decls: [CSSDeclaration] = []
-            var di = 0
-            while di < raw_decls.len() and css_decls.len() < 256:
-                val d = raw_decls[di]
-                di = di + 1
-                if val parsed_value = keyframe_css_value(d.property, d.value):
-                    css_decls.push(CSSDeclaration(
-                        property: d.property,
-                        value: parsed_value,
-                        important: false
-                    ))
-            for offset_val in parsed_offsets:
-                frames = _insert_keyframe_by_offset(
-                    frames, Keyframe.create(offset_val, css_decls)
-                )
+            val off = off_raw.trim()
+            val offset_val = _parse_keyframe_offset(off)
+            frames.push(Keyframe.create(offset_val, css_decls))
         pos = close + 1
     frames
 
@@ -162,17 +91,12 @@ fn keyframe_css_value(property: text, raw: text) -> CSSValue?:
     val value = raw.trim()
     val lower_property = property.trim().lower()
     if lower_property.contains("color"):
-        # Local renamed from `rgba`: a pattern binding named `rgba` is
-        # misresolved to the co-compiled global `fn rgba(...)` in
-        # gpu/engine2d/color.spl when both modules load, turning `rgba >> 24`
-        # into function>>int ("cannot convert function to int"). Tracked:
-        # doc/08_tracking/bug/local_binding_shadowed_by_cocompiled_global_fn_2026-08-19.md
-        if val rgba_val = parse_color_value_checked(value):
+        if val rgba = parse_color_value_checked(value):
             return CSSValue.Color(color: from_rgba(
-                ((rgba_val >> 24) & 255u32).to_i64(),
-                ((rgba_val >> 16) & 255u32).to_i64(),
-                ((rgba_val >> 8) & 255u32).to_i64(),
-                (rgba_val & 255u32).to_i64()
+                ((rgba >> 24) & 255u32).to_i64(),
+                ((rgba >> 16) & 255u32).to_i64(),
+                ((rgba >> 8) & 255u32).to_i64(),
+                (rgba & 255u32).to_i64()
             ))
         return nil
     if value.ends_with("%"):
@@ -477,7 +401,7 @@ pub fn parse_declarations(text_val: text) -> [CssDecl]:
         if prop.len() > 0 and value.len() > 0:
             val expanded = expand_shorthand(prop, value)
             var ex_idx = 0
-            while ex_idx < expanded.len() and decls.len() < 256:
+            while ex_idx < expanded.len():
                 val e = expanded[ex_idx]
                 ex_idx = ex_idx + 1
                 decls.push(e)
@@ -694,7 +618,7 @@ fn sb_background_shorthand_color_value(value: text) -> text:
         return ""
     var pos = 0
     while pos < trimmed.len():
-        while pos < trimmed.len() and trimmed.slice(pos, pos + 1) == " ":
+        while pos < trimmed.len() and trimmed.char_at(pos) == " ":
             pos = pos + 1
         if pos >= trimmed.len():
             break
@@ -717,7 +641,7 @@ fn sb_background_token_from(value: text, start: i32) -> text:
     var end = start
     var depth: i32 = 0
     while end < value.len():
-        val ch = value.slice(end, end + 1)
+        val ch = value.char_at(end)
         if ch == "(":
             depth = depth + 1
         elif ch == ")":

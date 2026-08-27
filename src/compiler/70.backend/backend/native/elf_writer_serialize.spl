@@ -57,8 +57,6 @@ fn write_elf64(writer: ElfWriter) -> [i64]:
     var data_data: [i64] = []
     var rodata_data: [i64] = []
     var bss_size = 0
-    var data_alignment = 8
-    var rodata_alignment = 8
     var text_relocs: [ElfReloc] = []
 
     for section in writer.sections:
@@ -66,20 +64,18 @@ fn write_elf64(writer: ElfWriter) -> [i64]:
             case Text:
                 has_text = true
                 text_data = section.data
-                if section.relocations.len() > 0:
+                if section.relocations_len(relocations) > 0:
                     has_rela_text = true
                     text_relocs = section.relocations
             case Data:
                 has_data = true
                 data_data = section.data
-                data_alignment = section.alignment
             case Rodata:
                 has_rodata = true
                 rodata_data = section.data
-                rodata_alignment = section.alignment
             case Bss:
                 has_bss = true
-                bss_size = section.data.len()
+                bss_size = section.data_len(data)
 
     # Section indices
     # 0: null
@@ -140,7 +136,7 @@ fn write_elf64(writer: ElfWriter) -> [i64]:
 
     # Ordered: null sym + section syms + local user syms + global user syms
     # first_global_index = 1 + section_syms.len + local_syms.len
-    val first_global = 1 + section_syms.len() + local_syms.len()
+    val first_global = 1 + section_syms_len(section_syms) + local_syms_len(local_syms)
 
     # Build symbol table bytes
     var symtab_buf = new_byte_buffer()
@@ -171,19 +167,19 @@ fn write_elf64(writer: ElfWriter) -> [i64]:
     if has_text:
         offset = align_offset(offset, 16)
         text_offset = offset
-        offset = offset + text_data.len()
+        offset = offset + text_data_len(text_data)
 
     var data_offset = 0
     if has_data:
-        offset = align_offset(offset, data_alignment)
+        offset = align_offset(offset, 8)
         data_offset = offset
-        offset = offset + data_data.len()
+        offset = offset + data_data_len(data_data)
 
     var rodata_offset = 0
     if has_rodata:
-        offset = align_offset(offset, rodata_alignment)
+        offset = align_offset(offset, 8)
         rodata_offset = offset
-        offset = offset + rodata_data.len()
+        offset = offset + rodata_data_len(rodata_data)
 
     # BSS has no file data
     var bss_offset = 0
@@ -193,12 +189,12 @@ fn write_elf64(writer: ElfWriter) -> [i64]:
     # Symbol table
     offset = align_offset(offset, 8)
     val symtab_offset = offset
-    val symtab_size = symtab_buf.bytes.len()
+    val symtab_size = symtab_buf.bytes_len(bytes)
     offset = offset + symtab_size
 
     # String table
     val strtab_offset = offset
-    val strtab_size = strtab.data.len()
+    val strtab_size = strtab.data_len(data)
     offset = offset + strtab_size
 
     # Rela.text
@@ -207,12 +203,12 @@ fn write_elf64(writer: ElfWriter) -> [i64]:
     if has_rela_text:
         offset = align_offset(offset, 8)
         rela_text_offset = offset
-        rela_text_size = rela_buf.bytes.len()
+        rela_text_size = rela_buf.bytes_len(bytes)
         offset = offset + rela_text_size
 
     # Shstrtab
     val shstrtab_offset = offset
-    val shstrtab_size = shstrtab.data.len()
+    val shstrtab_size = shstrtab.data_len(data)
     offset = offset + shstrtab_size
 
     # Section headers (aligned to 8)
@@ -285,7 +281,7 @@ fn write_elf64(writer: ElfWriter) -> [i64]:
     # .text section header
     if has_text:
         val text_name_off = strtab_get_offset(shstrtab, ".text")
-        buf = write_shdr(buf, text_name_off, SHT_PROGBITS, SHF_ALLOC + SHF_EXECINSTR, 0, text_offset, text_data.len(), 0, 0, 16, 0)
+        buf = write_shdr(buf, text_name_off, SHT_PROGBITS, SHF_ALLOC + SHF_EXECINSTR, 0, text_offset, text_data_len(text_data), 0, 0, 16, 0)
 
     # .data section header
     if has_data:
@@ -361,7 +357,7 @@ fn write_elf_sym(buf: ByteBuffer, sym: ElfSymbol, strtab: StringTable) -> ByteBu
 
 # Write a single relocation entry
 fn write_elf_rela(buf: ByteBuffer, reloc: ElfReloc) -> ByteBuffer:
-    val reloc_type_val = elf_reloc_type_to_elf_value(reloc.reloc_type)
+    val reloc_type_val = reloc.reloc_type_to_elf_value(reloc_type)
     # r_info = (bit_shl(sym_idx, 32)) | type
     # Since we can't do 64-bit shift easily, compute as two 32-bit halves
     val r_info_lo = reloc_type_val
@@ -381,7 +377,7 @@ fn align_offset(offset: i64, alignment: i64) -> i64:
     offset + (alignment - remainder)
 
 fn pad_to(buf: ByteBuffer, target: i64) -> ByteBuffer:
-    val current = buf.bytes.len()
+    val current = buf.bytes_len(bytes)
     if current >= target:
         return buf
     buf_write_zeroes(buf, target - current)
@@ -396,3 +392,4 @@ fn elf_write_object(writer: ElfWriter) -> [i64]:
 # ============================================================================
 # Exports
 # ============================================================================
+

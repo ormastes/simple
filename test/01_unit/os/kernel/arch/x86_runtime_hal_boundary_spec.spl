@@ -1,0 +1,86 @@
+"""x86 port-I/O and CR3 runtime-boundary ABI contract."""
+
+use std.spec
+use os.kernel.arch.x86_32.runtime_hal.{
+    hal_x86_32_cr3_width_bits,
+    hal_x86_32_cr3_available,
+}
+use os.kernel.arch.x86_64.runtime_hal.{
+    hal_x86_64_cr3_width_bits,
+    hal_x86_64_cr3_available,
+}
+
+describe "x86 runtime HAL boundary":
+    it "keeps one typed raw owner per ISA":
+        val h64 = file_read("src/os/kernel/arch/x86_64/runtime_hal.spl")
+        val h32 = file_read("src/os/kernel/arch/x86_32/runtime_hal.spl")
+        val cpu64 = file_read("src/os/kernel/arch/x86_64/cpu.spl")
+        val cpu32 = file_read("src/os/kernel/arch/x86_32/cpu.spl")
+        val paging64 = file_read("src/os/kernel/arch/x86_64/paging.spl")
+
+        expect(h64).to_contain("extern fn rt_port_inb(port: u16) -> u8")
+        expect(h32).to_contain("extern fn rt_port_inb(port: u16) -> u8")
+        expect(h64).to_start_with("@runtime_intrinsics")
+        expect(h32).to_start_with("@runtime_intrinsics")
+        expect(h64).to_contain("extern fn rt_read_cr3() -> u64")
+        expect(h64).to_contain("extern fn rt_write_cr3(value: u64)")
+        expect(h32).to_contain("extern fn rt_read_cr3() -> u64")
+        expect(h32).to_contain("extern fn rt_write_cr3(value: u64)")
+        expect(h32).to_contain("rt_read_cr3().to_u32()")
+        expect(h32).to_contain("rt_write_cr3(value.to_u64())")
+        expect(cpu64.contains("extern fn rt_port_")).to_be(false)
+        expect(cpu32.contains("extern fn rt_port_")).to_be(false)
+        expect(cpu64.contains("extern fn rt_read_cr3")).to_be(false)
+        expect(cpu32.contains("extern fn rt_read_cr3")).to_be(false)
+        expect(paging64.contains("extern fn rt_read_cr3")).to_be(false)
+
+    it "preserves compatibility names as aliases to the typed facade":
+        val cpu64 = file_read("src/os/kernel/arch/x86_64/cpu.spl")
+        val cpu32 = file_read("src/os/kernel/arch/x86_32/cpu.spl")
+        val paging64 = file_read("src/os/kernel/arch/x86_64/paging.spl")
+
+        expect(cpu64).to_contain("hal_x86_64_port_inb as port_inb")
+        expect(cpu64).to_contain("hal_x86_64_read_cr3 as read_cr3")
+        expect(cpu32).to_contain("hal_x86_32_port_inb as port_inb")
+        expect(cpu32).to_contain("hal_x86_32_read_cr3 as read_cr3")
+        expect(paging64).to_contain("hal_x86_64_write_cr3(pml4_phys)")
+        expect(paging64).to_contain("hal_x86_64_read_cr3()")
+
+    it "executes host-safe provider capability and ABI metadata":
+        expect(hal_x86_32_cr3_width_bits()).to_equal(32)
+        expect(hal_x86_64_cr3_width_bits()).to_equal(64)
+        expect(hal_x86_32_cr3_available()).to_be(false)
+        expect(hal_x86_64_cr3_available()).to_be(true)
+
+    it "matches the authoritative C ABI and hosted i386 unavailable behavior":
+        val header = file_read("src/runtime/runtime.h")
+        val minimal = file_read("src/runtime/startup/baremetal/runtime_minimal.c")
+
+        expect(header).to_contain("uint64_t rt_read_cr3(void);")
+        expect(header).to_contain("void     rt_write_cr3(uint64_t value);")
+        expect(minimal).to_contain("uint64_t rt_read_cr3(void) { return 0; }")
+        expect(minimal).to_contain("void rt_write_cr3(uint64_t val) { (void)val; }")
+
+    it "leaves no selected raw declarations or calls in product consumers":
+        var product = file_read("src/os/kernel/boot/cpu.spl")
+        product = product + file_read("src/os/kernel/memory/vmm_core.spl")
+        product = product + file_read("src/os/kernel/arch/x86_32/cpu.spl")
+        product = product + file_read("src/os/kernel/arch/x86_64/cpu.spl")
+        product = product + file_read("src/os/kernel/arch/x86_64/paging.spl")
+        product = product + file_read("src/os/kernel/arch/x86/com1_common.spl")
+        product = product + file_read("src/os/kernel/arch/reset.spl")
+        product = product + file_read("src/os/drivers/framebuffer/ramfb.spl")
+        product = product + file_read("src/os/drivers/pci/pci.spl")
+        product = product + file_read("src/os/drivers/rtc/rtc.spl")
+        product = product + file_read("src/os/services/wm/wm_host_2d_simpleos.spl")
+        product = product + file_read("src/os/sosix/io.spl")
+        product = product + file_read("src/os/sosix/io_rw.spl")
+        product = product + file_read("src/os/test/desktop_e2e_test.spl")
+
+        expect(product.contains("extern fn rt_port_")).to_be(false)
+        expect(product.contains("extern fn rt_read_cr3")).to_be(false)
+        expect(product.contains("extern fn rt_write_cr3")).to_be(false)
+        expect(product.contains("rt_port_inb(")).to_be(false)
+        expect(product.contains("rt_port_outb(")).to_be(false)
+        expect(product.contains("rt_read_cr3(")).to_be(false)
+        expect(product.contains("rt_write_cr3(")).to_be(false)

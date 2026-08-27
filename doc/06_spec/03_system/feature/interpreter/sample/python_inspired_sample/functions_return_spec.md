@@ -2,6 +2,29 @@
 
 > Tests function return value handling in the interpreter including explicit returns, implicit last-expression returns, and multi-value returns. Verifies that return values are correctly propagated through the call stack.
 
+<!-- sdn-diagram:id=functions_return_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=functions_return_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+functions_return_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=functions_return_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 5 | 5 | 0 | 0 |
@@ -20,7 +43,7 @@ Tests function return value handling in the interpreter including explicit retur
 | Category | Runtime |
 | Status | In Progress |
 | Source | `test/03_system/feature/interpreter/sample/python_inspired_sample/functions_return_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -37,18 +60,17 @@ values are correctly propagated through the call stack.
 
 #### returns last expression
 
-- returns last expression
+1. fn double
+2. expect double
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns last expression")
 fn double(x: i64) -> i64:
     x * 2
 expect double(5) == 10
@@ -58,18 +80,17 @@ expect double(5) == 10
 
 #### returns computed value
 
-- returns computed value
+1. fn square
+2. expect square
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns computed value")
 fn square(n: i64) -> i64:
     n * n
 expect square(4) == 16
@@ -81,18 +102,18 @@ expect square(4) == 16
 
 #### returns early from function
 
-- returns early from function
+1. fn classify
+2. expect classify
+3. expect classify
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns early from function")
 fn classify(x: i64) -> text:
     if x < 0:
         return "negative"
@@ -107,18 +128,17 @@ expect classify(5) == "non-negative"
 
 #### infers integer return type
 
-- infers integer return type
+1. fn add
+2. expect add
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("infers integer return type")
 fn add(a: i64, b: i64):
     a + b
 expect add(3, 4) == 7
@@ -128,18 +148,17 @@ expect add(3, 4) == 7
 
 #### infers string return type
 
-- infers string return type
+1. fn greet
+2. expect greet
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("infers string return type")
 fn greet(name: text):
     "Hello, {name}!"
 expect greet("World") == "Hello, World!"
@@ -159,51 +178,3 @@ expect greet("World") == "Hello, World!"
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `4e7bc03ad41be0e0acdf52f3f47a55df066c897df18c6e3ed7e430712b0f96bb`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `4e7bc03ad41be0e0acdf52f3f47a55df066c897df18c6e3ed7e430712b0f96bb`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `4e7bc03ad41be0e0acdf52f3f47a55df066c897df18c6e3ed7e430712b0f96bb`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/03_system/feature/interpreter/sample/python_inspired_sample/functions_return_spec.spl
-mirror: doc/06_spec/03_system/feature/interpreter/sample/python_inspired_sample/functions_return_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/feature/interpreter/sample/python_inspired_sample/functions_return_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/feature/interpreter/sample/python_inspired_sample/functions_return_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/feature/interpreter/sample/python_inspired_sample/functions_return_spec.spl:41:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'returns last expression' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/interpreter/sample/python_inspired_sample/functions_return_spec.spl:48:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'returns computed value' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/interpreter/sample/python_inspired_sample/functions_return_spec.spl:56:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'returns early from function' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

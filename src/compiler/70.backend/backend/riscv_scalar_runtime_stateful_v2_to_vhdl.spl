@@ -1,0 +1,224 @@
+# Dedicated strict VHDL backend for the canonical LSU plus FENCE stateful composition v2.
+
+use std.common.crypto.sha256.{sha256_text}
+use compiler.mir.hwir.types.{CoreConfig, HwPort, hwir_vhdl_identifier}
+use compiler.mir.hwir.riscv_lsu_config.{LsuConfig}
+use compiler.mir.hwir.riscv_scalar_runtime_lsu_composition.{
+    HwScalarRuntimeStatefulCompositionV2, HwScalarRuntimeLsuCompositionBinding,
+    strict_riscv_scalar_runtime_stateful_composition_v2}
+use compiler.backend.backend.hwir_to_vhdl.{HwirStrictVhdlResult,
+    render_strict_hwir_vhdl, render_strict_sequential_hwir}
+
+fn stateful_v2_route() -> text: "hwir-gen2-scalar-runtime-stateful-composition-v2"
+
+fn stateful_v2_config_hash(config: CoreConfig) -> text:
+    sha256_text([config.xlen.to_text(), config.physical_address_bits.to_text(),
+        config.register_count.to_text(), config.profile, config.isa_profile,
+        config.compressed_decode_profile].join("|"))
+
+fn stateful_v2_bus_hash(bus: LsuConfig) -> text:
+    sha256_text([bus.bus_data_bits.to_text(), bus.byte_mask_bits.to_text()].join("|"))
+
+fn stateful_v2_rejected(diagnostic: text) -> HwirStrictVhdlResult:
+    HwirStrictVhdlResult(success: false, vhdl: "", diagnostic: diagnostic,
+        route: stateful_v2_route(), module_node_id: "", config_xlen: 0,
+        config_profile: "", hwir_graph_sha256: "")
+
+fn stateful_v2_type(width: i32) -> text:
+    if width == 1: return "std_logic"
+    "std_logic_vector(" + (width - 1).to_text() + " downto 0)"
+
+fn stateful_v2_wire(binding: HwScalarRuntimeLsuCompositionBinding) -> text:
+    "wire_o" + binding.destination_owner.len().to_text() + "_" +
+        binding.destination_owner + "_p" + binding.destination_port.len().to_text() +
+        "_" + binding.destination_port
+
+fn stateful_v2_source(owner: text, port: text) -> text:
+    "source_o" + owner.len().to_text() + "_" + owner + "_p" +
+        port.len().to_text() + "_" + port
+
+fn stateful_v2_input_actual(composition: HwScalarRuntimeStatefulCompositionV2,
+    owner: text, port: HwPort) -> text:
+    for binding in composition.bindings:
+        if binding.destination_owner == owner and binding.destination_port == port.name:
+            return stateful_v2_wire(binding)
+    port.name
+
+fn stateful_v2_output_actual(composition: HwScalarRuntimeStatefulCompositionV2,
+    owner: text, port: HwPort) -> text:
+    for binding in composition.bindings:
+        if binding.source_owner == owner and binding.source_port == port.name:
+            return stateful_v2_source(owner, port.name)
+    "open"
+
+fn stateful_v2_child_map(composition: HwScalarRuntimeStatefulCompositionV2,
+    owner: text, ports: [HwPort]) -> text:
+    var result = ""; var index = 0
+    for port in ports:
+        if index > 0: result = result + ","
+        result = result + port.name + "=>" +
+            (if port.direction == "in": stateful_v2_input_actual(composition, owner, port)
+            else: stateful_v2_output_actual(composition, owner, port))
+        index = index + 1
+    result
+
+fn stateful_v2_ports(ports: [HwPort]) -> text:
+    var result = ""; var index = 0
+    for port in ports:
+        result = result + "        " + port.name + " : " + port.direction + " " +
+            stateful_v2_type(port.bit_width)
+        if index + 1 < ports.len(): result = result + ";"
+        result = result + "\n"; index = index + 1
+    result
+
+fn stateful_v2_signals(composition: HwScalarRuntimeStatefulCompositionV2) -> text:
+    var result = ""; var sources: [text] = []
+    for binding in composition.bindings:
+        if binding.destination_owner != "composition":
+            result = result + "    signal " + stateful_v2_wire(binding) + " : " +
+                stateful_v2_type(binding.bit_width) + ";\n"
+        if binding.source_owner != "composition":
+            val source = stateful_v2_source(binding.source_owner, binding.source_port)
+            if not sources.contains(source.lower()):
+                result = result + "    signal " + source + " : " +
+                    stateful_v2_type(binding.bit_width) + ";\n"
+                sources.push(source.lower())
+    result
+
+fn stateful_v2_assignments(composition: HwScalarRuntimeStatefulCompositionV2) -> text:
+    var result = ""
+    for binding in composition.bindings:
+        var destination = stateful_v2_wire(binding)
+        if binding.destination_owner == "composition": destination = binding.destination_port
+        var source = stateful_v2_source(binding.source_owner, binding.source_port)
+        if binding.source_owner == "composition": source = binding.source_port
+        result = result + "    " + destination + " <= " + source + ";\n"
+    result
+
+pub fn scalar_runtime_stateful_v2_vhdl_closure_diagnostic(
+    composition: HwScalarRuntimeStatefulCompositionV2) -> text:
+    if composition.config.xlen != 32 and composition.config.xlen != 64:
+        return "HWIR-E-RISCV-RUNTIME-STATEFUL-V2-VHDL-XLEN: backend supports exact RV32 or RV64 widths"
+    if composition.bus.bus_data_bits != composition.config.xlen or
+        composition.bus.byte_mask_bits != composition.config.xlen / 8:
+        return "HWIR-E-RISCV-RUNTIME-STATEFUL-V2-VHDL-BUS: backend requires one XLEN-wide bus beat"
+    var names: [text] = []; var destinations: [text] = []
+    var source_names: [text] = []; var source_endpoints: [text] = []
+    var source_widths: [text] = []
+    for name in [composition.module_name, composition.decoder.summary.name,
+            composition.pending.entity_name, composition.projection.summary.name,
+            composition.lsu.entity_name, composition.fence.entity_name,
+            composition.idle.summary.name, composition.route.summary.name]:
+        if not hwir_vhdl_identifier(name) or names.contains(name.lower()):
+            return "HWIR-E-RISCV-RUNTIME-STATEFUL-V2-VHDL-NAMESPACE: entities require legal case-insensitive injective identifiers"
+        names.push(name.lower())
+    for port in composition.top_ports:
+        if not hwir_vhdl_identifier(port.name) or names.contains(port.name.lower()):
+            return "HWIR-E-RISCV-RUNTIME-STATEFUL-V2-VHDL-NAMESPACE: ports, entities, and internal signals require one injective namespace"
+        names.push(port.name.lower())
+    for binding in composition.bindings:
+        var destination = stateful_v2_wire(binding)
+        if binding.destination_owner == "composition": destination = binding.destination_port
+        if destinations.contains(destination.lower()):
+            return "HWIR-E-RISCV-RUNTIME-STATEFUL-V2-VHDL-DRIVER: every destination requires exactly one driver"
+        destinations.push(destination.lower())
+        if binding.destination_owner != "composition":
+            if not hwir_vhdl_identifier(destination) or names.contains(destination.lower()):
+                return "HWIR-E-RISCV-RUNTIME-STATEFUL-V2-VHDL-NAMESPACE: ports, entities, and internal signals require one injective namespace"
+            names.push(destination.lower())
+        if binding.source_owner != "composition":
+            val source = stateful_v2_source(binding.source_owner, binding.source_port).lower()
+            val endpoint = binding.source_owner + "|" + binding.source_port
+            if source_names.contains(source):
+                var source_index = 0
+                while source_names[source_index] != source: source_index = source_index + 1
+                if source_endpoints[source_index] != endpoint:
+                    return "HWIR-E-RISCV-RUNTIME-STATEFUL-V2-VHDL-NAMESPACE: distinct endpoints require injective signal identifiers"
+            else:
+                if not hwir_vhdl_identifier(source) or names.contains(source):
+                    return "HWIR-E-RISCV-RUNTIME-STATEFUL-V2-VHDL-NAMESPACE: ports, entities, and internal signals require one injective namespace"
+                source_names.push(source); source_endpoints.push(endpoint); names.push(source)
+            val width = source + "|" + binding.bit_width.to_text()
+            for known in source_widths:
+                if known.starts_with(source + "|") and known != width:
+                    return "HWIR-E-RISCV-RUNTIME-STATEFUL-V2-VHDL-SOURCE: fanout requires one width-consistent source"
+            if not source_widths.contains(width): source_widths.push(width)
+    for owner in ["pending", "projection", "lsu", "fence", "idle", "route"]:
+        for port in composition.owner_ports(owner):
+            if port.direction == "in" and
+                    not destinations.contains(stateful_v2_wire(HwScalarRuntimeLsuCompositionBinding(
+                        source_owner: "", source_port: "", destination_owner: owner,
+                        destination_port: port.name, bit_width: port.bit_width)).lower()):
+                return "HWIR-E-RISCV-RUNTIME-STATEFUL-V2-VHDL-CLOSURE: every child input requires one driver"
+    for port in composition.top_ports:
+        if port.direction == "out" and not destinations.contains(port.name.lower()):
+            return "HWIR-E-RISCV-RUNTIME-STATEFUL-V2-VHDL-TOP: every top output requires one driver"
+    ""
+
+pub fn render_strict_riscv_scalar_runtime_stateful_v2_vhdl(
+    composition: HwScalarRuntimeStatefulCompositionV2, route: text) -> HwirStrictVhdlResult:
+    if route != stateful_v2_route():
+        return stateful_v2_rejected(
+            "HWIR-E-RISCV-RUNTIME-STATEFUL-V2-VHDL-ROUTE: stateful v2 requires its dedicated strict route")
+    val diagnostic = composition.diagnostic()
+    if diagnostic != "": return stateful_v2_rejected(diagnostic)
+    val closure = scalar_runtime_stateful_v2_vhdl_closure_diagnostic(composition)
+    if closure != "": return stateful_v2_rejected(closure)
+    val decoder = render_strict_hwir_vhdl(composition.decoder)
+    val pending = render_strict_sequential_hwir(composition.pending,
+        "hwir-gen2-scalar-pending-provider-owner-v1")
+    val projection = render_strict_hwir_vhdl(composition.projection)
+    val lsu = render_strict_sequential_hwir(composition.lsu,
+        "hwir-gen2-scalar-runtime-lsu-owner-v1")
+    val fence = render_strict_sequential_hwir(composition.fence,
+        "hwir-gen2-scalar-runtime-fence-provider-v1")
+    val idle = render_strict_hwir_vhdl(composition.idle)
+    val route_child = render_strict_hwir_vhdl(composition.route)
+    for child in [decoder, pending, projection, lsu, fence, idle, route_child]:
+        if not child.is_success(): return stateful_v2_rejected(child.diagnostic)
+    val graph = composition.structural_sha256()
+    val top = "library ieee;\nuse ieee.std_logic_1164.all;\nuse ieee.numeric_std.all;\n\n" +
+        "-- simple-hwir route=" + stateful_v2_route() + "\n" +
+        "-- simple-hwir top=" + graph + "\n" +
+        "-- simple-hwir config=" + stateful_v2_config_hash(composition.config) + "\n" +
+        "-- simple-hwir bus=" + stateful_v2_bus_hash(composition.bus) + "\n" +
+        "-- simple-hwir plan=" + composition.plan.structural_sha256() + "\n" +
+        "-- simple-hwir schema=" + composition.decoded.structural_sha256() + "\n" +
+        "-- simple-hwir protocol=" + composition.protocol.structural_sha256() + "\n" +
+        "-- simple-hwir child-decoder=" + decoder.hwir_graph_sha256 + "\n" +
+        "-- simple-hwir child-pending=" + pending.hwir_graph_sha256 + "\n" +
+        "-- simple-hwir child-projection=" + projection.hwir_graph_sha256 + "\n" +
+        "-- simple-hwir child-lsu=" + lsu.hwir_graph_sha256 + "\n" +
+        "-- simple-hwir child-fence=" + fence.hwir_graph_sha256 + "\n" +
+        "-- simple-hwir child-idle=" + idle.hwir_graph_sha256 + "\n" +
+        "-- simple-hwir child-route=" + route_child.hwir_graph_sha256 + "\n" +
+        "entity " + composition.module_name + " is port(\n" +
+        stateful_v2_ports(composition.top_ports) + "    ); end entity;\n" +
+        "architecture rtl of " + composition.module_name + " is\n" +
+        stateful_v2_signals(composition) + "begin\n" + stateful_v2_assignments(composition) +
+        "    pending: entity work." + composition.pending.entity_name + " port map(" +
+            stateful_v2_child_map(composition, "pending", composition.pending.ports) + ");\n" +
+        "    projection: entity work." + composition.projection.summary.name + " port map(" +
+            stateful_v2_child_map(composition, "projection", composition.projection.ports) + ");\n" +
+        "    lsu: entity work." + composition.lsu.entity_name + " port map(" +
+            stateful_v2_child_map(composition, "lsu", composition.lsu.ports) + ");\n" +
+        "    fence: entity work." + composition.fence.entity_name + " port map(" +
+            stateful_v2_child_map(composition, "fence", composition.fence.ports) + ");\n" +
+        "    idle: entity work." + composition.idle.summary.name + " port map(" +
+            stateful_v2_child_map(composition, "idle", composition.idle.ports) + ");\n" +
+        "    route_owner: entity work." + composition.route.summary.name + " port map(" +
+            stateful_v2_child_map(composition, "route", composition.route.ports) + ");\n" +
+        "end architecture rtl;\n"
+    HwirStrictVhdlResult(success: true,
+        vhdl: decoder.vhdl + "\n" + pending.vhdl + "\n" + projection.vhdl + "\n" +
+            lsu.vhdl + "\n" + fence.vhdl + "\n" + idle.vhdl + "\n" + route_child.vhdl + "\n" + top,
+        diagnostic: "", route: stateful_v2_route(), module_node_id: composition.node_id.value,
+        config_xlen: composition.config.xlen, config_profile: composition.config.profile,
+        hwir_graph_sha256: graph)
+
+pub fn compile_strict_riscv_scalar_runtime_stateful_v2_vhdl(module_name: text,
+    config: CoreConfig, bus: LsuConfig) -> HwirStrictVhdlResult:
+    val rebuilt = strict_riscv_scalar_runtime_stateful_composition_v2(module_name, config, bus)
+    if rebuilt.is_err(): return stateful_v2_rejected(rebuilt.err().unwrap())
+    render_strict_riscv_scalar_runtime_stateful_v2_vhdl(
+        rebuilt.ok().unwrap(), stateful_v2_route())

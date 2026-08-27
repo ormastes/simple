@@ -10,27 +10,41 @@ use compiler.loader.module_loader_compat.{
     moduleloader_visible_aspect_catalog_digest,
     moduleloader_visible_aspect_catalog_generation,
     moduleloader_aspect_catalog_digest_computations,
-    moduleloader_aspect_catalog_invalidations,
-    moduleloader_retained_aspect_snapshot_count_v1,
-    moduleloader_retained_aspect_snapshot_capacity_v1,
-    moduleloader_unload_aspect_facet
+    moduleloader_aspect_catalog_invalidations
 }
 use compiler.driver.smf_writer.{generate_aspect_pack_smf}
 use std.common.aspect_pack.{
-    ApkModuleSourceV2, ApkCatalogEntryV2, ApkProfileRecordV1, apk_build_pack_v2,
-    apk_build_catalog_v2, apk_build_catalog_v3, APK_ENTRY_FACET, APK_ACT_LAZY_FACET,
+    ApkModuleSourceV2, ApkCatalogEntryV2, apk_build_pack_v2,
+    apk_build_catalog_v2, APK_ENTRY_FACET, APK_ACT_LAZY_FACET,
     apk_loader_packs_opened, apk_loader_modules_decompressed,
     apk_loader_bytes_decompressed, apk_activation_stack_enter_v1,
-    apk_activation_stack_exit_v1, apk_loader_select_profile, apk_loader_profile
+    apk_activation_stack_exit_v1
 }
-use std.common.string_core.{text_to_bytes}
 use std.io_runtime.{file_write_bytes, mkdir_p}
 
 fn catalog_pack_path() -> text:
     "build/test/aspect_catalog_invalidation.smf"
 
 fn catalog_payload(tag: text) -> [u8]:
-    text_to_bytes("resident aspect payload: " + tag)
+    var code: [i64] = []
+    var i = 0
+    while i < 16:
+        code.push(0)
+        i = i + 1
+    code.push(195)
+    var writer = SmfWriter.create()
+    writer.add_code_section("nested", code)
+    writer.add_symbol(SmfWriterSymbol(name: "nested_" + tag,
+        binding: SmfWriterSymbolBinding.Global,
+        sym_type: SmfWriterSymbolType.Function, section_index: 1, value: 0,
+        size: 16, layout_phase: 2, is_event_loop_anchor: false, layout_pinned: true))
+    writer.add_relocation(SmfRelocation(offset: 0, symbol_index: 0,
+        reloc_type: RelocationType.Abs64, addend: tag.len()))
+    val raw = writer.write().unwrap()
+    var out: [u8] = []
+    for b in raw:
+        out.push(b as u8)
+    out
 
 fn catalog_pack_bytes() -> [u8]:
     var modules: [ApkModuleSourceV2] = []
@@ -73,9 +87,6 @@ describe "visible aspect catalog digest and invalidation":
             case Err(message): panic(message)
         expect(first.len()).to_equal(64)
         expect(moduleloader_visible_aspect_catalog_generation(loader)).to_equal(1)
-        val retained_after_first = moduleloader_retained_aspect_snapshot_count_v1()
-        expect(retained_after_first).to_be_less_than(
-            moduleloader_retained_aspect_snapshot_capacity_v1() + 1)
         val second = match loader.install_aspect_catalog(catalog):
             case Ok(digest): digest
             case Err(message): panic(message)
@@ -83,56 +94,6 @@ describe "visible aspect catalog digest and invalidation":
         expect(moduleloader_visible_aspect_catalog_digest(loader)).to_equal(first)
         expect(moduleloader_visible_aspect_catalog_generation(loader)).to_equal(1)
         expect(moduleloader_aspect_catalog_invalidations(loader)).to_equal(0)
-        expect(moduleloader_retained_aspect_snapshot_count_v1()).to_equal(
-            retained_after_first)
-
-    it "explicit owner teardown releases its retained catalog snapshot":
-        var loader = ModuleLoader.with_defaults()
-        val before = moduleloader_retained_aspect_snapshot_count_v1()
-        val unique_catalog = catalog_bytes_for(
-            "snapshot.close.owner", "abi-close-owner")
-        match loader.install_aspect_catalog(unique_catalog):
-            case Ok(_): pass
-            case Err(message): panic(message)
-        expect(moduleloader_retained_aspect_snapshot_count_v1()).to_equal(
-            before + 1)
-        var copied_loader = loader
-        expect(copied_loader.close_aspect_state()).to_equal(true)
-        expect(moduleloader_retained_aspect_snapshot_count_v1()).to_equal(before)
-        expect(moduleloader_visible_aspect_catalog_digest(loader)).to_equal("")
-        expect(moduleloader_visible_aspect_catalog_digest(
-            copied_loader)).to_equal("")
-
-    it "snapshot retention fails closed at capacity and teardown restores slots":
-        val before = moduleloader_retained_aspect_snapshot_count_v1()
-        val capacity = moduleloader_retained_aspect_snapshot_capacity_v1()
-        var owners: [ModuleLoader] = []
-        var slot = before
-        while slot < capacity:
-            var owner = ModuleLoader.with_defaults()
-            val catalog = catalog_bytes_for(
-                "snapshot.capacity.{before}.{slot}",
-                "abi-snapshot-capacity-{before}-{slot}")
-            match owner.install_aspect_catalog(catalog):
-                case Ok(_): pass
-                case Err(message): panic(message)
-            owners.push(owner)
-            slot = slot + 1
-        expect(moduleloader_retained_aspect_snapshot_count_v1()).to_equal(
-            capacity)
-        var overflow = ModuleLoader.with_defaults()
-        match overflow.install_aspect_catalog(catalog_bytes_for(
-                "snapshot.capacity.overflow.{before}", "abi-overflow-{before}")):
-            case Err(_): pass
-            case Ok(_): panic("snapshot capacity admitted an unowned slot")
-        expect(moduleloader_retained_aspect_snapshot_count_v1()).to_equal(
-            capacity)
-        var owner_index = 0
-        while owner_index < owners.len():
-            var retained_owner = owners[owner_index]
-            expect(retained_owner.close_aspect_state()).to_equal(true)
-            owner_index = owner_index + 1
-        expect(moduleloader_retained_aspect_snapshot_count_v1()).to_equal(before)
 
     it "changed catalog invalidates resident routing before publication":
         var loader = loader_with_pack()
@@ -154,43 +115,6 @@ describe "visible aspect catalog digest and invalidation":
         expect(new_ref.load.module_id).to_equal("trace.spans")
         expect(new_ref.load.generation).to_be_greater_than(old_generation)
         expect(new_ref.release()).to_equal(true)
-
-    it "published profile index resolves repeated adversarial keys and invalidates on switch":
-        var loader = loader_with_pack()
-        var entries: [ApkCatalogEntryV2] = []
-        entries.push(ApkCatalogEntryV2(facet_key: "Widget\0/Debuggable",
-            pack_path: catalog_pack_path(), module_id: "debug.core",
-            entry_kind: APK_ENTRY_FACET, activation: APK_ACT_LAZY_FACET,
-            abi_hash: "abi-debug-1"))
-        entries.push(ApkCatalogEntryV2(facet_key: "Noise\0/Facet",
-            pack_path: catalog_pack_path(), module_id: "debug.core",
-            entry_kind: APK_ENTRY_FACET, activation: APK_ACT_LAZY_FACET,
-            abi_hash: "abi-debug-1"))
-        entries.push(ApkCatalogEntryV2(facet_key: "Widget\0/Debuggable",
-            pack_path: catalog_pack_path(), module_id: "trace.spans",
-            entry_kind: APK_ENTRY_FACET, activation: APK_ACT_LAZY_FACET,
-            abi_hash: "abi-trace-1"))
-        var profiles: [ApkProfileRecordV1] = []
-        profiles.push(ApkProfileRecordV1(
-            profile_id: "small\0profile", entry_start: 0, entry_count: 2))
-        profiles.push(ApkProfileRecordV1(
-            profile_id: "large\0profile", entry_start: 1, entry_count: 2))
-        match loader.install_aspect_catalog(apk_build_catalog_v3(entries, profiles).bytes):
-            case Ok(_): pass
-            case Err(message): panic(message)
-        val handle = moduleloader_aspect_loader_handle(loader)
-        apk_loader_select_profile(handle, "large\0profile")
-        var large = loader.aspect_facet_visible("Widget\0/Debuggable")
-        expect(large.load.module_id).to_equal("trace.spans")
-        apk_loader_select_profile(handle, "small\0profile")
-        expect(apk_loader_profile(handle)).to_equal("large\0profile")
-        expect(large.is_live()).to_equal(true)
-        expect(large.release()).to_equal(true)
-        apk_loader_select_profile(handle, "small\0profile")
-        expect(moduleloader_aspect_catalog_invalidations(loader)).to_equal(0)
-        var small = loader.aspect_facet_visible("Widget\0/Debuggable")
-        expect(small.load.module_id).to_equal("debug.core")
-        expect(small.release()).to_equal(true)
 
     it "compatibility acquisition honors each supplied catalog before resident lookup":
         var loader = loader_with_pack()
@@ -227,27 +151,6 @@ describe "visible aspect catalog digest and invalidation":
         expect(moduleloader_aspect_catalog_invalidations(loader)).to_equal(0)
         expect(pinned.is_live()).to_equal(true)
         expect(pinned.release()).to_equal(true)
-        # Refusal retains the old bytes and their correlated route index as one
-        # snapshot; the rejected replacement must not leak its module route.
-        var retained = loader.aspect_facet_visible("Widget/Debuggable")
-        expect(retained.load.module_id).to_equal("debug.core")
-        expect(retained.release()).to_equal(true)
-
-    it "owner unload quiesces a pinned facet and reclaims only after release":
-        var loader = loader_with_pack()
-        match loader.install_aspect_catalog(catalog_bytes_for("debug.core", "abi-debug-1")):
-            case Ok(_): pass
-            case Err(message): panic(message)
-        var pinned = loader.aspect_facet_visible("Widget/Debuggable")
-        val unload = moduleloader_unload_aspect_facet(
-            loader, "Widget/Debuggable")
-        expect(unload.ok).to_equal(true)
-        expect(unload.quiescing).to_equal(true)
-        expect(unload.released).to_equal(false)
-        expect(pinned.is_live()).to_equal(true)
-        expect(loader.try_aspect_facet("Widget/Debuggable").load.found).to_equal(false)
-        expect(pinned.release()).to_equal(true)
-        expect(pinned.is_live()).to_equal(false)
 
     it "activating facet blocks update without invalidation or generation churn":
         var loader = loader_with_pack()

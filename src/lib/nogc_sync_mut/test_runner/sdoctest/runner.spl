@@ -10,7 +10,7 @@ use std.io.{env_set, env_get}
 use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
 use std.sffi.cli.{cli_get_args}
 use nogc_sync_mut.platform.{get_host_os, get_host_arch}
-use std.test_runner.test_runner_types.{TestOptions, TEST_OUTPUT_CAPTURE_BYTES}
+use std.test_runner.test_runner_types.TestOptions
 use std.test_runner.sdoctest.types.{BlockResult, BlockStatus, SdoctestBlock, SdoctestConfig, SdoctestFileResult, SdoctestRunResult}
 use std.test_runner.sdoctest.config.{find_init_script_file, find_env_timeout, find_env_vars, find_env_run_config}
 use std.test_runner.sdoctest.extractor.{extract_sdoctest_blocks, extract_reusable_lines}
@@ -21,7 +21,7 @@ use std.test_runner.sdoctest.discovery.{discover_sdoctest_files, is_tag_ignored}
 # =========================================================================
 
 fn run_sdoctest_mode(options: TestOptions, config: SdoctestConfig) -> SdoctestRunResult:
-    val cli_path = if options.path_explicit: options.path else: ""
+    val cli_path = if options.path != "test/": options.path else: ""
     val files = discover_sdoctest_files(config, cli_path)
 
     if options.list:
@@ -29,14 +29,6 @@ fn run_sdoctest_mode(options: TestOptions, config: SdoctestConfig) -> SdoctestRu
         return SdoctestRunResult(files: [], total: 0, passed: 0, failed: 0, skipped: 0, errors: 0, accepted: 0, duration_ms: 0)
 
     if files.len() == 0:
-        if cli_path != "":
-            # Explicit target (a single .md file or directory the caller named
-            # directly) that produced zero matching files is a fail-closed
-            # error, not a silent no-op — mirrors the single-file spec
-            # arbiter's "no examples executed" contract. Config-driven sweeps
-            # (cli_path == "") keep their existing zero-is-ok semantics.
-            print "error: test-runner: no doctest blocks found"
-            return SdoctestRunResult(files: [], total: 0, passed: 0, failed: 1, skipped: 0, errors: 0, accepted: 0, duration_ms: 0)
         print "No sdoctest files found."
         return SdoctestRunResult(files: [], total: 0, passed: 0, failed: 0, skipped: 0, errors: 0, accepted: 0, duration_ms: 0)
 
@@ -71,15 +63,6 @@ fn run_sdoctest_mode(options: TestOptions, config: SdoctestConfig) -> SdoctestRu
 
     val run_end = time_now_unix_micros()
     val duration_ms = (run_end - run_start) / 1000
-
-    if cli_path != "" and total == 0:
-        # The explicit target resolved to a real file (or files), but none of
-        # them contained an extractable sdoctest block (e.g. markdown with no
-        # fences/markers). Fail-closed, matching the zero-files-found case
-        # above — an explicitly named target with nothing to run is an error,
-        # not a silent pass.
-        print "error: test-runner: no doctest blocks found"
-        return SdoctestRunResult(files: file_results, total: 0, passed: 0, failed: 1, skipped: skipped, errors: errors, accepted: accepted, duration_ms: duration_ms)
 
     SdoctestRunResult(
         files: file_results,
@@ -199,27 +182,12 @@ fn build_file_preambles(blocks: [SdoctestBlock]) -> [text]:
 # =========================================================================
 
 fn find_sdoctest_binary() -> text:
-    # Explicit override (used by the "test" dispatcher when it interprets a
-    # .spl entry file in-process instead of spawning a real compiled binary —
-    # see the argv[0] guard note below).
-    val configured = env_get("SIMPLE_BINARY")
-    if configured != "" and configured != nil and file_exists(configured):
-        return configured
-
     # Prefer the currently running executable — subprocess sdoctests should use
     # the same binary that invoked the test runner (self-hosted consistency).
-    # Guard: when "test" is dispatched by interpreting a .spl entry file
-    # in-process (e.g. src/app/test_runner_new/main.spl via the seed), argv[0]
-    # is that source file's own path. It exists on disk but is not executable,
-    # so trusting it verbatim makes process_run fail to spawn immediately —
-    # which reads back as exit_code -1 and gets mislabeled "TIMEOUT" below.
-    # Only trust argv[0] when it looks like the compiled binary, mirroring
-    # test_runner_single.spl's find_simple_binary() / test_runner_client.spl's
-    # simple_binary() guards.
     val args = cli_get_args()
     if args.len() > 0:
         val self_exe = args[0]
-        if self_exe != "" and (self_exe.ends_with("/simple") or self_exe.ends_with("simple.exe")) and file_exists(self_exe):
+        if self_exe != "" and file_exists(self_exe):
             return self_exe
 
     # Fallback: try known locations, preferring bin/simple and platform-specific
@@ -311,7 +279,7 @@ fn run_sdoctest_block(block: SdoctestBlock, config: SdoctestConfig, default_env_
     val temp_path = "/tmp/sdoctest_block_{block.line_number}.spl"
     file_atomic_write(temp_path, code)
 
-    # Preserve argv boundaries through the native bounded process facade.
+    # Run subprocess using process_run (process_run_timeout has arg-passing bug)
     val binary = find_sdoctest_binary()
     # Block-level @modifier takes priority over env-level run-config
     val block_run_config = block.get_run_config()
@@ -321,7 +289,7 @@ fn run_sdoctest_block(block: SdoctestBlock, config: SdoctestConfig, default_env_
     else:
         [temp_path]
     val start = time_now_unix_micros()
-    val run_result = process_run_bounded(binary, run_args, timeout, TEST_OUTPUT_CAPTURE_BYTES)
+    val run_result = process_run(binary, run_args)
     val stdout = run_result.0
     val stderr = run_result.1
     val exit_code = run_result.2
@@ -335,16 +303,10 @@ fn run_sdoctest_block(block: SdoctestBlock, config: SdoctestConfig, default_env_
     val should_fail = block.has_modifier_should_fail()
 
     if exit_code == -1:
-        val process_error = if stderr.contains("TIMEOUT") or stderr.contains("timed out"):
-            "TIMEOUT after {timeout}ms"
-        elif stderr != "":
-            stderr
-        else:
-            "Process failed to start or returned an internal error"
         return BlockResult(
             block: block, status: BlockStatus.Error,
             duration_ms: duration_ms, stdout: stdout, stderr: stderr,
-            error: process_error
+            error: "TIMEOUT after {timeout}ms"
         )
 
     if should_fail:

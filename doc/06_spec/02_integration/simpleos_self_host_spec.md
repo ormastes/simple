@@ -2,6 +2,30 @@
 
 > Verifies the end-to-end self-host chain: SimpleOS boots in QEMU, loads the
 
+<!-- sdn-diagram:id=simpleos_self_host_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=simpleos_self_host_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+simpleos_self_host_spec -> std
+simpleos_self_host_spec -> os
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=simpleos_self_host_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 14 | 14 | 0 | 0 |
@@ -60,7 +84,7 @@ Two-layer test:
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -90,7 +114,7 @@ expect(cmd).to_contain("stdio")
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -121,7 +145,7 @@ expect(cmd).to_contain("q35")
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -146,7 +170,7 @@ expect(TAG_TRIVIAL_OK).to_equal("TRIVIAL_SELFHOST_OK")
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -171,7 +195,7 @@ expect(TAG_TRIVIAL_SKIP).to_start_with("TRIVIAL_SELFHOST_SKIP")
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -199,7 +223,7 @@ expect(TAG_TRIVIAL_FAIL).to_start_with("TRIVIAL_SELFHOST_FAIL")
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -224,7 +248,7 @@ expect(SIMPLE_BIN).to_equal("/bin/simple")
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -250,7 +274,7 @@ expect(TRIVIAL_SRC_FILE).to_end_with(".spl")
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -276,7 +300,7 @@ expect(TRIVIAL_OUTPUT).to_start_with("/tmp/selfhost_test/")
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -303,7 +327,7 @@ expect(TRIVIAL_EXPECTED_OUTPUT).to_equal("hello from self-host")
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -339,7 +363,7 @@ expect(args).to_contain(TRIVIAL_OUTPUT)
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -367,7 +391,7 @@ expect(TRIVIAL_SRC_FILE).to_end_with("hello.spl")
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -394,7 +418,7 @@ expect(stdout.contains(TAG_TRIVIAL_OK)).to_equal(true)
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -421,7 +445,7 @@ expect(stdout.contains(TAG_TRIVIAL_SKIP)).to_equal(true)
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.

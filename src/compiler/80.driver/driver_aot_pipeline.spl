@@ -8,7 +8,7 @@ use compiler.driver.driver_log_helpers.{log_debug, log_error, log_phase, log_boo
 # 'update_smf_manifest_entry' not found`. See
 # doc/08_tracking/bug/block_scoped_use_no_op_symbol_resolution_2026-08-18.md
 use compiler.driver.cache.cache_validator.{source_to_cache_path}
-use compiler.driver.watcher.smf_manifest.{update_smf_manifest_entry}
+use compiler.driver.watcher.smf_manifest.{update_smf_manifest_entry_with_mcdc}
 use compiler.driver.driver_bootstrap.{
     bootstrap_compile_to_native_local,
     bootstrap_compile_context_to_native_local,
@@ -21,10 +21,13 @@ use compiler.common.driver_core_types.{
     driver_output_format_is_both,
     driver_output_format_is_self_contained
 }
-use std.io_runtime.{env_get_opt, file_read_result, hash_text}
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_hash_text(s: text) -> i64
+extern fn rt_env_get(key: text) -> text
 
 fn native_build_cache_dir() -> text:
-    val dir = env_get_opt("SIMPLE_NATIVE_BUILD_CACHE_DIR") ?? ""
+    val dir = rt_env_get("SIMPLE_NATIVE_BUILD_CACHE_DIR") ?? ""
     if dir == "":
         "build/native_cache"
     else:
@@ -59,7 +62,7 @@ impl CompilerDriver:
 
         log_phase("aot:lower_to_mir:start")
         var mir_ok = false
-        if (env_get_opt("SIMPLE_BOOTSTRAP") ?? "") == "1" and (env_get_opt("SIMPLE_BOOTSTRAP_STAGE4") ?? "") != "1":
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and (rt_env_get("SIMPLE_BOOTSTRAP_STAGE4") ?? "") != "1":
             val (next_ctx, ok) = bootstrap_lower_to_mir_context(self.ctx)
             self.ctx = next_ctx
             mir_ok = ok
@@ -93,7 +96,7 @@ impl CompilerDriver:
             log_debug("low-memory: evicting HIR modules")
             self.ctx.evict_hir()
 
-        val bootstrap_flat_aot = (env_get_opt("SIMPLE_BOOTSTRAP") ?? "") == "1" and (env_get_opt("SIMPLE_BOOTSTRAP_STAGE4") ?? "") != "1"
+        val bootstrap_flat_aot = (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and (rt_env_get("SIMPLE_BOOTSTRAP_STAGE4") ?? "") != "1"
         if bootstrap_flat_aot:
             log_phase("aot:flat_mir_passes:skipped")
             log_bootstrap_flat_warning("aot:flat_mir_passes:skipped")
@@ -110,7 +113,7 @@ impl CompilerDriver:
             log_phase("aot:process_async:done")
 
             log_phase("aot:optimize_mir:start")
-            val skip_mir_opt = env_get_opt("SIMPLE_BOOTSTRAP_SKIP_MIR_OPT") ?? ""
+            val skip_mir_opt = rt_env_get("SIMPLE_BOOTSTRAP_SKIP_MIR_OPT") ?? ""
             if skip_mir_opt == "1":
                 log_phase("aot:optimize_mir:skipped")
             else:
@@ -139,21 +142,19 @@ impl CompilerDriver:
             return self.compile_to_cuda(output)
         if backend_name == "opencl" or backend_name == "opencl-c" or backend_name == "opencl-spirv" or backend_name == "cl":
             return self.compile_to_opencl(output)
-        if backend_name == "vulkan" or backend_name == "spirv":
-            return self.compile_to_vulkan(output)
         if backend_name == "vhdl":
             return self.compile_to_vhdl(output)
         if backend_name == "wasm" or backend_name == "wasm32":
             return self.compile_to_wasm(output)
 
-        if (env_get_opt("SIMPLE_BOOTSTRAP_DIRECT_IR") ?? "") == "1":
+        if (rt_env_get("SIMPLE_BOOTSTRAP_DIRECT_IR") ?? "") == "1":
             log_phase("aot:bootstrap_native_dispatch")
             return bootstrap_compile_to_native_local(self.ctx, backend_name, output)
 
         log_phase("aot:format:start")
         val format = self.ctx.options.output_format
         log_phase("aot:format:done")
-        if (env_get_opt("SIMPLE_BOOTSTRAP") ?? "") == "1" and (env_get_opt("SIMPLE_BOOTSTRAP_STAGE4") ?? "") != "1":
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and (rt_env_get("SIMPLE_BOOTSTRAP_STAGE4") ?? "") != "1":
             log_phase("aot:bootstrap_native_context_dispatch")
             return bootstrap_compile_context_to_native_local(self.ctx, backend_name, output)
         if driver_output_format_is_smf(format):
@@ -164,16 +165,15 @@ impl CompilerDriver:
             val native_result = self.compile_to_native(output)
             if not native_result.is_success():
                 return native_result
+            use compiler.driver.cache.cache_validator.{source_to_cache_path}
+            use compiler.driver.watcher.smf_manifest.{update_smf_manifest_entry}
             val source_path = self.ctx.options.input_files[0]
             val smf_cache_path = source_to_cache_path(source_path, native_build_cache_dir(), ".smf")
             val smf_result = self.compile_to_smf(smf_cache_path)
             if smf_result.is_success():
                 val smf_opt_level = compileoptions_effective_mir_opt_level(self.ctx.options)
-                val source_result = file_read_result(source_path)
-                val src = match source_result:
-                    case Ok(content): content
-                    case Err(error): return CompileResult.CodegenError(error)
-                val src_hash = hash_text(src)
+                val src = rt_file_read_text(source_path) ?? ""
+                val src_hash = rt_hash_text(src)
                 update_smf_manifest_entry(
                     source_path,
                     smf_cache_path,
@@ -184,8 +184,8 @@ impl CompilerDriver:
                     self.ctx.options.debug_info,
                     self.ctx.options.gc_off,
                     self.ctx.options.profile,
-                    self.ctx.options.allowed_families
+                    self.ctx.options.allowed_families,
+                    self.ctx.options.mcdc_policy
                 )
             return CompileResult.Success(output)
         return self.compile_to_native(output)
-use compiler.common.diagnostics.span.{Span}

@@ -1,13 +1,73 @@
-"""Pure Metal-pipeline cache bookkeeping.
+"""Metal Session — MTLDevice + Command Queue + Pipeline Cache
 
-The former `MetalComputeSession` declared ten providerless Engine2D Metal
-functions with ad-hoc handle and text contracts. Production does not import
-that execution façade; retaining it could turn a missing foreign provider into
-fabricated handles or text. The active GC Metal backend is a separate owner.
+@tag:stdlib
+@tag:gpu
 
-This module intentionally preserves only allocation-free bounded pipeline-cache
-bookkeeping. It contains no SFFI boundary.
+Owns a Metal device handle, command queue, and a flat pipeline cache.
+macOS-only: init_device() returns an error string on non-macOS platforms.
+
+Usage:
+    val session = MetalComputeSession.create("compute")
+    val err = session.init_device()
+    if err != "":
+        use std.io
+        io.println(err)
 """
+
+# ============================================================================
+# Extern declarations (resolved at link time against Rust runtime)
+# ============================================================================
+
+@unsafe(reason: "raw Engine2D Metal availability ABI; provider is not admitted", capabilities: [ffi])
+extern fn rt_engine2d_metal_session_is_available() -> bool
+@unsafe(reason: "raw Engine2D Metal device ABI; provider is not admitted", capabilities: [ffi])
+extern fn rt_engine2d_metal_session_create_device() -> i64
+@unsafe(reason: "raw Engine2D Metal device-name ABI; provider is not admitted", capabilities: [ffi])
+extern fn rt_engine2d_metal_session_device_name(device: i64) -> text
+@unsafe(reason: "raw Engine2D Metal queue ABI; provider is not admitted", capabilities: [ffi])
+extern fn rt_engine2d_metal_session_create_queue(device: i64) -> i64
+@unsafe(reason: "raw Engine2D Metal library ABI; provider is not admitted", capabilities: [ffi])
+extern fn rt_engine2d_metal_session_create_library(device: i64, source: text) -> i64
+@unsafe(reason: "raw Engine2D Metal pipeline ABI; provider is not admitted", capabilities: [ffi])
+extern fn rt_engine2d_metal_session_create_pipeline(device: i64, library: i64, fn_name: text) -> i64
+@unsafe(reason: "raw Engine2D Metal command ABI; provider is not admitted", capabilities: [ffi])
+extern fn rt_engine2d_metal_session_begin_command(queue: i64) -> i64
+@unsafe(reason: "raw Engine2D Metal commit ABI; provider is not admitted", capabilities: [ffi])
+extern fn rt_engine2d_metal_session_commit_command(cmd: i64) -> text
+@unsafe(reason: "raw Engine2D Metal wait ABI; provider is not admitted", capabilities: [ffi])
+extern fn rt_engine2d_metal_session_wait_completion(cmd: i64) -> text
+@unsafe(reason: "raw Engine2D Metal cleanup ABI; provider is not admitted", capabilities: [ffi])
+extern fn rt_engine2d_metal_session_cleanup_device(device: i64) -> i64
+
+fn metal_session_is_available() -> bool:
+    rt_engine2d_metal_session_is_available()
+
+fn metal_session_create_device() -> i64:
+    rt_engine2d_metal_session_create_device()
+
+fn metal_session_device_name(device: i64) -> text:
+    rt_engine2d_metal_session_device_name(device)
+
+fn metal_session_create_queue(device: i64) -> i64:
+    rt_engine2d_metal_session_create_queue(device)
+
+fn metal_session_create_library(device: i64, source: text) -> i64:
+    rt_engine2d_metal_session_create_library(device, source)
+
+fn metal_session_create_compute_pipeline(device: i64, library: i64, fn_name: text) -> i64:
+    rt_engine2d_metal_session_create_pipeline(device, library, fn_name)
+
+fn metal_session_begin_command(queue: i64) -> i64:
+    rt_engine2d_metal_session_begin_command(queue)
+
+fn metal_session_commit_command(cmd: i64) -> text:
+    rt_engine2d_metal_session_commit_command(cmd)
+
+fn metal_session_wait_completion(cmd: i64) -> text:
+    rt_engine2d_metal_session_wait_completion(cmd)
+
+fn metal_session_cleanup_device(device: i64) -> i64:
+    rt_engine2d_metal_session_cleanup_device(device)
 
 # ============================================================================
 # MetalPipelineCache — flat storage for up to 4 named pipeline handles
@@ -71,14 +131,24 @@ class MetalPipelineCache:
 # ============================================================================
 
 class MetalComputeSession:
+    device_handle: i64
+    queue_handle: i64
+    device_name: text
     pipeline_cache: MetalPipelineCache
+    library_count: i64
+    command_count: i64
     mode: text
     cache_reject_count: i64
     last_cache_rejection: text
 
     static fn create(mode: text) -> MetalComputeSession:
         MetalComputeSession(
+            device_handle: 0,
+            queue_handle: 0,
+            device_name: "",
             pipeline_cache: MetalPipelineCache.create(),
+            library_count: 0,
+            command_count: 0,
             mode: mode,
             cache_reject_count: 0,
             last_cache_rejection: "")

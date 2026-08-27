@@ -37,15 +37,6 @@ struct DrawIrStyleProp:
     key: text
     value: text
 
-# Immutable producer-resolved shaping semantics. Glyph IDs and positions are
-# durable layout data; renderer handles, atlases, and caches never cross Draw IR.
-struct DrawIrGlyphRunPayload:
-    glyph_ids: [u32]
-    xs: [i32]
-    ys: [i32]
-    clusters: [i64]
-    valid: bool
-
 struct DrawEdge:
     id: text
     source: text
@@ -74,7 +65,6 @@ struct DrawIrCommand:
     height: i32
     color: u32
     text_value: text
-    advance_widths: [i32]
     border_rect: DrawIrRect
     content_rect: DrawIrRect
     hit_rect: DrawIrRect
@@ -84,7 +74,6 @@ struct DrawIrCommand:
     parent_id: text
     image_uri: text
     points: [DrawIrPoint]
-    glyph_run: DrawIrGlyphRunPayload
 
 struct DrawIrSourceInfo:
     source_kind: text
@@ -164,40 +153,8 @@ fn draw_ir_rect_bounds(x: i32, y: i32, width: i32, height: i32) -> DrawIrRect:
 fn draw_ir_no_rect() -> DrawIrRect:
     DrawIrRect(present: false, x: 0, y: 0, width: 0, height: 0)
 
-fn draw_ir_rect_translate(rect: DrawIrRect, dx: i32, dy: i32) -> DrawIrRect:
-    if rect.present == false:
-        return draw_ir_no_rect()
-    draw_ir_rect_bounds(rect.x + dx, rect.y + dy, rect.width, rect.height)
-
-fn draw_ir_rect_intersection(rect: DrawIrRect, limit: DrawIrRect) -> DrawIrRect:
-    if rect.present == false:
-        return limit
-    if limit.present == false:
-        return rect
-    val x = if rect.x > limit.x: rect.x else: limit.x
-    val y = if rect.y > limit.y: rect.y else: limit.y
-    val rect_right = rect.x + rect.width
-    val rect_bottom = rect.y + rect.height
-    val limit_right = limit.x + limit.width
-    val limit_bottom = limit.y + limit.height
-    val right = if rect_right < limit_right: rect_right else: limit_right
-    val bottom = if rect_bottom < limit_bottom: rect_bottom else: limit_bottom
-    draw_ir_rect_bounds(
-        x, y,
-        if right > x: right - x else: 0,
-        if bottom > y: bottom - y else: 0
-    )
-
 fn draw_ir_style_prop(key: text, value: text) -> DrawIrStyleProp:
     DrawIrStyleProp(key: key, value: value)
-
-fn draw_ir_empty_glyph_run_payload() -> DrawIrGlyphRunPayload:
-    DrawIrGlyphRunPayload(glyph_ids: [], xs: [], ys: [], clusters: [], valid: false)
-
-fn draw_ir_glyph_run_payload(glyph_ids: [u32], xs: [i32], ys: [i32], clusters: [i64], valid: bool) -> DrawIrGlyphRunPayload:
-    val lengths_match = glyph_ids.len() == xs.len() and glyph_ids.len() == ys.len() and glyph_ids.len() == clusters.len()
-    DrawIrGlyphRunPayload(glyph_ids: glyph_ids, xs: xs, ys: ys, clusters: clusters,
-        valid: valid and lengths_match and glyph_ids.len() > 0)
 
 fn draw_edge(id: text, source: text, target: text, routing: text, points: [DrawIrPoint], style: [DrawIrStyleProp]) -> DrawEdge:
     DrawEdge(id: id, source: source, target: target, routing: routing, points: points, style: style)
@@ -215,12 +172,7 @@ fn draw_ir_embedding_config(surface_id: text, component_id: text, x: i32, y: i32
         clip: clip
     )
 
-fn draw_ir_rect(component_id: text, x: i32, y: i32, width: i32, height: i32, color: u32, parent_id: text = "") -> DrawIrCommand:
-    draw_ir_rect_clipped(
-        component_id, x, y, width, height, color, draw_ir_no_rect(), parent_id
-    )
-
-fn draw_ir_rect_clipped(component_id: text, x: i32, y: i32, width: i32, height: i32, color: u32, clip_rect: DrawIrRect, parent_id: text = "") -> DrawIrCommand:
+fn draw_ir_rect(component_id: text, x: i32, y: i32, width: i32, height: i32, color: u32) -> DrawIrCommand:
     DrawIrCommand(
         kind: DRAW_IR_COMMAND_RECT,
         component_id: component_id,
@@ -230,52 +182,18 @@ fn draw_ir_rect_clipped(component_id: text, x: i32, y: i32, width: i32, height: 
         height: height,
         color: color,
         text_value: "",
-        advance_widths: [],
-        border_rect: draw_ir_no_rect(),
-        content_rect: draw_ir_no_rect(),
-        hit_rect: draw_ir_no_rect(),
-        clip_rect: clip_rect,
-        computed_style: [],
-        edge: nil,
-        parent_id: parent_id,
-        image_uri: "",
-        points: [],
-        glyph_run: draw_ir_empty_glyph_run_payload()
-    )
-
-fn draw_ir_text(component_id: text, x: i32, y: i32, text_value: text, color: u32, parent_id: text = "") -> DrawIrCommand:
-    DrawIrCommand(
-        kind: DRAW_IR_COMMAND_TEXT,
-        component_id: component_id,
-        x: x,
-        y: y,
-        width: 0,
-        height: 0,
-        color: color,
-        text_value: text_value,
-        advance_widths: [],
         border_rect: draw_ir_no_rect(),
         content_rect: draw_ir_no_rect(),
         hit_rect: draw_ir_no_rect(),
         clip_rect: draw_ir_no_rect(),
         computed_style: [],
         edge: nil,
-        parent_id: parent_id,
+        parent_id: "",
         image_uri: "",
-        points: [],
-        glyph_run: draw_ir_empty_glyph_run_payload()
+        points: []
     )
 
-fn draw_ir_text_styled(component_id: text, x: i32, y: i32, text_value: text, color: u32, computed_style: [DrawIrStyleProp], parent_id: text = "") -> DrawIrCommand:
-    draw_ir_text_styled_clipped(
-        component_id, x, y, text_value, color, computed_style,
-        draw_ir_no_rect(), parent_id
-    )
-
-fn draw_ir_text_styled_clipped(component_id: text, x: i32, y: i32, text_value: text, color: u32, computed_style: [DrawIrStyleProp], clip_rect: DrawIrRect, parent_id: text = "") -> DrawIrCommand:
-    # A text-run command that carries the node's computed style so the executor
-    # can recover the pixel font size (computed_style["font-size"]) and render
-    # glyphs at the layout's metrics rather than a fixed default.
+fn draw_ir_text(component_id: text, x: i32, y: i32, text_value: text, color: u32) -> DrawIrCommand:
     DrawIrCommand(
         kind: DRAW_IR_COMMAND_TEXT,
         component_id: component_id,
@@ -285,62 +203,18 @@ fn draw_ir_text_styled_clipped(component_id: text, x: i32, y: i32, text_value: t
         height: 0,
         color: color,
         text_value: text_value,
-        advance_widths: [],
         border_rect: draw_ir_no_rect(),
         content_rect: draw_ir_no_rect(),
         hit_rect: draw_ir_no_rect(),
-        clip_rect: clip_rect,
-        computed_style: computed_style,
+        clip_rect: draw_ir_no_rect(),
+        computed_style: [],
         edge: nil,
-        parent_id: parent_id,
+        parent_id: "",
         image_uri: "",
-        points: [],
-        glyph_run: draw_ir_empty_glyph_run_payload()
+        points: []
     )
 
-fn draw_ir_text_resolved_font(component_id: text, x: i32, y: i32, text_value: text, color: u32, family: text, identity: text, advance_widths: [i32], width: i32, line_height: i32, font_size: i32, parent_id: text = "") -> DrawIrCommand:
-    if identity == "" or advance_widths.len() == 0 or width <= 0 or line_height <= 0 or font_size <= 0:
-        return draw_ir_text(component_id, x, y, text_value, color, parent_id)
-    var character_count = 0
-    for ch in text_value:
-        character_count = character_count + 1
-    if advance_widths.len() != character_count:
-        return draw_ir_text(component_id, x, y, text_value, color, parent_id)
-    var measured_width: i64 = 0
-    var index = 0
-    while index < advance_widths.len():
-        if advance_widths[index] < 0:
-            return draw_ir_text(component_id, x, y, text_value, color, parent_id)
-        val advance = advance_widths[index] as i64
-        if measured_width > 2147483647 - advance:
-            return draw_ir_text(component_id, x, y, text_value, color, parent_id)
-        measured_width = measured_width + advance
-        index = index + 1
-    if measured_width != width as i64:
-        return draw_ir_text(component_id, x, y, text_value, color, parent_id)
-    var command = draw_ir_text_styled(component_id, x, y, text_value, color, [
-        draw_ir_style_prop("font-family", family),
-        draw_ir_style_prop("font-identity", identity),
-        draw_ir_style_prop("font-size", font_size.to_string()),
-        draw_ir_style_prop("line-height", line_height.to_string())
-    ], parent_id)
-    command.width = width
-    command.height = line_height
-    command.advance_widths = advance_widths
-    command
-
-fn draw_ir_text_shaped_font(component_id: text, x: i32, y: i32, text_value: text, color: u32, family: text, identity: text, advance_widths: [i32], width: i32, line_height: i32, font_size: i32, glyph_run: DrawIrGlyphRunPayload, parent_id: text = "") -> DrawIrCommand:
-    var command = draw_ir_text_resolved_font(component_id, x, y, text_value, color,
-        family, identity, advance_widths, width, line_height, font_size, parent_id)
-    if command.computed_style.len() == 0:
-        return command
-    var style = command.computed_style
-    style.push(draw_ir_style_prop("font-shaping", "selected-pure-simple"))
-    command.computed_style = style
-    command.glyph_run = glyph_run
-    command
-
-fn draw_ir_box_with_style(component_id: text, x: i32, y: i32, width: i32, height: i32, color: u32, border_rect: DrawIrRect, content_rect: DrawIrRect, hit_rect: DrawIrRect, clip_rect: DrawIrRect, computed_style: [DrawIrStyleProp], parent_id: text = "") -> DrawIrCommand:
+fn draw_ir_box_with_style(component_id: text, x: i32, y: i32, width: i32, height: i32, color: u32, border_rect: DrawIrRect, content_rect: DrawIrRect, hit_rect: DrawIrRect, clip_rect: DrawIrRect, computed_style: [DrawIrStyleProp]) -> DrawIrCommand:
     DrawIrCommand(
         kind: DRAW_IR_COMMAND_RECT,
         component_id: component_id,
@@ -350,23 +224,18 @@ fn draw_ir_box_with_style(component_id: text, x: i32, y: i32, width: i32, height
         height: height,
         color: color,
         text_value: "",
-        advance_widths: [],
         border_rect: border_rect,
         content_rect: content_rect,
         hit_rect: hit_rect,
         clip_rect: clip_rect,
         computed_style: computed_style,
         edge: nil,
-        parent_id: parent_id,
+        parent_id: "",
         image_uri: "",
-        points: [],
-        glyph_run: draw_ir_empty_glyph_run_payload()
+        points: []
     )
 
-# Edges connect a source node to a target node, not a single parent, so
-# `parent_id` has no natural value here and stays "" unless a caller embeds
-# the edge inside a group/container (e.g. a swimlane) that owns it.
-fn draw_ir_edge_command(edge: DrawEdge, parent_id: text = "") -> DrawIrCommand:
+fn draw_ir_edge_command(edge: DrawEdge) -> DrawIrCommand:
     DrawIrCommand(
         kind: DRAW_IR_COMMAND_EDGE,
         component_id: edge.id,
@@ -376,20 +245,18 @@ fn draw_ir_edge_command(edge: DrawEdge, parent_id: text = "") -> DrawIrCommand:
         height: 0,
         color: 0u32,
         text_value: "",
-        advance_widths: [],
         border_rect: draw_ir_no_rect(),
         content_rect: draw_ir_no_rect(),
         hit_rect: draw_ir_no_rect(),
         clip_rect: draw_ir_no_rect(),
         computed_style: edge.style,
         edge: edge,
-        parent_id: parent_id,
+        parent_id: "",
         image_uri: "",
-        points: edge.points,
-        glyph_run: draw_ir_empty_glyph_run_payload()
+        points: edge.points
     )
 
-fn draw_ir_path_command(component_id: text, points: [DrawIrPoint], computed_style: [DrawIrStyleProp], parent_id: text = "") -> DrawIrCommand:
+fn draw_ir_path_command(component_id: text, points: [DrawIrPoint], computed_style: [DrawIrStyleProp]) -> DrawIrCommand:
     DrawIrCommand(
         kind: DRAW_IR_COMMAND_PATH,
         component_id: component_id,
@@ -399,20 +266,18 @@ fn draw_ir_path_command(component_id: text, points: [DrawIrPoint], computed_styl
         height: 0,
         color: 0u32,
         text_value: "",
-        advance_widths: [],
         border_rect: draw_ir_no_rect(),
         content_rect: draw_ir_no_rect(),
         hit_rect: draw_ir_no_rect(),
         clip_rect: draw_ir_no_rect(),
         computed_style: computed_style,
         edge: nil,
-        parent_id: parent_id,
+        parent_id: "",
         image_uri: "",
-        points: points,
-        glyph_run: draw_ir_empty_glyph_run_payload()
+        points: points
     )
 
-fn draw_ir_image_command(component_id: text, x: i32, y: i32, width: i32, height: i32, image_uri: text, computed_style: [DrawIrStyleProp], parent_id: text = "") -> DrawIrCommand:
+fn draw_ir_image_command(component_id: text, x: i32, y: i32, width: i32, height: i32, image_uri: text, computed_style: [DrawIrStyleProp]) -> DrawIrCommand:
     DrawIrCommand(
         kind: DRAW_IR_COMMAND_IMAGE,
         component_id: component_id,
@@ -422,17 +287,15 @@ fn draw_ir_image_command(component_id: text, x: i32, y: i32, width: i32, height:
         height: height,
         color: 0u32,
         text_value: "",
-        advance_widths: [],
         border_rect: draw_ir_no_rect(),
         content_rect: draw_ir_no_rect(),
         hit_rect: draw_ir_rect_bounds(x, y, width, height),
         clip_rect: draw_ir_no_rect(),
         computed_style: computed_style,
         edge: nil,
-        parent_id: parent_id,
+        parent_id: "",
         image_uri: image_uri,
-        points: [],
-        glyph_run: draw_ir_empty_glyph_run_payload()
+        points: []
     )
 
 fn draw_ir_group_command(component_id: text, parent_id: text) -> DrawIrCommand:
@@ -445,7 +308,6 @@ fn draw_ir_group_command(component_id: text, parent_id: text) -> DrawIrCommand:
         height: 0,
         color: 0u32,
         text_value: "",
-        advance_widths: [],
         border_rect: draw_ir_no_rect(),
         content_rect: draw_ir_no_rect(),
         hit_rect: draw_ir_no_rect(),
@@ -454,8 +316,7 @@ fn draw_ir_group_command(component_id: text, parent_id: text) -> DrawIrCommand:
         edge: nil,
         parent_id: parent_id,
         image_uri: "",
-        points: [],
-        glyph_run: draw_ir_empty_glyph_run_payload()
+        points: []
     )
 
 fn draw_ir_port_command(component_id: text, parent_id: text, x: i32, y: i32) -> DrawIrCommand:
@@ -468,7 +329,6 @@ fn draw_ir_port_command(component_id: text, parent_id: text, x: i32, y: i32) -> 
         height: 0,
         color: 0u32,
         text_value: "",
-        advance_widths: [],
         border_rect: draw_ir_no_rect(),
         content_rect: draw_ir_no_rect(),
         hit_rect: draw_ir_rect_bounds(x, y, 0, 0),
@@ -477,8 +337,7 @@ fn draw_ir_port_command(component_id: text, parent_id: text, x: i32, y: i32) -> 
         edge: nil,
         parent_id: parent_id,
         image_uri: "",
-        points: [],
-        glyph_run: draw_ir_empty_glyph_run_payload()
+        points: []
     )
 
 fn draw_ir_source_info(source_kind: text, source_id: text, html_tag: text, html_node_id: text, css_selector: text, css_class: text, style_key: text, style_revision: text) -> DrawIrSourceInfo:
@@ -523,65 +382,6 @@ fn draw_ir_composition(composition_id: text, scene_key: text, backend_target: te
         backend_target: backend_target,
         batches: batches
     )
-
-# Flatten a child composition into its embedding owner.  The flat batch order
-# remains the paint order; the executor therefore needs no iframe-specific path.
-fn _draw_ir_embed_prefixed_id(prefix: text, value: text) -> text:
-    if value == "":
-        return prefix
-    "{prefix}:{value}"
-
-fn _draw_ir_embed_command(
-    command: DrawIrCommand, prefix: text, inherited_local_clip: DrawIrRect
-) -> DrawIrCommand:
-    var embedded = command
-    embedded.component_id = _draw_ir_embed_prefixed_id(
-        prefix, command.component_id
-    )
-    if command.parent_id != "":
-        embedded.parent_id = _draw_ir_embed_prefixed_id(prefix, command.parent_id)
-    # Child hit targets are not an input authority.  Keep only renderer-local
-    # paint geometry until the separate sandboxed child broker exists.
-    embedded.hit_rect = draw_ir_no_rect()
-    embedded.clip_rect = draw_ir_rect_intersection(
-        command.clip_rect, inherited_local_clip
-    )
-    embedded
-
-pub fn draw_ir_embed_composition(
-    child: DrawIrComposition,
-    offset_x: i32,
-    offset_y: i32,
-    ancestor_clip: DrawIrRect,
-    surface_prefix: text,
-    component_id: text,
-    layer_base: i32
-) -> [DrawIrBatch]:
-    var embedded: [DrawIrBatch] = []
-    for child_batch in child.batches:
-        val local_clip = draw_ir_rect_translate(
-            ancestor_clip,
-            0 - offset_x - child_batch.embedding.x,
-            0 - offset_y - child_batch.embedding.y
-        )
-        var commands: [DrawIrCommand] = []
-        for command in child_batch.commands:
-            commands.push(_draw_ir_embed_command(
-                command, surface_prefix, local_clip
-            ))
-        var embedding = child_batch.embedding
-        embedding.surface_id = _draw_ir_embed_prefixed_id(
-            surface_prefix, child_batch.embedding.surface_id
-        )
-        embedding.component_id = component_id
-        embedding.x = offset_x + child_batch.embedding.x
-        embedding.y = offset_y + child_batch.embedding.y
-        embedding.layer = layer_base
-        embedded.push(draw_ir_batch_with_source(
-            _draw_ir_embed_prefixed_id(surface_prefix, child_batch.batch_id),
-            child_batch.backend_target, embedding, commands, child_batch.source
-        ))
-    embedded
 
 fn _draw_ir_event_backend_target(composition: DrawIrComposition, backend_target: text) -> text:
     if backend_target == "":
@@ -671,7 +471,7 @@ fn simple_2d_draw_ir_adv_plan(batch: DrawIrBatch, gpu_available: bool) -> Simple
     var selected_backend = DRAW_IR_BACKEND_CPU
     var fallback_required = false
     var fallback_reason = ""
-    if batch.backend_target == DRAW_IR_BACKEND_GPU or batch.backend_target == "metal":
+    if batch.backend_target == DRAW_IR_BACKEND_GPU:
         if gpu_available:
             selected_backend = DRAW_IR_BACKEND_GPU
         else:
@@ -700,7 +500,7 @@ fn simple_2d_draw_ir_adv_plan(batch: DrawIrBatch, gpu_available: bool) -> Simple
     )
 
 fn _simple_2d_draw_ir_backend_selection(backend_target: text, gpu_available: bool) -> text:
-    if backend_target == DRAW_IR_BACKEND_GPU or backend_target == "metal":
+    if backend_target == DRAW_IR_BACKEND_GPU:
         if gpu_available:
             return DRAW_IR_BACKEND_GPU
         return DRAW_IR_BACKEND_CPU
@@ -711,10 +511,10 @@ fn _simple_2d_draw_ir_backend_selection(backend_target: text, gpu_available: boo
     DRAW_IR_BACKEND_CPU
 
 fn _simple_2d_draw_ir_fallback_required(backend_target: text, gpu_available: bool) -> bool:
-    (backend_target == DRAW_IR_BACKEND_GPU or backend_target == "metal") and not gpu_available
+    backend_target == DRAW_IR_BACKEND_GPU and not gpu_available
 
 fn _simple_2d_draw_ir_fallback_reason(backend_target: text, gpu_available: bool) -> text:
-    if (backend_target == DRAW_IR_BACKEND_GPU or backend_target == "metal") and not gpu_available:
+    if backend_target == DRAW_IR_BACKEND_GPU and not gpu_available:
         return "gpu backend unavailable; using cpu fallback"
     if backend_target == DRAW_IR_BACKEND_AUTO and not gpu_available:
         return "auto selected cpu because gpu backend unavailable"

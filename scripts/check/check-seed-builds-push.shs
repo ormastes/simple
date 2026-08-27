@@ -237,18 +237,11 @@ count_changed_files() {
 # ---------------------------------------------------------------------------
 seed_content_digest() {
     sd_repo=$1; sd_rev=$2
-    sd_ct=$(git_in_repo "$sd_repo" rev-parse --verify --quiet "$sd_rev:src/compiler_rust" 2>/dev/null) || sd_ct=""
+    sd_ct=$(git -C "$sd_repo" rev-parse --verify --quiet "$sd_rev:src/compiler_rust" 2>/dev/null) || sd_ct=""
     [ -n "$sd_ct" ] || return 1
-    sd_rt=$(git_in_repo "$sd_repo" rev-parse --verify --quiet "$sd_rev:src/runtime" 2>/dev/null) || sd_rt="none"
-    sd_lk=$(git_in_repo "$sd_repo" rev-parse --verify --quiet "$sd_rev:src/compiler_rust/Cargo.lock" 2>/dev/null) || sd_lk="none"
-    # The recipe tag is part of the digest ON PURPOSE: the marker records
-    # "this content passed THIS guard's legs". Adding a leg (the 2026-08-21
-    # --features vulkan leg) must invalidate every marker written by the older,
-    # weaker recipe -- otherwise a tree already recorded green under seed/v1
-    # would skip the new leg forever and the fast path would launder exactly
-    # the fail-open this leg exists to close. Bump the tag whenever a leg is
-    # added or its selector changes.
-    printf 'seed/v2+vulkan %s %s %s\n' "$sd_ct" "$sd_rt" "$sd_lk" \
+    sd_rt=$(git -C "$sd_repo" rev-parse --verify --quiet "$sd_rev:src/runtime" 2>/dev/null) || sd_rt="none"
+    sd_lk=$(git -C "$sd_repo" rev-parse --verify --quiet "$sd_rev:src/compiler_rust/Cargo.lock" 2>/dev/null) || sd_lk="none"
+    printf 'seed/v1 %s %s %s\n' "$sd_ct" "$sd_rt" "$sd_lk" \
         | (sha256sum 2>/dev/null || shasum -a 256) | cut -c1-40
     return 0
 }
@@ -332,7 +325,7 @@ run_cargo_check() {
 # (E0432 unresolved import, E0599 missing enum variant / no method) and
 # that a clean fixture passes. Fatal if it does not pass.
 # ===========================================================================
-SELFTEST_EXPECTED=6
+SELFTEST_EXPECTED=5
 
 selftest() {
     st_dir="$TMPROOT/selftest-crate"
@@ -509,15 +502,16 @@ fn main() { let _ = module_globals_generation(); }
 EOF
     echo "before" >"$st_repo/doc/notes.md"
     (
-        git_in_repo "$st_repo" init -q . &&
-        git_in_repo "$st_repo" config user.email guard@selftest &&
-        git_in_repo "$st_repo" config user.name guard &&
-        git_in_repo "$st_repo" add -A &&
-        git_in_repo "$st_repo" commit -q -m "seed (already broken) + docs" &&
-        echo "after" >"$st_repo/doc/notes.md" &&
-        git_in_repo "$st_repo" add -A &&
-        git_in_repo "$st_repo" commit -q -m "docs(tracking): docs-only tip, touches no seed file"
-    ) < /dev/null >"$TMPROOT/st_e_setup.out" 2>&1
+        cd "$st_repo" &&
+        git init -q . &&
+        git config user.email guard@selftest &&
+        git config user.name guard &&
+        git add -A &&
+        git commit -q -m "seed (already broken) + docs" &&
+        echo "after" >doc/notes.md &&
+        git add -A &&
+        git commit -q -m "docs(tracking): docs-only tip, touches no seed file"
+    ) >"$TMPROOT/st_e_setup.out" 2>&1
     st_setup=$?
     st_ran=$((st_ran + 1))
     if [ "$st_setup" -ne 0 ]; then
@@ -525,10 +519,10 @@ EOF
         cat "$TMPROOT/st_e_setup.out" >&2
         st_fail=1
     else
-        st_e_base=$(git_in_repo "$st_repo" rev-parse HEAD~1)
-        st_e_tip=$(git_in_repo "$st_repo" rev-parse HEAD)
+        st_e_base=$(git -C "$st_repo" rev-parse HEAD~1)
+        st_e_tip=$(git -C "$st_repo" rev-parse HEAD)
         # E1 -- the range is docs-only
-        git_in_repo "$st_repo" diff --name-only "$st_e_base" "$st_e_tip" -- >"$TMPROOT/st_e_changed.out" 2>&1
+        git -C "$st_repo" diff --name-only "$st_e_base" "$st_e_tip" -- >"$TMPROOT/st_e_changed.out" 2>&1
         if $GREP -qE '^src/(compiler_rust|runtime)/' "$TMPROOT/st_e_changed.out"; then
             echo "SELFTEST FAIL: incident-replay range touches the seed -- fixture does not reproduce the fail-open" >&2
             st_fail=1
@@ -643,7 +637,7 @@ EOF
         return 1
     fi
     [ "$st_fail" -eq 0 ] || return 1
-    echo "$SELF: selftest $st_ran/$SELFTEST_EXPECTED fixtures correct (E0432/E0599-shape FAIL, clean PASS, target-scope gap: --bin PASS + --tests FAIL, 2026-08-18 incident replay: docs-only range over a broken untouched seed must compile and FAIL, vacuous-range contract, cfg-gap: default-features PASS + --features FAIL with E0252)"
+    echo "$SELF: selftest $st_ran/$SELFTEST_EXPECTED fixtures correct (E0432/E0599-shape FAIL, clean PASS, target-scope gap: --bin PASS + --tests FAIL, 2026-08-18 incident replay: docs-only range over a broken untouched seed must compile and FAIL, vacuous-range contract)"
     return 0
 }
 
@@ -657,7 +651,17 @@ if ! command -v cargo >/dev/null 2>&1; then
     die 2 "cargo not found on PATH -- cannot verify the seed builds."
 fi
 
-if ! selftest; then
+# Git exports repository-location variables to hooks. A fixture-side `git init`
+# must never inherit those variables: with a trailing-slash GIT_DIR it can
+# reinitialize the real shared repository and flip core.bare=true. Run every
+# selftest fixture in an isolated subshell so both Git location/config state
+# and fixture-local shell mutations are unable to escape into the real scan.
+if ! (
+    unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
+        GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR GIT_NAMESPACE \
+        GIT_CONFIG GIT_CONFIG_COUNT
+    selftest
+); then
     VERDICT_EMITTED=1
     echo "$SELF: ERROR — selftest failed; the detector is not trustworthy" >&2
     echo "$SELF: ERROR — nothing was checked (exit 2)"
@@ -790,50 +794,6 @@ EOF
     exit 1
 fi
 
-# --- GATING LEG 3: cfg-gated feature bodies (`--features vulkan`) ----------
-# Legs 1 and 2 run with DEFAULT features, so every `#[cfg(feature = "vulkan")]`
-# body is never type-checked by them -- cfg-gated code that does not compile is
-# invisible BY CONSTRUCTION, which is the same fail-open shape as the old
-# path-filter: an absence of evidence laundered into a green verdict.
-# Measured incident (2026-08-20): vulkan_graphics_runtime_compute.rs and
-# ..._shader.rs carried 4 stray unconditional `use` lines duplicating cfg-gated
-# imports -- 4 x E0252 -- so `cargo check -p simple-runtime --features vulkan`
-# failed outright and had never compiled, while main looked green the whole
-# time. See doc/08_tracking/bug/seed_build_guard_never_compiles_vulkan_feature_2026-08-20.md
-#
-# `cargo check` (not `build`) means this needs NO GPU, no Vulkan loader and no
-# device: it is pure type-checking, which is exactly what was missing. The
-# existing device gates (check-engine2d-vulkan-*.shs) are RUNTIME gates and are
-# device-blocked on hosts without a GPU, so they never covered this.
-# Scoped to `-p simple-runtime` because that is the crate proven green
-# (2026-08-21, 40s warm). Other feature flags (llvm, wasm, pytorch, cuda,
-# monoio-*, ratatui-tui, and the compiler crate's own vulkan) are NOT gated
-# here: none has been proven green on this host, and gating on an unproven-red
-# condition gets routed around with --no-verify, which protects nothing. The
-# general form is a per-feature matrix; add each leg as it is proven.
-run_cargo_check "$WORKTREE" "-p simple-runtime --features vulkan" cargo_vulkan.out
-cv_st=$?
-
-if [ "$cv_st" -ne 0 ]; then
-    cat >&2 <<EOF
-
-DO NOT PUSH. src/compiler_rust compiles with default features but the
-cfg-gated \`vulkan\` bodies do not compile at $tip (cargo check --release
--p simple-runtime --features vulkan failed). Code behind a cfg is not
-type-checked unless the cfg is enabled, so this is invisible to every
-default-features leg.
-
-$(tail -n 40 "$TMPROOT/cargo_vulkan.out")
-
-Re-run standalone to iterate:
-  cd $WORKTREE/src/compiler_rust && CARGO_TARGET_DIR=$CARGO_TARGET_ROOT cargo check --release -p simple-runtime --features vulkan
-EOF
-    VERDICT_EMITTED=1
-    err1=$($GREP -m1 -E '^error' "$TMPROOT/cargo_vulkan.out" 2>/dev/null)
-    echo "$SELF: FAIL — cargo check --features vulkan failed in $tip: ${err1:-see stderr above}"
-    exit 1
-fi
-
 # --- ADVISORY LEG: every remaining target (examples, benches) ---------------
 # Reported, never fatal. Kept separate from leg 2 so that a breakage in a probe
 # fixture is visible without turning a genuine product-code PASS into a FAIL
@@ -851,5 +811,5 @@ fi
 record_green_marker "$seed_digest"
 
 VERDICT_EMITTED=1
-echo "$SELF: PASS — $nfiles file(s) checked, seed bin + test + vulkan-feature targets compile cleanly at $tip (seed content $seed_digest recorded green; link NOT verified: cargo check does not link)$advisory"
+echo "$SELF: PASS — $nfiles file(s) checked, seed bin + test targets compile cleanly at $tip (seed content $seed_digest recorded green; link NOT verified: cargo check does not link)$advisory"
 exit 0

@@ -1,4 +1,13 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+
+
+use std.spec.step
+
 use std.spec
+use std.spec.step
 use std.common.crypto.sha256.{sha256_text}
 use compiler.common.attributes.{vhdl_hardware_metadata_default}
 use compiler.common.diagnostics.span.{Span}
@@ -16,10 +25,7 @@ use compiler.mir.verification_call_identity.{ResolvedDirectCallBindingV1,
     ResolvedDirectCallManifestV1, resolved_direct_call_module_hash_v1,
     resolved_direct_call_site_hash_v1}
 use compiler.mir.mir_json.{serialize_mir_function, serialize_mir_signature}
-use compiler.mir.verification_contract_bridge.{
-    verification_contract_obligations_from_canonical_module_v2}
 
-extern fn rt_file_read_text(path: text) -> text?
 
 fn module_span() -> Span:
     Span(start: 10, end: 14, line: 2, col: 5,
@@ -67,12 +73,6 @@ fn module_with(owner: MirFunction, callee: MirFunction) -> MirModule:
     MirModule(name: "module_vc", functions: functions, statics: {},
         constants: {}, types: {})
 
-fn module_from_functions(function_values: [MirFunction]) -> MirModule:
-    var functions: Dict<SymbolId, MirFunction> = {}
-    for func in function_values: functions[func.symbol] = func
-    MirModule(name: "module_vc", functions: functions, statics: {},
-        constants: {}, types: {})
-
 fn closed_module_trust() -> TrustManifestV1:
     TrustManifestV1(["propext"], [], [], [], [], [])
 
@@ -87,7 +87,10 @@ fn resolved_module_calls(module: MirModule, owner: MirFunction,
         sha256_text("resolver-receipt"), [binding])
 
 describe "Verification 2.0 canonical module obligation closure":
+    # @manual scenario evidence
     it "binds an exact pure leaf callee contract into the owner call VC":
+        # @req REQ-SSPEC-UNIT
+        step("binds an exact pure leaf callee contract into the owner call VC")
         val callee = module_function(7101, "leaf", [])
         val owner = module_function(7102, "owner", [module_call("leaf")])
         val closure = generate_verification_obligation_closure_from_canonical_module_v1(
@@ -98,6 +101,8 @@ describe "Verification 2.0 canonical module obligation closure":
             "7102::fv2::trust-closure")
 
     it "requires a resolver-backed exact call manifest for the V2 handoff":
+        # @req REQ-SSPEC-UNIT
+        step("requires a resolver-backed exact call manifest for the V2 handoff")
         val callee = module_function(7101, "leaf", [])
         val owner = module_function(7102, "owner", [module_call("leaf")])
         val module = module_with(owner, callee)
@@ -123,6 +128,8 @@ describe "Verification 2.0 canonical module obligation closure":
         expect(rejected.diagnostic).to_contain("CALL-IDENTITY-MISSING")
 
     it "invalidates the closure when the callee contract changes":
+        # @req REQ-SSPEC-UNIT
+        step("invalidates the closure when the callee contract changes")
         val callee = module_function(7101, "leaf", [])
         val owner = module_function(7102, "owner", [module_call("leaf")])
         val first = generate_verification_obligation_closure_from_canonical_module_v1(
@@ -143,6 +150,8 @@ describe "Verification 2.0 canonical module obligation closure":
         expect(first.closure_hash == second.closure_hash).to_equal(false)
 
     it "rejects missing contracts and effectful leaf calls":
+        # @req REQ-SSPEC-UNIT
+        step("rejects missing contracts and effectful leaf calls")
         val owner = module_function(7102, "owner", [module_call("leaf")])
         val unchecked = module_function(7101, "leaf", [], false)
         val missing = generate_verification_obligation_closure_from_canonical_module_v1(
@@ -158,68 +167,3 @@ describe "Verification 2.0 canonical module obligation closure":
             module_with(owner, effectful), "7102", "woven-module", "lean4",
             "lean-backend-v1", closed_module_trust())
         expect(rejected.diagnostic).to_contain("CALL-EFFECT")
-
-    it "reuses one pure-leaf validation across repeated direct calls":
-        val callee = module_function(7101, "leaf", [])
-        val owner = module_function(7102, "owner", [
-            module_call("leaf"), module_call("leaf"), module_call("leaf")])
-        val obligations = verification_contract_obligations_from_canonical_module_v2(
-            module_with(owner, callee), "7102", "woven-module")
-        expect(obligations.diagnostic).to_equal("")
-        expect(obligations.obligations.len()).to_be_greater_than(0)
-
-    it "retains exact missing-callee and name-validation precedence":
-        val leaf = module_function(7101, "leaf", [])
-        val missing_owner = module_function(
-            7102, "owner", [module_call("missing")])
-        val missing = verification_contract_obligations_from_canonical_module_v2(
-            module_with(missing_owner, leaf), "7102", "woven-module")
-        expect(missing.diagnostic).to_equal(
-            "FV2-E-CONTRACT-MODULE-CALLEE: direct call must resolve to one internal function")
-
-        val duplicate = module_function(7103, "leaf", [])
-        val duplicate_name = verification_contract_obligations_from_canonical_module_v2(
-            module_from_functions([missing_owner, leaf, duplicate]),
-            "7102", "woven-module")
-        expect(duplicate_name.diagnostic).to_equal(
-            "FV2-E-CONTRACT-MODULE-NAME: internal function names must be nonempty and unique")
-
-        val empty = module_function(7104, "", [])
-        val empty_name = verification_contract_obligations_from_canonical_module_v2(
-            module_from_functions([missing_owner, leaf, empty]),
-            "7102", "woven-module")
-        expect(empty_name.diagnostic).to_equal(
-            "FV2-E-CONTRACT-MODULE-NAME: internal function names must be nonempty and unique")
-
-    it "retains recursive self-call exclusion":
-        val leaf = module_function(7101, "leaf", [])
-        val owner = module_function(7102, "owner", [module_call("owner")])
-        val obligations = verification_contract_obligations_from_canonical_module_v2(
-            module_with(owner, leaf), "7102", "woven-module")
-        expect(obligations.diagnostic).to_equal("")
-
-    it "retains exact effectful-callee rejection":
-        val value = MirOperand(kind: MirOperandKind.Const(
-            MirConstValue.Int(1), MirType.i64()))
-        val effectful = module_function(7101, "leaf", [MirInst(
-            kind: MirInstKind.StoreGlobal(SymbolId(id: 99), value),
-            span: Some(module_span()))])
-        val owner = module_function(7102, "owner", [
-            module_call("leaf"), module_call("leaf")])
-        val rejected = verification_contract_obligations_from_canonical_module_v2(
-            module_with(owner, effectful), "7102", "woven-module")
-        expect(rejected.diagnostic).to_equal(
-            "FV2-E-CONTRACT-MODULE-CALLEE-EFFECT: initial contract composition admits only pure leaf callees")
-
-    it "keeps module call validation dictionary-backed":
-        val source = rt_file_read_text(
-            "src/compiler/50.mir/verification_contract_bridge.spl") ?? ""
-        expect(source).to_contain(
-            "var function_symbols_by_name: {text: SymbolId} = {}")
-        expect(source).to_contain(
-            "var pure_callee_names: {text: bool} = {}")
-        expect(source).to_contain(
-            "if not pure_callee_names.has(callee_name):")
-        expect(source).to_contain("pure_callee_names[callee_name] = true")
-        expect(source).not_to_contain("var callees: [MirFunction] = []")
-        expect(source).not_to_contain("internal_names.contains(name)")

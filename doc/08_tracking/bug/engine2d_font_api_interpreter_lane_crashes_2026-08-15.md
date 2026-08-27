@@ -1,7 +1,7 @@
 # Engine2D font/backends APIs crash under the interpreter lane (5 distinct sites)
 
 **Date:** 2026-08-15
-**Status:** RESOLVED (2026-08-15; re-verified on the current seed 2026-08-16)
+**Status:** OPEN
 **Severity:** P2 — `bin/simple test` hard-defaults to the interpreter, so no
 spec can exercise these APIs until fixed; JIT (`bin/simple run` default) is
 unaffected (all sites verified working there).
@@ -57,12 +57,15 @@ Evidence: interpreter probes green for all five repros;
 (cuda re-enabled, full font lanes restored): `Results: 13 total, 13 passed,
 0 failed`; engine.spl decision coverage 3% -> 19%.
 
-## Re-verified 2026-08-16 (current seed, origin/main fd085136a6d)
+## Origin-lineage port blocker (2026-08-15)
 
-The seed's nested + augmented ClassInstance field-assignment support (landed
-2026-08-15/16) is in; re-ran
-`bin/simple test test/01_unit/lib/gpu/engine2d/draw_ir_adv_branch_coverage_spec.spl`
-(interpreter-default test lane): `Results: 13 total, 13 passed, 0 failed`.
-Bitmap/vector font offload, font_runtime_config, engine_vulkan_font_route,
-font scalar receipt, and font offload preference smoke specs also green (see
-the bungee bug doc's fix, same session).
+The fix is verified on THIS lineage (13/13). Porting to origin/main is
+blocked by structural divergence: origin's `font_renderer.spl` has a
+different glyph-cache API (no `cache.lookup(codepoint, font_size)` form) and
+its `spl_fonts.spl` no longer reads unmanaged fonts via
+`file_read_bytes(ttf_path)`; only the 37 nested
+`self.font_owner.active[0] = fonts` assignment sites port mechanically.
+A faithful origin port must re-locate the Option field-access sites in
+origin's cache functions and re-verify with the coverage spec run inside an
+origin checkout. Not attempted as a blind cherry-pick per the sync/anti-
+clobber protocol.

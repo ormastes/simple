@@ -1,7 +1,6 @@
 # A single system spec without `# @cover` abandons the WHOLE run — 488 specs never execute in three directories (2026-08-04)
 
-Status: OPEN (P1)
-Status re-verified 2026-08-17 by source inspection (triage shard 02).
+**Status:** OPEN
 **Found:** 2026-08-04
 **Related — SAME gate, other tiers, found by parallel lanes the same day. Fix
 once, close all three:**

@@ -1,6 +1,29 @@
 # Binary Io Specification
 
-> Tests covering BinaryWriter integer byte masks.
+> 1. var writer = BinaryWriter new
+
+<!-- sdn-diagram:id=binary_io_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=binary_io_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+binary_io_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=binary_io_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -17,11 +40,13 @@
 
 #### writes and reads little-endian values with nonzero high bytes
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+1. var writer = BinaryWriter new
 
+2. writer write u16
 
-- writes and reads little-endian values with nonzero high bytes
+3. writer write u32
+
+4. writer write i64
    - Expected: bytes[0] equals `77`
    - Expected: bytes[1] equals `1`
    - Expected: bytes[2] equals `1`
@@ -30,20 +55,20 @@
    - Expected: bytes[5] equals `4`
    - Expected: bytes[6] equals `77`
    - Expected: bytes[7] equals `1`
+
+5. var reader = BinaryReader new
    - Expected: reader.read_u16(ByteOrder.LittleEndian) ?? 0 equals `333`
    - Expected: reader.read_u32(ByteOrder.LittleEndian) ?? 0 equals `0x04030201`
    - Expected: reader.read_i64(ByteOrder.LittleEndian) ?? 0 equals `333`
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("writes and reads little-endian values with nonzero high bytes")
 var writer = BinaryWriter.new()
 writer.write_u16(333, ByteOrder.LittleEndian)
 writer.write_u32(0x04030201, ByteOrder.LittleEndian)
@@ -74,12 +99,12 @@ expect(reader.read_i64(ByteOrder.LittleEndian) ?? 0).to_equal(333)
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/01_unit/lib/io/binary_io_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering BinaryWriter integer byte masks.
+Tests covering:
 - BinaryWriter integer byte masks
 
 ## Scenario Summary
@@ -94,48 +119,3 @@ Tests covering BinaryWriter integer byte masks.
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-UNIT`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `11fb581baabbe6f0ea48c67e63cc7b2a3c3b8addf402e55b156b47b1ba1ceef3`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `11fb581baabbe6f0ea48c67e63cc7b2a3c3b8addf402e55b156b47b1ba1ceef3`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `11fb581baabbe6f0ea48c67e63cc7b2a3c3b8addf402e55b156b47b1ba1ceef3`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **89/100**; effective score: **89/100**; blockers: **0**.
-
-SSpec documentization score: 89/100
-source: test/01_unit/lib/io/binary_io_spec.spl
-mirror: doc/06_spec/01_unit/lib/io/binary_io_spec.md (current)
-findings: 4 blockers: 0
-  narrative=100 structure=100 oracle=70
-  traceability=100 evidence=90 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/lib/io/binary_io_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/lib/io/binary_io_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/lib/io/binary_io_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 10 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/01_unit/lib/io/binary_io_spec.spl:16:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'writes and reads little-endian values with nonzero high bytes' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

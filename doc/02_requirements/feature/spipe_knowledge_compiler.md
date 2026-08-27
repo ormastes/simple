@@ -8,7 +8,7 @@
 
 ## Selection Record
 
-The user selected the full knowledge-compiler direction documented by the source research: a canonical lifecycle tree, immutable artifact identity, virtual multidimensional views, typed traceability, deterministic hybrid retrieval, transactional refactoring, hybrid tree rebalancing, and reviewed common-knowledge promotion. These requirements therefore record a completed selection; no requirement option remains pending.
+The user selected the full knowledge-compiler direction documented by the source research: a canonical lifecycle tree, immutable artifact identity, virtual multidimensional views, typed traceability, deterministic hybrid retrieval, transactional refactoring, hybrid tree rebalancing, and reviewed common-knowledge promotion. For host authority, F1/N1 is selected: the transactional authority service is the required portable P3 publisher. F2/N2 is retained only as a separately admitted optional native backend. F3/N3 is rejected: offline work may continue, but it is not a substitute for canonical publication or canonical authority-open. These requirements therefore record a completed selection; no requirement option remains pending.
 
 Normative terms `must`, `must not`, `should`, and `may` have their usual requirements meaning. Paths are locations, never identities.
 
@@ -96,7 +96,7 @@ Source: research §11; ADR-009. Traces: AC-4, AC-10, AC-14.
 
 #### REQ-SPKC-013 — Portable provider protocol
 
-SPipe must operate without Simple, an embedding model, a network service, or external Node dependencies. A versioned provider protocol must allow a Simple-native or server provider when configured and healthy, while a dependency-free deterministic JavaScript lexical fallback remains mandatory. Provider executables/endpoints must be selected from trusted configuration rather than artifact content; launch arguments and environment must be allowlisted and secret-minimized. Responses must be size/time/schema/version bounded, treated as untrusted until validated, and unable to inject canonical paths, accepted trace authority, capabilities, prompt policy, or executable instructions. Protocol 1.0 request deadlines must be in the inclusive range 1 through 30,000 milliseconds and measured from acceptance of the first frame-header byte, so framing, decoding, validation, normalization, hashing, execution, and response construction consume the same semantic budget. `invalid_utf8` and `frame_too_large` are payload-free local `TransportDiagnosticV1` classes, never bound `ProviderErrorV1` codes; before complete typed host binding they close the transport silently without fabricating a response.
+SPipe must operate without Simple, an embedding model, a network service, or external Node dependencies for offline parsing, graph, exact/lexical search, diagnostics, and other non-canonical work. A versioned provider protocol must allow a Simple-native or server provider when configured and healthy, while a dependency-free deterministic JavaScript lexical fallback remains mandatory for that offline/search baseline. This portability does not apply to P3 canonical publication or canonical authority-open: both require the transactional authority service in REQ-SPKC-031, and neither Node nor the JavaScript fallback may emulate, select, or replace it. Provider executables/endpoints must be selected from trusted configuration rather than artifact content; launch arguments and environment must be allowlisted and secret-minimized. Responses must be size/time/schema/version bounded, treated as untrusted until validated, and unable to inject canonical paths, accepted trace authority, capabilities, prompt policy, or executable instructions. Protocol 1.0 request deadlines must be in the inclusive range 1 through 30,000 milliseconds and measured from acceptance of the first frame-header byte, so framing, decoding, validation, normalization, hashing, execution, and response construction consume the same semantic budget. `invalid_utf8` and `frame_too_large` are payload-free local `TransportDiagnosticV1` classes, never bound `ProviderErrorV1` codes; before complete typed host binding they close the transport silently without fabricating a response.
 
 Source: research §§10.5, 18.3; ADR-006. Traces: AC-4, AC-12, AC-15.
 
@@ -212,27 +212,47 @@ FUSE/ProjFS implementation is excluded from the initial required implementation.
 
 Source: research §§7.6, Wave 11; ADR-015. Traces: AC-14.
 
+### Host authority selection
+
+#### REQ-SPKC-031 — Transactional publication authority
+
+P3 publication must use an admitted transactional authority service as the sole portable owner of `replaceCurrentIfExactV1`. The service must make each identity-scoped, fence-bound compare-and-publish request at one durable linearization point, persist its decision before acknowledging success, and expose `current` only as a validated projection of that decision. Clients, including Node, must never make a local pointer, cache, rename, lock, write-then-compare sequence, or provider-selection seam authoritative.
+
+The service must accept only the closed P3 request algebra: exact raw predecessor bytes/digest for every successor, paired-null only for genesis, and `(scopeBytes, generation)` fencing. Its result must preserve the existing closed `replaced` or `mismatch` result and the only fatal shape, a thrown/rejected `HostReplaceFatalV1` with exactly code `SPK704`, reason `corrupt_successor_missing_current`, and generation `G`. A fatal result must contain no `outcome`, winner/current bytes, retry token, or receipt. A `ServiceTransportFailureV1` is a distinct request-layer failure only before journal admission, outside the P3 `replaced`/`mismatch`/fatal algebra; it contains no P3 result, receipt, or authority mutation. An absent `current` is a mismatch only for a paired-null genesis request and is fatal/corrupt state for a successor.
+
+After journal admission, a timeout, partition, or lost response must never let a client infer success or construct a fallback. The client must resolve the immutable request/idempotency key through the service and receive either the exact accepted terminal/winner evidence or a definitive no-admission result; ambiguous local state is not a result. An invalid but authenticated operation capability, scope, trust epoch, or authorization binding must instead return an explicit non-enumerating `CapabilityDeniedV1` before admission; only service authentication/availability/transport failure uses `ServiceTransportFailureV1`. Both pre-admission failures leave no journal admission, current mutation, or receipt.
+
+The service must authenticate the caller and bind authorization, workspace, project/revision, scope, proposal/record digest, predecessor, generation, idempotency/replay key, and response evidence to its durable decision. It must prevent split brain, stale replay, cross-tenant publication, and publication by an untrusted or unavailable client. Restart/recovery must expose exactly one complete old-or-new authority state and preserve an auditable decision record.
+
+Source: selected F1/N1; research §43.8; architecture §21.10; detail design §12.10. Traces: AC-5, AC-7, AC-8, AC-14, AC-17.
+
+#### REQ-SPKC-032 — Optional admitted native authority backend
+
+A platform-specific native provider may implement the same transactional authority-service interface only after separate admission for an explicit OS/kernel/filesystem/version tuple. It must preserve byte-for-byte request and response semantics, the same durable linearization/fencing/recovery evidence, and the same closed error algebra as REQ-SPKC-031. It is an optional backend, not an alternative feature direction: no unsupported tuple may activate it, and Node must never select, emulate, or fall back to it through filesystem primitives, environment, argv, globals, or a public factory.
+
+Source: selected F2/N2 as constrained optional backend; research §43.8. Traces: AC-7, AC-14, AC-17.
+
 ## Acceptance-Criteria Trace Summary
 
 | State AC | Primary feature requirements |
 |---|---|
-| AC-1 | REQ-SPKC-001–030 |
+| AC-1 | REQ-SPKC-001–032 |
 | AC-2 | 001–005, 013–016, 021–030 |
 | AC-3 | 002–005 |
 | AC-4 | 004, 011–014 |
-| AC-5 | 006–009, 026 |
+| AC-5 | 006–009, 026, 031 |
 | AC-6 | 008, 010, 027 |
-| AC-7 | 008–009, 019–020, 026, 029 |
-| AC-8 | 002–005, 016–020, 028–029 |
+| AC-7 | 008–009, 019–020, 026, 029, 031–032 |
+| AC-8 | 002–005, 016–020, 028–029, 031 |
 | AC-9 | 001, 006, 021–022, 026, 029 |
 | AC-10 | 003, 012, 023–024, 026, 029 |
 | AC-11 | 025, 028 |
 | AC-12 | 011–016 |
 | AC-13 | 006–024 (behavioral test scope) |
-| AC-14 | 005, 009–010, 012–013, 015, 017, 019–024, 030 |
+| AC-14 | 005, 009–010, 012–013, 015, 017, 019–024, 030–032 |
 | AC-15 | 010, 013–015, 027 |
 | AC-16 | 025, 028–029 |
-| AC-17 | All requirements |
+| AC-17 | All requirements, including 031–032 |
 | DC-1 | Delivery control: each verified increment is isolated, committed, linearly rebased with tracked-file-count protection, and pushed according to repository policy; no product requirement substitution |
 
 ## Design-Owned Decisions

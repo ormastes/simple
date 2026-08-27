@@ -1,0 +1,549 @@
+# codex-impl
+# Capture-free Pure owner for the native device callback transport. Registry
+# growth and staging allocation are preparation-only; sealed callbacks retain
+# no caller pointer and resolve exactly one explicit capsule/cookie pair.
+
+use std.common.structural.environment_instruction.*
+use std.common.structural.hal_provider.*
+
+val RT_HAL_DEVICE_PURE_CAPSULE_CAPACITY_V1: i64 = 32
+val RT_HAL_DEVICE_TRACE_CAPACITY_V1: i64 = 1048576
+val _RT_HAL_DEVICE_CALLBACK_OK_V1: i32 = 0
+val _RT_HAL_DEVICE_CALLBACK_INVALID_V1: i32 = 1
+val _RT_HAL_DEVICE_CALLBACK_STATE_V1: i32 = 2
+
+extern fn rt_atomic_int_new(initial: i64) -> i64
+extern fn rt_atomic_int_load(handle: i64) -> i64
+extern fn rt_atomic_int_store(handle: i64, value: i64)
+extern fn rt_atomic_int_compare_exchange(
+    handle: i64, current: i64, new_value: i64) -> bool
+extern fn rt_ptr_read_u8(address: i64, offset: i64) -> i64
+extern fn rt_ptr_write_u8(address: i64, offset: i64, value: i64)
+@unsafe(reason: "sealed Pure device route registration", capabilities: [ffi])
+extern fn rt_hal_device_route_prepare_v1(
+    capability_id: i64, generation: i64, grant_hi: i64, grant_lo: i64,
+    authority_hi: i64, authority_lo: i64, device_hi: i64, device_lo: i64,
+    allowed_opcode_mask: i64, range_base: i64, range_length: i64,
+    permissions: i64, run_mode: i32, preferred_provider: i32,
+    deadline_ms: i64, capsule_id: u64, prepare_callback: u64,
+    shutdown_callback: u64, configured_callback: u64,
+    direct_callback: u64, compare_callback: u64) -> u64
+
+fn _rt_hal_device_callback_mode_v1(value: i32) -> HalRunMode:
+    if value == 0: return HalRunMode.AlphaCompare
+    if value == 1: return HalRunMode.BetaCompare
+    HalRunMode.NormalPreferred
+
+fn _rt_hal_device_callback_provider_v1(value: i32) -> HalProviderKind:
+    if value == 1: return HalProviderKind.C
+    if value == 2: return HalProviderKind.Rust
+    HalProviderKind.PureSimple
+
+fn _rt_hal_device_callback_opcode_v1(value: i32) -> EnvOpcodeV1:
+    if value == 16: return EnvOpcodeV1.InterruptMask
+    if value == 17: return EnvOpcodeV1.InterruptAcknowledge
+    if value == 18: return EnvOpcodeV1.MmioRead
+    if value == 19: return EnvOpcodeV1.MmioWrite
+    if value == 20: return EnvOpcodeV1.DmaMap
+    if value == 21: return EnvOpcodeV1.DmaSubmit
+    if value == 22: return EnvOpcodeV1.DmaPoll
+    EnvOpcodeV1.DmaUnmap
+
+fn _rt_hal_device_callback_opcode_valid_v1(value: i32) -> bool:
+    value >= 16 and value <= 23
+
+class RtHalDevicePureCallbackCapsuleV1:
+    acquisition: RtHalDeviceAcquisitionV1
+    pure_executor: DeviceSandboxExecutorV1
+    c_executor: DeviceSandboxExecutorV1
+    rust_executor: DeviceSandboxExecutorV1
+    pure_device: [u8]
+    c_device: [u8]
+    rust_device: [u8]
+    argument_staging: [u8]
+    preferred_result_staging: [u8]
+    c_result_staging: [u8]
+    rust_result_staging: [u8]
+    run_mode: HalRunMode
+    preferred_provider: HalProviderKind
+    route_permissions: i64
+    deadline_ms: i64
+    cookie: u64
+    lock_handle: i64
+    bound: bool
+    sealed: bool
+
+    me _executor(provider: HalProviderKind) -> DeviceSandboxExecutorV1:
+        if provider == HalProviderKind.C: return self.c_executor
+        if provider == HalProviderKind.Rust: return self.rust_executor
+        self.pure_executor
+
+    me _device(provider: HalProviderKind) -> [u8]:
+        if provider == HalProviderKind.C: return self.c_device
+        if provider == HalProviderKind.Rust: return self.rust_device
+        self.pure_device
+
+    me _store_executor(provider: HalProviderKind,
+                       executor: DeviceSandboxExecutorV1):
+        if provider == HalProviderKind.C:
+            self.c_executor = executor
+        elif provider == HalProviderKind.Rust:
+            self.rust_executor = executor
+        else:
+            self.pure_executor = executor
+
+    me _request(opcode_raw: i32, invocation_id: i64, sequence: i64,
+                address_or_irq: i64, length_or_width: i64, token_slot: i64,
+                region_id: i64, region_offset: i64, region_length: i64,
+                region_capacity: i64, region_identity_hi: i64,
+                region_identity_lo: i64, argument_length: i64,
+                result_capacity: i64) -> RtHalDeviceRequestV1:
+        val opcode = _rt_hal_device_callback_opcode_v1(opcode_raw)
+        val is_irq = opcode == EnvOpcodeV1.InterruptMask
+            or opcode == EnvOpcodeV1.InterruptAcknowledge
+        val is_read = opcode == EnvOpcodeV1.MmioRead
+            or opcode == EnvOpcodeV1.DmaPoll
+        val address = if is_irq: 0 else: address_or_irq
+        val irq = if is_irq: address_or_irq else: 0
+        val width = if opcode == EnvOpcodeV1.MmioRead
+            or opcode == EnvOpcodeV1.MmioWrite: length_or_width else: 0
+        val transfer_length = if is_irq: 0 else: length_or_width
+        val flags = if opcode == EnvOpcodeV1.InterruptAcknowledge
+                or opcode == EnvOpcodeV1.MmioRead:
+            if token_slot > 0: DEVICE_FLAG_READ_ONCE_V1 else: 0
+        elif opcode == EnvOpcodeV1.MmioWrite:
+            if self.acquisition.grant.write_has_side_effect:
+                DEVICE_FLAG_SIDE_EFFECT_V1
+            else:
+                0
+        elif opcode == EnvOpcodeV1.DmaSubmit:
+            DEVICE_FLAG_DMA_TO_DEVICE_V1
+        elif opcode == EnvOpcodeV1.DmaPoll:
+            DEVICE_FLAG_DMA_FROM_DEVICE_V1
+        else:
+            0
+        val environment = env_instruction_v1(invocation_id, sequence, opcode,
+            self.acquisition.handle.capability_id, flags,
+            region_offset, argument_length, region_capacity,
+            region_offset, result_capacity, region_capacity)
+        val instruction = device_instruction_v1(environment, address,
+            transfer_length, width, irq, token_slot,
+            self.acquisition.handle.generation,
+            self.acquisition.handle.grant_digest_hi,
+            self.acquisition.handle.grant_digest_lo)
+        val region = rt_hal_caller_owned_region_v1(region_id, region_offset,
+            region_length, region_capacity, region_identity_hi,
+            region_identity_lo)
+        val extraction = RtHalAutomaticExtractionReceiptV1(
+            environment, true, EnvInstructionStatusV1.Planned)
+        RtHalDeviceRequestV1(RtHalDeviceStatusV1.Planned,
+            self.acquisition.handle, region, instruction, extraction)
+
+    me _stage(argument: *u8, argument_length: i64,
+              region_offset: i64, region_capacity: i64,
+              result_capacity: i64) -> bool:
+        if region_offset < 0 or region_capacity < 0
+                or argument_length < 0 or result_capacity < 0
+                or region_offset > region_capacity
+                or argument_length > region_capacity - region_offset
+                or result_capacity > region_capacity - region_offset
+                or region_capacity > self.argument_staging.len()
+                or region_capacity > self.preferred_result_staging.len()
+                or (argument_length > 0 and (argument as i64) == 0):
+            return false
+        var i = 0
+        while i < argument_length:
+            self.argument_staging[region_offset + i] =
+                (rt_ptr_read_u8(argument as i64, i) & 255) as u8
+            i = i + 1
+        i = 0
+        while i < result_capacity:
+            self.preferred_result_staging[region_offset + i] = 0u8
+            self.c_result_staging[region_offset + i] = 0u8
+            self.rust_result_staging[region_offset + i] = 0u8
+            i = i + 1
+        true
+
+    me _copy_result(result: *mut u8, region_offset: i64,
+                    result_capacity: i64) -> bool:
+        if result_capacity > 0 and (result as i64) == 0: return false
+        var i = 0
+        while i < result_capacity:
+            rt_ptr_write_u8(result as i64, i,
+                self.preferred_result_staging[region_offset + i])
+            i = i + 1
+        true
+
+    me dispatch(compare: bool, opcode: i32, invocation_id: i64,
+                sequence: i64, address_or_irq: i64, length_or_width: i64,
+                token_slot: i64, region_id: i64, region_offset: i64,
+                region_length: i64, region_capacity: i64,
+                region_identity_hi: i64, region_identity_lo: i64,
+                argument: *u8, argument_length: i64, result: *mut u8,
+                result_capacity: i64) -> i32:
+        if not self.sealed or not _rt_hal_device_callback_opcode_valid_v1(opcode)
+                or not rt_atomic_int_compare_exchange(self.lock_handle, 0, 1):
+            return _RT_HAL_DEVICE_CALLBACK_STATE_V1
+        if not self._stage(argument, argument_length, region_offset,
+                           region_capacity, result_capacity):
+            rt_atomic_int_store(self.lock_handle, 0)
+            return _RT_HAL_DEVICE_CALLBACK_INVALID_V1
+        val request = self._request(opcode, invocation_id, sequence,
+            address_or_irq, length_or_width, token_slot, region_id,
+            region_offset, region_length, region_capacity,
+            region_identity_hi, region_identity_lo, argument_length,
+            result_capacity)
+        var preferred_executor = self._executor(self.preferred_provider)
+        val preferred_device = self._device(self.preferred_provider)
+        var preferred = rt_hal_device_preferred_execution_owner_v1(
+            preferred_executor)
+        val direct = preferred.execute(request, self.argument_staging,
+            self.preferred_result_staging, preferred_device, 1, 1)
+        self._store_executor(self.preferred_provider, preferred.executor)
+        if direct.status != RtHalDeviceDispatchStatusV1.Executed:
+            rt_atomic_int_store(self.lock_handle, 0)
+            return _RT_HAL_DEVICE_CALLBACK_INVALID_V1
+        if compare:
+            var owner = rt_hal_device_comparison_owner_v1(
+                request, self.run_mode, self.preferred_provider)
+            val published = owner.publish_preferred(direct.execution,
+                self.preferred_result_staging, 1, 1)
+            if published.status != RtHalDeviceDispatchStatusV1.Compared:
+                rt_atomic_int_store(self.lock_handle, 0)
+                return _RT_HAL_DEVICE_CALLBACK_INVALID_V1
+            if self.preferred_provider != HalProviderKind.C:
+                val c = owner.replay_provider(HalProviderKind.C,
+                    self.c_executor, self.argument_staging,
+                    self.preferred_result_staging, self.c_result_staging)
+                if c.status != RtHalDeviceDispatchStatusV1.Compared:
+                    rt_atomic_int_store(self.lock_handle, 0)
+                    return _RT_HAL_DEVICE_CALLBACK_INVALID_V1
+            if self.preferred_provider != HalProviderKind.Rust:
+                val rust = owner.replay_provider(HalProviderKind.Rust,
+                    self.rust_executor, self.argument_staging,
+                    self.preferred_result_staging, self.rust_result_staging)
+                if rust.status != RtHalDeviceDispatchStatusV1.Compared:
+                    rt_atomic_int_store(self.lock_handle, 0)
+                    return _RT_HAL_DEVICE_CALLBACK_INVALID_V1
+            if self.preferred_provider != HalProviderKind.PureSimple:
+                val pure = owner.replay_provider(HalProviderKind.PureSimple,
+                    self.pure_executor, self.argument_staging,
+                    self.preferred_result_staging, self.c_result_staging)
+                if pure.status != RtHalDeviceDispatchStatusV1.Compared:
+                    rt_atomic_int_store(self.lock_handle, 0)
+                    return _RT_HAL_DEVICE_CALLBACK_INVALID_V1
+            if not owner.receipt().commit_allowed:
+                rt_atomic_int_store(self.lock_handle, 0)
+                return _RT_HAL_DEVICE_CALLBACK_INVALID_V1
+        val copied = self._copy_result(result, region_offset, result_capacity)
+        rt_atomic_int_store(self.lock_handle, 0)
+        if copied: _RT_HAL_DEVICE_CALLBACK_OK_V1
+        else: _RT_HAL_DEVICE_CALLBACK_INVALID_V1
+
+var _rt_hal_device_pure_capsules_v1: [RtHalDevicePureCallbackCapsuleV1] = []
+var _rt_hal_device_pure_registry_lock_v1: i64 = rt_atomic_int_new(0)
+var _rt_hal_device_pure_registry_sealed_v1: i64 = rt_atomic_int_new(0)
+var _rt_hal_device_pure_cookie_capsules_v1: [i64] = [0; 64]
+
+fn rt_hal_device_pure_capsule_register_v1(
+        acquisition: RtHalDeviceAcquisitionV1,
+        pure_executor: DeviceSandboxExecutorV1,
+        c_executor: DeviceSandboxExecutorV1,
+        rust_executor: DeviceSandboxExecutorV1,
+        pure_device: [u8], c_device: [u8], rust_device: [u8],
+        staging_capacity: i64, run_mode: HalRunMode,
+        preferred_provider: HalProviderKind, route_permissions: i64,
+        deadline_ms: i64) -> u64:
+    if staging_capacity < 0 or staging_capacity > DEVICE_MAX_TRANSFER_BYTES_V1
+            or route_permissions < 0 or deadline_ms <= 0
+            or not rt_hal_device_handle_v1_well_formed(acquisition.handle)
+            or rt_atomic_int_load(_rt_hal_device_pure_registry_sealed_v1) != 0
+            or not rt_atomic_int_compare_exchange(
+                _rt_hal_device_pure_registry_lock_v1, 0, 1):
+        return 0
+    if _rt_hal_device_pure_capsules_v1.len()
+            >= RT_HAL_DEVICE_PURE_CAPSULE_CAPACITY_V1:
+        rt_atomic_int_store(_rt_hal_device_pure_registry_lock_v1, 0)
+        return 0
+    val capsule = RtHalDevicePureCallbackCapsuleV1(
+        acquisition, pure_executor, c_executor, rust_executor,
+        pure_device, c_device, rust_device,
+        [0u8; staging_capacity], [0u8; staging_capacity],
+        [0u8; staging_capacity], [0u8; staging_capacity],
+        run_mode, preferred_provider, route_permissions, deadline_ms,
+        0, rt_atomic_int_new(0),
+        false, false)
+    _rt_hal_device_pure_capsules_v1 =
+        _rt_hal_device_pure_capsules_v1.push(capsule)
+    val id = _rt_hal_device_pure_capsules_v1.len() as u64
+    rt_atomic_int_store(_rt_hal_device_pure_registry_lock_v1, 0)
+    id
+
+fn _rt_hal_device_pure_capsule_index_v1(capsule_id: u64) -> i64:
+    if capsule_id == 0
+            or capsule_id > (_rt_hal_device_pure_capsules_v1.len() as u64):
+        return -1
+    (capsule_id - 1) as i64
+
+fn rt_hal_device_pure_capsule_sequence_v1(
+        capsule_id: u64, provider: HalProviderKind) -> i64:
+    if not rt_atomic_int_compare_exchange(
+            _rt_hal_device_pure_registry_lock_v1, 0, 1):
+        return -1
+    val index = _rt_hal_device_pure_capsule_index_v1(capsule_id)
+    if index < 0:
+        rt_atomic_int_store(_rt_hal_device_pure_registry_lock_v1, 0)
+        return -1
+    val capsule = _rt_hal_device_pure_capsules_v1[index]
+    if not rt_atomic_int_compare_exchange(capsule.lock_handle, 0, 1):
+        rt_atomic_int_store(_rt_hal_device_pure_registry_lock_v1, 0)
+        return -1
+    val sequence = capsule._executor(provider).next_sequence
+    rt_atomic_int_store(capsule.lock_handle, 0)
+    rt_atomic_int_store(_rt_hal_device_pure_registry_lock_v1, 0)
+    sequence
+
+fn _rt_hal_device_pure_cookie_slot_v1(cookie: u64) -> i64:
+    val encoded = (cookie & 4294967295u64) as i64
+    if encoded <= 0 or encoded > 64 or (cookie >> 32) == 0: return -1
+    encoded - 1
+
+fn _rt_hal_device_pure_cookie_capsule_index_v1(cookie: u64) -> i64:
+    val slot = _rt_hal_device_pure_cookie_slot_v1(cookie)
+    if slot < 0: return -1
+    val capsule_id = _rt_hal_device_pure_cookie_capsules_v1[slot]
+    if capsule_id <= 0: return -1
+    _rt_hal_device_pure_capsule_index_v1(capsule_id as u64)
+
+fn hal_device_pure_route_prepare_v1(capsule_id: u64) -> u64:
+    if not rt_atomic_int_compare_exchange(
+            _rt_hal_device_pure_registry_lock_v1, 0, 1):
+        return 0
+    val index = _rt_hal_device_pure_capsule_index_v1(capsule_id)
+    if index < 0:
+        rt_atomic_int_store(_rt_hal_device_pure_registry_lock_v1, 0)
+        return 0
+    val capsule = _rt_hal_device_pure_capsules_v1[index]
+    if capsule.bound or capsule.sealed
+            or not rt_hal_device_handle_v1_well_formed(
+                capsule.acquisition.handle):
+        rt_atomic_int_store(_rt_hal_device_pure_registry_lock_v1, 0)
+        return 0
+    val handle = capsule.acquisition.handle
+    val proof = capsule.acquisition.proof
+    val grant = capsule.acquisition.grant
+    val permissions = capsule.route_permissions
+    val run_mode = hal_run_mode_to_i64(capsule.run_mode) as i32
+    val preferred_provider = hal_provider_kind_to_i64(
+        capsule.preferred_provider) as i32
+    val deadline_ms = capsule.deadline_ms
+    # Freezes the class array before unlocking. Native prepare synchronously
+    # invokes the Pure prepare callback, which must be able to take this lock.
+    rt_atomic_int_store(_rt_hal_device_pure_registry_sealed_v1, 1)
+    rt_atomic_int_store(_rt_hal_device_pure_registry_lock_v1, 0)
+    rt_hal_device_route_prepare_v1(
+        handle.capability_id, handle.generation,
+        handle.grant_digest_hi, handle.grant_digest_lo,
+        handle.authority_digest_hi, handle.authority_digest_lo,
+        handle.device_identity_hi, handle.device_identity_lo,
+        proof.allowed_opcode_mask, grant.range_base, grant.range_length,
+        permissions, run_mode, preferred_provider, deadline_ms, capsule_id,
+        rt_hal_device_pure_prepare_callback_v1 as u64,
+        rt_hal_device_pure_shutdown_callback_v1 as u64,
+        rt_hal_device_pure_configured_callback_v1 as u64,
+        rt_hal_device_pure_direct_callback_v1 as u64,
+        rt_hal_device_pure_compare_callback_v1 as u64)
+
+@export("C", name: "rt_hal_device_pure_prepare_callback_v1")
+fn rt_hal_device_pure_prepare_callback_v1(
+        cookie: u64, capsule_id: u64, capability_id: i64, generation: i64,
+        grant_hi: i64, grant_lo: i64, authority_hi: i64, authority_lo: i64,
+        device_hi: i64, device_lo: i64, allowed_opcode_mask: i64,
+        range_base: i64, range_length: i64, permissions: i64,
+        run_mode: i32, preferred_provider: i32, deadline_ms: i64) -> i32:
+    if cookie == 0 or deadline_ms <= 0 or permissions < 0:
+        return _RT_HAL_DEVICE_CALLBACK_INVALID_V1
+    if not rt_atomic_int_compare_exchange(
+            _rt_hal_device_pure_registry_lock_v1, 0, 1):
+        return _RT_HAL_DEVICE_CALLBACK_STATE_V1
+    val index = _rt_hal_device_pure_capsule_index_v1(capsule_id)
+    if index < 0:
+        rt_atomic_int_store(_rt_hal_device_pure_registry_lock_v1, 0)
+        return _RT_HAL_DEVICE_CALLBACK_INVALID_V1
+    rt_atomic_int_store(_rt_hal_device_pure_registry_sealed_v1, 1)
+    var capsule = _rt_hal_device_pure_capsules_v1[index]
+    val proof = capsule.acquisition.proof
+    val grant = capsule.acquisition.grant
+    if capsule.bound or capsule.sealed
+            or capsule.acquisition.handle.capability_id != capability_id
+            or capsule.acquisition.handle.generation != generation
+            or proof.allowed_opcode_mask != allowed_opcode_mask
+            or proof.grant_digest_hi != grant_hi
+            or proof.grant_digest_lo != grant_lo
+            or proof.authority_digest_hi != authority_hi
+            or proof.authority_digest_lo != authority_lo
+            or proof.device_identity_hi != device_hi
+            or proof.device_identity_lo != device_lo
+            or grant.range_base != range_base
+            or grant.range_length != range_length
+            or capsule.route_permissions != permissions
+            or capsule.deadline_ms != deadline_ms
+            or hal_run_mode_to_i64(capsule.run_mode) != run_mode
+            or hal_provider_kind_to_i64(capsule.preferred_provider)
+                != preferred_provider:
+        rt_atomic_int_store(_rt_hal_device_pure_registry_lock_v1, 0)
+        return _RT_HAL_DEVICE_CALLBACK_INVALID_V1
+    capsule.cookie = cookie
+    capsule.bound = true
+    capsule.sealed = true
+    _rt_hal_device_pure_capsules_v1[index] = capsule
+    val cookie_slot = _rt_hal_device_pure_cookie_slot_v1(cookie)
+    if cookie_slot < 0 or _rt_hal_device_pure_cookie_capsules_v1[cookie_slot] != 0:
+        capsule.sealed = false
+        capsule.bound = false
+        capsule.cookie = 0
+        _rt_hal_device_pure_capsules_v1[index] = capsule
+        rt_atomic_int_store(_rt_hal_device_pure_registry_lock_v1, 0)
+        return _RT_HAL_DEVICE_CALLBACK_INVALID_V1
+    _rt_hal_device_pure_cookie_capsules_v1[cookie_slot] = capsule_id as i64
+    rt_atomic_int_store(_rt_hal_device_pure_registry_lock_v1, 0)
+    _RT_HAL_DEVICE_CALLBACK_OK_V1
+
+@export("C", name: "rt_hal_device_pure_shutdown_callback_v1")
+fn rt_hal_device_pure_shutdown_callback_v1(cookie: u64) -> i32:
+    if not rt_atomic_int_compare_exchange(
+            _rt_hal_device_pure_registry_lock_v1, 0, 1):
+        return _RT_HAL_DEVICE_CALLBACK_STATE_V1
+    val cookie_slot = _rt_hal_device_pure_cookie_slot_v1(cookie)
+    val index = _rt_hal_device_pure_cookie_capsule_index_v1(cookie)
+    if index < 0:
+        rt_atomic_int_store(_rt_hal_device_pure_registry_lock_v1, 0)
+        return _RT_HAL_DEVICE_CALLBACK_INVALID_V1
+    var capsule = _rt_hal_device_pure_capsules_v1[index]
+    if capsule.cookie != cookie or not capsule.bound or not capsule.sealed:
+        rt_atomic_int_store(_rt_hal_device_pure_registry_lock_v1, 0)
+        return _RT_HAL_DEVICE_CALLBACK_INVALID_V1
+    if rt_atomic_int_load(capsule.lock_handle) != 0:
+        rt_atomic_int_store(_rt_hal_device_pure_registry_lock_v1, 0)
+        return _RT_HAL_DEVICE_CALLBACK_STATE_V1
+    capsule.sealed = false
+    capsule.bound = false
+    capsule.cookie = 0
+    _rt_hal_device_pure_capsules_v1[index] = capsule
+    _rt_hal_device_pure_cookie_capsules_v1[cookie_slot] = 0
+    rt_atomic_int_store(_rt_hal_device_pure_registry_lock_v1, 0)
+    _RT_HAL_DEVICE_CALLBACK_OK_V1
+
+fn _rt_hal_device_pure_dispatch_callback_v1(
+        compare: bool, cookie: u64, opcode: i32, handle: u64,
+        invocation_id: i64, sequence: i64, address_or_irq: i64,
+        length_or_width: i64, token_slot: i64, region_id: i64,
+        region_offset: i64, region_length: i64, region_capacity: i64,
+        region_identity_hi: i64, region_identity_lo: i64,
+        argument: *u8, argument_length: i64, result: *mut u8,
+        result_capacity: i64, trace_identity_hi: i64,
+        trace_identity_lo: i64, trace_cursor: i64, trace_length: i64,
+        trace_capacity: i64) -> i32:
+    if cookie == 0 or handle != cookie
+            or trace_identity_hi == 0 or trace_identity_lo == 0
+            or trace_cursor < 0
+            or trace_cursor == 9223372036854775807
+            or trace_length != trace_cursor + 1
+            or trace_capacity < trace_length
+            or trace_capacity > RT_HAL_DEVICE_TRACE_CAPACITY_V1:
+        return _RT_HAL_DEVICE_CALLBACK_INVALID_V1
+    if not rt_atomic_int_compare_exchange(
+            _rt_hal_device_pure_registry_lock_v1, 0, 1):
+        return _RT_HAL_DEVICE_CALLBACK_STATE_V1
+    val index = _rt_hal_device_pure_cookie_capsule_index_v1(cookie)
+    if index < 0:
+        rt_atomic_int_store(_rt_hal_device_pure_registry_lock_v1, 0)
+        return _RT_HAL_DEVICE_CALLBACK_INVALID_V1
+    var capsule = _rt_hal_device_pure_capsules_v1[index]
+    if capsule.cookie != cookie or not capsule.bound or not capsule.sealed:
+        rt_atomic_int_store(_rt_hal_device_pure_registry_lock_v1, 0)
+        return _RT_HAL_DEVICE_CALLBACK_INVALID_V1
+    rt_atomic_int_store(_rt_hal_device_pure_registry_lock_v1, 0)
+    val status = capsule.dispatch(compare, opcode, invocation_id,
+        sequence, address_or_irq, length_or_width, token_slot,
+        region_id, region_offset, region_length, region_capacity,
+        region_identity_hi, region_identity_lo, argument,
+        argument_length, result, result_capacity)
+    status
+
+@export("C", name: "rt_hal_device_pure_direct_callback_v1")
+fn rt_hal_device_pure_direct_callback_v1(
+        cookie: u64, opcode: i32, handle: u64, invocation_id: i64,
+        sequence: i64, address_or_irq: i64, length_or_width: i64,
+        token_slot: i64, region_id: i64, region_offset: i64,
+        region_length: i64, region_capacity: i64, region_identity_hi: i64,
+        region_identity_lo: i64, argument: *u8, argument_length: i64,
+        result: *mut u8, result_capacity: i64, trace_identity_hi: i64,
+        trace_identity_lo: i64, trace_cursor: i64, trace_length: i64,
+        trace_capacity: i64) -> i32:
+    _rt_hal_device_pure_dispatch_callback_v1(false, cookie, opcode, handle,
+        invocation_id, sequence, address_or_irq, length_or_width, token_slot,
+        region_id, region_offset, region_length, region_capacity,
+        region_identity_hi, region_identity_lo, argument, argument_length,
+        result, result_capacity, trace_identity_hi, trace_identity_lo,
+        trace_cursor, trace_length, trace_capacity)
+
+@export("C", name: "rt_hal_device_pure_compare_callback_v1")
+fn rt_hal_device_pure_compare_callback_v1(
+        cookie: u64, opcode: i32, handle: u64, invocation_id: i64,
+        sequence: i64, address_or_irq: i64, length_or_width: i64,
+        token_slot: i64, region_id: i64, region_offset: i64,
+        region_length: i64, region_capacity: i64, region_identity_hi: i64,
+        region_identity_lo: i64, argument: *u8, argument_length: i64,
+        result: *mut u8, result_capacity: i64, trace_identity_hi: i64,
+        trace_identity_lo: i64, trace_cursor: i64, trace_length: i64,
+        trace_capacity: i64) -> i32:
+    _rt_hal_device_pure_dispatch_callback_v1(true, cookie, opcode, handle,
+        invocation_id, sequence, address_or_irq, length_or_width, token_slot,
+        region_id, region_offset, region_length, region_capacity,
+        region_identity_hi, region_identity_lo, argument, argument_length,
+        result, result_capacity, trace_identity_hi, trace_identity_lo,
+        trace_cursor, trace_length, trace_capacity)
+
+@export("C", name: "rt_hal_device_pure_configured_callback_v1")
+fn rt_hal_device_pure_configured_callback_v1(
+        cookie: u64, opcode: i32, handle: u64, invocation_id: i64,
+        sequence: i64, address_or_irq: i64, length_or_width: i64,
+        token_slot: i64, region_id: i64, region_offset: i64,
+        region_length: i64, region_capacity: i64, region_identity_hi: i64,
+        region_identity_lo: i64, argument: *u8, argument_length: i64,
+        result: *mut u8, result_capacity: i64, trace_identity_hi: i64,
+        trace_identity_lo: i64, trace_cursor: i64, trace_length: i64,
+        trace_capacity: i64) -> i32:
+    if cookie == 0 or handle != cookie:
+        return _RT_HAL_DEVICE_CALLBACK_INVALID_V1
+    if not rt_atomic_int_compare_exchange(
+            _rt_hal_device_pure_registry_lock_v1, 0, 1):
+        return _RT_HAL_DEVICE_CALLBACK_STATE_V1
+    val index = _rt_hal_device_pure_cookie_capsule_index_v1(cookie)
+    if index < 0:
+        rt_atomic_int_store(_rt_hal_device_pure_registry_lock_v1, 0)
+        return _RT_HAL_DEVICE_CALLBACK_INVALID_V1
+    val capsule = _rt_hal_device_pure_capsules_v1[index]
+    if capsule.cookie != cookie or not capsule.bound or not capsule.sealed:
+        rt_atomic_int_store(_rt_hal_device_pure_registry_lock_v1, 0)
+        return _RT_HAL_DEVICE_CALLBACK_INVALID_V1
+    rt_atomic_int_store(_rt_hal_device_pure_registry_lock_v1, 0)
+    _rt_hal_device_pure_dispatch_callback_v1(
+        hal_run_mode_executes_all(capsule.run_mode), cookie, opcode,
+        handle, invocation_id, sequence, address_or_irq,
+        length_or_width, token_slot, region_id, region_offset,
+        region_length, region_capacity, region_identity_hi,
+        region_identity_lo, argument, argument_length, result,
+        result_capacity, trace_identity_hi, trace_identity_lo,
+        trace_cursor, trace_length, trace_capacity)
+
+export RtHalDevicePureCallbackCapsuleV1
+export rt_hal_device_pure_capsule_register_v1
+export rt_hal_device_pure_capsule_sequence_v1
+export hal_device_pure_route_prepare_v1
+export rt_hal_device_pure_prepare_callback_v1
+export rt_hal_device_pure_shutdown_callback_v1
+export rt_hal_device_pure_configured_callback_v1
+export rt_hal_device_pure_direct_callback_v1
+export rt_hal_device_pure_compare_callback_v1

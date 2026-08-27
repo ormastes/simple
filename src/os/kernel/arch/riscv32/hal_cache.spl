@@ -42,20 +42,17 @@ fn hal_cache32_init_with_isa(isa: text):
     val caps = hal_cache32_probe_with_isa(isa)
     ZICBOM_STATE32 = caps.has_zicbom
 
-fn _hal_cache32_line_count(len: u32, stride: u32) -> u32:
-    if len == 0u32 or stride == 0u32:
-        return 0u32
-    val count = 1u64 + (len as u64 - 1u64) / stride as u64
-    if count > 0xFFFFFFFFu64: 0xFFFFFFFFu32 else: count as u32
-
 fn hal_cache32_sync_icache_with_log(caps: CmoCapSnapshot32, addr: u32, len: u32) -> CacheOpLog32:
     """Simulate hal_cache32_sync_icache: cbo.flush per-line if Zicbom, then fence.i.
     Returns a CacheOpLog32 with counters populated (avoids parameter-mutation interpreter bug)."""
     val stride: u32 = 64u32
-    val cbo_flush_count = if caps.has_zicbom:
-        _hal_cache32_line_count(len, stride)
-    else:
-        0u32
+    var cbo_flush_count: u32 = 0u32
+    if caps.has_zicbom:
+        var cur = addr
+        val end_addr = addr + len
+        while cur < end_addr:
+            cbo_flush_count = cbo_flush_count + 1u32
+            cur = cur + stride
     CacheOpLog32(
         fence_i_count: 1u32,
         cbo_clean_count: 0u32,
@@ -71,7 +68,11 @@ fn hal_cache32_clean_dcache_with_log(caps: CmoCapSnapshot32, addr: u32, len: u32
     var cbo_clean_count: u32 = 0u32
     var diagnostic_emitted: bool = false
     if caps.has_zicbom:
-        cbo_clean_count = _hal_cache32_line_count(len, stride)
+        var cur = addr
+        val end_addr = addr + len
+        while cur < end_addr:
+            cbo_clean_count = cbo_clean_count + 1u32
+            cur = cur + stride
     else:
         diagnostic_emitted = true
     CacheOpLog32(
@@ -89,7 +90,11 @@ fn hal_cache32_invalidate_dcache_with_log(caps: CmoCapSnapshot32, addr: u32, len
     var cbo_inval_count: u32 = 0u32
     var diagnostic_emitted: bool = false
     if caps.has_zicbom:
-        cbo_inval_count = _hal_cache32_line_count(len, stride)
+        var cur = addr
+        val end_addr = addr + len
+        while cur < end_addr:
+            cbo_inval_count = cbo_inval_count + 1u32
+            cur = cur + stride
     else:
         diagnostic_emitted = true
     CacheOpLog32(
@@ -110,36 +115,30 @@ fn hal_cache32_invalidate_dcache_with_log(caps: CmoCapSnapshot32, addr: u32, len
 fn hal_cache32_sync_icache(addr: u32, len: u32):
     """Sync icache (rv32): cbo.flush per-line (if Zicbom) then fence.i."""
     val stride: u32 = 64u32
-    if ZICBOM_STATE32 and len > 0u32 and addr <= 0xFFFFFFFFu32 - (len - 1u32):
+    if ZICBOM_STATE32:
         var cur = addr
-        val last_addr = addr + len - 1u32
-        while true:
+        val end_addr = addr + len
+        while cur < end_addr:
             cbo_flush(cur as u64)
-            if last_addr - cur < stride:
-                break
             cur = cur + stride
     fence_i()
 
 fn hal_cache32_clean_dcache(addr: u32, len: u32):
     """Clean dcache (rv32): cbo.clean per-line when Zicbom=true, else emit diagnostic."""
     val stride: u32 = 64u32
-    if ZICBOM_STATE32 and len > 0u32 and addr <= 0xFFFFFFFFu32 - (len - 1u32):
+    if ZICBOM_STATE32:
         var cur = addr
-        val last_addr = addr + len - 1u32
-        while true:
+        val end_addr = addr + len
+        while cur < end_addr:
             cbo_clean(cur as u64)
-            if last_addr - cur < stride:
-                break
             cur = cur + stride
 
 fn hal_cache32_invalidate_dcache(addr: u32, len: u32):
     """Invalidate dcache (rv32): cbo.inval per-line when Zicbom=true, else emit diagnostic."""
     val stride: u32 = 64u32
-    if ZICBOM_STATE32 and len > 0u32 and addr <= 0xFFFFFFFFu32 - (len - 1u32):
+    if ZICBOM_STATE32:
         var cur = addr
-        val last_addr = addr + len - 1u32
-        while true:
+        val end_addr = addr + len
+        while cur < end_addr:
             cbo_inval(cur as u64)
-            if last_addr - cur < stride:
-                break
             cur = cur + stride

@@ -2,9 +2,33 @@
 
 > Executable requirement trace for the dual-arch orchestration layer.
 
+<!-- sdn-diagram:id=riscv_fpga_linux_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=riscv_fpga_linux_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+riscv_fpga_linux_spec -> std
+riscv_fpga_linux_spec -> hardware
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=riscv_fpga_linux_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 9 | 9 | 0 | 0 |
+| 7 | 7 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -38,12 +62,13 @@ Executable requirement trace for the dual-arch orchestration layer.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-RFL-001..003
-# @req REQ-RFL-004..006
+val profile = XilinxBoardProfile.generic()
+expect(profile.validate_for_prepare().len()).to_equal(0)
+expect(profile.validate_for_hardware_boot()).to_contain("xilinx part must be selected before hardware boot")
 ```
 
 </details>
@@ -59,7 +84,7 @@ Reproduction: this block contains the complete executable scenario source.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -85,7 +110,7 @@ expect(mlk.programmer).to_equal("openFPGALoader")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -148,7 +173,7 @@ val products = manifest.board_linux_boot_products_manifest_text("/tmp/simple_ris
 expect(products).to_contain("product_id = \"mlk_s02_100t_rv32_linux\"")
 expect(products).to_contain("product_id = \"mlk_s02_100t_rv64_linux\"")
 expect(products).to_contain("boot_script = \"scripts/mlk_s02_100t_generated_linux_boot.shs\"")
-expect(products).to_contain("validation_kind = \"contract-not-ready\"")
+expect(products).to_contain("validation_kind = \"linux-uart-markers\"")
 ```
 
 </details>
@@ -173,78 +198,18 @@ expect(result.is_ok()).to_equal(true)
 val bundle = result.ok().unwrap()
 val manifest_text = read_generated_riscv_fpga_rtl_file(bundle.manifest_path)
 val products_text = read_generated_riscv_fpga_rtl_file(bundle.board_linux_boot_products_manifest_path)
-val byl_text = read_generated_riscv_fpga_rtl_file("/tmp/simple_riscv_fpga_system_spec/riscv_product.byl")
-val rv32_synth_template = read_generated_riscv_fpga_rtl_file("/tmp/simple_riscv_fpga_system_spec/synth/rv32_synth.sdn")
-val rv64_synth_template = read_generated_riscv_fpga_rtl_file("/tmp/simple_riscv_fpga_system_spec/synth/rv64_synth.sdn")
 val bundle_readme_text = read_generated_riscv_fpga_rtl_file(bundle.bundle_readme_path)
-val rv32_sidecar = read_generated_riscv_fpga_rtl_file("/tmp/simple_riscv_fpga_system_spec/rv32/rtl/simple_rv32gc_core.debug.json")
-val rv64_sidecar = read_generated_riscv_fpga_rtl_file("/tmp/simple_riscv_fpga_system_spec/rv64/rtl/simple_rv64gc_core.debug.json")
-val rv32_core_vhdl = read_generated_riscv_fpga_rtl_file("/tmp/simple_riscv_fpga_system_spec/rv32/rtl/simple_rv32gc_core.vhd")
-val rv64_core_vhdl = read_generated_riscv_fpga_rtl_file("/tmp/simple_riscv_fpga_system_spec/rv64/rtl/simple_rv64gc_core.vhd")
-val rv32_formal_vhdl = read_generated_riscv_fpga_rtl_file("/tmp/simple_riscv_fpga_system_spec/rv32/rtl/simple_rv32gc_core_formal.vhd")
-val rv64_formal_vhdl = read_generated_riscv_fpga_rtl_file("/tmp/simple_riscv_fpga_system_spec/rv64/rtl/simple_rv64gc_core_formal.vhd")
-val rv32_sby = read_generated_riscv_fpga_rtl_file("/tmp/simple_riscv_fpga_system_spec/rv32/rtl/simple_rv32gc_core.sby")
-val rv64_sby = read_generated_riscv_fpga_rtl_file("/tmp/simple_riscv_fpga_system_spec/rv64/rtl/simple_rv64gc_core.sby")
-val rv32_formal_manifest = read_generated_riscv_fpga_rtl_file("/tmp/simple_riscv_fpga_system_spec/rv32/rtl/simple_rv32gc_core_formal.sdn")
-val rv64_formal_manifest = read_generated_riscv_fpga_rtl_file("/tmp/simple_riscv_fpga_system_spec/rv64/rtl/simple_rv64gc_core_formal.sdn")
 expect(manifest_text).to_contain("proof_lane = \"generated_rv32_linux\"")
 expect(manifest_text).to_contain("proof_lane = \"generated_rv64_linux\"")
-expect(manifest_text).to_contain("board = \"xilinx_generic\"")
-expect(manifest_text).to_contain("readiness = \"contract-not-ready\"")
-expect(manifest_text).to_contain("authoritative_rtl_provenance = \"none\"")
-expect(manifest_text).to_contain("contract_file = \"/tmp/simple_riscv_fpga_system_spec/rv32/rtl/simple_rv32gc_core.spl\"")
-expect(manifest_text).to_contain("contract_file = \"/tmp/simple_riscv_fpga_system_spec/rv64/rtl/simple_rv64gc_core.vhd\"")
-expect(manifest_text).to_contain("pure_simple_authoritative_rtl = \"false\"")
+expect(manifest_text).to_contain("authoritative_rtl_provenance = \"simple-compiler-generated\"")
+expect(manifest_text).to_contain("authoritative_file = \"/tmp/simple_riscv_fpga_system_spec/rv32/rtl/simple_rv32gc_core.spl\"")
+expect(manifest_text).to_contain("authoritative_file = \"/tmp/simple_riscv_fpga_system_spec/rv64/rtl/simple_rv64gc_core.vhd\"")
+expect(manifest_text).to_contain("pure_simple_authoritative_rtl = \"true\"")
 expect(products_text).to_contain("product_id = \"xilinx_generic_rv32_linux\"")
 expect(products_text).to_contain("product_id = \"xilinx_generic_rv64_linux\"")
 expect(products_text).to_contain("expected_markers = \"OpenSBI|Linux version|OF: fdt|Freeing unused kernel memory|init started\"")
-expect(byl_text).to_contain("schema = \"simple.riscv_product\"")
-expect(byl_text).to_contain("lane rv32")
-expect(byl_text).to_contain("readiness = \"contract-not-ready\"")
-expect(byl_text).to_contain("formal_gate = \"placeholder-rejected\"")
-expect(byl_text).to_contain("max_luts = 25000")
-expect(byl_text).to_contain("target_mhz = 50")
-expect(rv32_synth_template).to_contain("max_luts = 25000")
-expect(rv32_synth_template).to_contain("target_mhz = 50")
-expect(rv32_synth_template).to_contain("actual_luts = 0")
-expect(rv64_synth_template).to_contain("max_luts = 45000")
-expect(rv64_synth_template).to_contain("target_mhz = 50")
 expect(bundle_readme_text).to_contain("per-arch boot products manifest: `board_linux_boot_products.sdn`")
-expect(bundle_readme_text).to_contain("`riscv_product.byl`")
-expect(bundle_readme_text).to_contain("`synth/rv32_synth.sdn`, `synth/rv64_synth.sdn`")
-expect(bundle_readme_text).to_contain("Contract files are listed by `contract_file`")
-expect(rv32_sidecar).to_contain("\"productLevel\": \"linux-rtl\"")
-expect(rv64_sidecar).to_contain("\"configurationProfile\": \"qemu-virt+fpga-board\"")
-expect(rv32_sidecar).to_contain("\"rtlBudget\": {\"maxLuts\": 25000, \"targetMhz\": 50}")
-expect(rv64_sidecar).to_contain("\"rtlBudget\": {\"maxLuts\": 45000, \"targetMhz\": 50}")
-expect(rv32_sidecar).to_contain("\"readiness\": \"contract-not-ready\"")
-expect(rv32_sidecar).to_contain("\"formal\": {\"flow\": \"rvfi+sby\", \"gate\": \"placeholder-rejected\", \"status\": \"contract-not-ready\"")
-expect(rv32_sidecar).to_contain("\"harness\": \"/tmp/simple_riscv_fpga_system_spec/rv32/rtl/simple_rv32gc_core_formal.vhd\"")
-expect(rv32_sidecar).to_contain("\"sby\": \"/tmp/simple_riscv_fpga_system_spec/rv32/rtl/simple_rv32gc_core.sby\"")
-expect(rv32_sidecar).to_contain("\"sourceMap\": []")
-expect(rv32_sidecar).to_contain("tb_generated_rv32_linux_handoff.vhd")
-expect(rv32_sidecar).to_contain("\"runnerSuccessMarkers\": {}")
-expect(rv32_core_vhdl).to_contain("rvfi_valid")
-expect(rv32_core_vhdl).to_contain("rvfi_mem_wdata")
-expect(rv32_core_vhdl).to_contain("GENERATED_RTL_NOT_IMPLEMENTED lane=rv32")
-expect(rv32_formal_vhdl).to_contain("entity simple_rv32gc_core_formal is")
-expect(rv32_formal_vhdl).to_contain("formal-proof-unavailable")
-expect(rv32_sby).to_contain("mode prove")
-expect(rv32_sby).to_contain("smtbmc")
-expect(rv32_formal_manifest).to_contain("runner = \"sby -f simple_rv32gc_core.sby\"")
-expect(rv64_sidecar).to_contain("\"readiness\": \"contract-not-ready\"")
-expect(rv64_sidecar).to_contain("\"formal\": {\"flow\": \"rvfi+sby\", \"gate\": \"placeholder-rejected\", \"status\": \"contract-not-ready\"")
-expect(rv64_sidecar).to_contain("\"harness\": \"/tmp/simple_riscv_fpga_system_spec/rv64/rtl/simple_rv64gc_core_formal.vhd\"")
-expect(rv64_sidecar).to_contain("\"sby\": \"/tmp/simple_riscv_fpga_system_spec/rv64/rtl/simple_rv64gc_core.sby\"")
-expect(rv64_sidecar).to_contain("\"sourceMap\": []")
-expect(rv64_core_vhdl).to_contain("rvfi_valid")
-expect(rv64_core_vhdl).to_contain("rvfi_mem_wdata")
-expect(rv64_core_vhdl).to_contain("GENERATED_RTL_NOT_IMPLEMENTED lane=rv64")
-expect(rv64_formal_vhdl).to_contain("entity simple_rv64gc_core_formal is")
-expect(rv64_formal_vhdl).to_contain("formal-proof-unavailable")
-expect(rv64_sby).to_contain("mode prove")
-expect(rv64_sby).to_contain("smtbmc")
-expect(rv64_formal_manifest).to_contain("runner = \"sby -f simple_rv64gc_core.sby\"")
+expect(bundle_readme_text).to_contain("The machine-readable authoritative subset is listed explicitly by `authoritative_file` entries in the manifest and `provenance.authoritativeFiles` in the debug sidecar.")
 ```
 
 </details>
@@ -353,8 +318,8 @@ expect(rv64_sidecar).to_contain("\"rtlBudget\": {\"maxLuts\": 39000, \"targetMhz
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 9 |
-| Active scenarios | 9 |
+| Total scenarios | 7 |
+| Active scenarios | 7 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

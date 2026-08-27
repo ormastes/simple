@@ -7,6 +7,57 @@ pub enum EnvAccessKind:
     ReadRepoFile
     RunAllowedTool
     HardwareProbe
+    SocketConnect
+    SocketSend
+    SocketReceive
+    SocketClose
+    DeviceRead
+    DeviceWrite
+    MmioRead
+    MmioWrite
+    IrqEnable
+    IrqWait
+    IrqAcknowledge
+    IrqDisable
+    DmaMap
+    DmaSyncForDevice
+    DmaSyncForCpu
+    DmaSubmit
+    DmaWait
+    DmaUnmap
+    ClockRead
+
+pub const ENV_ACCESS_KIND_COUNT = 24
+
+# All physical operations use a declared typed adapter identity. This keeps the
+# common model independent of raw addresses, file descriptors and device
+# pointers while making the 24-kind set closed and exhaustively routable.
+pub fn env_access_kind_requires_physical_adapter(kind: EnvAccessKind) -> bool:
+    match kind:
+        case EnvAccessKind.HardwareProbe: return true
+        case EnvAccessKind.SocketConnect: return true
+        case EnvAccessKind.SocketSend: return true
+        case EnvAccessKind.SocketReceive: return true
+        case EnvAccessKind.SocketClose: return true
+        case EnvAccessKind.DeviceRead: return true
+        case EnvAccessKind.DeviceWrite: return true
+        case EnvAccessKind.MmioRead: return true
+        case EnvAccessKind.MmioWrite: return true
+        case EnvAccessKind.IrqEnable: return true
+        case EnvAccessKind.IrqWait: return true
+        case EnvAccessKind.IrqAcknowledge: return true
+        case EnvAccessKind.IrqDisable: return true
+        case EnvAccessKind.DmaMap: return true
+        case EnvAccessKind.DmaSyncForDevice: return true
+        case EnvAccessKind.DmaSyncForCpu: return true
+        case EnvAccessKind.DmaSubmit: return true
+        case EnvAccessKind.DmaWait: return true
+        case EnvAccessKind.DmaUnmap: return true
+        case EnvAccessKind.ClockRead: return false
+        case EnvAccessKind.ReadEnv: return false
+        case EnvAccessKind.HostIdentity: return false
+        case EnvAccessKind.ReadRepoFile: return false
+        case EnvAccessKind.RunAllowedTool: return false
 
 pub struct EnvAccessInstruction:
     kind: EnvAccessKind
@@ -79,6 +130,19 @@ pub struct EnvAccessPlan:
     allowed_tools: [EnvToolIdentity]
     allowed_hardware_probes: [EnvHardwareProbeIdentity]
 
+# Immutable, cold-only admission row for an independently executed RT/HAL
+# operation.  `operation_id` is the compiler's canonical
+# `sourcefile::function` identity.  Provider adapter IDs are selectors in the
+# foreign provider's closed registry, never command-line fragments.  Zero
+# means that provider/effect is not admitted; it is not a fallback selector.
+pub struct EnvRtHalOperationPlan:
+    operation_id: text
+    c_adapter_id: i64
+    rust_adapter_id: i64
+    effect_capable: bool
+    c_effect_adapter_id: i64
+    rust_effect_adapter_id: i64
+
 # Tools are admitted by stable logical ID and a pre-resolved executable path.
 # Executors never search PATH or interpret resource text as a command.
 pub struct EnvToolIdentity:
@@ -103,6 +167,59 @@ fn env_has_control(value: text) -> bool:
         if code < 32 or code == 127:
             return true
     return false
+
+# This is deliberately stricter than the runtime's generic nonempty-string
+# check.  A host plan is an authority boundary, so it admits only the exact
+# operation identity emitted by MIR (`span.file + "::" + fn.name`) and never
+# a prefix, wildcard, ABI signature, or provider argv fragment.
+pub fn env_rt_hal_operation_identity_error(operation_id: text) -> text:
+    if operation_id == "" or operation_id.len() > 4096 or env_has_control(operation_id):
+        return "RTHAL-E-OPERATION-ID"
+    val separator = operation_id.find("::")
+    if separator <= 0 or separator >= operation_id.len() - 2:
+        return "RTHAL-E-OPERATION-ID"
+    val source = operation_id.substring(0, separator)
+    val function = operation_id.substring(separator + 2, operation_id.len())
+    # `::` is one exact separator, not an untyped module/signature language.
+    if source.contains("::") or function.contains("::") or
+       source.contains("\\") or source.contains("//") or
+       source == "." or source == ".." or source.starts_with("./") or
+       source.starts_with("../") or source.contains("/../") or source.ends_with("/..") or
+       function.contains("(") or function.contains(")") or
+       function.contains(",") or function.contains(":") or
+       function.contains(" "):
+        return "RTHAL-E-OPERATION-SIGNATURE"
+    for character in function.chars():
+        if not "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_".contains(character):
+            return "RTHAL-E-OPERATION-SIGNATURE"
+    return ""
+
+pub fn env_rt_hal_operation_plan_error(row: EnvRtHalOperationPlan,
+                                       compare_c: bool, compare_rust: bool) -> text:
+    val identity_problem = env_rt_hal_operation_identity_error(row.operation_id)
+    if identity_problem != "": return identity_problem
+    if row.c_adapter_id < 0 or row.c_adapter_id > 3 or
+       row.rust_adapter_id < 0 or row.rust_adapter_id > 3 or
+       row.c_effect_adapter_id < 0 or row.c_effect_adapter_id > 4 or
+       row.rust_effect_adapter_id < 0 or row.rust_effect_adapter_id > 4:
+        return "RTHAL-E-PROVIDER-ADAPTER"
+    if (not compare_c and (row.c_adapter_id != 0 or row.c_effect_adapter_id != 0)) or
+       (not compare_rust and (row.rust_adapter_id != 0 or row.rust_effect_adapter_id != 0)):
+        return "RTHAL-E-PROVIDER-ADAPTER"
+    # Every enabled provider must independently execute the operation.  A
+    # provider missing from a row cannot be silently replaced by Pure.
+    if (compare_c and row.c_adapter_id == 0) or
+       (compare_rust and row.rust_adapter_id == 0):
+        return "RTHAL-E-PROVIDER-OPERATION"
+    if row.effect_capable:
+        # Effect replay has a distinct closed adapter ABI (4), never the
+        # query ABI nor a policy bit on a query adapter.
+        if (compare_c and row.c_effect_adapter_id != 4) or
+           (compare_rust and row.rust_effect_adapter_id != 4):
+            return "RTHAL-E-PROVIDER-EFFECT"
+    elif row.c_effect_adapter_id != 0 or row.rust_effect_adapter_id != 0:
+        return "RTHAL-E-PROVIDER-EFFECT"
+    return ""
 
 fn env_exact_sha256(value: text) -> bool:
     if value.len() != 71 or not value.starts_with("sha256:"):
@@ -182,7 +299,7 @@ pub fn env_access_instruction_error(instruction: EnvAccessInstruction) -> text:
             return "ENV-E-REPO-PATH"
         if instruction.arguments.len() != 0:
             return "ENV-E-ARGUMENT"
-    if instruction.kind == EnvAccessKind.ReadEnv or instruction.kind == EnvAccessKind.HardwareProbe:
+    if instruction.kind == EnvAccessKind.ReadEnv or env_access_kind_requires_physical_adapter(instruction.kind):
         val resource_id = instruction.resource.trim()
         if (env_text_too_long(resource_id, 128) or resource_id.contains("/") or
             resource_id.contains("\\") or resource_id.contains(":") or resource_id.contains(" ")):
@@ -258,7 +375,7 @@ pub fn env_access_plan_error(plan: EnvAccessPlan) -> text:
                     admitted = true
             if not admitted:
                 return "ENV-E-TOOL-NOT-ALLOWED"
-        if instruction.kind == EnvAccessKind.HardwareProbe:
+        if env_access_kind_requires_physical_adapter(instruction.kind):
             var probe_admitted = false
             for probe in plan.allowed_hardware_probes:
                 if probe.probe_id == instruction.resource:
@@ -291,14 +408,18 @@ pub fn env_access_receipt_error(receipt: EnvAccessReceipt) -> text:
         env_has_control(receipt.resume_command)):
         return "ENV-E-CONTROL"
     for artifact_path in receipt.artifact_paths:
-        if env_has_control(artifact_path) or env_text_too_long(artifact_path, 4096):
-            return "ENV-E-BOUND"
+        if not env_canonical_evidence_artifact_path(artifact_path):
+            return "ENV-E-ARTIFACT-PATH"
     if receipt.status == EnvAccessStatus.Executed:
         if not env_exact_sha256(receipt.stdout_hash) or not env_exact_sha256(receipt.stderr_hash):
             return "ENV-E-RECEIPT-HASH"
     if (receipt.status == EnvAccessStatus.Blocked or
-        receipt.status == EnvAccessStatus.Unsupported or
-        receipt.status == EnvAccessStatus.Rejected or
+        receipt.status == EnvAccessStatus.Unsupported):
+        if (receipt.reason.trim() == "" or receipt.prerequisite.trim() == ""
+            or receipt.owner.trim() == "" or receipt.resume_command.trim() == ""
+            or receipt.artifact_paths.len() == 0):
+            return "ENV-B-BLOCKED-INCOMPLETE"
+    if (receipt.status == EnvAccessStatus.Rejected or
         receipt.status == EnvAccessStatus.TimedOut):
         if (receipt.reason.trim() == "" or receipt.prerequisite.trim() == ""
             or receipt.owner.trim() == "" or receipt.resume_command.trim() == ""):

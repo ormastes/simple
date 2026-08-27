@@ -17,6 +17,15 @@ requirement has current executable evidence and `$verify` reports PASS.
   scoped certification; `umbrella_all_platforms` remains false unless all 24
   cells pass. Guest evidence must be target-side and correlated to the same
   run/source/image/configuration.
+  Live collector-v3 receipts must use the canonical guest commands
+  `exec /SYS/APPS/SIMPLSTC.SMF --version`, `--compile-fixture`, and
+  `--run-fixture`; arbitrary host `sh -c` self-attestation is not admissible.
+  Each command retains hashed stdout and stderr transcripts, exact image and
+  guest payload path identities, and the selected host/guest cell. Resource
+  samples use decimal-safe ordered arithmetic, an exact 24-hour interval, and
+  explicit RSS/CPU/storage ceilings; every registered invariant must have a
+  passing ledger row. Inputs and transcript paths are snapshot-checked for
+  ABA mutation and publication uses the shared no-follow atomic publisher.
 - Rendering: `common.mission_critical.draw_ir_generation_arena_v3` binds a
   count/byte plan to one arena, generation, and packed layout, recomputes caller
   totals, admits before mutation, seals only exact use, and requires explicit
@@ -35,6 +44,22 @@ host, compiler, GPU, RenderDoc, stress, or external-platform evidence.
 ## Operator flow
 
 The canonical release entrypoint is `scripts/check/check-mci-v2-release.shs`.
+Before the SimpleOS MCI-v2 manifest producer, it invokes the existing
+`scripts/check/check-simpleos-mission-critical-release.shs` gate and requires
+its canonical matrix to report `simpleos_hardening_matrix_passed=26/26`,
+`simpleos_hardening_matrix_status=pass`,
+`simpleos_hardening_mission_critical_release_status=pass`, and
+`simpleos_hardening_mission_critical_release_blockers=none`. The orchestrator
+captures that gate with the same bounded timeout/capture/process limits as
+other children and records `simpleos-mission-critical-gate-v1` at
+`<evidence>/simpleos-mission-critical-gate-v1.env`. The sidecar binds the
+orchestrator `run_id`, `source_hash`, and `configuration_hash` and hashes the
+gate report, matrix stdout/stderr, and bounded child captures. The existing
+gate has no common-identity arguments, so the sidecar explicitly records
+`gate_report_common_identity=not-supported-by-gate`; it does not invent a
+cross-run identity claim. `qemu_claim=not-made-by-orchestrator` remains
+explicit. A controlled `--contract-fixture` uses only a supplied fake gate,
+reports `CONTRACT_ONLY`, and cannot be used as live or QEMU evidence.
 It requires externally provisioned producer/reviewer keys and decision inputs;
 it never generates a key. Live lane arguments are supplied through
 `MCI_<LANE>_ARGS_FILE` files containing one whitespace-free argument per line;
@@ -96,6 +121,13 @@ snapshot-local `SIMPLE_LIB`, so later worktree changes cannot create a
 manifest/build TOCTOU mismatch. The fixture, compiler, provenance, signatures,
 and trust keys are independently snapshotted too.
 
+Snapshot copies and isolated compiler/fixture executions run in a bounded child
+process group. On timeout or interruption, the producer terminates that group
+(TERM followed by a short KILL grace period) before removing its private build
+directory. This ordering prevents an outer harness timeout from leaving `cp` or
+the compiler alive against a deleted snapshot and falsely reporting
+`source-aba-or-input-mutation`.
+
 Passing fixture mode proves only the `MCI-COMP-001` producer contract and emits
 `CONTRACT_ONLY`. Live mode can prove `MCI-COMP-001` only after trust policy is
 provisioned, and still exits blocked with `release_candidate=false` because
@@ -140,6 +172,20 @@ OpenSSL verification covers the exact canonical receipt, including its artifact
 hash. A self-asserted producer class, missing trust root, wrong key ID, missing
 signature, or signature from any other key cannot admit a row.
 
+### Tooling performance admission
+
+`check-mci-v2-tooling-admission.shs` owns the warm tooling budgets from the
+certified design. Its manifest pins one bounded scan/index per gate, requires 30
+warm CLI samples and 1,000 representative MCP/LSP request samples, and rejects
+missing or zero telemetry. It enforces CLI p95/RSS <=250 ms/256 MiB, MCP
+startup/request/RSS <=500 ms/100 ms/512 MiB, and LSP
+startup/request/RSS <=1,500 ms/150 ms/768 MiB. These are absolute ceilings in
+addition to the existing <=5% p95 regression check. Startup values are retained
+as `metric=<warm-id>|startup_p95_ms|<value>` rows, so a request p95 or RSS pass
+cannot hide a missing startup measurement. The generic MCP/LSP evidence helper
+prints `mcp_samples` and `lsp_samples` markers for this admission; the CLI
+startup audit prints `samples`, `startup_p95_ms`, and `max_rss_kib`.
+
 The deterministic `aggregate-report-v1.env` preserves fixed check order. The
 shell contract `test/01_unit/scripts/mci_v2_aggregate_contract_test.shs` owns
 `MCI-AGG-001/002/003`; its `collector_contract=PASS` proves collector mechanics
@@ -163,6 +209,14 @@ verification.
 C owned-process runtime selfcheck plus its ABI adapter and non-Unix fail-closed
 selfchecks under fixed time and capture bounds. It records hashes for the C ABI,
 the Simple process facade, and every compiler/runtime symbol-closure owner.
+
+The canonical facade is `std.nogc_sync_mut.io.process_ops`: call
+`process_run_owned_bounded` to obtain the versioned `OwnedProcessReceipt`, then
+pass that owner-issued receipt to `process_owned_terminate` (or its
+`process_owned_cancel` alias) only while the owner slot is live. Authorization requires slot,
+generation, PID, and start identity together; a PID-only or forged-generation
+request is rejected. The interpreter deliberately fails closed because it has
+no pidfd-backed owner registry.
 
 The focused Simple policy/facade specs run only when `--simple-runner` is paired
 with a regular, executable runner and `--runner-admission` contains exactly one
@@ -267,7 +321,31 @@ template; only the focused negative-control scenario `MCI-DOC-003` is bound.
 The template is canonical lane-receipt-shaped but is not aggregate-admissible
 until its signer placeholders and hash are replaced and a detached signature
 is published. The producer never
-holds a private key and does not perform reviewer work:
+holds a private key and does not perform reviewer work.
+
+The docgen producer is the pure-Simple app owner
+`src/app/spipe_docgen/spipe_docgen/main.spl`; the shallower
+`src/app/spipe_docgen/main.spl` is a compatibility re-export reached through
+the `spipe-docgen` subcommand.
+The checked-in `bin/simple` currently resolves to the Rust bootstrap seed and
+cannot produce release evidence. After admitting an exact-current self-hosted
+binary, run the command once and retain the receipt it emits:
+
+```sh
+SIMPLE_BIN=/absolute/path/to/bin/release/<triple>/simple
+SIMPLE_BINARY="$SIMPLE_BIN" "$SIMPLE_BIN" spipe-docgen \
+  test/03_system/infra/mission_critical_infra_hardening_v2_spec.spl \
+  --output doc/06_spec --no-index \
+  --provenance-receipt \
+  doc/06_spec/03_system/infra/mission_critical_infra_hardening_v2_spec.docgen-receipt.env
+```
+
+The docgen owner emits the exact ordered
+`mci-spipe-docgen-provenance-v2` receipt only after successful zero-stub
+generation. It binds the canonical executing binary path and SHA-256, tool
+version, logical command, source and manual hashes, and run identity. Do not
+create or hand-edit it. Until this command has run on the admitted self-hosted
+binary, DOC-001 and DOC-002 remain blocked. Then run the traceability producer:
 
 ```sh
 sh scripts/check/check-mci-v2-traceability.shs \

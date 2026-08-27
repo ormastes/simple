@@ -1,0 +1,82 @@
+# Byte-wise text ordering and glob matching for pointcut normalization.
+#
+# The ordering is byte-lexicographic so that a canonical sort is independent of
+# locale and of any host collation — the same property `action_key_text_lt`
+# guarantees for the cache key encoder.
+
+use std.common.crypto.types.{text_to_bytes}
+
+fn pointcut_text_lt(a: text, b: text) -> bool:
+    """Byte-wise lexicographic `a < b`."""
+    val ab = text_to_bytes(a)
+    val bb = text_to_bytes(b)
+    val an = ab.len()
+    val bn = bb.len()
+    var i = 0
+    while i < an and i < bn:
+        val ca = ab[i] as i64
+        val cb = bb[i] as i64
+        if ca < cb:
+            return true
+        if ca > cb:
+            return false
+        i = i + 1
+    an < bn
+
+fn pointcut_sort_texts(items: [text]) -> [text]:
+    """Insertion sort by `pointcut_text_lt`."""
+    var out: [text] = []
+    for item in items:
+        var placed: [text] = []
+        var inserted = false
+        for existing in out:
+            if not inserted and pointcut_text_lt(a: item, b: existing):
+                placed = placed.push(item)
+                inserted = true
+            placed = placed.push(existing)
+        if not inserted:
+            placed = placed.push(item)
+        out = placed
+    out
+
+# --- glob matching --------------------------------------------------------
+# `**` matches any run of characters including `.`; `*` matches any run that
+# contains no `.`. Everything else is literal. This is the semantics the
+# in-tree predicates already assume (`http_server.**`, `*.handle_request`,
+# `*.authenticate*`).
+
+fn pointcut_glob_matches(pattern: text, subject: text) -> bool:
+    """True when `subject` matches the glob `pattern`."""
+    pointcut_glob_at(pattern: pattern, pi_in: 0, subject: subject, si_in: 0)
+
+fn pointcut_glob_at(pattern: text, pi_in: i64, subject: text, si_in: i64) -> bool:
+    """Backtracking glob matcher over codepoint indices."""
+    val pn = pattern.len()
+    val sn = subject.len()
+    var pi = pi_in
+    var si = si_in
+    while pi < pn:
+        val pc = pattern.slice(pi, pi + 1)
+        if pc == "*":
+            var double = false
+            if pi + 1 < pn and pattern.slice(pi + 1, pi + 2) == "*":
+                double = true
+            var next_pi = pi + 1
+            if double:
+                next_pi = pi + 2
+            # Try every split point, shortest first.
+            var k = si
+            while k <= sn:
+                if pointcut_glob_at(pattern: pattern, pi_in: next_pi, subject: subject, si_in: k):
+                    return true
+                if k < sn and not double and subject.slice(k, k + 1) == ".":
+                    return false
+                k = k + 1
+            return false
+        if si >= sn:
+            return false
+        if subject.slice(si, si + 1) != pc:
+            return false
+        pi = pi + 1
+        si = si + 1
+    si >= sn

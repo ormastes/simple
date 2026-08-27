@@ -2,6 +2,29 @@
 
 > NDArray<T> slicing — `Slice.new(start, stop, step)` typed wrapper, view semantics, negative indices, multi-dim slicing. Slices carry shape, stride, and offset metadata and share backing storage.
 
+<!-- sdn-diagram:id=ndarray_slice_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=ndarray_slice_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+ndarray_slice_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=ndarray_slice_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 19 | 19 | 0 | 0 |
@@ -24,7 +47,7 @@ NDArray<T> slicing — `Slice.new(start, stop, step)` typed wrapper, view semant
 | Plan | doc/03_plan/agent_tasks/scilib_port_ndarray.md |
 | Design | doc/05_design/scilib_port_architecture.md |
 | Source | `test/03_system/feature/scilib/ndarray_slice_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -57,7 +80,7 @@ strides, and offsets change while the data arrays are reused.
 
 #### returns a[1:3] for length-5 array
 
-- returns a[1:3] for length-5 array
+1. Float64 new
    - Expected: r.len() equals `Index.new(2)`
    - Expected: r.get(Index.new(0)) equals `Float64.new(20.0)`
    - Expected: r.get(Index.new(1)) equals `Float64.new(30.0)`
@@ -66,12 +89,10 @@ strides, and offsets change while the data arrays are reused.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns a[1:3] for length-5 array")
 val a = array([Float64.new(10.0), Float64.new(20.0), Float64.new(30.0),
                Float64.new(40.0), Float64.new(50.0)])
 val r = a.slice(Slice.new(Index.new(1), Index.new(3), Index.new(1)))
@@ -86,7 +107,7 @@ expect(r.get(Index.new(1))).to_equal(Float64.new(30.0))
 
 #### returns a[0:5:2] (every-other element)
 
-- returns a[0:5:2] (every-other element)
+1. Float64 new
    - Expected: r.len() equals `Index.new(3)`
    - Expected: r.get(Index.new(0)) equals `Float64.new(0.0)`
    - Expected: r.get(Index.new(1)) equals `Float64.new(2.0)`
@@ -96,12 +117,10 @@ expect(r.get(Index.new(1))).to_equal(Float64.new(30.0))
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns a[0:5:2] (every-other element)")
 val a = array([Float64.new(0.0), Float64.new(1.0), Float64.new(2.0),
                Float64.new(3.0), Float64.new(4.0)])
 val r = a.slice(Slice.new(Index.new(0), Index.new(5), Index.new(2)))
@@ -117,20 +136,13 @@ expect(r.get(Index.new(2))).to_equal(Float64.new(4.0))
 
 #### treats Index.new(-1) as 'last element'
 
-- treats Index.new(-1) as 'last element'
-   - Expected: a.get(Index.new(-1)) equals `Float64.new(30.0)`
-   - Expected: a.get(Index.new(-2)) equals `Float64.new(20.0)`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("treats Index.new(-1) as 'last element'")
 val a = array([Float64.new(10.0), Float64.new(20.0), Float64.new(30.0)])
 expect(a.get(Index.new(-1))).to_equal(Float64.new(30.0))
 expect(a.get(Index.new(-2))).to_equal(Float64.new(20.0))
@@ -140,21 +152,13 @@ expect(a.get(Index.new(-2))).to_equal(Float64.new(20.0))
 
 #### returns a[-2:] (last two elements)
 
-- returns a[-2:] (last two elements)
-   - Expected: r.len() equals `Index.new(2)`
-   - Expected: r.get(Index.new(0)) equals `Float64.new(3.0)`
-   - Expected: r.get(Index.new(1)) equals `Float64.new(4.0)`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns a[-2:] (last two elements)")
 val a = array([Float64.new(1.0), Float64.new(2.0), Float64.new(3.0), Float64.new(4.0)])
 val r = a.slice(Slice.new(Index.new(-2), Index.new(4), Index.new(1)))
 expect(r.len()).to_equal(Index.new(2))
@@ -168,19 +172,13 @@ expect(r.get(Index.new(1))).to_equal(Float64.new(4.0))
 
 #### returns a length-0 array for slice(2, 2)
 
-- returns a length-0 array for slice(2, 2)
-   - Expected: r.len() equals `Index.new(0)`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns a length-0 array for slice(2, 2)")
 val a = array([Float64.new(1.0), Float64.new(2.0), Float64.new(3.0)])
 val r = a.slice(Slice.new(Index.new(2), Index.new(2), Index.new(1)))
 expect(r.len()).to_equal(Index.new(0))
@@ -195,7 +193,9 @@ expect(r.len()).to_equal(Index.new(0))
 
 #### returns a 2x2 sub-block of a 3x3 matrix
 
-- returns a 2x2 sub-block of a 3x3 matrix
+1. Float64 new
+2. Float64 new
+3. Slice new
    - Expected: r.shape equals `Shape.new([Index.new(2), Index.new(2)])`
    - Expected: r.get_at([Index.new(0), Index.new(0)]) equals `Float64.new(1.0)`
    - Expected: r.get_at([Index.new(0), Index.new(1)]) equals `Float64.new(2.0)`
@@ -206,12 +206,10 @@ expect(r.len()).to_equal(Index.new(0))
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns a 2x2 sub-block of a 3x3 matrix")
 # 3x3:  1 2 3
 #       4 5 6
 #       7 8 9
@@ -235,7 +233,9 @@ expect(r.get_at([Index.new(1), Index.new(1)])).to_equal(Float64.new(5.0))
 
 #### selects a single column as a 3x1 slice
 
-- selects a single column as a 3x1 slice
+1. Float64 new
+2. Float64 new
+3. Slice new
    - Expected: r.shape equals `Shape.new([Index.new(3), Index.new(1)])`
    - Expected: r.get_at([Index.new(0), Index.new(0)]) equals `Float64.new(3.0)`
    - Expected: r.get_at([Index.new(1), Index.new(0)]) equals `Float64.new(6.0)`
@@ -245,12 +245,10 @@ expect(r.get_at([Index.new(1), Index.new(1)])).to_equal(Float64.new(5.0))
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("selects a single column as a 3x1 slice")
 val flat = [Float64.new(1.0), Float64.new(2.0), Float64.new(3.0),
             Float64.new(4.0), Float64.new(5.0), Float64.new(6.0),
             Float64.new(7.0), Float64.new(8.0), Float64.new(9.0)]
@@ -269,24 +267,13 @@ expect(r.get_at([Index.new(2), Index.new(0)])).to_equal(Float64.new(9.0))
 
 #### slice keeps shared storage and updates metadata only
 
-- slice keeps shared storage and updates metadata only
-   - Expected: s.get(Index.new(0)) equals `Float64.new(2.0)`
-   - Expected: s.get(Index.new(1)) equals `Float64.new(3.0)`
-   - Expected: s.layout equals `Layout.Strided`
-   - Expected: s.offset equals `Index.new(1)`
-   - Expected: s.strides equals `Stride.new([Index.new(1)])`
-   - Expected: s.data_f64.len() equals `a.data_f64.len()`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("slice keeps shared storage and updates metadata only")
 val a = array([Float64.new(1.0), Float64.new(2.0), Float64.new(3.0), Float64.new(4.0)])
 val s = a.slice(Slice.new(Index.new(1), Index.new(3), Index.new(1)))
 expect(s.get(Index.new(0))).to_equal(Float64.new(2.0))
@@ -301,7 +288,7 @@ expect(s.data_f64.len()).to_equal(a.data_f64.len())
 
 #### stepped 1-D slice is a strided view
 
-- stepped 1-D slice is a strided view
+1. Float64 new
    - Expected: s.layout equals `Layout.Strided`
    - Expected: s.offset equals `Index.new(0)`
    - Expected: s.strides equals `Stride.new([Index.new(2)])`
@@ -312,12 +299,10 @@ expect(s.data_f64.len()).to_equal(a.data_f64.len())
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("stepped 1-D slice is a strided view")
 val a = array([Float64.new(0.0), Float64.new(1.0), Float64.new(2.0),
                Float64.new(3.0), Float64.new(4.0)])
 val s = a.slice(Slice.new(Index.new(0), Index.new(5), Index.new(2)))
@@ -332,7 +317,7 @@ expect(s.data_f64.len()).to_equal(a.data_f64.len())
 
 #### negative-step slice is a reverse strided view
 
-- negative-step slice is a reverse strided view
+1. Float64 new
    - Expected: s.layout equals `Layout.Strided`
    - Expected: s.offset equals `Index.new(4)`
    - Expected: s.strides equals `Stride.new([Index.new(-2)])`
@@ -344,12 +329,10 @@ expect(s.data_f64.len()).to_equal(a.data_f64.len())
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("negative-step slice is a reverse strided view")
 val a = array([Float64.new(0.0), Float64.new(1.0), Float64.new(2.0),
                Float64.new(3.0), Float64.new(4.0)])
 val s = a.slice(Slice.new(Index.new(4), Index.new(0), Index.new(-2)))
@@ -365,7 +348,7 @@ expect(s.data_f64.len()).to_equal(a.data_f64.len())
 
 #### chained 1-D slices compose offset and stride
 
-- chained 1-D slices compose offset and stride
+1. Float64 new
    - Expected: t.layout equals `Layout.Strided`
    - Expected: t.offset equals `Index.new(3)`
    - Expected: t.strides equals `Stride.new([Index.new(2)])`
@@ -376,12 +359,10 @@ expect(s.data_f64.len()).to_equal(a.data_f64.len())
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("chained 1-D slices compose offset and stride")
 val a = array([Float64.new(0.0), Float64.new(1.0), Float64.new(2.0),
                Float64.new(3.0), Float64.new(4.0), Float64.new(5.0)])
 val s = a.slice(Slice.new(Index.new(1), Index.new(6), Index.new(2)))
@@ -397,7 +378,9 @@ expect(t.data_f64.len()).to_equal(a.data_f64.len())
 
 #### non-origin 2-D slice keeps parent storage and composed offset
 
-- non-origin 2-D slice keeps parent storage and composed offset
+1. Float64 new
+2. Float64 new
+3. Slice new
    - Expected: s.layout equals `Layout.Strided`
    - Expected: s.offset equals `Index.new(4)`
    - Expected: s.strides equals `Stride.new([Index.new(3), Index.new(1)])`
@@ -409,12 +392,10 @@ expect(t.data_f64.len()).to_equal(a.data_f64.len())
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("non-origin 2-D slice keeps parent storage and composed offset")
 val flat = [Float64.new(1.0), Float64.new(2.0), Float64.new(3.0),
             Float64.new(4.0), Float64.new(5.0), Float64.new(6.0),
             Float64.new(7.0), Float64.new(8.0), Float64.new(9.0)]
@@ -433,7 +414,8 @@ expect(s.data_f64.len()).to_equal(a.data_f64.len())
 
 #### row view is metadata-only and keeps row-major stride
 
-- row view is metadata-only and keeps row-major stride
+1. Float64 new
+2. Float64 new
    - Expected: r.shape equals `Shape.new([Index.new(3)])`
    - Expected: r.layout equals `Layout.Strided`
    - Expected: r.offset equals `Index.new(3)`
@@ -446,12 +428,10 @@ expect(s.data_f64.len()).to_equal(a.data_f64.len())
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("row view is metadata-only and keeps row-major stride")
 val flat = [Float64.new(1.0), Float64.new(2.0), Float64.new(3.0),
             Float64.new(4.0), Float64.new(5.0), Float64.new(6.0),
             Float64.new(7.0), Float64.new(8.0), Float64.new(9.0)]
@@ -470,7 +450,8 @@ expect(r.data_f64.len()).to_equal(a.data_f64.len())
 
 #### column slice is metadata-only and carries non-contiguous stride
 
-- column slice is metadata-only and carries non-contiguous stride
+1. Float64 new
+2. Float64 new
    - Expected: c.shape equals `Shape.new([Index.new(3), Index.new(1)])`
    - Expected: c.layout equals `Layout.Strided`
    - Expected: c.offset equals `Index.new(1)`
@@ -483,12 +464,10 @@ expect(r.data_f64.len()).to_equal(a.data_f64.len())
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("column slice is metadata-only and carries non-contiguous stride")
 val flat = [Float64.new(1.0), Float64.new(2.0), Float64.new(3.0),
             Float64.new(4.0), Float64.new(5.0), Float64.new(6.0),
             Float64.new(7.0), Float64.new(8.0), Float64.new(9.0)]
@@ -510,7 +489,9 @@ expect(c.data_f64.len()).to_equal(a.data_f64.len())
 
 #### row and column from a sliced matrix compose view metadata
 
-- row and column from a sliced matrix compose view metadata
+1. Float64 new
+2. Float64 new
+3. Slice new
    - Expected: row.offset equals `Index.new(7)`
    - Expected: row.strides equals `Stride.new([Index.new(1)])`
    - Expected: row.get(Index.new(1)) equals `Float64.new(9.0)`
@@ -524,12 +505,10 @@ expect(c.data_f64.len()).to_equal(a.data_f64.len())
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("row and column from a sliced matrix compose view metadata")
 val flat = [Float64.new(1.0), Float64.new(2.0), Float64.new(3.0),
             Float64.new(4.0), Float64.new(5.0), Float64.new(6.0),
             Float64.new(7.0), Float64.new(8.0), Float64.new(9.0)]
@@ -555,7 +534,7 @@ expect(col.data_f64.len()).to_equal(a.data_f64.len())
 
 #### to_contiguous materializes strided I64 views
 
-- to_contiguous materializes strided I64 views
+1. Int64 new
    - Expected: dense.layout equals `Layout.RowMajor`
    - Expected: dense.offset equals `Index.new(0)`
    - Expected: dense.strides equals `Stride.new([Index.new(1)])`
@@ -567,12 +546,10 @@ expect(col.data_f64.len()).to_equal(a.data_f64.len())
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("to_contiguous materializes strided I64 views")
 val a = array_i64([Int64.new(1), Int64.new(2), Int64.new(3),
                    Int64.new(4), Int64.new(5)])
 val s = a.slice(Slice.new(Index.new(0), Index.new(5), Index.new(2)))
@@ -589,7 +566,7 @@ expect(dense.get(Index.new(2))).to_equal(Int64.new(5))
 
 #### to_contiguous materializes strided Bool views
 
-- to_contiguous materializes strided Bool views
+1. Bool new
    - Expected: dense.layout equals `Layout.RowMajor`
    - Expected: dense.offset equals `Index.new(0)`
    - Expected: dense.strides equals `Stride.new([Index.new(1)])`
@@ -601,12 +578,10 @@ expect(dense.get(Index.new(2))).to_equal(Int64.new(5))
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("to_contiguous materializes strided Bool views")
 val a = array_bool([Bool.new(true), Bool.new(false), Bool.new(true),
                     Bool.new(false)])
 val s = a.slice(Slice.new(Index.new(0), Index.new(4), Index.new(2)))
@@ -625,19 +600,13 @@ expect(dense.get_bool_at([Index.new(1)])).to_equal(Bool.new(true))
 
 #### returns an error for step=0
 
-- returns an error for step=0
-   - Expected: r.is_err() is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns an error for step=0")
 val a = array([Float64.new(1.0), Float64.new(2.0), Float64.new(3.0)])
 val r = a.try_slice(Slice.new(Index.new(0), Index.new(3), Index.new(0)))
 expect(r.is_err()).to_equal(true)
@@ -647,19 +616,13 @@ expect(r.is_err()).to_equal(true)
 
 #### returns an error for stop > len
 
-- returns an error for stop > len
-   - Expected: r.is_err() is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns an error for stop > len")
 val a = array([Float64.new(1.0), Float64.new(2.0)])
 val r = a.try_slice(Slice.new(Index.new(0), Index.new(5), Index.new(1)))
 expect(r.is_err()).to_equal(true)
@@ -680,59 +643,8 @@ expect(r.is_err()).to_equal(true)
 
 ## Related Documentation
 
-- **Plan:** `doc/03_plan/agent_tasks/scilib_port_ndarray.md`
-- **Design:** `doc/05_design/scilib_port_architecture.md`
+- **Plan:** [doc/03_plan/agent_tasks/scilib_port_ndarray.md](doc/03_plan/agent_tasks/scilib_port_ndarray.md)
+- **Design:** [doc/05_design/scilib_port_architecture.md](doc/05_design/scilib_port_architecture.md)
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `03c03c60fbcebeb86bc9d1dd78ea676b7f6e361041d6a9659b3050011c04cf19`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `03c03c60fbcebeb86bc9d1dd78ea676b7f6e361041d6a9659b3050011c04cf19`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `03c03c60fbcebeb86bc9d1dd78ea676b7f6e361041d6a9659b3050011c04cf19`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **88/100**; effective score: **88/100**; blockers: **0**.
-
-SSpec documentization score: 88/100
-source: test/03_system/feature/scilib/ndarray_slice_spec.spl
-mirror: doc/06_spec/03_system/feature/scilib/ndarray_slice_spec.md (current)
-findings: 6 blockers: 0
-  narrative=100 structure=100 oracle=80
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/feature/scilib/ndarray_slice_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/feature/scilib/ndarray_slice_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/feature/scilib/ndarray_slice_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-20): 2 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/03_system/feature/scilib/ndarray_slice_spec.spl:59:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'returns a[1:3] for length-5 array' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/scilib/ndarray_slice_spec.spl:70:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'returns a[0:5:2] (every-other element)' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/scilib/ndarray_slice_spec.spl:82:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'treats Index.new(-1) as 'last element'' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

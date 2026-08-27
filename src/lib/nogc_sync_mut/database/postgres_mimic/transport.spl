@@ -1,0 +1,211 @@
+"""Socket-neutral bounded transport driver for PostgreSQL v3 frontend bytes.
+
+Socket adapters feed received octets and drain typed events.  This module owns
+incremental buffering and protocol sequencing, but deliberately performs no
+network, TLS, authentication, cancellation, or query I/O itself.
+"""
+
+use nogc_sync_mut.database.postgres_mimic.wire.{
+    PGWIRE_DEFAULT_MAX_FRAME, PGWIRE_DEFAULT_MAX_PARAMETERS, PgWireErrorCode
+}
+use nogc_sync_mut.database.postgres_mimic.connection.{
+    PgWireSslPolicy, PgWireConnectionState, PgWireActionKind,
+    PgWireConnection, pgwire_connection
+}
+
+const PGWIRE_DEFAULT_MAX_BUFFER: i64 = PGWIRE_DEFAULT_MAX_FRAME * 2
+
+enum PgWireTransportEventKind:
+    None
+    NeedInput
+    SendSslSupported
+    SendSslUnsupported
+    Authenticate
+    ExecuteQuery
+    CancelRequest
+    Close
+
+enum PgWireTransportError:
+    None
+    InvalidLimit
+    BufferOverflow
+    ProtocolRejected
+    LocallyCancelled
+
+struct PgWireTransportEvent:
+    kind: PgWireTransportEventKind
+    required: i64
+    user: text
+    database: text
+    application_name: text
+    query: text
+    process_id: i64
+    secret_key: i64
+    transport_error: PgWireTransportError
+    wire_error: PgWireErrorCode
+    detail: text
+
+fn pgwire_transport_event(kind: PgWireTransportEventKind) -> PgWireTransportEvent:
+    PgWireTransportEvent(kind: kind, required: 0, user: "", database: "",
+        application_name: "", query: "", process_id: 0, secret_key: 0,
+        transport_error: PgWireTransportError.None, wire_error: PgWireErrorCode.None,
+        detail: "")
+
+fn pgwire_transport_tail(bytes: [i64], consumed: i64) -> [i64]:
+    var remaining: [i64] = []
+    var i = consumed
+    while i < bytes.len():
+        remaining.push(bytes[i])
+        i = i + 1
+    remaining
+
+class PgWireTransportDriver:
+    connection: PgWireConnection
+    receive_buffer: [i64]
+    events: [PgWireTransportEvent]
+    max_buffer: i64
+    closed: bool
+    current_event: PgWireTransportEvent
+
+    me emit_close(transport_error: PgWireTransportError, wire_error: PgWireErrorCode,
+            detail: text):
+        if self.closed: return
+        self.closed = true
+        self.connection.state = PgWireConnectionState.Closed
+        self.receive_buffer = []
+        var event = pgwire_transport_event(PgWireTransportEventKind.Close)
+        event.transport_error = transport_error
+        event.wire_error = wire_error
+        event.detail = detail
+        self.events.push(event)
+
+    me emit_connection_action(kind: PgWireActionKind):
+        if kind == PgWireActionKind.NeedMore:
+            var event = pgwire_transport_event(PgWireTransportEventKind.NeedInput)
+            event.required = self.connection.action_required()
+            self.events.push(event)
+        elif kind == PgWireActionKind.SendSslSupported:
+            self.events.push(pgwire_transport_event(PgWireTransportEventKind.SendSslSupported))
+        elif kind == PgWireActionKind.SendSslUnsupported:
+            self.events.push(pgwire_transport_event(PgWireTransportEventKind.SendSslUnsupported))
+        elif kind == PgWireActionKind.BeginAuthentication:
+            var event = pgwire_transport_event(PgWireTransportEventKind.Authenticate)
+            event.user = self.connection.action_user()
+            event.database = self.connection.action_database()
+            event.application_name = self.connection.action_application_name()
+            self.events.push(event)
+        elif kind == PgWireActionKind.DispatchSimpleQuery:
+            var event = pgwire_transport_event(PgWireTransportEventKind.ExecuteQuery)
+            event.query = self.connection.action_query()
+            self.events.push(event)
+        elif kind == PgWireActionKind.CancelUnsupported:
+            var event = pgwire_transport_event(PgWireTransportEventKind.CancelRequest)
+            event.process_id = self.connection.action_process_id()
+            event.secret_key = self.connection.action_secret_key()
+            self.events.push(event)
+            self.closed = true
+            self.receive_buffer = []
+        elif kind == PgWireActionKind.Terminate:
+            self.emit_close(PgWireTransportError.None, PgWireErrorCode.None, "client terminated connection")
+        else:
+            self.emit_close(PgWireTransportError.ProtocolRejected,
+                self.connection.action_error(), self.connection.action_detail())
+
+    me drive():
+        while not self.closed:
+            val kind = self.connection.dispatch_kind(self.receive_buffer)
+            if kind == PgWireActionKind.NeedMore:
+                self.emit_connection_action(kind)
+                return
+            val consumed = self.connection.action_consumed()
+            if consumed > 0:
+                self.receive_buffer = pgwire_transport_tail(self.receive_buffer, consumed)
+            self.emit_connection_action(kind)
+            if self.closed: return
+            if (kind == PgWireActionKind.SendSslSupported or
+                    kind == PgWireActionKind.BeginAuthentication):
+                return
+            if consumed <= 0: return
+
+    me feed(bytes: [i64]):
+        if self.closed: return
+        if bytes.len() > self.max_buffer - self.receive_buffer.len():
+            self.emit_close(PgWireTransportError.BufferOverflow, PgWireErrorCode.FrameTooLarge,
+                "receive buffer exceeds configured limit")
+            return
+        var i = 0
+        while i < bytes.len():
+            self.receive_buffer.push(bytes[i])
+            i = i + 1
+        self.drive()
+
+    me tls_established():
+        if self.closed: return
+        val kind = self.connection.tls_established_kind()
+        self.emit_connection_action(kind)
+        if not self.closed and self.receive_buffer.len() > 0: self.drive()
+
+    me tls_failed():
+        if self.closed: return
+        self.emit_connection_action(self.connection.tls_failed_kind())
+
+    me authentication_succeeded():
+        if self.closed: return
+        val kind = self.connection.authentication_succeeded_kind()
+        self.emit_connection_action(kind)
+        if not self.closed and self.receive_buffer.len() > 0: self.drive()
+
+    me authentication_failed():
+        if self.closed: return
+        self.emit_connection_action(self.connection.authentication_failed_kind())
+
+    me cancel(detail: text = "transport cancelled"):
+        self.emit_close(PgWireTransportError.LocallyCancelled, PgWireErrorCode.None, detail)
+
+    me close():
+        self.emit_close(PgWireTransportError.None, PgWireErrorCode.None, "transport closed")
+
+    me drain_events() -> [PgWireTransportEvent]:
+        val drained = self.events
+        self.events = []
+        drained
+
+    # Scalar cursor used by socket adapters: the driver owns the aggregate.
+    me next_event_kind() -> PgWireTransportEventKind:
+        if self.events.len() == 0:
+            self.current_event = pgwire_transport_event(PgWireTransportEventKind.None)
+            return PgWireTransportEventKind.None
+        self.current_event = self.events[0]
+        self.events = self.events.slice(1, self.events.len())
+        self.current_event.kind
+
+    fn event_required() -> i64: self.current_event.required
+    fn event_user() -> text: self.current_event.user
+    fn event_database() -> text: self.current_event.database
+    fn event_application_name() -> text: self.current_event.application_name
+    fn event_query() -> text: self.current_event.query
+    fn event_process_id() -> i64: self.current_event.process_id
+    fn event_secret_key() -> i64: self.current_event.secret_key
+    fn event_transport_error() -> PgWireTransportError: self.current_event.transport_error
+    fn event_wire_error() -> PgWireErrorCode: self.current_event.wire_error
+    fn event_detail() -> text: self.current_event.detail
+
+    fn buffered_bytes() -> i64: self.receive_buffer.len()
+    fn pending_events() -> i64: self.events.len()
+
+fn pgwire_transport_driver(ssl_policy: PgWireSslPolicy,
+        max_frame: i64 = PGWIRE_DEFAULT_MAX_FRAME,
+        max_parameters: i64 = PGWIRE_DEFAULT_MAX_PARAMETERS,
+        max_buffer: i64 = PGWIRE_DEFAULT_MAX_BUFFER) -> PgWireTransportDriver:
+    var driver = PgWireTransportDriver(
+        connection: pgwire_connection(ssl_policy, max_frame, max_parameters),
+        receive_buffer: [], events: [], max_buffer: max_buffer, closed: false,
+        current_event: pgwire_transport_event(PgWireTransportEventKind.None))
+    if max_frame < 8 or max_parameters < 1 or max_buffer < max_frame:
+        driver.emit_close(PgWireTransportError.InvalidLimit, PgWireErrorCode.InvalidLimit,
+            "transport limits are invalid")
+    driver
+
+export PGWIRE_DEFAULT_MAX_BUFFER
+export PgWireTransportEventKind, PgWireTransportError, PgWireTransportEvent
+export PgWireTransportDriver, pgwire_transport_driver

@@ -1,6 +1,29 @@
 # Pure Simple Vhdl Source Of Truth Specification
 
-> Tests covering pure Simple VHDL source-of-truth metadata, pure Simple VHDL return ABI and diagnostics, pure Simple VHDL hardware calls, pure Simple VHDL fixed-width and domains, pure Simple VHDL GHDL acceptance.
+> 1. delete file
+
+<!-- sdn-diagram:id=pure_simple_vhdl_source_of_truth_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=pure_simple_vhdl_source_of_truth_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+pure_simple_vhdl_source_of_truth_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=pure_simple_vhdl_source_of_truth_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -17,22 +40,25 @@
 
 #### preserves @hardware metadata through pure Simple AST HIR and MIR
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- preserves @hardware metadata through pure Simple AST HIR and MIR
+1. delete file
+2. delete file
+3. write file
+4. check msg
+5. check msg
+6. check msg
+7. check msg
+8. check msg
+9. delete file
+10. delete file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("preserves @hardware metadata through pure Simple AST HIR and MIR")
 # Fixture: @hardware full_add.
 # Expected: the pure Simple compiler selects it as a VHDL entity without
 # reparsing raw source text or relying on the Rust MIR backend.
@@ -57,18 +83,24 @@ delete_file(out_path)
 
 #### preserves @generic metadata as structured VHDL generic declarations
 
-- preserves @generic metadata as structured VHDL generic declarations
+1. delete file
+2. delete file
+3. write file
+4. check msg
+5. check msg
+6. check msg
+7. check msg
+8. delete file
+9. delete file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("preserves @generic metadata as structured VHDL generic declarations")
 val src_path = "/tmp/sml_pure_vhdl_generic_metadata.spl"
 val out_path = "/tmp/sml_pure_vhdl_generic_metadata.vhd"
 delete_file(src_path)
@@ -89,18 +121,25 @@ delete_file(out_path)
 
 #### preserves @clocked reset-domain metadata as structured process metadata
 
-- preserves @clocked reset-domain metadata as structured process metadata
+1. delete file
+2. delete file
+3. write file
+4. check msg
+5. check msg
+6. check msg
+7. check msg
+8. check msg
+9. delete file
+10. delete file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("preserves @clocked reset-domain metadata as structured process metadata")
 val src_path = "/tmp/sml_pure_vhdl_clocked_metadata.spl"
 val out_path = "/tmp/sml_pure_vhdl_clocked_metadata.vhd"
 delete_file(src_path)
@@ -122,18 +161,24 @@ delete_file(out_path)
 
 #### preserves labeled tuple return field names through pure Simple MIR
 
-- preserves labeled tuple return field names through pure Simple MIR
+1. delete file
+2. delete file
+3. write file
+4. check msg
+5. check msg
+6. check msg
+7. check msg
+8. delete file
+9. delete file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("preserves labeled tuple return field names through pure Simple MIR")
 # Fixture: @hardware full_add returns (sum: bool, cout: bool).
 # Expected: pure Simple VHDL lowering can inspect labels from IR/type
 # metadata, not from the original source line.
@@ -159,19 +204,25 @@ delete_file(out_path)
 
 #### emits labeled tuple return fields as VHDL output ports
 
-- emits labeled tuple return fields as VHDL output ports
+1. delete file
+2. delete file
+3. write file
+4. check msg
+5. check msg
    - Expected: output does not contain `result_out`
+6. check msg
+7. check msg
+8. delete file
+9. delete file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("emits labeled tuple return fields as VHDL output ports")
 # Expected: sum/cout are out ports, result_out is absent, and each field
 # has its own assignment.
 val src_path = "/tmp/sml_pure_vhdl_tuple_outputs.spl"
@@ -195,18 +246,22 @@ delete_file(out_path)
 
 #### accepts same-type labeled output ports
 
-- accepts same-type labeled output ports
+1. delete file
+2. delete file
+3. write file
+4. check msg
+5. check msg
+6. delete file
+7. delete file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("accepts same-type labeled output ports")
 # Fixture: @hardware fn flags() -> (left: bool, right: bool).
 # Expected: same-type outputs are legal when labels define the ABI.
 val src_path = "/tmp/sml_pure_vhdl_same_type_labeled.spl"
@@ -227,18 +282,24 @@ delete_file(out_path)
 
 #### emits same-type anonymous hardware outputs with deterministic public ports
 
-- emits same-type anonymous hardware outputs with deterministic public ports
+1. delete file
+2. delete file
+3. write file
+4. check msg
+5. check msg
+6. check msg
+7. check msg
+8. delete file
+9. delete file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("emits same-type anonymous hardware outputs with deterministic public ports")
 # Fixture: @hardware fn bad() -> (bool, bool).
 # Expected: deterministic out_0/out_1 VHDL output ports and assignments.
 val src_path = "/tmp/sml_pure_vhdl_same_type_anonymous.spl"
@@ -261,18 +322,22 @@ delete_file(out_path)
 
 #### rejects duplicate sanitized pure Simple VHDL port names
 
-- rejects duplicate sanitized pure Simple VHDL port names
+1. delete file
+2. delete file
+3. write file
+4. check msg
+5. check msg
+6. delete file
+7. delete file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("rejects duplicate sanitized pure Simple VHDL port names")
 # Expected: input/output and output/output collisions report both source
 # names and the sanitized VHDL name.
 val src_path = "/tmp/sml_pure_vhdl_port_collision.spl"
@@ -295,18 +360,27 @@ delete_file(out_path)
 
 #### lowers selected pure combinational helpers as explicit hardware entities
 
-- lowers selected pure combinational helpers as explicit hardware entities
+1. delete file
+2. delete file
+3. write file
+4. check msg
+5. check msg
+6. check msg
+7. check msg
+8. check msg
+9. check msg
+10. check msg
+11. delete file
+12. delete file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 23 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("lowers selected pure combinational helpers as explicit hardware entities")
 # Selected helper subset: pure combinational helpers must be explicit
 # @hardware entities. Broad HLS inference for ordinary functions remains
 # a hard diagnostic covered below.
@@ -334,18 +408,22 @@ delete_file(out_path)
 
 #### lowers direct hardware calls to deterministic named entity instances
 
-- lowers direct hardware calls to deterministic named entity instances
+1. delete file
+2. delete file
+3. write file
+4. check msg
+5. check msg
+6. delete file
+7. delete file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("lowers direct hardware calls to deterministic named entity instances")
 # Fixture: add2 calls full_add twice.
 # Expected: u_full_add_0/u_full_add_1 entity instances are emitted in
 # stable source order.
@@ -367,18 +445,24 @@ delete_file(out_path)
 
 #### emits named port map connections for caller and callee ports
 
-- emits named port map connections for caller and callee ports
+1. delete file
+2. delete file
+3. write file
+4. check msg
+5. check msg
+6. check msg
+7. check msg
+8. delete file
+9. delete file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("emits named port map connections for caller and callee ports")
 # Expected: every input and output is connected by sanitized VHDL port
 # name; positional port maps are not used.
 val src_path = "/tmp/sml_pure_vhdl_named_port_map.spl"
@@ -401,18 +485,22 @@ delete_file(out_path)
 
 #### allocates deterministic temp signals for multi-output hardware calls
 
-- allocates deterministic temp signals for multi-output hardware calls
+1. delete file
+2. delete file
+3. write file
+4. check msg
+5. check msg
+6. delete file
+7. delete file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("allocates deterministic temp signals for multi-output hardware calls")
 # Expected: repeated pure Simple compilations produce byte-stable signal
 # names for full_add_0_sum/full_add_0_cout and later instances.
 val src_path = "/tmp/sml_pure_vhdl_temp_signals.spl"
@@ -433,18 +521,21 @@ delete_file(out_path)
 
 #### resolves labeled field access over hardware call results
 
-- resolves labeled field access over hardware call results
+1. delete file
+2. delete file
+3. write file
+4. check msg
+5. delete file
+6. delete file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("resolves labeled field access over hardware call results")
 # Fixture: lo.sum, lo.cout, lo.0, and lo.1.
 # Expected: labeled access lowers to temp signals; numeric access works
 # but emits the common labeled-tuple numeric-access warning.
@@ -465,18 +556,22 @@ delete_file(out_path)
 
 #### rejects dynamic runtime tuple access during pure Simple VHDL lowering
 
-- rejects dynamic runtime tuple access during pure Simple VHDL lowering
+1. delete file
+2. delete file
+3. write file
+4. check msg
+5. check msg
+6. delete file
+7. delete file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("rejects dynamic runtime tuple access during pure Simple VHDL lowering")
 # Fixture: lo[index] where index is not a compile-time constant.
 # Expected: hard diagnostic before VHDL emission.
 val src_path = "/tmp/sml_pure_vhdl_dynamic_tuple_access.spl"
@@ -497,18 +592,23 @@ delete_file(out_path)
 
 #### rejects broad HLS helper inference outside explicit hardware helpers
 
-- rejects broad HLS helper inference outside explicit hardware helpers
+1. delete file
+2. delete file
+3. write file
+4. check msg
+5. check msg
+6. check msg
+7. delete file
+8. delete file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("rejects broad HLS helper inference outside explicit hardware helpers")
 # Fixture: top calls an ordinary pure helper.
 # Expected: no inferred helper subprogram is emitted; the compiler fails
 # before VHDL output so the unsupported ownership boundary stays visible.
@@ -533,18 +633,22 @@ delete_file(out_path)
 
 #### lowers typed integer comparisons from pure Simple IR
 
-- lowers typed integer comparisons from pure Simple IR
+1. delete file
+2. delete file
+3. write file
+4. check msg
+5. check msg
+6. delete file
+7. delete file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("lowers typed integer comparisons from pure Simple IR")
 val src_path = "/tmp/sml_pure_vhdl_compare.spl"
 val out_path = "/tmp/sml_pure_vhdl_compare.vhd"
 delete_file(src_path)
@@ -563,18 +667,23 @@ delete_file(out_path)
 
 #### lowers unsigned fixed-width literal shifts from typed IR
 
-- lowers unsigned fixed-width literal shifts from typed IR
+1. delete file
+2. delete file
+3. write file
+4. check msg
+5. check msg
+6. check msg
+7. delete file
+8. delete file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("lowers unsigned fixed-width literal shifts from typed IR")
 val src_path = "/tmp/sml_pure_vhdl_shift.spl"
 val out_path = "/tmp/sml_pure_vhdl_shift.vhd"
 delete_file(src_path)
@@ -594,18 +703,34 @@ delete_file(out_path)
 
 #### lowers fixed-width slices and concat from typed IR
 
-- lowers fixed-width slices and concat from typed IR
+1. delete file
+2. delete file
+3. write file
+4. check msg
+5. check msg
+6. check msg
+7. check msg
+8. delete file
+9. delete file
+10. write file
+11. check msg
+12. check msg
+13. check msg
+14. check msg
+15. check msg
+16. delete file
+17. delete file
+18. delete file
+19. delete file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 35 lines folded for reproduction.
+Runnable source: 33 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("lowers fixed-width slices and concat from typed IR")
 # Expected: no facade string parsing; widths, signedness, and conversions
 # are validated by pure Simple type/IR metadata.
 val slice_src = "/tmp/sml_pure_vhdl_slice.spl"
@@ -645,18 +770,38 @@ delete_file(concat_out)
 
 #### lowers named clock domains with reset polarity synchrony and no-reset forms
 
-- lowers named clock domains with reset polarity synchrony and no-reset forms
+1. delete file
+2. delete file
+3. delete file
+4. delete file
+5. delete file
+6. delete file
+7. write file
+8. check msg
+9. check msg
+10. write file
+11. check msg
+12. check msg
+13. check msg
+14. write file
+15. check msg
+16. check msg
+17. check msg
+18. delete file
+19. delete file
+20. delete file
+21. delete file
+22. delete file
+23. delete file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 38 lines folded for reproduction.
+Runnable source: 36 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("lowers named clock domains with reset polarity synchrony and no-reset forms")
 val sync_src = "/tmp/sml_pure_vhdl_domain_sync.spl"
 val sync_out = "/tmp/sml_pure_vhdl_domain_sync.vhd"
 val async_src = "/tmp/sml_pure_vhdl_domain_async.spl"
@@ -699,18 +844,23 @@ delete_file(no_reset_out)
 
 #### rejects implicit cross-domain reads with source and destination names
 
-- rejects implicit cross-domain reads with source and destination names
+1. delete file
+2. delete file
+3. write file
+4. check msg
+5. check msg
+6. check msg
+7. delete file
+8. delete file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("rejects implicit cross-domain reads with source and destination names")
 val src_path = "/tmp/sml_pure_vhdl_cross_domain.spl"
 val out_path = "/tmp/sml_pure_vhdl_cross_domain.vhd"
 delete_file(src_path)
@@ -732,18 +882,22 @@ delete_file(out_path)
 
 #### generated pure Simple full_add VHDL passes GHDL analyze elaborate and synth
 
-- generated pure Simple full_add VHDL passes GHDL analyze elaborate and synth
+1. delete file
+2. delete file
+3. write file
+4. check msg
+5. check msg
+6. delete file
+7. delete file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("generated pure Simple full_add VHDL passes GHDL analyze elaborate and synth")
 val src_path = "/tmp/sml_pure_vhdl_ghdl_full_add.spl"
 val out_path = "/tmp/sml_pure_vhdl_ghdl_full_add.vhd"
 delete_file(src_path)
@@ -763,18 +917,22 @@ delete_file(out_path)
 
 #### generated pure Simple caller callee VHDL passes GHDL analyze elaborate and synth
 
-- generated pure Simple caller callee VHDL passes GHDL analyze elaborate and synth
+1. delete file
+2. delete file
+3. write file
+4. check msg
+5. check msg
+6. delete file
+7. delete file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("generated pure Simple caller callee VHDL passes GHDL analyze elaborate and synth")
 val src_path = "/tmp/sml_pure_vhdl_ghdl_call.spl"
 val out_path = "/tmp/sml_pure_vhdl_ghdl_call.vhd"
 delete_file(src_path)
@@ -794,18 +952,23 @@ delete_file(out_path)
 
 #### pure Simple diagnostics prevent writing stale or partial VHDL files
 
-- pure Simple diagnostics prevent writing stale or partial VHDL files
+1. delete file
+2. delete file
+3. write file
+4. write file
+5. check msg
+6. check msg
+7. delete file
+8. delete file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("pure Simple diagnostics prevent writing stale or partial VHDL files")
 val src_path = "/tmp/sml_pure_vhdl_stale_failure.spl"
 val out_path = "/tmp/sml_pure_vhdl_stale_failure.vhd"
 delete_file(src_path)
@@ -825,18 +988,23 @@ delete_file(out_path)
 
 #### pure Simple VHDL output is byte-stable across compilations
 
-- pure Simple VHDL output is byte-stable across compilations
+1. delete file
+2. delete file
+3. delete file
+4. write file
+5. check msg
+6. delete file
+7. delete file
+8. delete file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("pure Simple VHDL output is byte-stable across compilations")
 val src_path = "/tmp/sml_pure_vhdl_stable.spl"
 val out1 = "/tmp/sml_pure_vhdl_stable_run1.vhd"
 val out2 = "/tmp/sml_pure_vhdl_stable_run2.vhd"
@@ -863,12 +1031,12 @@ delete_file(out2)
 | Category | Compiler |
 | Status | Active |
 | Source | `test/03_system/compiler/pure_simple_vhdl_source_of_truth_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering pure Simple VHDL source-of-truth metadata, pure Simple VHDL return ABI and diagnostics, pure Simple VHDL hardware calls, pure Simple VHDL fixed-width and domains, pure Simple VHDL GHDL acceptance.
+Tests covering:
 - pure Simple VHDL source-of-truth metadata
 - pure Simple VHDL return ABI and diagnostics
 - pure Simple VHDL hardware calls
@@ -887,51 +1055,3 @@ Tests covering pure Simple VHDL source-of-truth metadata, pure Simple VHDL retur
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `1baef3fb0937fca1c12920e40de6340d5157bfb22953e180be00ee5e35a302d6`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `1baef3fb0937fca1c12920e40de6340d5157bfb22953e180be00ee5e35a302d6`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `1baef3fb0937fca1c12920e40de6340d5157bfb22953e180be00ee5e35a302d6`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/03_system/compiler/pure_simple_vhdl_source_of_truth_spec.spl
-mirror: doc/06_spec/03_system/compiler/pure_simple_vhdl_source_of_truth_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/compiler/pure_simple_vhdl_source_of_truth_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/compiler/pure_simple_vhdl_source_of_truth_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/compiler/pure_simple_vhdl_source_of_truth_spec.spl:74:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'preserves @hardware metadata through pure Simple AST HIR and MIR' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/compiler/pure_simple_vhdl_source_of_truth_spec.spl:96:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'preserves @generic metadata as structured VHDL generic declarations' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/compiler/pure_simple_vhdl_source_of_truth_spec.spl:114:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'preserves @clocked reset-domain metadata as structured process metadata' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

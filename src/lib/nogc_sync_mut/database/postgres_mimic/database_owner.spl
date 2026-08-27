@@ -1,0 +1,79 @@
+"""Single mutable owner for commands decoded by parallel pgwire front workers."""
+
+use std.database.postgres_mimic.server.{
+    PgResponse, PgResponseKind, PostgresMimicServer
+}
+use std.database.sql.types.{DbError}
+use std.database.postgres_mimic.dispatch_lifecycle.{
+    PgDispatchOperation, PgDispatchClaimResult, PgDispatchCompletion
+}
+use std.database.postgres_mimic.dispatch_gate.{PgDispatchGate}
+
+fn pg_owner_error(sqlstate: text, message: text) -> PgResponse:
+    PgResponse(kind: PgResponseKind.ErrorResponse, tag: "ERROR", columns: [],
+        rows: [], sqlstate: sqlstate, message: message, transaction_status: "I")
+
+class PgDatabaseOwner:
+    database: PostgresMimicServer
+    dispatch: PgDispatchGate
+    commands_started: i64
+    commands_completed: i64
+
+    static fn create(database: PostgresMimicServer,
+            queue_capacity: i64) -> PgDatabaseOwner:
+        PgDatabaseOwner(database: database,
+            dispatch: PgDispatchGate.create(queue_capacity),
+            commands_started: 0, commands_completed: 0)
+
+    me process_one(now_ms: i64) -> bool:
+        val claimed = self.dispatch.claim_next(now_ms)
+        val job = match claimed:
+            PgDispatchClaimResult.Claimed(value): value
+            PgDispatchClaimResult.Empty: return false
+        self.commands_started = self.commands_started + 1
+
+        var completion = PgDispatchCompletion(session_id: job.session_id,
+            responses: [], close_connection: false)
+        match job.operation:
+            PgDispatchOperation.Startup:
+                match self.database.startup(job.user, job.database,
+                        job.application_name):
+                    Ok(session_id):
+                        completion.session_id = session_id
+                        completion.responses = self.database.startup_responses(session_id)
+                    Err(message):
+                        completion.responses = [pg_owner_error("28000", message)]
+                        completion.close_connection = true
+            PgDispatchOperation.Query:
+                completion.responses = [
+                    self.database.simple_query(job.session_id, job.payload)
+                ]
+            PgDispatchOperation.Terminate:
+                val _ = self.database.terminate(job.session_id)
+                completion.close_connection = true
+
+        if not self.dispatch.complete(job.job_id, completion):
+            # The owner claimed the job, so loss of its retained slot is an
+            # internal invariant failure. Stop admission and preserve DB state.
+            val _ = self.dispatch.begin_drain()
+            return false
+        self.commands_completed = self.commands_completed + 1
+        true
+
+    me process_bounded(now_ms: i64, max_commands: i64) -> i64:
+        if max_commands <= 0: return 0
+        var completed = 0
+        while completed < max_commands and self.process_one(now_ms):
+            completed = completed + 1
+        completed
+
+    me begin_drain() -> i64:
+        self.dispatch.begin_drain()
+
+    me checkpoint() -> Result<(), DbError>:
+        self.database.checkpoint()
+
+    me close() -> Result<(), DbError>:
+        self.database.close()
+
+export PgDatabaseOwner

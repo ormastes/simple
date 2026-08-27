@@ -162,7 +162,7 @@ expect(m.clint_base()).to_equal(4026597376)
 
 ## Related Documentation
 
-- **Requirements:** `REQ-6`
+- **Requirements:** [REQ-6](REQ-6)
 
 
 </details>

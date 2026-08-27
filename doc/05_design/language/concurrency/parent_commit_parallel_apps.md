@@ -5,6 +5,14 @@
 
 `TransferEnvelopeV1`, `StorageLayoutPlanV1`, and the parallel-commit result/receipt types are versioned common contracts. Transfer decisions are structural and include origin (`ParentOwned`, `ChildFresh`, `SharedImmutable`, `SharedSynchronized`, or external resource), boundary, source invalidation, and codec/lease requirement.
 
+The runtime's smaller scalar-only actor record is named
+`InlineValueEnvelopeV1`; it is an adapter for inline `RuntimeValue` words, not a
+second definition of `TransferEnvelopeV1`. Scalar channel symbols are C-owned
+under `rt_channel_*`; Rust object channels use `rt_value_channel_*`. Both are
+finite and expose nonblocking backpressure. Process/remote object handles remain
+non-admitting until an owner-scoped capability registry validates generation,
+token, owner context, and revocation.
+
 Task group sequence:
 
 1. Parent freezes or references input revision.
@@ -45,36 +53,38 @@ The planner resolves ABI constraints first, then assurance/profile overrides, de
 | REQ-PAR-008/009 | randomized completion yields one ordered parent receipt; stale/conflict rejects atomically |
 | REQ-MEM-001..003 | AoS/SoA parity, ABI rejection, stale-view rejection |
 
-The actor/process completion SSpec freezes these operator-visible steps:
+Required future SSpec flow helpers are `step_create_parent_snapshot`, `step_send_child_result`, `step_commit_results_in_order`, and `check_no_raw_pointer_transport`. Unwired scaffolds fail with `fail("parallel ownership contract not wired")`.
 
-1. `Create a bounded parent-owned process session`.
-2. `Receive a fragmented encoded child result`.
-3. `Reject stale or replayed child output`.
-4. `Commit one validated batch at the parent`.
-5. `Close the child transport exactly once`.
+## Concrete structured owner/task API (2026-08-12)
 
-The frozen setup/checker helpers are `child_result_line`,
-`parent_commit_frame_inbox_v1_for_generation`,
-`parent_commit_piped_process_session_v1`, and `drain_process_result_batch`.
-Unwired scaffolds fail with `fail("parallel ownership contract not wired")`.
+The first executable API is split by ownership responsibility:
 
-Actor admission deliberately uses the first falsifiable design: every
-`ActorRef` operation routes through its admitting `ActorScheduler`, and that
-scheduler fails closed outside its creator OS-thread domain. References never
-mutate a mailbox or ready queue independently. This is a same-thread routing
-capability, not a cross-thread contract; a future cross-thread producer must add
-one scheduler-owned synchronized command ingress. Mailbox locking alone cannot
-justify concurrent copied-reference safety.
+- `StructuredOwnerV1.snapshot()` returns copied values, revision, owner ID,
+  deterministic digest, and an opaque scalar frozen-input token.
+- `StructuredTaskGroupV1.reserve/publish_wire_result/fail_task/cancel_task/wait_all`
+  owns bounded leases and terminal state independent of a runtime. The wire is
+  eleven self-contained `i64` words with explicit success/failure and error
+  code fields.
+- `StructuredOwnerV1.commit()` calls the common commit validator, orders by the
+  declared policy, applies to a cloned staging array, and publishes exactly
+  once by advancing the owner revision.
+- `RuntimeStructuredTaskGroupV1.spawn/map/join_all/wait_all` adapts the protocol
+  to multicore-green handles. Each child has one private bounded scalar result
+  channel and constructs `StructuredTaskWireResultV1`; the owner accepts it
+  only if its task, sequence, region, kind, key token, revision, and live lease
+  all match, then reconstructs `ResultEnvelopeV1` locally.
+- `ActorStructuredTaskGroupV1.accept_result_message` decodes the same wire from
+  a canonical bounded actor mailbox message and uses the identical lease gate.
 
-The actor Modern SSpec freezes these primary steps:
+`map` preflights count, regions, key, and remaining capacity before the first
+reservation, so capacity+1 rejection is atomic. Cancellation revokes leases
+and discards late messages while `join_all` still drains the worker. Allocation
+failure rejects before reservation; joined channels are closed and freed so
+the fixed native registry can reuse slots. The worker API accepts no function
+or closure at all: `StructuredScalarWorker` selects only reviewed scalar
+operations over the frozen token and copied scalar input.
 
-1. `Create one scheduler-owned bounded actor channel`.
-2. `Admit copied arguments through one actor reference`.
-3. `Observe finite mailbox and reply backpressure`.
-4. `Dispatch and consume the isolated result`.
-5. `Stop once through the owning scheduler`.
-
-`actor-channel-authority/v1` is the closed typed-evidence schema. It records
-mailbox/reply boundedness, the isolated reply value, unique terminal removal,
-and stopped-reference rejection. It must not be used to claim synchronized
-cross-thread ingress or typed heap payload support.
+`WorkerReportedFailure` is an explicit cooperative child result and produces a
+`StructuredTaskFailureV1`. It is not a trapped runtime exit. The current pool
+directly invokes closures and cannot convert an abort/panic into a result; docs
+and receipts therefore make no trap-handling claim.

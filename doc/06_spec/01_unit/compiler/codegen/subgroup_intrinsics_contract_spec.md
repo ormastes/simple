@@ -1,6 +1,6 @@
-# Subgroup Intrinsics Contract Specification
+# Contract spec: test/01_unit/compiler/codegen/subgroup_intrinsics_contract_spec.spl
 
-> Tests covering subgroup intrinsics contract — OpenCL backend, subgroup intrinsics contract — CUDA/PTX backend, gpu_intrinsics — subgroup recognition and arity.
+> Audience: engineers owning the module under test. Purpose: keep the pinned observable
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -9,7 +9,47 @@
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Subgroup Intrinsics Contract Specification
+# Contract spec: test/01_unit/compiler/codegen/subgroup_intrinsics_contract_spec.spl
+
+Audience: engineers owning the module under test. Purpose: keep the pinned observable
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Compiler |
+| Status | Active |
+| Source | `test/01_unit/compiler/codegen/subgroup_intrinsics_contract_spec.spl` |
+| Updated | 2026-08-27 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Purpose and Audience
+
+Audience: engineers owning the module under test. Purpose: keep the pinned observable
+contracts red-visible, so a regression in the owned code fails this spec
+instead of shipping silently.
+
+## Scope and Preconditions
+
+Precondition: the repository working tree holds the subject code under test.
+Each scenario exercises the subject and asserts its observable contract; no
+behavior outside the named subject is claimed.
+
+## Primary Workflow
+
+Run the scenarios; each one drives the subject through its pinned contract
+and asserts the expected observable outcome with an executed oracle.
+
+## Unsupported / Limitations
+
+Only the pinned contracts are asserted here; end-to-end and integration
+behavior of the surrounding system is covered by companion specs.
+
+## Verification and Recovery
+
+A red scenario names the contract that regressed. Recover by restoring the
+pinned behavior in the subject; verify with
+`bin/simple test test/01_unit/compiler/codegen/subgroup_intrinsics_contract_spec.spl` and a green Results line.
 
 ## Scenarios
 
@@ -211,14 +251,12 @@ expect(source).to_contain("sub_group_barrier(")
 #### does not emit placeholder comment for any subgroup intrinsic
 
 - does not emit placeholder comment for any subgroup intrinsic
-   - Expected: source does not contain `subgroup barrier deferred`
-   - Expected: source does not contain `// unsupported OpenCL intrinsic`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -226,8 +264,7 @@ Reproduction: this block contains the complete executable scenario source.
 step("does not emit placeholder comment for any subgroup intrinsic")
 val func = make_opencl_subgroup_kernel("sg_lane_id_check_kernel", 109, lane_id_block())
 val source = OpenClBackend.compile_module_to_opencl_source(make_module_from(func)).unwrap()
-expect(source.contains("subgroup barrier deferred")).to_equal(false)
-expect(source.contains("// unsupported OpenCL intrinsic")).to_equal(false)
+expect(source).to_not_contain("subgroup barrier deferred")        expect(source).to_not_contain("// unsupported OpenCL intrinsic")
 ```
 
 </details>
@@ -463,7 +500,6 @@ expect(ptx).to_contain("bar.warp.sync")
 
 - does not emit placeholder warp sync comment
    - Expected: result.is_ok() is true
-   - Expected: ptx does not contain `// warp sync`
 
 
 <details>
@@ -480,7 +516,7 @@ val backend = CudaBackend.create((8, 6))
 val result = backend.compile(make_module_from(func))
 expect(result.is_ok()).to_equal(true)
 val ptx = result.unwrap().ptx
-expect(ptx.contains("// warp sync")).to_equal(false)
+expect(ptx).to_not_contain("// warp sync")
 ```
 
 </details>
@@ -543,24 +579,19 @@ expect(recognize_gpu_intrinsic("gpu_lane_id_nonexistent")).to_be_nil()
 #### all_gpu_intrinsic_names includes subgroup intrinsics
 
 - all_gpu_intrinsic_names includes subgroup intrinsics
-   - Expected: names contains `gpu_lane_id`
-   - Expected: names contains `gpu_warp_shuffle`
-   - Expected: names contains `gpu_warp_ballot`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # @req REQ-SSPEC-COMPILER
 step("all_gpu_intrinsic_names includes subgroup intrinsics")
 val names = all_gpu_intrinsic_names()
-expect(names.contains("gpu_lane_id")).to_equal(true)
-expect(names.contains("gpu_warp_shuffle")).to_equal(true)
-expect(names.contains("gpu_warp_ballot")).to_equal(true)
+expect(names).to_contain("gpu_lane_id")        expect(names).to_contain("gpu_warp_shuffle")        expect(names).to_contain("gpu_warp_ballot")
 ```
 
 </details>
@@ -589,23 +620,6 @@ expect(is_gpu_builtin_call("gpu_warp_ballot")).to_equal(true)
 
 </details>
 
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Compiler |
-| Status | Active |
-| Source | `test/01_unit/compiler/codegen/subgroup_intrinsics_contract_spec.spl` |
-| Updated | 2026-08-26 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering subgroup intrinsics contract — OpenCL backend, subgroup intrinsics contract — CUDA/PTX backend, gpu_intrinsics — subgroup recognition and arity.
-- subgroup intrinsics contract — OpenCL backend
-- subgroup intrinsics contract — CUDA/PTX backend
-- gpu_intrinsics — subgroup recognition and arity
-
 ## Scenario Summary
 
 | Metric | Count |
@@ -630,43 +644,33 @@ Requirements covered by the scenarios in this manual:
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `b543f437c73af387344a882d6605064703fdc7ca6076e8ab4e9c3e1ed9a6835b`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `873cbbd7d2318a1a0176f0e9d61f1a3f4d3974a264062004cdf1c886d8e51fcc`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `b543f437c73af387344a882d6605064703fdc7ca6076e8ab4e9c3e1ed9a6835b`.
+Source SHA-256: `873cbbd7d2318a1a0176f0e9d61f1a3f4d3974a264062004cdf1c886d8e51fcc`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `b543f437c73af387344a882d6605064703fdc7ca6076e8ab4e9c3e1ed9a6835b`  
+Source SHA-256: `873cbbd7d2318a1a0176f0e9d61f1a3f4d3974a264062004cdf1c886d8e51fcc`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **82/100**; effective score: **49/100**; blockers: **1**.
+Raw score: **95/100**; effective score: **95/100**; blockers: **0**.
 
-SSpec documentization score: 49/100
+SSpec documentization score: 95/100
 source: test/01_unit/compiler/codegen/subgroup_intrinsics_contract_spec.spl
 mirror: doc/06_spec/01_unit/compiler/codegen/subgroup_intrinsics_contract_spec.md (current)
-findings: 6 blockers: 1
-  narrative=100 structure=100 oracle=50
-  traceability=100 evidence=70 coverage=100 maintainability=70
+findings: 3 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=100
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-  raw=82; blocker cap makes effective=49
-doc/06_spec/01_unit/compiler/codegen/subgroup_intrinsics_contract_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/compiler/codegen/subgroup_intrinsics_contract_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, assumptions/preconditions, primary workflow, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/compiler/codegen/subgroup_intrinsics_contract_spec.spl:1:1: blocker SSDOC-ORA-002 [oracle] (-50): scenario relies on source-text inspection as system evidence
-  why: Source presence or self-created arithmetic does not demonstrate production behavior.
-  improve: Observe runtime behavior or a stable generated artifact instead.
-test/01_unit/compiler/codegen/subgroup_intrinsics_contract_spec.spl:183:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'emits get_sub_group_local_id() for gpu_lane_id' has no retained capture or evidence
+test/01_unit/compiler/codegen/subgroup_intrinsics_contract_spec.spl:215:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'emits get_sub_group_local_id() for gpu_lane_id' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/compiler/codegen/subgroup_intrinsics_contract_spec.spl:190:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'emits get_sub_group_id() for gpu_warp_id' has no retained capture or evidence
+test/01_unit/compiler/codegen/subgroup_intrinsics_contract_spec.spl:222:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'emits get_sub_group_id() for gpu_warp_id' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/compiler/codegen/subgroup_intrinsics_contract_spec.spl:197:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'emits get_sub_group_size() for gpu_warp_size' has no retained capture or evidence
+test/01_unit/compiler/codegen/subgroup_intrinsics_contract_spec.spl:229:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'emits get_sub_group_size() for gpu_warp_size' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
 <!-- sspec-maintain:scorecard:end -->

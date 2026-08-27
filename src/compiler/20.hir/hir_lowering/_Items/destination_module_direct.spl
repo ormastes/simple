@@ -1,0 +1,493 @@
+# Graph-only ParserModuleOwner lowering. This path publishes parser-owned
+# declarations directly into the destination registry and never materializes
+# a legacy HIR module/item aggregate.
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering._Items.destination_publication.*
+use compiler.hir.hir_lowering._Items.destination_declarations_direct.*
+use compiler.hir.hir_lowering._Items.destination_declaration_metadata.*
+use compiler.hir.hir_lowering._Items.declaration_lowering.*
+use compiler.hir.hir_lowering._Items.module_lowering.*
+use compiler.hir.hir_lowering._Items.module_import_resolution.*
+use compiler.hir.hir_lowering._Items.module_declarations_bootstrap.*
+use compiler.hir.hir_lowering._Items.lowering_helpers.{function_params}
+use compiler.hir.hir_lowering.hir_destination_registry_writer.{
+    hdw_function_root_building, hdw_function_token_building,
+    hdw_function_count_building, hdw_decl_count_building,
+    hdw_decl_extension_count_building, hdw_decl_schedule,
+    hdw_destination_symbol_lookup_in_module,
+    hdw_decl_nominal_detail_reserve, hdw_decl_nominal_detail_trait,
+    hdw_decl_nominal_detail_finalize}
+use compiler.hir.hir_lowering.hir_destination_declarations.{
+    HD_SCHEDULE_SYMBOL, HD_SCHEDULE_FUNCTION, HD_SCHEDULE_DECLARATION,
+    HD_SCHEDULE_IMPL, HD_SCHEDULE_EXTENSION, HD_NOMINAL_CLASS,
+    HD_NOMINAL_STRUCT}
+use compiler.frontend.parser_types.*
+use compiler.frontend.parser_types_expr.{TypeKind}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{SymbolKind, ScopeKind}
+
+var _hdd_method_parent_kind: [i64] = []
+var _hdd_method_parent_index: [i64] = []
+var _hdd_method_owner: [i64] = []
+var _hdd_method_name: [text] = []
+var _hdd_method_row: [i64] = []
+var _hdd_method_token: [i64] = []
+var _hdd_method_root: [i64] = []
+var _hdd_method_params: [i64] = []
+var _hdd_method_return_type: [i64] = []
+var _hdd_method_is_static: [bool] = []
+var _hdd_method_span: [i64] = []
+var _hdd_trait_indices: Dict<text, i64> = {}
+
+fn destination_direct_reset_method_receipts():
+    _hdd_method_parent_kind = []; _hdd_method_parent_index = []
+    _hdd_method_owner = []; _hdd_method_name = []; _hdd_method_row = []
+    _hdd_method_token = []; _hdd_method_root = []
+    _hdd_method_params = []; _hdd_method_return_type = []
+    _hdd_method_is_static = []
+    _hdd_method_span = []
+    _hdd_trait_indices = {}
+
+impl HirLowering:
+    fn destination_direct_named_type(kind: TypeKind) -> text:
+        match kind:
+            case TypeKind.Named(name, _): name
+            case _: ""
+
+    me destination_direct_fail(message: text, span: Span) -> bool:
+        destination_direct_reset_method_receipts()
+        self.destination_abort_module_publication(message)
+        self.error(message, span)
+        false
+
+    # destination_publish_function expects the function/parameter symbols to
+    # be live, but it otherwise lowers signatures and bodies directly into
+    # destination rows. Keep this adapter scalar: no HirFunction/HirParam or
+    # HirType value is constructed here.
+    me destination_publish_parser_function_direct(
+        source: ParserFunction, owner_symbol: i64, parent_generic: bool,
+        metadata_parent_kind: i64 = 0, metadata_parent_index: i64 = -1
+    ) -> bool:
+        var lookup_name = source.name
+        if owner_symbol >= 0:
+            val owner = self.symbols.get_symbol_raw(owner_symbol)
+            if val owner_value = owner:
+                lookup_name = self.symbols.method_symbol_name(
+                    owner_value.id, source.name)
+        val overload_ordinal = self.destination_next_overload_ordinal(
+            owner_symbol, source.name)
+        if overload_ordinal < 0: return false
+        val kind = if source.is_method and not source.is_static:
+            SymbolKind.Method
+        else:
+            SymbolKind.Function
+        val visibility = self.compute_visibility(source.name, source.visibility)
+        var symbol = if overload_ordinal == 0:
+            self.symbols.lookup_or_invalid(lookup_name)
+        else:
+            self.symbols.define(
+                "{lookup_name}#hir_overload#{overload_ordinal}", kind, nil,
+                source.span, visibility, false, nil)
+        if not symbol.is_valid():
+            symbol = self.symbols.define(lookup_name, kind, nil, source.span,
+                visibility, false, nil)
+        if not symbol.is_valid(): return false
+
+        self.current_function = Some(symbol)
+        self.symbols.push_scope(ScopeKind.Function)
+        var index = 0
+        while index < source.type_params.len():
+            val parameter = source.type_params[index]
+            self.symbols.define(parameter.name, SymbolKind.TypeParam, nil,
+                parameter.span, Visibility.Private, false, nil)
+            index = index + 1
+
+        val params = function_params(source)
+        var explicit_receiver = false
+        if params.len() > 0:
+            explicit_receiver = params[0].name == "self" or params[0].name == "me"
+        if source.is_method and not source.is_static and not explicit_receiver:
+            # Match legacy method scope semantics without constructing a
+            # HirType: destination parameter publication links this symbol to
+            # the scalar current_method_self_symbol_id below.
+            val self_symbol = self.symbols.define(
+                "self", SymbolKind.Parameter, nil, source.span,
+                Visibility.Private, false, nil)
+            if not self_symbol.is_valid():
+                self.symbols.pop_scope(); self.current_function = nil
+                return false
+        index = 0
+        while index < params.len():
+            val parameter = params[index]
+            self.symbols.define(parameter.name, SymbolKind.Parameter, nil,
+                parameter.span, Visibility.Private, false, nil)
+            index = index + 1
+
+        val previous_owner = self.current_method_self_symbol_id
+        self.current_method_self_symbol_id = owner_symbol
+        self.destination_parent_generic_set(parent_generic)
+        val row = self.destination_publish_function(source, symbol.id,
+            visibility, source.type_params.len() > 0, overload_ordinal)
+        self.destination_parent_generic_set(false)
+        self.current_method_self_symbol_id = previous_owner
+        self.symbols.pop_scope()
+        self.current_function = nil
+        if row < 0: return false
+        if metadata_parent_kind > 0:
+            val token = hdw_function_token_building(self.destination_slot,
+                self.destination_generation, row)
+            val root = hdw_function_root_building(self.destination_slot,
+                self.destination_generation, row)
+            val parameter_range = self.destination_last_function_params()
+            val return_type = self.destination_last_function_return_type()
+            val span = self.destination_last_function_span()
+            if (metadata_parent_index < 0 or token < 0 or root < 0 or
+                parameter_range < 0 or return_type < 0 or span < 0):
+                return false
+            _hdd_method_parent_kind.push(metadata_parent_kind)
+            _hdd_method_parent_index.push(metadata_parent_index)
+            _hdd_method_owner.push(owner_symbol)
+            _hdd_method_name.push(source.name)
+            _hdd_method_row.push(row); _hdd_method_token.push(token)
+            _hdd_method_root.push(root); _hdd_method_params.push(parameter_range)
+            _hdd_method_return_type.push(return_type)
+            _hdd_method_is_static.push(source.is_static)
+            _hdd_method_span.push(span)
+        true
+
+    me destination_publish_parser_fields_direct(
+        owner_symbol: i64, fields: [ParserField], publish_detail: bool = false
+    ) -> bool:
+        var ordinal = 0
+        while ordinal < fields.len():
+            val field = fields[ordinal]
+            val symbol = self.symbols.define(field.name, SymbolKind.Field,
+                nil, field.span, field.visibility, false, nil)
+            if (not symbol.is_valid() or
+                not self.destination_publish_nominal_field(owner_symbol,
+                    ordinal, field, symbol.id, publish_detail)):
+                return false
+            ordinal = ordinal + 1
+        true
+
+    me destination_begin_nominal_detail_direct(kind: i64, symbol: i64,
+            base: Option<Type>, traits: [Type], span: Span) -> bool:
+        var has_base = false; var base_row = -1
+        if val base_type = base:
+            has_base = true; base_row = self.destination_lower_type(base_type)
+            if base_row < 0: return false
+        val span_row = self.destination_declaration_span(span)
+        if (span_row < 0 or hdw_decl_nominal_detail_reserve(
+                self.destination_slot, self.destination_generation, kind,
+                self.current_destination_module_index, symbol, has_base,
+                base_row, span_row) < 0): return false
+        var index = 0
+        while index < traits.len():
+            val trait_row = self.destination_lower_type(traits[index])
+            if (trait_row < 0 or hdw_decl_nominal_detail_trait(
+                    self.destination_slot, self.destination_generation,
+                    trait_row) < 0): return false
+            index = index + 1
+        true
+
+    me destination_publish_parser_method_list_direct(
+        owner_symbol: i64, methods: [ParserFunction], parent_generic: bool,
+        metadata_parent_kind: i64 = 0, metadata_parent_index: i64 = -1
+    ) -> bool:
+        var index = 0
+        while index < methods.len():
+            if not self.destination_publish_parser_function_direct(
+                    methods[index], owner_symbol, parent_generic,
+                    metadata_parent_kind, metadata_parent_index):
+                return false
+            index = index + 1
+        true
+
+    me destination_publish_exact_schedule_direct(
+        owner: ParserModuleOwner, actor_names: Dict<text, bool>
+    ) -> bool:
+        val schedule_count = owner.value.declaration_kinds.len()
+        if (owner.value.declaration_names.len() != schedule_count or
+                owner.value.declaration_local_indices.len() != schedule_count or
+                owner.value.declaration_source_ordinals.len() != schedule_count): return false
+        var impl_index = 0; var function_index = 0; var extension_index = 0
+        var order_index = 0
+        var enum_count = 0; var bitfield_count = 0; var constant_count = 0
+        var actor_count = 0; var class_count = 0; var struct_count = 0
+        var trait_count = 0; var alias_count = 0
+        while order_index < schedule_count:
+            val kind = owner.value.declaration_kinds[order_index]
+            val name = owner.value.declaration_names[order_index]
+            val source_local_index = owner.value.declaration_local_indices[order_index]
+            val source_ordinal = owner.value.declaration_source_ordinals[order_index]
+            if kind == PARSER_DECL_FUNCTION:
+                if (source_local_index != function_index or
+                    function_index >= owner.value.ordered_functions.len() or
+                    owner.value.ordered_functions[function_index].name != name):
+                    return false
+                val receipt = hdw_function_count_building(
+                    self.destination_slot, self.destination_generation)
+                if (receipt < 0 or not self.destination_publish_parser_function_direct(
+                        owner.value.ordered_functions[function_index], -1, false) or
+                    hdw_decl_schedule(self.destination_slot, self.destination_generation,
+                        HD_SCHEDULE_FUNCTION, receipt, source_ordinal,
+                        self.current_destination_module_index, kind, source_local_index) < 0): return false
+                function_index = function_index + 1
+            elif (kind == PARSER_DECL_BITFIELD and source_local_index == bitfield_count and
+                    owner.value.bitfields.contains_key(name)):
+                val receipt = hdw_decl_count_building(self.destination_slot, self.destination_generation)
+                if (not self.destination_publish_bitfield_direct(owner.value.bitfields[name]) or
+                    hdw_decl_schedule(self.destination_slot, self.destination_generation,
+                        HD_SCHEDULE_DECLARATION, receipt, source_ordinal,
+                        self.current_destination_module_index, kind, source_local_index) < 0): return false
+                bitfield_count = bitfield_count + 1
+            elif (kind == PARSER_DECL_CONSTANT and source_local_index == constant_count and
+                    owner.value.constants.contains_key(name)):
+                val receipt = hdw_decl_count_building(self.destination_slot, self.destination_generation)
+                if (not self.destination_publish_constant_direct(owner.value.constants[name]) or
+                    hdw_decl_schedule(self.destination_slot, self.destination_generation,
+                        HD_SCHEDULE_DECLARATION, receipt, source_ordinal,
+                        self.current_destination_module_index, kind, source_local_index) < 0): return false
+                constant_count = constant_count + 1
+            elif (kind == PARSER_DECL_ENUM and source_local_index == enum_count and
+                    owner.value.enums.contains_key(name)):
+                val receipt = hdw_decl_count_building(self.destination_slot, self.destination_generation)
+                if (not self.destination_publish_enum_direct(owner.value.enums[name]) or
+                    hdw_decl_schedule(self.destination_slot, self.destination_generation,
+                        HD_SCHEDULE_DECLARATION, receipt, source_ordinal,
+                        self.current_destination_module_index, kind, source_local_index) < 0): return false
+                enum_count = enum_count + 1
+            elif kind == PARSER_DECL_ACTOR and source_local_index == actor_count and
+                    actor_names.contains_key(name) and
+                    owner.value.actors.contains_key(name):
+                val receipt = hdw_decl_count_building(self.destination_slot, self.destination_generation)
+                if (not self.destination_publish_actor_direct(owner.value.actors[name]) or
+                    hdw_decl_schedule(self.destination_slot, self.destination_generation,
+                        HD_SCHEDULE_DECLARATION, receipt, source_ordinal,
+                        self.current_destination_module_index, kind, source_local_index) < 0): return false
+                actor_count = actor_count + 1
+            elif kind == PARSER_DECL_EXTENSION:
+                if source_local_index != extension_index or extension_index >= owner.value.extend_enums.len(): return false
+                val source = owner.value.extend_enums[extension_index]
+                if source.target != name: return false
+                val receipt = hdw_decl_extension_count_building(
+                    self.destination_slot, self.destination_generation)
+                if (not self.destination_publish_enum_extension_direct(source, source_ordinal) or
+                    hdw_decl_schedule(self.destination_slot, self.destination_generation,
+                        HD_SCHEDULE_EXTENSION, receipt, source_ordinal,
+                        self.current_destination_module_index, kind, source_local_index) < 0): return false
+                extension_index = extension_index + 1
+            elif kind == PARSER_DECL_IMPL:
+                if source_local_index != impl_index or impl_index >= owner.value.impls.len(): return false
+                val source = owner.value.impls[impl_index]
+                val owner_name = self.destination_direct_named_type(source.type_.kind)
+                val owner_id = self.symbols.lookup_or_invalid(owner_name)
+                if not owner_id.is_valid(): return false
+                self.symbols.push_scope(ScopeKind.Class)
+                if source.methods.len() != source.ordered_methods.len():
+                    self.symbols.pop_scope(); return false
+                val methods_ok = self.destination_publish_parser_method_list_direct(
+                    owner_id.id, source.ordered_methods,
+                    source.type_params.len() > 0, 2, impl_index)
+                self.symbols.pop_scope()
+                if (not methods_ok or hdw_decl_schedule(self.destination_slot,
+                        self.destination_generation, HD_SCHEDULE_IMPL, impl_index,
+                        source_ordinal, self.current_destination_module_index,
+                        kind, source_local_index) < 0): return false
+                impl_index = impl_index + 1
+            else:
+                var symbol_kind = SymbolKind.TypeAlias
+                var visibility = Visibility.Private
+                var span = Span.empty()
+                var fields: [ParserField] = []
+                var ordered_methods: [ParserFunction] = []
+                var method_count = 0
+                var generic = false
+                var nominal_base: Option<Type> = nil
+                var nominal_traits: [Type] = []
+                if (kind == PARSER_DECL_CLASS and source_local_index == class_count and
+                    owner.value.classes.contains_key(name) and
+                    not actor_names.contains_key(name)):
+                    val source = owner.value.classes[name]
+                    symbol_kind = SymbolKind.Class; visibility = source.visibility
+                    span = source.span; fields = source.fields
+                    method_count = source.methods.len()
+                    ordered_methods = source.ordered_methods; generic = source.type_params.len() > 0
+                    nominal_base = source.base_type; nominal_traits = source.implemented_traits
+                    class_count = class_count + 1
+                elif (kind == PARSER_DECL_STRUCT and source_local_index == struct_count and
+                        owner.value.structs.contains_key(name)):
+                    val source = owner.value.structs[name]
+                    symbol_kind = SymbolKind.Struct; visibility = source.visibility
+                    span = source.span; fields = source.fields; generic = source.type_params.len() > 0
+                    nominal_base = source.base_type; nominal_traits = source.implemented_traits
+                    struct_count = struct_count + 1
+                elif (kind == PARSER_DECL_TRAIT and source_local_index == trait_count and
+                        owner.value.traits.contains_key(name)):
+                    val source = owner.value.traits[name]
+                    symbol_kind = SymbolKind.Trait; visibility = source.visibility; span = source.span
+                    ordered_methods = source.methods; generic = source.type_params.len() > 0
+                    trait_count = trait_count + 1
+                elif (kind == PARSER_DECL_ALIAS and source_local_index == alias_count and
+                        owner.value.type_aliases.contains_key(name)):
+                    val source = owner.value.type_aliases[name]
+                    visibility = source.visibility; span = source.span
+                    alias_count = alias_count + 1
+                else:
+                    return false
+                val symbol = self.symbols.lookup_or_invalid(name)
+                val effective = self.compute_visibility(name, visibility)
+                if not symbol.is_valid() or not self.destination_publish_nominal_declaration(
+                        symbol.id, name, symbol_kind, effective, span):
+                    return false
+                val has_nominal_detail = kind == PARSER_DECL_CLASS or kind == PARSER_DECL_STRUCT
+                if has_nominal_detail and not self.destination_begin_nominal_detail_direct(
+                        if kind == PARSER_DECL_CLASS: HD_NOMINAL_CLASS else: HD_NOMINAL_STRUCT,
+                        symbol.id, nominal_base, nominal_traits, span): return false
+                if (kind == PARSER_DECL_CLASS and
+                    method_count != ordered_methods.len()):
+                    return false
+                if fields.len() > 0 or ordered_methods.len() > 0:
+                    self.symbols.push_scope(ScopeKind.Class)
+                    val fields_ok = self.destination_publish_parser_fields_direct(
+                        symbol.id, fields, has_nominal_detail)
+                    val detail_ok = fields_ok and (not has_nominal_detail or
+                        hdw_decl_nominal_detail_finalize(self.destination_slot,
+                            self.destination_generation))
+                    val methods_ok = detail_ok and (if ordered_methods.len() > 0:
+                        self.destination_publish_parser_method_list_direct(symbol.id,
+                            ordered_methods, generic, if kind == PARSER_DECL_TRAIT: 1 else: 0,
+                            if kind == PARSER_DECL_TRAIT and _hdd_trait_indices.contains_key(name):
+                                _hdd_trait_indices[name]
+                            else: -1)
+                    else: true)
+                    self.symbols.pop_scope()
+                    if not detail_ok or not methods_ok: return false
+                elif has_nominal_detail and not hdw_decl_nominal_detail_finalize(
+                        self.destination_slot, self.destination_generation):
+                    return false
+                val receipt = hdw_destination_symbol_lookup_in_module(
+                    self.destination_slot, self.destination_generation,
+                    self.current_destination_module_index, symbol.id)
+                if hdw_decl_schedule(self.destination_slot, self.destination_generation,
+                        HD_SCHEDULE_SYMBOL, receipt, source_ordinal,
+                        self.current_destination_module_index, kind, source_local_index) < 0: return false
+            order_index = order_index + 1
+        (function_index == owner.value.ordered_functions.len() and
+            impl_index == owner.value.impls.len() and
+            extension_index == owner.value.extend_enums.len() and
+            enum_count == owner.value.enums.len() and
+            bitfield_count == owner.value.bitfields.len() and
+            constant_count == owner.value.constants.len() and
+            actor_count == owner.value.actor_order.len() and
+            # Async desugaring retains one synthetic class dictionary entry
+            # per actor for the legacy aggregate lowerer.  The destination
+            # schedule publishes actors from ActorDef and only source classes
+            # from PARSER_DECL_CLASS rows, so validate the exact partition
+            # without treating those legacy entries as graph classes.
+            class_count + actor_count == owner.value.classes.len() and
+            struct_count == owner.value.structs.len() and
+            trait_count == owner.value.traits.len() and
+            alias_count == owner.value.type_aliases.len() and
+            actor_count == owner.value.actors.len())
+
+    # Caller must have acquired the registry and prepared physical module
+    # authority once for the project. Each invocation owns exactly one module
+    # checkpoint and either finalizes it or rolls it back.
+    me lower_parser_module_owner_into_destination_direct(
+        owner: ParserModuleOwner, is_entry: bool
+    ) -> bool:
+        if not self.destination_graph_active(): return false
+        if (not self.destination_select_module(owner.value.name) or
+            not self.destination_begin_module_publication()):
+            return false
+
+        val schedule_count = owner.value.declaration_kinds.len()
+        if (owner.value.declaration_names.len() != schedule_count or
+            owner.value.declaration_local_indices.len() != schedule_count or
+            owner.value.declaration_source_ordinals.len() != schedule_count):
+            return self.destination_direct_fail(
+                "E-HIR-DEST-DIRECT-ORDER: canonical declaration schedule required",
+                Span.empty())
+
+        destination_direct_reset_method_receipts()
+        var destination_trait_index = 0
+        var destination_schedule_index = 0
+        while destination_schedule_index < schedule_count:
+            if owner.value.declaration_kinds[destination_schedule_index] ==
+                    PARSER_DECL_TRAIT:
+                val trait_name = owner.value.declaration_names[
+                    destination_schedule_index]
+                if (trait_name == "" or
+                    not owner.value.traits.contains_key(trait_name)):
+                    return self.destination_direct_fail(
+                        "E-HIR-DEST-DIRECT-ORDER: invalid trait sidecar",
+                        Span.empty())
+                _hdd_trait_indices[trait_name] = destination_trait_index
+                destination_trait_index = destination_trait_index + 1
+            destination_schedule_index = destination_schedule_index + 1
+
+        self.imported_traits = {}
+        self.imported_enums = {}
+        self.imported_enum_owners = {}
+        self.materialized_payload_origins = {}
+        self.materialized_payload_bindings = {}
+
+        self.registering_import_symbols = true
+        self.resolve_import_symbols_owner(owner)
+        self.resolve_package_sibling_symbols_owner(owner)
+        self.registering_import_symbols = false
+        self.declare_module_symbols_owner(owner)
+
+        # One bounded O(A) marker table keeps schedule and class filtering O(1)
+        # per declaration. It is scoped to this producer call and never enters
+        # destination ownership.
+        var actor_names: Dict<text, bool> = {}
+        var actor_index = 0
+        while actor_index < owner.value.actor_order.len():
+            val actor_name = owner.value.actor_order[actor_index]
+            if (actor_name == "" or actor_names.contains_key(actor_name) or
+                not owner.value.actors.contains_key(actor_name)):
+                return self.destination_direct_fail(
+                    "E-HIR-DEST-DIRECT-ACTOR-PROVENANCE: invalid actor name sidecar",
+                    Span.empty())
+            actor_names[actor_name] = true
+            actor_index = actor_index + 1
+
+        if not self.destination_publish_exact_schedule_direct(
+                owner, actor_names):
+            return self.destination_direct_fail(
+                "E-HIR-DEST-DIRECT-ORDER: exact declaration schedule publication failed",
+                Span.empty())
+        # Finalize the single grouped member staging pass before metadata reads
+        # nominal member ranges.  The module checkpoint remains the sole
+        # rollback authority for both the drained rows and their metadata.
+        if not self.destination_drain_module_members():
+            return self.destination_direct_fail(
+                "E-HIR-DEST-DIRECT-MEMBERS: grouped member publication failed",
+                Span.empty())
+        if not self.destination_publish_parser_metadata(owner, actor_names,
+                _hdd_method_parent_kind, _hdd_method_parent_index,
+                _hdd_method_owner, _hdd_method_name, _hdd_method_row,
+                _hdd_method_token, _hdd_method_root, _hdd_method_params,
+                _hdd_method_return_type, _hdd_method_is_static,
+                _hdd_method_span):
+            return self.destination_direct_fail(
+                "E-HIR-DEST-DIRECT-METADATA: declaration metadata publication failed",
+                Span.empty())
+        destination_direct_reset_method_receipts()
+
+        val registry_name = if is_entry:
+            self.module_surfaces.surfaces[
+                self.current_destination_module_index].logical_name
+        else:
+            owner.value.name
+        if not self.destination_finalize_module_publication(
+                registry_name, is_entry):
+            return self.destination_direct_fail(
+                "E-HIR-DEST-DIRECT-FINALIZE: direct module publication failed",
+                Span.empty())
+        true
+
+export HirLowering

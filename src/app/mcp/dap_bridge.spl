@@ -8,13 +8,14 @@
 # translates MCP tool calls to DAP requests via file-based IPC.
 
 use .dap_types
-use .main_lazy_query_tools.{_mcp_find_simple_binary}
 
 use std.io_runtime.{process_spawn_async, process_is_running, process_kill, time_now_unix_micros}
 
 # Session registry (in-process, per MCP server instance)
 class DapSession:
     id: text
+    debug_session_id: text
+    build_id: text
     program: text
     target_type: text
     pid: i64
@@ -47,6 +48,39 @@ class DapSession:
 
 var DAP_SESSIONS: [DapSession] = []
 var DAP_NEXT_ID: i64 = 1
+
+fn dap_build_binding(program: text) -> text:
+    # Keep the exact caller-supplied artifact identity. A future build-manifest
+    # adapter may replace this with its digest without changing MCP tool names.
+    "artifact:" + program.trim()
+
+fn dap_target_kind(target_type: text, backend: DebugBackendRegistration) -> text:
+    if backend.session_type != "":
+        return backend.session_type
+    target_type
+
+fn dap_debug_support(backend_error: text) -> CapLevel:
+    if backend_error == "":
+        return CapLevel.Native
+    CapLevel.Unavailable
+
+fn dap_debug_verification(state: text) -> DebugVerificationV1:
+    # Process spawn/bootstrap-plan construction proves routing only. Target
+    # attach/handshake must promote this to LiveVerified in a later receipt.
+    if state == "failed":
+        return DebugVerificationV1.Blocked
+    DebugVerificationV1.Unverified
+
+fn dap_control_receipt(session: DapSession, action: text, perturbation: DebugPerturbationV1) -> bool:
+    if session.debug_session_id == "":
+        return false
+    val receipt = central_debug_service_v1_authorize(
+        DebugSessionId(value: session.debug_session_id),
+        DebugRootOperationV1.Control,
+        perturbation,
+        action,
+    )
+    receipt.allowed
 
 fn dap_empty_backend(target: DebugTargetDescriptor) -> DebugBackendRegistration:
     DebugBackendRegistration(
@@ -163,8 +197,37 @@ fn dap_create_session(program: text, target_type: text, transport: text, arch: t
     else:
         bootstrap_notes = [backend_error]
 
+    val build_id = dap_build_binding(program)
+    var debug_session_id = ""
+    match central_debug_service_v1_open(build_id, debug_policy_development_v1()):
+        Ok(opened_id):
+            debug_session_id = opened_id.value
+            val target_id = sid + ":" + (if backend.backend_id == "": target_type else: backend.backend_id)
+            val target_node = DebugTargetNodeV1(
+                target_id: target_id,
+                parent_target_id: "",
+                kind: dap_target_kind(target_type, backend),
+                label: program,
+            )
+            val target_capability = DebugCapabilityV1(
+                target_id: target_id,
+                support: dap_debug_support(backend_error),
+                verification: dap_debug_verification(state),
+                perturbation: DebugPerturbationV1.Stopping,
+                reason: if backend_error == "": "backend selected; target handshake not yet verified" else: backend_error,
+            )
+            match central_debug_service_v1_add_target(opened_id, target_node, target_capability):
+                Ok(_): ()
+                Err(err):
+                    central_debug_service_v1_record(opened_id, DebugRootOperationV1.Observe, DebugPerturbationV1.Passive, "mcp.dap.target.map", false, false, err)
+        Err(err):
+            state = "failed"
+            bootstrap_notes.push(err)
+
     var session = DapSession(
         id: sid,
+        debug_session_id: debug_session_id,
+        build_id: build_id,
         program: program,
         target_type: target_type,
         pid: pid,
@@ -203,7 +266,7 @@ fn dap_find_session(session_id: text) -> DapSession:
         if s.id == session_id:
             return s
     DapSession(
-        id: "", program: "", target_type: "", pid: -1, state: "not_found",
+        id: "", debug_session_id: "", build_id: "", program: "", target_type: "", pid: -1, state: "not_found",
         next_bp_id: 1, breakpoints: [], watches: [], arch: "", exec_mode: "",
         vendor: "", probe_kind: "", server_kind: "", transport: "", backend_id: "",
         attach_semantics: "", persistent_session: false, capabilities: [],
@@ -219,8 +282,13 @@ fn dap_close_session(session_id: text) -> bool:
     for s in DAP_SESSIONS:
         if s.id == session_id:
             found = true
+            val changed = s.pid > 0
             if s.pid > 0:
                 process_kill(s.pid)
+            if s.debug_session_id != "":
+                val debug_id = DebugSessionId(value: s.debug_session_id)
+                central_debug_service_v1_record(debug_id, DebugRootOperationV1.Control, DebugPerturbationV1.Cooperative, "mcp.dap.transport.close", true, changed, "")
+                central_debug_service_v1_close(debug_id)
         else:
             new_sessions.push(s)
     DAP_SESSIONS = new_sessions
@@ -240,6 +308,8 @@ fn dap_add_breakpoint(session_id: text, file: text, line: text, condition: text)
     var session = dap_find_session(session_id)
     if session.id == "":
         return (-1, "session not found")
+    if not dap_control_receipt(session, "mcp.dap.breakpoint.set", DebugPerturbationV1.Stopping):
+        return (-1, "control denied by debug policy")
     val bp_id = session.next_bp_id
     session.next_bp_id = bp_id + 1
     val bp_entry = str(bp_id) + ":" + file + ":" + line
@@ -250,6 +320,8 @@ fn dap_add_breakpoint(session_id: text, file: text, line: text, condition: text)
 fn dap_remove_breakpoint(session_id: text, bp_id_str: text) -> bool:
     var session = dap_find_session(session_id)
     if session.id == "":
+        return false
+    if not dap_control_receipt(session, "mcp.dap.breakpoint.remove", DebugPerturbationV1.Stopping):
         return false
     var new_bps: [text] = []
     var found = false

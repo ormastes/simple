@@ -87,8 +87,72 @@ snapshot_file() {
     [ "$(file_identity "$source_file")" = "$before_identity" ] || return 1
 }
 
+validate_simpleos_gate_binding() {
+    artifact_snapshot=$1; receipt_snapshot=$2
+    sidecar_path=$evidence/simpleos-mission-critical-gate-v1.env
+    regular_nonsymlink "$sidecar_path" || return 1
+    sidecar_snapshot=$work/simpleos-gate.sidecar
+    snapshot_file "$sidecar_path" "$sidecar_snapshot" || return 1
+    [ "$(field gate_schema "$sidecar_snapshot" 2>/dev/null || true)" = simpleos-mission-critical-gate-v1 ] || return 1
+    [ "$(field matrix_passed "$sidecar_snapshot" 2>/dev/null || true)" = 26/26 ] || return 1
+    [ "$(field run_id "$sidecar_snapshot" 2>/dev/null || true)" = "$run_id" ] || return 1
+    [ "$(field source_hash "$sidecar_snapshot" 2>/dev/null || true)" = "$source_hash" ] || return 1
+    [ "$(field configuration_hash "$sidecar_snapshot" 2>/dev/null || true)" = "$configuration_hash" ] || return 1
+    sidecar_captured=$(field captured_at_utc_ns "$sidecar_snapshot" 2>/dev/null || true)
+    sidecar_admission=$(field admission_now_utc_ns "$sidecar_snapshot" 2>/dev/null || true)
+    sidecar_valid=$(field valid_until_utc_ns "$sidecar_snapshot" 2>/dev/null || true)
+    is_uint "$sidecar_captured" && is_uint "$sidecar_admission" && is_uint "$sidecar_valid" || return 1
+    dec_le "$sidecar_captured" "$sidecar_admission" && dec_le "$sidecar_admission" "$sidecar_valid" && age_within_day "$sidecar_captured" "$sidecar_valid" || return 1
+    [ "$sidecar_captured" = "$captured_at" ] && [ "$sidecar_admission" = "$now_ns" ] && [ "$sidecar_valid" = "$valid_until" ] || return 1
+    simpleos_gate_sidecar_sha256=$(field simpleos_gate_sidecar_sha256 "$receipt_snapshot" 2>/dev/null || true)
+    simpleos_gate_matrix_passed=$(field simpleos_gate_matrix_passed "$receipt_snapshot" 2>/dev/null || true)
+    simpleos_gate_report_sha256=$(field simpleos_gate_report_sha256 "$receipt_snapshot" 2>/dev/null || true)
+    simpleos_gate_matrix_out_sha256=$(field simpleos_gate_matrix_out_sha256 "$receipt_snapshot" 2>/dev/null || true)
+    simpleos_gate_matrix_err_sha256=$(field simpleos_gate_matrix_err_sha256 "$receipt_snapshot" 2>/dev/null || true)
+    simpleos_gate_stdout_sha256=$(field simpleos_gate_stdout_sha256 "$receipt_snapshot" 2>/dev/null || true)
+    simpleos_gate_stderr_sha256=$(field simpleos_gate_stderr_sha256 "$receipt_snapshot" 2>/dev/null || true)
+    [ "$simpleos_gate_matrix_passed" = 26/26 ] || return 1
+    for gate_hash in simpleos_gate_sidecar_sha256 simpleos_gate_report_sha256 simpleos_gate_matrix_out_sha256 simpleos_gate_matrix_err_sha256 simpleos_gate_stdout_sha256 simpleos_gate_stderr_sha256; do
+        is_sha256 "$(eval "printf '%s' \"\${$gate_hash}\"")" || return 1
+    done
+    for gate_key in simpleos_gate_sidecar_sha256 simpleos_gate_matrix_passed simpleos_gate_report_sha256 simpleos_gate_matrix_out_sha256 simpleos_gate_matrix_err_sha256 simpleos_gate_stdout_sha256 simpleos_gate_stderr_sha256; do
+        [ "$(field "$gate_key" "$artifact_snapshot" 2>/dev/null || true)" = "$(field "$gate_key" "$receipt_snapshot" 2>/dev/null || true)" ] || return 1
+    done
+    [ "$simpleos_gate_sidecar_sha256" = "$(hash_file "$sidecar_snapshot")" ] || return 1
+    [ "$(field matrix_passed "$sidecar_snapshot")" = "$simpleos_gate_matrix_passed" ] || return 1
+    [ "$(field report_sha256 "$sidecar_snapshot")" = "$simpleos_gate_report_sha256" ] || return 1
+    [ "$(field matrix_out_sha256 "$sidecar_snapshot")" = "$simpleos_gate_matrix_out_sha256" ] || return 1
+    [ "$(field matrix_err_sha256 "$sidecar_snapshot")" = "$simpleos_gate_matrix_err_sha256" ] || return 1
+    [ "$(field gate_stdout_sha256 "$sidecar_snapshot")" = "$simpleos_gate_stdout_sha256" ] || return 1
+    [ "$(field gate_stderr_sha256 "$sidecar_snapshot")" = "$simpleos_gate_stderr_sha256" ] || return 1
+    for gate_file in \
+        'simpleos-mission-critical-release/report.md' \
+        'simpleos-mission-critical-release/matrix.out' \
+        'simpleos-mission-critical-release/matrix.err' \
+        'orchestrator-captures/simpleos-mission-critical.stdout' \
+        'orchestrator-captures/simpleos-mission-critical.stderr'; do
+        regular_nonsymlink "$evidence/$gate_file" || return 1
+    done
+    report_snapshot=$work/simpleos-gate.report; matrix_out_snapshot=$work/simpleos-gate.matrix-out
+    matrix_err_snapshot=$work/simpleos-gate.matrix-err; stdout_snapshot=$work/simpleos-gate.stdout
+    stderr_snapshot=$work/simpleos-gate.stderr
+    snapshot_file "$evidence/simpleos-mission-critical-release/report.md" "$report_snapshot" || return 1
+    snapshot_file "$evidence/simpleos-mission-critical-release/matrix.out" "$matrix_out_snapshot" || return 1
+    snapshot_file "$evidence/simpleos-mission-critical-release/matrix.err" "$matrix_err_snapshot" || return 1
+    snapshot_file "$evidence/orchestrator-captures/simpleos-mission-critical.stdout" "$stdout_snapshot" || return 1
+    snapshot_file "$evidence/orchestrator-captures/simpleos-mission-critical.stderr" "$stderr_snapshot" || return 1
+    [ "$(hash_file "$report_snapshot")" = "$simpleos_gate_report_sha256" ] || return 1
+    [ "$(hash_file "$matrix_out_snapshot")" = "$simpleos_gate_matrix_out_sha256" ] || return 1
+    [ "$(hash_file "$matrix_err_snapshot")" = "$simpleos_gate_matrix_err_sha256" ] || return 1
+    [ "$(hash_file "$stdout_snapshot")" = "$simpleos_gate_stdout_sha256" ] || return 1
+    [ "$(hash_file "$stderr_snapshot")" = "$simpleos_gate_stderr_sha256" ] || return 1
+    grep -Fqx -- '- passed: 26/26' "$report_snapshot" || return 1
+    grep -Fqx 'simpleos_hardening_matrix_passed=26/26' "$matrix_out_snapshot" || return 1
+    grep -q '^STATUS: PASS simpleos-mission-critical-release ' "$stdout_snapshot" || return 1
+}
+
 # Order is policy and output order. Keep changes review-visible.
-required_checks='compiler tooling simpleos rendering allocation fault-injection process-safety stress traceability reviewer'
+required_checks='compiler tooling traceability simpleos rendering allocation fault-injection process-safety stress reviewer'
 
 missing_resume_env() {
     missing=
@@ -154,7 +218,7 @@ producer_for() {
 artifact_schema_for() {
     case "$1" in
         compiler) echo mci-compiler-collector-receipt-v2 ;;
-        tooling) echo mci-tooling-child-manifest-v1 ;;
+        tooling) echo mci-tooling-child-manifest-v2 ;;
         simpleos) echo mci-simpleos-platform-evidence-v1 ;;
         rendering) echo mci-rendering-evidence-v1 ;;
         allocation) echo mci-allocation-domain-arena-evidence-v1 ;;
@@ -175,11 +239,51 @@ artifact_header() {
     if [ "$check" = tooling ]; then
         # The tooling artifact is a generation archive. Only its canonical
         # manifest is policy-bearing; never trust a receipt-side description.
-        count=$(tar -tf "$artifact" 2>/dev/null | awk -v limit="${MCI_AGGREGATE_TAR_MEMBER_LIMIT:-256}" 'NR>limit { print NR; exit } END { if (NR<=limit) print NR }') || return 1
-        [ "$count" -le "${MCI_AGGREGATE_TAR_MEMBER_LIMIT:-256}" ] || return 1
-        blocks=$((65536 / 512 + 1))
+        member_limit=${MCI_AGGREGATE_TAR_MEMBER_LIMIT:-256}
+        expanded_limit=${MCI_AGGREGATE_TAR_EXPANDED_LIMIT_BYTES:-65536}
+        case "$member_limit:$expanded_limit" in *[!0-9:]*) return 1;; esac
+        awk -v value="$member_limit" 'BEGIN { exit !((value >= 1) && (value <= 256)) }' || return 1
+        awk -v value="$expanded_limit" 'BEGIN { exit !((value >= 1) && (value <= 65536)) }' || return 1
+        # Stop listing as soon as the member bound is crossed, and require one
+        # (and only one) canonical manifest before extracting any bytes.
+        count=$(tar -tf "$artifact" 2>/dev/null | awk -v limit="$member_limit" '
+            { count++; if ($0 == "./manifest.env") manifest++; if (count > limit) exit 2 }
+            END { if (count > limit || manifest != 1) exit 2; print count }
+        ') || return 1
+        [ "$count" -ge 1 ] || return 1
+        blocks=$(((expanded_limit + 511) / 512))
         (ulimit -f "$blocks"; tar -xOf "$artifact" ./manifest.env > "$output") 2>/dev/null || return 1
-        [ "$(wc -c < "$output")" -le 65536 ] || return 1
+        [ "$(wc -c < "$output")" -le "$expanded_limit" ] || return 1
+        [ "$(field manifest_schema "$output")" = mci-tooling-child-manifest-v2 ] || return 1
+        [ "$(field producer_class "$output")" = tooling-admission ] || return 1
+        [ "$(field mode "$output")" = live ] && [ "$(field release_eligible "$output")" = true ] || return 1
+        [ "$(field capture_limit_bytes "$output")" = 16777216 ] && [ "$(field timeout_seconds "$output")" = 1800 ] || return 1
+        [ "$(field scan_count_limit "$output")" = 0 ] && [ "$(field scan_count_policy "$output")" = per-row-explicit ] || return 1
+        [ "$(field warm_cli_min_samples "$output")" = 30 ] && [ "$(field warm_request_min_samples "$output")" = 1000 ] || return 1
+        [ "$(field warm_cli_p95_max_ms "$output")" = 250 ] && [ "$(field warm_cli_rss_max_kib "$output")" = 262144 ] || return 1
+        [ "$(field warm_mcp_startup_max_ms "$output")" = 500 ] && [ "$(field warm_mcp_request_p95_max_ms "$output")" = 100 ] && [ "$(field warm_mcp_rss_max_kib "$output")" = 524288 ] || return 1
+        [ "$(field warm_lsp_startup_max_ms "$output")" = 1500 ] && [ "$(field warm_lsp_request_p95_max_ms "$output")" = 150 ] && [ "$(field warm_lsp_rss_max_kib "$output")" = 786432 ] || return 1
+        tooling_ids='compiler-check lib-check mcp-check lsp-check bootstrap-essential bootstrap-portability bootstrap-parity lint duplicate whole-test direct-env-working direct-env-staged runtime-contract artifact-execution warm-cli warm-mcp warm-lsp'
+        [ "$(field required_child_ids "$output")" = "$tooling_ids" ] || return 1
+        [ "$(grep -c '^row=' "$output")" -eq 17 ] && [ "$(grep -c '^scan_policy=' "$output")" -eq 17 ] && [ "$(grep -c '^metric=' "$output")" -eq 3 ] && [ "$(grep -c '^baseline=' "$output")" -eq 3 ] || return 1
+        awk -F'|' -v ids="$tooling_ids" 'BEGIN{n=split(ids,a," ");for(i=1;i<=n;i++)e[a[i]]=1}
+            /^row=/{id=substr($1,5);if(NF!=20||!e[id]||seen[id]++||$2!="pass"&&$2!="blocked"&&$2!="fail"||$14!~/^[0-9]+$/||$14!=0||$15!~/^[0-9]+$/||$16!~/^[0-9]+$/||$17!~/^[0-9]+$/||$18!~/^[0-9]+$/||$19!~/^[0-9]+$/||$20!~/^[0-9]+$/)bad=1}
+            END{for(i=1;i<=n;i++)if(!seen[a[i]])bad=1;exit bad+0}' "$output" || return 1
+        awk -F'|' -v ids="$tooling_ids" 'BEGIN{n=split(ids,a," ");for(i=1;i<=n;i++)e[a[i]]=1}
+            /^scan_policy=/{id=substr($1,13);if(NF!=3||!e[id]||$2!="not-applicable"||$3!="command-contract-v1"||seen[id]++)bad=1}
+            END{for(i=1;i<=n;i++)if(!seen[a[i]])bad=1;exit bad+0}' "$output" || return 1
+        for warm_id in warm-cli warm-mcp warm-lsp; do
+            metric=$(sed -n "s/^metric=${warm_id}|//p" "$output"); old_ifs=$IFS; IFS='|'; set -- $metric; IFS=$old_ifs
+            [ "$#" -eq 16 ] && [ "$1" = startup_p95_ms ] && [ "$3" = samples ] && [ "$5" = p50_ms ] && [ "$7" = p95_ms ] && [ "$9" = p99_ms ] && [ "${11}" = max_rss_kib ] && [ "${13}" = raw_relpath ] && [ "${14}" = "raw/$warm_id.samples" ] && [ "${15}" = raw_sha256 ] || return 1
+            for number in "$2" "$4" "$6" "$8" "${10}" "${12}"; do is_uint "$number" || return 1; done
+            metric_raw_sha=${16}; is_sha256 "$metric_raw_sha" || return 1
+            baseline=$(sed -n "s/^baseline=${warm_id}|//p" "$output"); old_ifs=$IFS; IFS='|'; set -- $baseline; IFS=$old_ifs
+            [ "$#" -eq 2 ] && is_uint "$1" && is_uint "$2" && [ "$1" -gt 0 ] && [ "$2" -gt 0 ] || return 1
+            raw_out="$work/$warm_id.raw"; blocks=$((65536 / 512 + 1))
+            (ulimit -f "$blocks"; tar -xOf "$artifact" "./raw/$warm_id.samples" > "$raw_out") 2>/dev/null || return 1
+            [ "$(hash_file "$raw_out")" = "$metric_raw_sha" ] || return 1
+            [ "$(wc -c < "$raw_out")" -le 65536 ] || return 1
+        done
     else
         cp -- "$artifact" "$output" || return 1
     fi
@@ -464,6 +568,13 @@ for check_id in $required_checks; do
                                 reason=invalid-docgen-provenance-binding
                             fi
                         fi
+                        if [ "$reason" = none ] && [ "$check_id" = simpleos ]; then
+                            gate_receipt_field=$(field simpleos_gate_sidecar_sha256 "$snapshot" 2>/dev/null || true)
+                            gate_artifact_field=$(field simpleos_gate_sidecar_sha256 "$asnapshot" 2>/dev/null || true)
+                            if [ -n "$gate_receipt_field$gate_artifact_field" ] || [ -e "$evidence/simpleos-mission-critical-gate-v1.env" ]; then
+                                validate_simpleos_gate_binding "$asnapshot" "$snapshot" || reason=invalid-simpleos-gate-binding
+                            fi
+                        fi
                     fi
                 fi
             fi
@@ -477,6 +588,18 @@ for check_id in $required_checks; do
                 echo "scenarios=$scenarios"; echo "artifact_relpath=$artifact_relpath"
                 echo "artifact_sha256=$artifact_hash"
                 echo "artifact_schema=$bound_artifact_schema"; echo "artifact_mode=$bound_artifact_mode"; echo "release_eligible=$bound_release_eligible"
+                if [ "$check_id" = simpleos ]; then
+                    gate_binding_declared=$(field simpleos_gate_sidecar_sha256 "$snapshot" 2>/dev/null || true)
+                    if [ -n "$gate_binding_declared" ]; then
+                        echo "simpleos_gate_sidecar_sha256=$gate_binding_declared"
+                        echo "simpleos_gate_matrix_passed=$(field simpleos_gate_matrix_passed "$snapshot")"
+                        echo "simpleos_gate_report_sha256=$(field simpleos_gate_report_sha256 "$snapshot")"
+                        echo "simpleos_gate_matrix_out_sha256=$(field simpleos_gate_matrix_out_sha256 "$snapshot")"
+                        echo "simpleos_gate_matrix_err_sha256=$(field simpleos_gate_matrix_err_sha256 "$snapshot")"
+                        echo "simpleos_gate_stdout_sha256=$(field simpleos_gate_stdout_sha256 "$snapshot")"
+                        echo "simpleos_gate_stderr_sha256=$(field simpleos_gate_stderr_sha256 "$snapshot")"
+                    fi
+                fi
                 if [ "$check_id" = traceability ]; then echo "docgen_receipt_relpath=$docgen_receipt_relpath"; echo "docgen_receipt_sha256=$docgen_receipt_sha256"; fi
             } > "$tmp.canonical"
             if ! sed '/^receipt_hash=/d' "$snapshot" | cmp -s - "$tmp.canonical" ||

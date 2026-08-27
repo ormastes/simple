@@ -1,6 +1,30 @@
 # Curve25519 Rfc7748 Specification
 
-> Tests covering Curve25519 RFC 7748 §5.2 single scalar-mult test vectors, Curve25519 RFC 7748 §5.2 iterated scalar-mult, Curve25519 RFC 7748 §6.1 ECDH key exchange, Curve25519 RV64 live bootstrap regression.
+> <details>
+
+<!-- sdn-diagram:id=curve25519_rfc7748_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=curve25519_rfc7748_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+curve25519_rfc7748_spec -> std
+curve25519_rfc7748_spec -> os
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=curve25519_rfc7748_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -17,23 +41,13 @@
 
 #### TV1: scalar a546e36b... × u e6db6867... → c3da5537...
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- TV1: scalar a546e36b... × u e6db6867... → c3da5537...
-   - Expected: x25519(SCALAR_TV1, U_TV1) equals `EXPECTED_TV1`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("TV1: scalar a546e36b... × u e6db6867... → c3da5537...")
 expect(x25519(SCALAR_TV1, U_TV1)).to_equal(EXPECTED_TV1)
 ```
 
@@ -41,19 +55,13 @@ expect(x25519(SCALAR_TV1, U_TV1)).to_equal(EXPECTED_TV1)
 
 #### TV2: scalar 4b66e9d4... × u e5210f12... → 95cbde94...
 
-- TV2: scalar 4b66e9d4... × u e5210f12... → 95cbde94...
-   - Expected: x25519(SCALAR_TV2, U_TV2) equals `EXPECTED_TV2`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("TV2: scalar 4b66e9d4... × u e5210f12... → 95cbde94...")
 expect(x25519(SCALAR_TV2, U_TV2)).to_equal(EXPECTED_TV2)
 ```
 
@@ -63,19 +71,13 @@ expect(x25519(SCALAR_TV2, U_TV2)).to_equal(EXPECTED_TV2)
 
 #### after 1 iteration starting from BASE_POINT: 422c8e7a...
 
-- after 1 iteration starting from BASE_POINT: 422c8e7a...
-   - Expected: x25519(BASE_POINT, BASE_POINT) equals `EXPECTED_AFTER_1_ITER`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("after 1 iteration starting from BASE_POINT: 422c8e7a...")
 expect(x25519(BASE_POINT, BASE_POINT)).to_equal(EXPECTED_AFTER_1_ITER)
 ```
 
@@ -85,19 +87,13 @@ expect(x25519(BASE_POINT, BASE_POINT)).to_equal(EXPECTED_AFTER_1_ITER)
 
 #### Alice public key: x25519(alice_priv, base) == alice_pub
 
-- Alice public key: x25519(alice_priv, base) == alice_pub
-   - Expected: x25519_base(ALICE_PRIV) equals `ALICE_PUB`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("Alice public key: x25519(alice_priv, base) == alice_pub")
 expect(x25519_base(ALICE_PRIV)).to_equal(ALICE_PUB)
 ```
 
@@ -105,19 +101,13 @@ expect(x25519_base(ALICE_PRIV)).to_equal(ALICE_PUB)
 
 #### Bob public key: x25519(bob_priv, base) == bob_pub
 
-- Bob public key: x25519(bob_priv, base) == bob_pub
-   - Expected: x25519_base(BOB_PRIV) equals `BOB_PUB`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("Bob public key: x25519(bob_priv, base) == bob_pub")
 expect(x25519_base(BOB_PRIV)).to_equal(BOB_PUB)
 ```
 
@@ -125,19 +115,13 @@ expect(x25519_base(BOB_PRIV)).to_equal(BOB_PUB)
 
 #### Alice computes shared secret: x25519(alice_priv, bob_pub) == shared_secret
 
-- Alice computes shared secret: x25519(alice_priv, bob_pub) == shared_secret
-   - Expected: x25519(ALICE_PRIV, BOB_PUB) equals `SHARED_SECRET`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("Alice computes shared secret: x25519(alice_priv, bob_pub) == shared_secret")
 expect(x25519(ALICE_PRIV, BOB_PUB)).to_equal(SHARED_SECRET)
 ```
 
@@ -145,19 +129,13 @@ expect(x25519(ALICE_PRIV, BOB_PUB)).to_equal(SHARED_SECRET)
 
 #### Bob computes shared secret: x25519(bob_priv, alice_pub) == shared_secret
 
-- Bob computes shared secret: x25519(bob_priv, alice_pub) == shared_secret
-   - Expected: x25519(BOB_PRIV, ALICE_PUB) equals `SHARED_SECRET`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("Bob computes shared secret: x25519(bob_priv, alice_pub) == shared_secret")
 expect(x25519(BOB_PRIV, ALICE_PUB)).to_equal(SHARED_SECRET)
 ```
 
@@ -167,22 +145,13 @@ expect(x25519(BOB_PRIV, ALICE_PUB)).to_equal(SHARED_SECRET)
 
 #### small-limb shallow probes preserve bootstrap byte and base-point inputs
 
-- small-limb shallow probes preserve bootstrap byte and base-point inputs
-   - Expected: x25519_smalllimb_clamp_probe(LIVE_BOOTSTRAP_PRIV) equals `LIVE_BOOTSTRAP_PRIV`
-   - Expected: x25519_smalllimb_base_point_probe() equals `BASE_POINT`
-   - Expected: x25519_smalllimb_mask_probe(BASE_POINT) equals `BASE_POINT`
-   - Expected: x25519_smalllimb_roundtrip_probe(BASE_POINT) equals `BASE_POINT`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("small-limb shallow probes preserve bootstrap byte and base-point inputs")
 expect(x25519_smalllimb_clamp_probe(LIVE_BOOTSTRAP_PRIV)).to_equal(LIVE_BOOTSTRAP_PRIV)
 expect(x25519_smalllimb_base_point_probe()).to_equal(BASE_POINT)
 expect(x25519_smalllimb_mask_probe(BASE_POINT)).to_equal(BASE_POINT)
@@ -193,19 +162,13 @@ expect(x25519_smalllimb_roundtrip_probe(BASE_POINT)).to_equal(BASE_POINT)
 
 #### small-limb public API matches the live C helper bootstrap public key
 
-- small-limb public API matches the live C helper bootstrap public key
-   - Expected: x25519_base(LIVE_BOOTSTRAP_PRIV) equals `LIVE_BOOTSTRAP_PUB`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("small-limb public API matches the live C helper bootstrap public key")
 expect(x25519_base(LIVE_BOOTSTRAP_PRIV)).to_equal(LIVE_BOOTSTRAP_PUB)
 ```
 
@@ -213,19 +176,13 @@ expect(x25519_base(LIVE_BOOTSTRAP_PRIV)).to_equal(LIVE_BOOTSTRAP_PUB)
 
 #### BigInt probe matches the live C helper bootstrap public key
 
-- BigInt probe matches the live C helper bootstrap public key
-   - Expected: x25519_base_bigint_probe(LIVE_BOOTSTRAP_PRIV) equals `LIVE_BOOTSTRAP_PUB`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("BigInt probe matches the live C helper bootstrap public key")
 expect(x25519_base_bigint_probe(LIVE_BOOTSTRAP_PRIV)).to_equal(LIVE_BOOTSTRAP_PUB)
 ```
 
@@ -238,12 +195,12 @@ expect(x25519_base_bigint_probe(LIVE_BOOTSTRAP_PRIV)).to_equal(LIVE_BOOTSTRAP_PU
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/01_unit/lib/crypto/curve25519_rfc7748_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering Curve25519 RFC 7748 §5.2 single scalar-mult test vectors, Curve25519 RFC 7748 §5.2 iterated scalar-mult, Curve25519 RFC 7748 §6.1 ECDH key exchange, Curve25519 RV64 live bootstrap regression.
+Tests covering:
 - Curve25519 RFC 7748 §5.2 single scalar-mult test vectors
 - Curve25519 RFC 7748 §5.2 iterated scalar-mult
 - Curve25519 RFC 7748 §6.1 ECDH key exchange
@@ -261,51 +218,3 @@ Tests covering Curve25519 RFC 7748 §5.2 single scalar-mult test vectors, Curve2
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-UNIT`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `c51669bbe2b8a4b8cd4df23c554928df24c1321b237989abc55db5a5db430984`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `c51669bbe2b8a4b8cd4df23c554928df24c1321b237989abc55db5a5db430984`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `c51669bbe2b8a4b8cd4df23c554928df24c1321b237989abc55db5a5db430984`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/01_unit/lib/crypto/curve25519_rfc7748_spec.spl
-mirror: doc/06_spec/01_unit/lib/crypto/curve25519_rfc7748_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/lib/crypto/curve25519_rfc7748_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/lib/crypto/curve25519_rfc7748_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/lib/crypto/curve25519_rfc7748_spec.spl:160:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'TV1: scalar a546e36b... × u e6db6867... → c3da5537...' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/lib/crypto/curve25519_rfc7748_spec.spl:165:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'TV2: scalar 4b66e9d4... × u e5210f12... → 95cbde94...' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/lib/crypto/curve25519_rfc7748_spec.spl:182:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'after 1 iteration starting from BASE_POINT: 422c8e7a...' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

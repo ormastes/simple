@@ -1,6 +1,29 @@
 # Lsp Mcp Format Specification
 
-> Tests covering LSP MCP Format Output.
+> <details>
+
+<!-- sdn-diagram:id=lsp_mcp_format_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=lsp_mcp_format_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+lsp_mcp_format_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=lsp_mcp_format_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -22,19 +45,13 @@
 
 #### query check --format=json output contains structuredContent key _(slow)_
 
-- query check --format=json output contains structuredContent key
-   - Expected: has_structured is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("query check --format=json output contains structuredContent key")
 val code = "fn test():\n    val unused_var = 42\n    print \"done\"\n"
 val path = write_temp_file("struct_content", code)
 val output = run_check_json(path)
@@ -54,19 +71,13 @@ expect(has_structured).to_equal(true)
 
 #### diagnostics array is present in output _(slow)_
 
-- diagnostics array is present in output
-   - Expected: has_diagnostics is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("diagnostics array is present in output")
 val code = "fn broken(\n    val x = \n"
 val path = write_temp_file("diag_array", code)
 val output = run_check_json(path)
@@ -84,20 +95,13 @@ expect(has_diagnostics).to_equal(true)
 
 #### diagnostics array contains entries for errors _(slow)_
 
-- diagnostics array contains entries for errors
-   - Expected: has_line is true
-   - Expected: has_message is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("diagnostics array contains entries for errors")
 val code = "fn test() -> i64:\n    return 42\n    val dead = 10\n"
 val path = write_temp_file("diag_entries", code)
 val output = run_check_json(path)
@@ -120,19 +124,13 @@ expect(has_message).to_equal(true)
 
 #### count field is present in output _(slow)_
 
-- count field is present in output
-   - Expected: has_count is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("count field is present in output")
 val code = "fn test():\n    val unused1 = 1\n    val unused2 = 2\n    print \"done\"\n"
 val path = write_temp_file("count_field", code)
 val output = run_check_json(path)
@@ -153,19 +151,13 @@ expect(has_count).to_equal(true)
 
 #### isError field reflects error status _(slow)_
 
-- isError field reflects error status
-   - Expected: has_status is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("isError field reflects error status")
 val code = "fn broken(\n"
 val path = write_temp_file("is_error", code)
 val output = run_check_json(path)
@@ -186,19 +178,13 @@ expect(has_status).to_equal(true)
 
 #### each diagnostic has severity field _(slow)_
 
-- each diagnostic has severity field
-   - Expected: has_severity is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("each diagnostic has severity field")
 val code = "fn test():\n    val unused_x = 42\n    print \"done\"\n"
 val path = write_temp_file("has_severity", code)
 val output = run_check_json(path)
@@ -216,19 +202,13 @@ expect(has_severity).to_equal(true)
 
 #### each diagnostic has code field _(slow)_
 
-- each diagnostic has code field
-   - Expected: has_code_field is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("each diagnostic has code field")
 val code = "fn test_depr():\n    val result = Vec__new()\n"
 val path = write_temp_file("has_code", code)
 val output = run_check_json(path)
@@ -246,19 +226,13 @@ expect(has_code_field).to_equal(true)
 
 #### each diagnostic has message field _(slow)_
 
-- each diagnostic has message field
-   - Expected: has_message is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("each diagnostic has message field")
 val code = "fn test() -> i64:\n    return 42\n    val dead = 0\n"
 val path = write_temp_file("has_message", code)
 val output = run_check_json(path)
@@ -276,19 +250,13 @@ expect(has_message).to_equal(true)
 
 #### each diagnostic has line field _(slow)_
 
-- each diagnostic has line field
-   - Expected: has_line is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("each diagnostic has line field")
 val code = "fn test():\n    val unused_z = 99\n    print \"done\"\n"
 val path = write_temp_file("has_line", code)
 val output = run_check_json(path)
@@ -306,19 +274,13 @@ expect(has_line).to_equal(true)
 
 #### each diagnostic has col field _(slow)_
 
-- each diagnostic has col field
-   - Expected: has_col is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("each diagnostic has col field")
 val code = "fn broken(\n    val x = \n"
 val path = write_temp_file("has_col", code)
 val output = run_check_json(path)
@@ -338,19 +300,13 @@ expect(has_col).to_equal(true)
 
 #### clean code produces zero diagnostics _(slow)_
 
-- clean code produces zero diagnostics
-   - Expected: has_ok is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("clean code produces zero diagnostics")
 val code = "fn add(a: i64, b: i64) -> i64:\n    a + b\n"
 val path = write_temp_file("clean_code", code)
 val output = run_check_json(path)
@@ -371,12 +327,12 @@ expect(has_ok).to_equal(true)
 | Category | LSP |
 | Status | Active |
 | Source | `test/03_system/tools/lsp/lsp_mcp_format_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering LSP MCP Format Output.
+Tests covering:
 - LSP MCP Format Output
 
 ## Scenario Summary
@@ -391,51 +347,3 @@ Tests covering LSP MCP Format Output.
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `e83b0a4ff15647161f81fe7276e5c4d20b1844de24ad50f700bacba5d020759e`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `e83b0a4ff15647161f81fe7276e5c4d20b1844de24ad50f700bacba5d020759e`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `e83b0a4ff15647161f81fe7276e5c4d20b1844de24ad50f700bacba5d020759e`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/03_system/tools/lsp/lsp_mcp_format_spec.spl
-mirror: doc/06_spec/03_system/tools/lsp/lsp_mcp_format_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/tools/lsp/lsp_mcp_format_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/tools/lsp/lsp_mcp_format_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/tools/lsp/lsp_mcp_format_spec.spl:77:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'query check --format=json output contains structuredContent key' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/tools/lsp/lsp_mcp_format_spec.spl:87:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'diagnostics array is present in output' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/tools/lsp/lsp_mcp_format_spec.spl:96:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'diagnostics array contains entries for errors' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

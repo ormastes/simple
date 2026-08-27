@@ -1,0 +1,135 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/llm_runtime_svllm_native_capability_probe}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/2026/06/llm_runtime_svllm_native_capability_probe_$(date -u +%F).md}"
+OUT_ENV="$BUILD_DIR/evidence.env"
+SURFACE_MANIFEST="$BUILD_DIR/svllm_native_capability_probe_surface_manifest.tsv"
+SOURCE="${SVLLM_NATIVE_CAPABILITY_SOURCE:-local_simple_svllm_capability_probe}"
+SIMPLE_BIN="${SIMPLE_BIN:-release/x86_64-unknown-linux-gnu/simple}"
+STD_FS_SPEC_LOG="$BUILD_DIR/std_fs_nvfs_client_spec.log"
+STD_FS_SPEC_TIMEOUT_SECONDS="${SVLLM_NATIVE_CAPABILITY_SPEC_TIMEOUT_SECONDS:-120}"
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+rm -f "$OUT_ENV" "$REPORT_PATH" "$SURFACE_MANIFEST" "$STD_FS_SPEC_LOG"
+
+artifact_size() {
+    path="$1"
+    if [ -n "$path" ] && [ -f "$path" ]; then
+        wc -c <"$path" | tr -d ' '
+    else
+        printf '%s\n' "missing"
+    fi
+}
+
+artifact_sha256() {
+    path="$1"
+    if [ -n "$path" ] && [ -f "$path" ]; then
+        if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$path" | awk '{print $1}'
+        elif command -v shasum >/dev/null 2>&1; then
+            shasum -a 256 "$path" | awk '{print $1}'
+        else
+            printf '%s\n' "unavailable"
+        fi
+    else
+        printf '%s\n' "missing"
+    fi
+}
+
+read_range_status="unsupported"
+pinned_buffer_status="unsupported"
+device_staging_status="unsupported"
+local_read_range_bytes_status="unchecked"
+local_read_range_bytes_reason="std_fs_spec_not_run"
+std_fs_spec_status="not_run"
+std_fs_spec_exit="not_run"
+probe_status="pass"
+probe_exit="0"
+reason="native_runtime_capabilities_not_linked"
+next_action="implement native read_range, pinned-buffer registration, and device staging, then rerun this probe"
+
+if timeout "$STD_FS_SPEC_TIMEOUT_SECONDS" "$SIMPLE_BIN" test test/01_unit/lib/gc_async_mut/svllm/nvfs_client/std_fs_spec.spl --mode=interpreter --clean >"$STD_FS_SPEC_LOG" 2>&1; then
+    std_fs_spec_status="pass"
+    std_fs_spec_exit="0"
+    local_read_range_bytes_status="ready"
+    local_read_range_bytes_reason="std_fs_read_range_bytes_spec_passed"
+else
+    std_fs_spec_exit="$?"
+    std_fs_spec_status="fail"
+    local_read_range_bytes_status="unavailable"
+    local_read_range_bytes_reason="std_fs_read_range_bytes_spec_failed"
+fi
+
+{
+    for path in \
+        scripts/check/check-llm-runtime-svllm-native-capability-probe.shs \
+        scripts/check/check-llm-runtime-svllm-native-streaming-evidence.shs \
+        src/lib/gc_async_mut/svllm/model_executor/model_loader/streaming_readiness.spl \
+        src/lib/gc_async_mut/svllm/model_executor/model_loader/transport.spl \
+        src/lib/nogc_async_mut/svllm/nvfs_client/std_fs.spl \
+        test/01_unit/lib/gc_async_mut/svllm/nvfs_client/std_fs_spec.spl \
+        doc/07_guide/app/llm/llm_runtime_vllm_torch_interface.md
+    do
+        printf '%s\t%s\t%s\n' "$path" "$(artifact_size "$path")" "$(artifact_sha256 "$path")"
+    done
+} >"$SURFACE_MANIFEST"
+surface_manifest_count="$(wc -l <"$SURFACE_MANIFEST" | tr -d ' ')"
+surface_manifest_size="$(artifact_size "$SURFACE_MANIFEST")"
+surface_manifest_sha256="$(artifact_sha256 "$SURFACE_MANIFEST")"
+
+{
+    printf '%s\n' "svllm_native_capability_schema_version=1"
+    printf '%s\n' "svllm_native_capability_source=$SOURCE"
+    printf '%s\n' "svllm_native_capability_probe_event=svllm_native_capability_probe"
+    printf '%s\n' "svllm_native_capability_probe_status=$probe_status"
+    printf '%s\n' "svllm_native_capability_probe_exit=$probe_exit"
+    printf '%s\n' "svllm_native_capability_read_range_status=$read_range_status"
+    printf '%s\n' "svllm_native_capability_pinned_buffer_status=$pinned_buffer_status"
+    printf '%s\n' "svllm_native_capability_device_staging_status=$device_staging_status"
+    printf '%s\n' "svllm_native_capability_local_read_range_bytes_status=$local_read_range_bytes_status"
+    printf '%s\n' "svllm_native_capability_local_read_range_bytes_reason=$local_read_range_bytes_reason"
+    printf '%s\n' "svllm_native_capability_std_fs_spec_status=$std_fs_spec_status"
+    printf '%s\n' "svllm_native_capability_std_fs_spec_exit=$std_fs_spec_exit"
+    printf '%s\n' "svllm_native_capability_std_fs_spec_log=$STD_FS_SPEC_LOG"
+    printf '%s\n' "svllm_native_capability_std_fs_spec_log_size=$(artifact_size "$STD_FS_SPEC_LOG")"
+    printf '%s\n' "svllm_native_capability_std_fs_spec_log_sha256=$(artifact_sha256 "$STD_FS_SPEC_LOG")"
+    printf '%s\n' "svllm_native_capability_std_fs_spec_timeout_seconds=$STD_FS_SPEC_TIMEOUT_SECONDS"
+    printf '%s\n' "svllm_native_capability_reason=$reason"
+    printf '%s\n' "svllm_native_capability_next_action=$next_action"
+    printf '%s\n' "svllm_native_capability_surface_manifest=$SURFACE_MANIFEST"
+    printf '%s\n' "svllm_native_capability_surface_manifest_count=$surface_manifest_count"
+    printf '%s\n' "svllm_native_capability_surface_manifest_size=$surface_manifest_size"
+    printf '%s\n' "svllm_native_capability_surface_manifest_sha256=$surface_manifest_sha256"
+} >"$OUT_ENV"
+
+{
+    printf '# LLM Runtime svLLM Native Capability Probe\n\n'
+    printf '%s\n' "- status: \`$probe_status\`"
+    printf '%s\n' "- source: \`$SOURCE\`"
+    printf '%s\n' "- reason: \`$reason\`"
+    printf '%s\n' "- read_range: \`$read_range_status\`"
+    printf '%s\n' "- pinned_buffer: \`$pinned_buffer_status\`"
+    printf '%s\n' "- device_staging: \`$device_staging_status\`"
+    printf '%s\n' "- local_read_range_bytes: \`$local_read_range_bytes_status\`"
+    printf '%s\n' "- local_read_range_bytes_reason: \`$local_read_range_bytes_reason\`"
+    printf '%s\n' "- std_fs_spec_status: \`$std_fs_spec_status\`"
+    printf '%s\n' "- std_fs_spec_exit: \`$std_fs_spec_exit\`"
+    printf '%s\n' "- std_fs_spec_log: \`$STD_FS_SPEC_LOG\`"
+    printf '%s\n' "- std_fs_spec_log_size: \`$(artifact_size "$STD_FS_SPEC_LOG")\`"
+    printf '%s\n' "- std_fs_spec_log_sha256: \`$(artifact_sha256 "$STD_FS_SPEC_LOG")\`"
+    printf '%s\n' "- std_fs_spec_timeout_seconds: \`$STD_FS_SPEC_TIMEOUT_SECONDS\`"
+    printf '%s\n' "- next_action: \`$next_action\`"
+    printf '%s\n' "- surface_manifest: \`$SURFACE_MANIFEST\`"
+    printf '%s\n' "- surface_manifest_count: \`$surface_manifest_count\`"
+    printf '%s\n' "- surface_manifest_size: \`$surface_manifest_size\`"
+    printf '%s\n' "- surface_manifest_sha256: \`$surface_manifest_sha256\`"
+    printf '%s\n' "- env: \`$OUT_ENV\`"
+    printf '\n'
+    printf 'This probe is a fail-closed local capability artifact. It proves the local probe ran and records that native read_range, pinned-buffer registration, and device staging are not linked on this host. It separately executes the StdFs NVFS client spec and records local `read_range_bytes` bring-up evidence when that bounded file-backed helper passes. That local byte evidence is not caller-buffer DMA, pinned-buffer registration, or device staging, so it is provenance for an unsupported native state, not native streaming completion evidence.\n'
+} >"$REPORT_PATH"
+
+echo "STATUS: PASS llm-runtime-svllm-native-capability-probe reason=$reason"

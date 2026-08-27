@@ -6,6 +6,8 @@
 
 - Executable: `test/03_system/app/simple/feature/minimal_bootstrap_configuration_composed_dynamic_architecture_spec.spl`
 - Mirrored manual: `doc/06_spec/03_system/app/simple/feature/minimal_bootstrap_configuration_composed_dynamic_architecture_spec.md`
+- Focused ABI-digest executable: `test/03_system/app/simple/feature/sci_provider_query_abi_digest_spec.spl`
+- Focused ABI-digest manual: `doc/06_spec/03_system/app/simple/feature/sci_provider_query_abi_digest_spec.md`
 - Evidence: `build/test-artifacts/03_system/app/simple/feature/minimal_bootstrap_configuration_composed_dynamic_architecture/`
 
 The spec uses built-in matchers only. The manual shows primary operator flows; setup is hidden with `@inline`/`@prev`, matrices are folded, and executable SPipe is folded by default.
@@ -25,7 +27,8 @@ The spec uses built-in matchers only. The manual shows primary operator flows; s
 | Reject malformed images; skip optional extension | REQ-002; NFR-002, NFR-011 | stable rejection codes for bounds, overlap, hash, binding, slot, path, interface; optional skip |
 | Project app policy through one manifest | REQ-003; NFR-003 | SCI and `SimpleArtifactManifest` agree; conflicting legacy record rejected |
 | Change app record through unchanged core | REQ-004, REQ-008; NFR-004, NFR-008 | same core digest, new catalog value, zero compile/bootstrap actions |
-| Query compatible and incompatible providers | REQ-005, REQ-006, REQ-014; NFR-011 | old/new minor success; major/short/duplicate/unstable failure |
+| Query compatible and incompatible providers | REQ-005, REQ-006, REQ-014; NFR-011 | 48-byte prefix preservation; full-digest exact match; malformed/mismatch/old-size rejection before pin; old/new minor success; major/short/duplicate/unstable failure |
+| Admit the complete provider ABI identity | REQ-005, REQ-006, REQ-014 | exact 84-byte round trip; real CLI/compiler producers; malformed/mismatch, poisoned legacy partial write, dirty reserved, short/trailing rejection |
 | Dispatch leaf CLI provider | REQ-007; NFR-006, NFR-008 | command result plus provider-only/SCI closure |
 | Missing provider fails without compilation | REQ-009; NFR-003, NFR-010 | `ProviderArtifactMissing`; no process/build action |
 | Body-only edge turns green | REQ-010; NFR-009 | implementation delta, stable interface/ABI/semantic identities, zero dependents |
@@ -53,7 +56,15 @@ The generated manual must explain this flow without exposing setup implementatio
 
 Composition: deterministic ordering; unknown required/optional sections; truncated directory; checked overflow; overlapping sections; hash/signature mismatch; duplicate binding; undeclared slot; unsafe path; missing required/optional provider.
 
-Provider: compatible minor prefixes; unsupported major; descriptor shorter than required; duplicate interface ID; interface set changes between queries; query crash/status failure; non-callable SMF evidence; unload while pinned.
+Provider: compatible minor prefixes; unsupported major; descriptor shorter than required; complete ABI digest round-trip; malformed SCI digest; exact digest mismatch; legacy 60-byte result rejection; duplicate interface ID; interface set changes between queries; query crash/status failure; non-callable SMF evidence; unload while pinned. Mutable-path/same-handle TOCTOU is a later loader criterion, not part of this focused ABI-digest slice.
+
+The focused ABI-digest spec is fail-closed and future-executable. Every
+scenario has a visible literal `step("...")`, built-in `to_equal` assertions,
+and positive, byte-edge, or stable-error evidence. REQ-005, REQ-006, and
+REQ-014 each map to at least three scenarios. Runtime, docgen, and
+`sspec-maintain` remain `TEST_BLOCKED` until one admitted general pure-Simple
+CLI supplies exact path/hash/stage/provenance and declares those commands;
+the compiler-only admitted Stage 2 artifact is not eligible.
 
 Invalidation: body/private/public signature/ABI ownership/macro-CTFE-AOP/tool behavior/config projection changes. Every mutation asserts the exact rebuilt and reused sets.
 

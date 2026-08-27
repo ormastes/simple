@@ -1,0 +1,196 @@
+# Exhaustive MIR-owned use collection.
+#
+# This is intentionally a standalone analysis primitive.  Optimizer passes may
+# adopt it only after their own admission/review work; keeping the collector
+# here prevents another incomplete, pass-local opcode inventory from silently
+# deciding liveness.
+
+use compiler.mir.mir_instructions.{
+    LocalId, MirAsmOperand, MirInstKind, MirOperand, MirOperandKind,
+    MirPlace, MirProjection, MirTerminator
+}
+
+fn mir_used_local_ids_operand_v1(operand: MirOperand) -> [LocalId]:
+    match operand.kind:
+        case MirOperandKind.Copy(local) | MirOperandKind.Move(local): [local]
+        case MirOperandKind.Const(_, _): []
+
+fn mir_used_local_ids_operands_v1(operands: [MirOperand]) -> [LocalId]:
+    var result: [LocalId] = []
+    for operand in operands:
+        for local in mir_used_local_ids_operand_v1(operand):
+            result = result.push(local)
+    result
+
+fn mir_used_local_ids_place_v1(place: MirPlace) -> [LocalId]:
+    var result = [place.local]
+    for projection in place.projection:
+        match projection:
+            case MirProjection.Deref | MirProjection.Field(_) | MirProjection.Downcast(_): ()
+            case MirProjection.Index(local): result = result.push(local)
+    result
+
+fn mir_used_local_ids_asm_operands_v1(operands: [MirAsmOperand]) -> [LocalId]:
+    var result: [LocalId] = []
+    for operand in operands:
+        for local in mir_used_local_ids_operand_v1(operand.operand):
+            result = result.push(local)
+    result
+
+fn mir_used_local_ids_instruction_v1(kind: MirInstKind) -> [LocalId]:
+    match kind:
+        case MirInstKind.Const(_, _, _): []
+        case MirInstKind.Copy(_, source): [source]
+        case MirInstKind.Move(_, source): [source]
+        case MirInstKind.Drop(source): [source]
+        case MirInstKind.Alloc(_, _): []
+        case MirInstKind.LoadGlobal(_, _): []
+        case MirInstKind.GpuKernelDef(_): []
+        case MirInstKind.GpuLaunch(_): []
+        case MirInstKind.GpuGlobalId(_, _): []
+        case MirInstKind.GpuLocalId(_, _): []
+        case MirInstKind.GpuBlockId(_, _): []
+        case MirInstKind.GpuBlockDim(_, _): []
+        case MirInstKind.GpuGridDim(_, _): []
+        case MirInstKind.GpuBarrier(_): []
+        case MirInstKind.GpuMemFence(_): []
+        case MirInstKind.GpuSharedAlloc(_, _, _): []
+        case MirInstKind.HostGpuLaneEnd(_): []
+        case MirInstKind.VhdlProcess(_, _): []
+        case MirInstKind.ScalableVecFence(_): []
+        case MirInstKind.MirWarpActivesMask(_): []
+        case MirInstKind.Nop: []
+        case MirInstKind.DebugValue(source, _): [source]
+        case MirInstKind.ResultMatchSemantic(scrutinee, destination, _, _, _, ok_payload, err_payload):
+            [scrutinee, destination, ok_payload, err_payload]
+        case MirInstKind.BinOp(_, _, left, right): mir_used_local_ids_operands_v1([left, right])
+        case MirInstKind.UnaryOp(_, _, operand): mir_used_local_ids_operand_v1(operand)
+        case MirInstKind.CheckedBinOp(_, _, left, right): mir_used_local_ids_operands_v1([left, right])
+        case MirInstKind.Load(_, operand): mir_used_local_ids_operand_v1(operand)
+        case MirInstKind.Store(left, right): mir_used_local_ids_operands_v1([left, right])
+        case MirInstKind.GetElementPtr(_, base, indices):
+            mir_used_local_ids_operands_v1([base] + indices)
+        case MirInstKind.StoreGlobal(_, operand): mir_used_local_ids_operand_v1(operand)
+        case MirInstKind.Aggregate(_, _, operands): mir_used_local_ids_operands_v1(operands)
+        case MirInstKind.GetField(_, operand, _): mir_used_local_ids_operand_v1(operand)
+        case MirInstKind.SetField(left, _, right): mir_used_local_ids_operands_v1([left, right])
+        case MirInstKind.Cast(_, operand, _): mir_used_local_ids_operand_v1(operand)
+        case MirInstKind.Bitcast(_, operand, _): mir_used_local_ids_operand_v1(operand)
+        case MirInstKind.Call(_, function, arguments): mir_used_local_ids_operands_v1([function] + arguments)
+        case MirInstKind.CallIndirect(_, function, arguments, _): mir_used_local_ids_operands_v1([function] + arguments)
+        case MirInstKind.Intrinsic(_, _, arguments): mir_used_local_ids_operands_v1(arguments)
+        case MirInstKind.DecisionProbe(_, _, result, _, _, _): mir_used_local_ids_operand_v1(result)
+        case MirInstKind.ConditionProbe(_, _, _, _, result, _, _, _): mir_used_local_ids_operand_v1(result)
+        case MirInstKind.SimdAddF32x4(_, a, b): mir_used_local_ids_operands_v1([a, b])
+        case MirInstKind.SimdSubF32x4(_, a, b): mir_used_local_ids_operands_v1([a, b])
+        case MirInstKind.SimdMulF32x4(_, a, b): mir_used_local_ids_operands_v1([a, b])
+        case MirInstKind.SimdDivF32x4(_, a, b): mir_used_local_ids_operands_v1([a, b])
+        case MirInstKind.SimdFmaF32x4(_, a, b, c): mir_used_local_ids_operands_v1([a, b, c])
+        case MirInstKind.SimdAddF32x8(_, a, b): mir_used_local_ids_operands_v1([a, b])
+        case MirInstKind.SimdSubF32x8(_, a, b): mir_used_local_ids_operands_v1([a, b])
+        case MirInstKind.SimdMulF32x8(_, a, b): mir_used_local_ids_operands_v1([a, b])
+        case MirInstKind.SimdDivF32x8(_, a, b): mir_used_local_ids_operands_v1([a, b])
+        case MirInstKind.SimdFmaF32x8(_, a, b, c): mir_used_local_ids_operands_v1([a, b, c])
+        case MirInstKind.SimdAddF64x4(_, a, b): mir_used_local_ids_operands_v1([a, b])
+        case MirInstKind.SimdSubF64x4(_, a, b): mir_used_local_ids_operands_v1([a, b])
+        case MirInstKind.SimdMulF64x4(_, a, b): mir_used_local_ids_operands_v1([a, b])
+        case MirInstKind.SimdDivF64x4(_, a, b): mir_used_local_ids_operands_v1([a, b])
+        case MirInstKind.SimdFmaF64x4(_, a, b, c): mir_used_local_ids_operands_v1([a, b, c])
+        case MirInstKind.SimdAddI32x4(_, a, b): mir_used_local_ids_operands_v1([a, b])
+        case MirInstKind.SimdSubI32x4(_, a, b): mir_used_local_ids_operands_v1([a, b])
+        case MirInstKind.SimdMulI32x4(_, a, b): mir_used_local_ids_operands_v1([a, b])
+        case MirInstKind.SimdXorI32x4(_, a, b): mir_used_local_ids_operands_v1([a, b])
+        case MirInstKind.SimdAndI32x4(_, a, b): mir_used_local_ids_operands_v1([a, b])
+        case MirInstKind.SimdOrI32x4(_, a, b): mir_used_local_ids_operands_v1([a, b])
+        case MirInstKind.SimdShlI32x4(_, a, b): mir_used_local_ids_operands_v1([a, b])
+        case MirInstKind.SimdShrI32x4(_, a, b): mir_used_local_ids_operands_v1([a, b])
+        case MirInstKind.SimdAddI32x8(_, a, b): mir_used_local_ids_operands_v1([a, b])
+        case MirInstKind.SimdSubI32x8(_, a, b): mir_used_local_ids_operands_v1([a, b])
+        case MirInstKind.SimdMulI32x8(_, a, b): mir_used_local_ids_operands_v1([a, b])
+        case MirInstKind.SimdXorI32x8(_, a, b): mir_used_local_ids_operands_v1([a, b])
+        case MirInstKind.SimdAndI32x8(_, a, b): mir_used_local_ids_operands_v1([a, b])
+        case MirInstKind.SimdOrI32x8(_, a, b): mir_used_local_ids_operands_v1([a, b])
+        case MirInstKind.SimdShlI32x8(_, a, b): mir_used_local_ids_operands_v1([a, b])
+        case MirInstKind.SimdShrI32x8(_, a, b): mir_used_local_ids_operands_v1([a, b])
+        case MirInstKind.SimdHaddF32x4(_, operand): mir_used_local_ids_operand_v1(operand)
+        case MirInstKind.SimdHmaxF32x4(_, operand): mir_used_local_ids_operand_v1(operand)
+        case MirInstKind.SimdHminF32x4(_, operand): mir_used_local_ids_operand_v1(operand)
+        case MirInstKind.InlineAsm(_, _, inputs, outputs, _):
+            mir_used_local_ids_asm_operands_v1(inputs) + mir_used_local_ids_asm_operands_v1(outputs)
+        case MirInstKind.PipeForward(_, value, function): mir_used_local_ids_operands_v1([value, function])
+        case MirInstKind.Compose(_, first, second, _): mir_used_local_ids_operands_v1([first, second])
+        case MirInstKind.Parallel(_, functions): mir_used_local_ids_operands_v1(functions)
+        case MirInstKind.LayerConnect(_, first, second): mir_used_local_ids_operands_v1([first, second])
+        case MirInstKind.CreatePromise(_, body, _): [body]
+        case MirInstKind.Await(_, promise): mir_used_local_ids_operand_v1(promise)
+        case MirInstKind.Yield(value):
+            match value:
+                case Some(operand): mir_used_local_ids_operand_v1(operand)
+                case nil: []
+        case MirInstKind.Spawn(_, handler, arguments): mir_used_local_ids_operands_v1([handler] + arguments)
+        case MirInstKind.Send(_, target, message): mir_used_local_ids_operands_v1([target, message])
+        case MirInstKind.Receive(_, timeout):
+            match timeout:
+                case Some(operand): mir_used_local_ids_operand_v1(operand)
+                case nil: []
+        case MirInstKind.Ref(_, _, place): mir_used_local_ids_place_v1(place)
+        case MirInstKind.GpuAtomicOp(_, _, pointer, value): mir_used_local_ids_operands_v1([pointer, value])
+        case MirInstKind.GpuAtomicCas(_, pointer, expected, desired): mir_used_local_ids_operands_v1([pointer, expected, desired])
+        case MirInstKind.HostGpuLaneBegin(_, max_packet_bytes):
+            match max_packet_bytes:
+                case Some(operand): mir_used_local_ids_operand_v1(operand)
+                case nil: []
+        case MirInstKind.VhdlSignalAssign(target, value, _): mir_used_local_ids_operands_v1([target, value])
+        case MirInstKind.VhdlVarAssign(target, value): mir_used_local_ids_operands_v1([target, value])
+        case MirInstKind.VhdlPortMap(_, _, connections):
+            var result: [LocalId] = []
+            for connection in connections:
+                for local in mir_used_local_ids_operand_v1(connection.1):
+                    result = result.push(local)
+            result
+        case MirInstKind.VhdlResize(_, operand, _, _): mir_used_local_ids_operand_v1(operand)
+        case MirInstKind.VhdlSlice(_, operand, _, _): mir_used_local_ids_operand_v1(operand)
+        case MirInstKind.VhdlConcat(_, parts): mir_used_local_ids_operands_v1(parts)
+        case MirInstKind.MirSimdSplat(_, value, _): mir_used_local_ids_operand_v1(value)
+        case MirInstKind.MirSimdLoad(_, pointer, _, _): mir_used_local_ids_operand_v1(pointer)
+        case MirInstKind.MirSimdStore(value, pointer, _): mir_used_local_ids_operands_v1([value, pointer])
+        case MirInstKind.MirSimdGather(_, base, indices, _): mir_used_local_ids_operands_v1([base, indices])
+        case MirInstKind.MirSimdScatter(value, base, indices): mir_used_local_ids_operands_v1([value, base, indices])
+        case MirInstKind.MirSimdBinop(_, left, right, _): mir_used_local_ids_operands_v1([left, right])
+        case MirInstKind.MirSimdTernop(_, a, b, c, _): mir_used_local_ids_operands_v1([a, b, c])
+        case MirInstKind.MirSimdUnop(_, source, _): mir_used_local_ids_operand_v1(source)
+        case MirInstKind.MirSimdReduce(_, source, _): mir_used_local_ids_operand_v1(source)
+        case MirInstKind.MirSimdShuffle(_, left, right, _): mir_used_local_ids_operands_v1([left, right])
+        case MirInstKind.MirSimdPermute(_, source, control): mir_used_local_ids_operands_v1([source, control])
+        case MirInstKind.MirSimdCmp(_, left, right, _): mir_used_local_ids_operands_v1([left, right])
+        case MirInstKind.MirSimdSelect(_, mask, if_true, if_false): mir_used_local_ids_operands_v1([mask, if_true, if_false])
+        case MirInstKind.MirSimdMaskOp(_, left, right, _): mir_used_local_ids_operands_v1([left, right])
+        case MirInstKind.MirSimdScalableVsetvl(_, requested, _): mir_used_local_ids_operand_v1(requested)
+        case MirInstKind.MaskFromCmp(_, _, left, right): mir_used_local_ids_operands_v1([left, right])
+        case MirInstKind.MaskedAdd(_, mask, a, b): mir_used_local_ids_operands_v1([mask, a, b])
+        case MirInstKind.MaskedMul(_, mask, a, b): mir_used_local_ids_operands_v1([mask, a, b])
+        case MirInstKind.MaskedFma(_, mask, a, b, c):
+            mir_used_local_ids_operands_v1([mask, a, b, c])
+        case MirInstKind.PredicatedAdd(_, _, cmp_a, cmp_b, a, b): mir_used_local_ids_operands_v1([cmp_a, cmp_b, a, b])
+        case MirInstKind.PredicatedMul(_, _, cmp_a, cmp_b, a, b): mir_used_local_ids_operands_v1([cmp_a, cmp_b, a, b])
+        case MirInstKind.PredicatedFma(_, _, cmp_a, cmp_b, a, b, c):
+            mir_used_local_ids_operands_v1([cmp_a, cmp_b, a, b, c])
+        case MirInstKind.MirWarpShfl(_, source, delta, mask, _): mir_used_local_ids_operands_v1([source, delta, mask])
+        case MirInstKind.MirWarpReduce(_, source, mask, _): mir_used_local_ids_operands_v1([source, mask])
+        case MirInstKind.MirWarpBallot(_, predicate, mask): mir_used_local_ids_operands_v1([predicate, mask])
+        case MirInstKind.MirWarpSync(mask): mir_used_local_ids_operand_v1(mask)
+
+fn mir_used_local_ids_terminator_v1(terminator: MirTerminator) -> [LocalId]:
+    match terminator:
+        case MirTerminator.Goto(_) | MirTerminator.Unreachable | MirTerminator.Abort(_): []
+        case MirTerminator.Ret(value):
+            match value:
+                case Some(operand): mir_used_local_ids_operand_v1(operand)
+                case nil: []
+        case MirTerminator.If(condition, _, _) | MirTerminator.Switch(condition, _, _):
+            mir_used_local_ids_operand_v1(condition)
+        case MirTerminator.CallTerminator(_, function, arguments, _, _):
+            mir_used_local_ids_operands_v1([function] + arguments)
+
+export mir_used_local_ids_operand_v1, mir_used_local_ids_place_v1
+export mir_used_local_ids_instruction_v1, mir_used_local_ids_terminator_v1

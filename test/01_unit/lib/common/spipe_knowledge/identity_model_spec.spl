@@ -1,0 +1,73 @@
+"""Independent scalar identity oracles for the SPipe Knowledge Compiler."""
+
+use std.spec
+use lib.common.spipe_knowledge.identity.*
+
+val HEX32 = "0123456789ABCDEF0123456789ABCDEF"
+val CROCK26 = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+val HASH64 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+describe "SPipe canonical knowledge identities":
+    it "accepts and preserves both canonical payload encodings":
+        expect(parse_workspace_id_v1("WS-" + HEX32).unwrap().value).to_equal("WS-" + HEX32)
+        expect(parse_project_id_v1("P-" + CROCK26).unwrap().value).to_equal("P-" + CROCK26)
+        expect(parse_worktree_id_v1("WT-" + HEX32).unwrap().value).to_equal("WT-" + HEX32)
+        expect(parse_artifact_uid_v1("A-" + CROCK26).unwrap().value).to_equal("A-" + CROCK26)
+        expect(parse_section_uid_v1("S-" + HEX32).unwrap().value).to_equal("S-" + HEX32)
+        expect(parse_edge_uid_v1("E-" + CROCK26).unwrap().value).to_equal("E-" + CROCK26)
+
+    it "rejects legacy, lowercase, ambiguous, short, and trailing identity forms":
+        expect(parse_workspace_id_v1("W-" + HEX32).is_err()).to_be(true)
+        expect(parse_artifact_uid_v1("A-0123456789abcdef0123456789abcdef").is_err()).to_be(true)
+        expect(parse_section_uid_v1("S-01ARZ3NDEKTSV4RRFFQ69G5FAI").is_err()).to_be(true)
+        expect(parse_edge_uid_v1("E-" + HEX32 + "0").is_err()).to_be(true)
+        expect(parse_project_id_v1("P-" + HEX32.slice(0, 31)).is_err()).to_be(true)
+        expect(parse_workspace_id_v1("WS-É" + HEX32.slice(0, 30)).is_err()).to_be(true)
+
+    it "keeps KnowledgeUid a closed canonical union":
+        val uid = parse_knowledge_uid_v1("A-" + CROCK26).unwrap()
+        match uid:
+            KnowledgeUid.Artifact(artifact): expect(artifact.value).to_equal("A-" + CROCK26)
+            _: fail("artifact prefix resolved to the wrong closed variant")
+        expect(parse_knowledge_uid_v1("K-" + HEX32).is_err()).to_be(true)
+
+describe "SPipe content and provisional artifact identities":
+    it "canonicalizes only the optional SHA-256 scheme prefix":
+        expect(parse_content_hash_v1(HASH64).unwrap().value).to_equal("sha256:" + HASH64)
+        expect(parse_content_hash_v1("sha256:" + HASH64).unwrap().value).to_equal("sha256:" + HASH64)
+        expect(parse_content_hash_v1(HASH64.to_upper()).is_err()).to_be(true)
+        expect(parse_content_hash_v1(HASH64.slice(0, 63)).is_err()).to_be(true)
+        expect(parse_content_hash_v1("é" + HASH64.slice(1, 64)).is_err()).to_be(true)
+
+    it "derives and parses the exact embedded project and digest values":
+        val project = parse_project_id_v1("P-" + CROCK26).unwrap()
+        val hash = parse_content_hash_v1(HASH64).unwrap()
+        val expected = "P-P-" + CROCK26 + "-" + HASH64
+        val derived = derive_provisional_artifact_uid_v1(project, hash)
+        expect(derived.value).to_equal(expected)
+        val parsed = parse_provisional_artifact_uid_v1(expected).unwrap()
+        expect(parsed.project_id.value).to_equal(project.value)
+        expect(parsed.content_hash.value).to_equal(hash.value)
+        expect(parse_provisional_artifact_uid_v1(expected + "0").is_err()).to_be(true)
+        val legacy_project = parse_project_id_v1("P-" + HEX32).unwrap()
+        val legacy_expected = "P-P-" + HEX32 + "-" + HASH64
+        expect(parse_provisional_artifact_uid_v1(legacy_expected).unwrap().project_id.value).to_equal(legacy_project.value)
+        expect(parse_provisional_artifact_uid_v1("P-P-" + CROCK26 + "-" + HASH64.to_upper()).is_err()).to_be(true)
+        expect(parse_provisional_artifact_uid_v1("P-P-" + CROCK26.slice(0, 25) + "-" + HASH64).is_err()).to_be(true)
+
+    it "parses both closed artifact identity variants":
+        match parse_artifact_identity_v1("A-" + HEX32).unwrap():
+            ArtifactIdentity.Canonical(uid): expect(uid.value).to_equal("A-" + HEX32)
+            _: fail("canonical artifact resolved to provisional")
+        val provisional = "P-P-" + CROCK26 + "-" + HASH64
+        match parse_artifact_identity_v1(provisional).unwrap():
+            ArtifactIdentity.Provisional(uid): expect(uid.value).to_equal(provisional)
+            _: fail("provisional artifact resolved to canonical")
+        expect(parse_artifact_identity_v1("P-" + CROCK26).is_err()).to_be(true)
+
+    it "never derives opaque canonical artifact identity from a hash or path":
+        val hash = parse_content_hash_v1(HASH64).unwrap()
+        expect(parse_artifact_uid_v1("A-" + HASH64).is_err()).to_be(true)
+        expect(parse_artifact_uid_v1("A-doc/05_design/search.md").is_err()).to_be(true)
+        expect(derive_provisional_artifact_uid_v1(
+            parse_project_id_v1("P-" + HEX32).unwrap(), hash).value.starts_with("P-P-")).to_be(true)

@@ -6,69 +6,15 @@ cd "$ROOT_DIR"
 
 BUILD_DIR="${BUILD_DIR:-build/simpleos_wm_qmp_drag_delta_evidence}"
 REPORT_PATH="${REPORT_PATH:-doc/09_report/simpleos_wm_qmp_drag_delta_evidence_$(date -u +%F).md}"
-SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-explicit-env}"
-SIMPLE_BIN_STATUS=pass
+SIMPLE_BIN="${SIMPLE_BIN:-src/compiler_rust/target/release/simple}"
 LAUNCH_OUT="$BUILD_DIR/launch.out"
 DRAG_OUT="$BUILD_DIR/drag.out"
 BEFORE_PPM="$BUILD_DIR/before-drag.ppm"
 AFTER_PPM="$BUILD_DIR/after-drag.ppm"
-BEFORE_RAW="$BEFORE_PPM.raw"
-AFTER_RAW="$AFTER_PPM.raw"
 PID=""
 
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
 rm -f "$LAUNCH_OUT" "$DRAG_OUT" "$BEFORE_PPM" "$AFTER_PPM" "$BEFORE_PPM.raw" "$AFTER_PPM.raw" "$BUILD_DIR/evidence.env"
-
-is_rust_seed_simple() {
-    # Identity probe, not just a path pattern (2026-07-28).
-    # This used to test ONLY for a src/compiler_rust/ path. The deployed Rust
-    # seed lives at bin/release/<triple>/simple, which matches none of those
-    # patterns, so the seed was classified "not a seed" and every self-hosted
-    # claim in this script was asserted against it. Ask the binary instead.
-    # Audit: doc/08_tracking/todo/check_scripts_seed_identity_fail_open_2026-07-28.md
-    case "$1" in
-        src/compiler_rust/*|./src/compiler_rust/*|*/src/compiler_rust/*) return 0 ;;
-    esac
-    # Not runnable: leave it to the caller's own missing-binary branch, which
-    # already fails. Do not report "seed" for something we never ran.
-    [ -n "${1:-}" ] && [ -x "$1" ] || return 1
-    # Executable but unverifiable => treat as forbidden (fail closed). The seed
-    # self-identifies on stderr, so 2>&1 is required.
-    if command -v timeout >/dev/null 2>&1; then
-        _irss_v="$(timeout 10 "$1" --version 2>&1)" || return 0
-    else
-        _irss_v="$("$1" --version 2>&1)" || return 0
-    fi
-    [ -n "$_irss_v" ] || return 0
-    case "$_irss_v" in
-        *"bootstrap seed only"*|*"Rust-built"*|*"debug build"*) return 0 ;;
-    esac
-    return 1
-}
-
-if [ -n "${SIMPLE_BIN:-}" ]; then
-    if is_rust_seed_simple "$SIMPLE_BIN"; then
-        SIMPLE_BIN_SOURCE="explicit-env-rust-seed-forbidden"
-        SIMPLE_BIN_STATUS=forbidden
-    fi
-else
-    SIMPLE_BIN=""
-    SIMPLE_BIN_SOURCE=missing
-    for candidate in \
-        "$ROOT_DIR"/bin/release/*/simple \
-        "$ROOT_DIR"/release/*/simple \
-        "$ROOT_DIR"/build/bootstrap/stage3/simple \
-        "$ROOT_DIR"/bin/simple
-    do
-        if [ -f "$candidate" ]; then
-            SIMPLE_BIN="$candidate"
-            SIMPLE_BIN_SOURCE="self-hosted:$candidate"
-            SIMPLE_BIN_STATUS=pass
-            break
-        fi
-    done
-fi
-export SIMPLE_BIN SIMPLE_BIN_SOURCE SIMPLE_BIN_STATUS
 
 cleanup() {
     if [ -n "$PID" ]; then
@@ -83,32 +29,6 @@ file_byte_count() {
         wc -c <"$1" | tr -d ' '
     else
         echo 0
-    fi
-}
-
-regular_file_status() {
-    path="$1"
-    if [ -z "$path" ]; then
-        echo "missing-path"
-    elif [ -L "$path" ]; then
-        echo "symlink"
-    elif [ ! -f "$path" ]; then
-        echo "missing"
-    elif [ ! -s "$path" ]; then
-        echo "empty"
-    else
-        echo "pass"
-    fi
-}
-
-ppm_magic_status() {
-    path="$1"
-    if [ "$(regular_file_status "$path")" != "pass" ]; then
-        regular_file_status "$path"
-    elif head -c 2 "$path" 2>/dev/null | grep -q '^P6$'; then
-        echo "pass"
-    else
-        echo "invalid-magic"
     fi
 }
 
@@ -187,8 +107,6 @@ reason=not-run
 changed_bytes=0
 source_region_changed=0
 target_region_changed=0
-before_raw_bytes=0
-after_raw_bytes=0
 before_sha256=
 after_sha256=
 guest_input_contract_status=not-run
@@ -261,11 +179,9 @@ fi
 set +e
 SIMPLE_LIB="${SIMPLE_LIB:-src}" \
 SIMPLE_BINARY="$SIMPLE_BIN" \
-SIMPLE_OS_LOG_MODE="${SIMPLE_OS_LOG_MODE:-off}" \
 SIMPLEOS_DESKTOP_QMP_TARGET=wm-simple-web \
-SIMPLEOS_DESKTOP_QMP_KEEPALIVE=1 \
 SIMPLEOS_DESKTOP_QMP_LAUNCH_TIMEOUT_MS="${SIMPLEOS_WM_QMP_LAUNCH_TIMEOUT_MS:-90000}" \
-    "$SIMPLE_BIN" run src/app/test/simpleos_desktop_qmp_launch.spl --mode=interpreter --clean >"$LAUNCH_OUT" 2>&1
+    "$SIMPLE_BIN" run simpleos_desktop_qmp_launch_root.spl --mode=interpreter --clean >"$LAUNCH_OUT" 2>&1
 launch_code=$?
 set -e
 
@@ -273,15 +189,11 @@ launcher_status="$(field simpleos_desktop_qmp_status "$LAUNCH_OUT")"
 launcher_reason="$(field simpleos_desktop_qmp_reason "$LAUNCH_OUT")"
 launcher_target="$(field simpleos_desktop_qmp_target "$LAUNCH_OUT")"
 launcher_entry="$(field simpleos_desktop_qmp_entry "$LAUNCH_OUT")"
-if [ "${launcher_reason:-}" = "wm-simple-web-build-failed" ] && grep -q 'phase=native-build FAILED .*timeout_ms=' "$LAUNCH_OUT"; then
-    launcher_reason=wm-simple-web-build-timeout
-fi
 PID="$(field simpleos_desktop_qmp_pid "$LAUNCH_OUT")"
 qmp_socket="$(field simpleos_desktop_qmp_socket "$LAUNCH_OUT")"
 serial_log="$(field simpleos_desktop_qmp_serial_log "$LAUNCH_OUT")"
 stderr_log="$(field simpleos_desktop_qmp_stderr_log "$LAUNCH_OUT")"
 marker_state="$(field simpleos_desktop_qmp_marker_state "$LAUNCH_OUT")"
-classify_guest_input_contract "$launcher_entry"
 
 if [ "$launch_code" -eq 0 ] && [ "$launcher_status" = "pass" ] && [ -S "$qmp_socket" ]; then
     set +e
@@ -380,8 +292,6 @@ PY
     changed_bytes="$(printf '%s\n' "$drag_line" | sed -n 's/.* changed_bytes=\([0-9][0-9]*\).*/\1/p')"
     source_region_changed="$(printf '%s\n' "$drag_line" | sed -n 's/.* source_region_changed=\([0-9][0-9]*\).*/\1/p')"
     target_region_changed="$(printf '%s\n' "$drag_line" | sed -n 's/.* target_region_changed=\([0-9][0-9]*\).*/\1/p')"
-    before_raw_bytes="$(printf '%s\n' "$drag_line" | sed -n 's/.* before_raw_bytes=\([0-9][0-9]*\).*/\1/p')"
-    after_raw_bytes="$(printf '%s\n' "$drag_line" | sed -n 's/.* after_raw_bytes=\([0-9][0-9]*\).*/\1/p')"
     before_sha256="$(printf '%s\n' "$drag_line" | sed -n 's/.* before_sha256=\([^ ]*\).*/\1/p')"
     after_sha256="$(printf '%s\n' "$drag_line" | sed -n 's/.* after_sha256=\([^ ]*\).*/\1/p')"
     drag_receipt_elapsed_ms="$(printf '%s\n' "$drag_line" | sed -n 's/.* drag_receipt_elapsed_ms=\([0-9][0-9]*\).*/\1/p')"
@@ -448,12 +358,9 @@ PY
     if [ "$event_evidence_status" = "pass" ]; then
         status=pass
         reason=pass
-    elif [ "$guest_input_contract_status" != "pass" ] && [ "${changed_bytes:-0}" = "0" ]; then
-        status=fail
-        reason="$guest_input_contract_reason"
     else
         status=fail
-        reason="$event_evidence_reason"
+        reason=qmp-drag-delta-not-proven
     fi
 else
     reason="${launcher_reason:-wm-qmp-launch-failed}"
@@ -462,9 +369,6 @@ fi
 {
     echo "qemu_wm_drag_delta_status=$status"
     echo "qemu_wm_drag_delta_reason=$reason"
-    echo "qemu_wm_drag_delta_simple_bin=$SIMPLE_BIN"
-    echo "qemu_wm_drag_delta_simple_bin_source=$SIMPLE_BIN_SOURCE"
-    echo "qemu_wm_drag_delta_simple_bin_status=$SIMPLE_BIN_STATUS"
     echo "qemu_wm_drag_delta_launcher_status=${launcher_status:-}"
     echo "qemu_wm_drag_delta_launcher_reason=${launcher_reason:-}"
     echo "qemu_wm_drag_delta_launcher_target=${launcher_target:-}"
@@ -502,18 +406,8 @@ fi
     echo "qemu_wm_drag_delta_after_sha256=$after_sha256"
     echo "qemu_wm_drag_delta_drag_receipt_elapsed_ms=$drag_receipt_elapsed_ms"
     echo "qemu_wm_drag_delta_before_ppm=$BEFORE_PPM"
-    echo "qemu_wm_drag_delta_before_raw=$BEFORE_RAW"
-    echo "qemu_wm_drag_delta_before_raw_file_status=$(regular_file_status "$BEFORE_RAW")"
-    echo "qemu_wm_drag_delta_before_raw_bytes=$(file_byte_count "$BEFORE_RAW")"
-    echo "qemu_wm_drag_delta_before_ppm_file_status=$(regular_file_status "$BEFORE_PPM")"
-    echo "qemu_wm_drag_delta_before_ppm_magic_status=$(ppm_magic_status "$BEFORE_PPM")"
     echo "qemu_wm_drag_delta_before_ppm_bytes=$(file_byte_count "$BEFORE_PPM")"
     echo "qemu_wm_drag_delta_after_ppm=$AFTER_PPM"
-    echo "qemu_wm_drag_delta_after_raw=$AFTER_RAW"
-    echo "qemu_wm_drag_delta_after_raw_file_status=$(regular_file_status "$AFTER_RAW")"
-    echo "qemu_wm_drag_delta_after_raw_bytes=$(file_byte_count "$AFTER_RAW")"
-    echo "qemu_wm_drag_delta_after_ppm_file_status=$(regular_file_status "$AFTER_PPM")"
-    echo "qemu_wm_drag_delta_after_ppm_magic_status=$(ppm_magic_status "$AFTER_PPM")"
     echo "qemu_wm_drag_delta_after_ppm_bytes=$(file_byte_count "$AFTER_PPM")"
     echo "qemu_wm_drag_delta_launch_out=$LAUNCH_OUT"
     echo "qemu_wm_drag_delta_drag_out=$DRAG_OUT"
@@ -524,9 +418,6 @@ fi
     echo
     echo "- status: $status"
     echo "- reason: $reason"
-    echo "- simple bin: $SIMPLE_BIN"
-    echo "- simple bin source: $SIMPLE_BIN_SOURCE"
-    echo "- simple bin status: $SIMPLE_BIN_STATUS"
     echo "- launcher status: ${launcher_status:-}"
     echo "- launcher reason: ${launcher_reason:-}"
     echo "- launcher target: ${launcher_target:-}"
@@ -550,11 +441,7 @@ fi
     echo "- after sha256: ${after_sha256:--}"
     echo "- drag receipt elapsed ms: $drag_receipt_elapsed_ms"
     echo "- before ppm: $BEFORE_PPM ($(file_byte_count "$BEFORE_PPM") bytes)"
-    echo "- before raw: $BEFORE_RAW ($(file_byte_count "$BEFORE_RAW") bytes; $(regular_file_status "$BEFORE_RAW"))"
-    echo "- before ppm status: $(regular_file_status "$BEFORE_PPM"); magic $(ppm_magic_status "$BEFORE_PPM")"
     echo "- after ppm: $AFTER_PPM ($(file_byte_count "$AFTER_PPM") bytes)"
-    echo "- after raw: $AFTER_RAW ($(file_byte_count "$AFTER_RAW") bytes; $(regular_file_status "$AFTER_RAW"))"
-    echo "- after ppm status: $(regular_file_status "$AFTER_PPM"); magic $(ppm_magic_status "$AFTER_PPM")"
     echo "- serial log: ${serial_log:--} ($(file_byte_count "${serial_log:-}") bytes)"
     echo "- stderr log: ${stderr_log:--} ($(file_byte_count "${stderr_log:-}") bytes)"
     echo

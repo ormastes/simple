@@ -1,0 +1,120 @@
+use compiler.common.dependency.visibility.Visibility
+
+# The caller resolves module/package/layer relationships once, while this
+# policy owner decides whether a member may be named.  Keeping these facts
+# explicit avoids lossy path guessing in hot field and constructor lookup.
+struct MemberAccessScope:
+    same_module: bool
+    same_package: bool
+    declared_friend: bool
+    internally_exported: bool
+    immediate_parent_facade: bool
+    peer_logical_path: bool
+
+impl MemberAccessScope:
+    static fn unrelated() -> MemberAccessScope:
+        MemberAccessScope(
+            same_module: false,
+            same_package: false,
+            declared_friend: false,
+            internally_exported: false,
+            immediate_parent_facade: false,
+            peer_logical_path: false
+        )
+
+fn member_parent_dir(path: text) -> text:
+    val slash = path.last_index_of("/")
+    if slash <= 0:
+        return ""
+    path.substring(0, slash)
+
+fn member_relative_to_src(path: text) -> text:
+    val marker = "/src/"
+    val index = path.index_of(marker)
+    if index >= 0:
+        return path.substring(index + 5)
+    if path.starts_with("src/"):
+        return path.substring(4)
+    path
+
+fn member_normalized_module(path: text) -> text:
+    var normalized = member_relative_to_src(path)
+    while normalized.starts_with("./"):
+        normalized = normalized.substring(2, normalized.len())
+    normalized
+
+fn member_layer_and_tail(path: text) -> (text, text):
+    val parts = member_relative_to_src(path).split("/")
+    if parts.len() >= 3 and parts[0] == "compiler":
+        return (parts[1], parts[2..].join("/"))
+    if parts.len() >= 2:
+        return (parts[0], parts[1..].join("/"))
+    ("", "")
+
+fn member_source_root(path: text) -> text:
+    val parts = member_relative_to_src(path).split("/")
+    if parts.len() == 0:
+        return ""
+    parts[0]
+
+fn member_access_scope_for_modules(
+    requester_module: text,
+    requester_package: text,
+    declaring_module: text,
+    declaring_package: text,
+    declaring_friends: [text],
+    internally_exported: bool = false
+) -> MemberAccessScope:
+    """Resolve bounded caller/owner facts once per imported composite."""
+    val requester_normalized = member_normalized_module(requester_module)
+    val declaring_normalized = member_normalized_module(declaring_module)
+    val same_module = requester_normalized == declaring_normalized
+    val same_package = requester_package != "" and requester_package == declaring_package
+    var declared_friend = false
+    for friend in declaring_friends:
+        if friend == requester_package:
+            declared_friend = true
+    val immediate_parent_facade = (requester_normalized ==
+        member_parent_dir(declaring_normalized) + "/__init__.spl")
+    val requester_peer = member_layer_and_tail(requester_module)
+    val declaring_peer = member_layer_and_tail(declaring_module)
+    val peer_logical_path = (member_source_root(requester_module) != "" and
+        member_source_root(requester_module) == member_source_root(declaring_module) and
+        requester_peer.0 != "" and
+        requester_peer.0 != declaring_peer.0 and
+        requester_peer.1 == declaring_peer.1)
+    MemberAccessScope(
+        same_module: same_module,
+        same_package: same_package,
+        declared_friend: declared_friend,
+        internally_exported: internally_exported,
+        immediate_parent_facade: immediate_parent_facade,
+        peer_logical_path: peer_logical_path
+    )
+
+fn member_visibility_allows(visibility: Visibility, scope: MemberAccessScope) -> bool:
+    """Decide access without weakening any scoped visibility kind."""
+    match visibility:
+        case Visibility.Public:
+            true
+        case Visibility.Private:
+            scope.same_module
+        case Visibility.Package:
+            scope.same_package
+        case Visibility.Internal:
+            scope.same_package or (scope.declared_friend and scope.internally_exported)
+        case Visibility.Up:
+            scope.same_module or scope.immediate_parent_facade
+        case Visibility.Peer:
+            scope.same_module or scope.peer_logical_path
+
+fn aggregate_constructor_visibility_allows(field_visibilities: [Visibility], scope: MemberAccessScope) -> bool:
+    """Aggregate construction requires authority to initialize every field.
+
+    This seals a public record that contains private state while preserving
+    construction from every scope explicitly admitted by each field.
+    """
+    for visibility in field_visibilities:
+        if not member_visibility_allows(visibility, scope):
+            return false
+    true

@@ -1,0 +1,51 @@
+#!/bin/sh
+set -eu
+
+# Static contract only: this test must never invoke the bootstrap pipeline.
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+bootstrap="$root/scripts/bootstrap/bootstrap-from-scratch.sh"
+
+fail() {
+    echo "FAIL: $*" >&2
+    exit 1
+}
+
+line_of() {
+    pattern=$1
+    line=$(grep -nF "$pattern" "$bootstrap" | head -n 1 | cut -d: -f1)
+    [ -n "$line" ] || fail "missing contract: $pattern"
+    printf '%s\n' "$line"
+}
+
+assert_before() {
+    earlier=$(line_of "$1")
+    later=$(line_of "$2")
+    [ "$earlier" -lt "$later" ] ||
+        fail "contract out of order: $1 must precede $2"
+}
+
+# A failed frontend smoke must leave its diagnostic log beside the durable
+# sanity evidence.  Its receipt records a hash computed from the retained path,
+# after the move, so consumers can verify the exact retained bytes.  Removing
+# any prior path and recreating the log through shell redirection also prevents
+# executable bits from being inherited from a pre-existing file.
+assert_before 'rm -f "${evidence_tmp}" "${frontend_log}"' \
+    'candidate_frontend_smoke "${candidate}" >"${frontend_log}" 2>&1 ||'
+assert_before 'candidate_frontend_smoke "${candidate}" >"${frontend_log}" 2>&1 ||' \
+    'mv "${frontend_log}" "${frontend_evidence_path}" || return 1'
+assert_before \
+    'mv "${frontend_log}" "${frontend_evidence_path}" || return 1' \
+    '"$(bootstrap_stage3_hash_file "${frontend_evidence_path}")"'
+line_of "printf 'frontend_smoke_log=%s\\nfrontend_smoke_log_sha256=%s\\n'" >/dev/null
+
+# A rejected Stage 2 candidate must leave the executable production lane,
+# become read-only/non-executable, and only then be hashed into its receipt.
+assert_before 'mv "${stage2_bin}" "${stage2_rejected_bin}"' \
+    'chmod 400 "${stage2_rejected_bin}"'
+assert_before 'chmod 400 "${stage2_rejected_bin}"' \
+    'echo "candidate_sha256=$(bootstrap_stage3_hash_file "${stage2_rejected_bin}")"'
+line_of 'echo "schema=simple-bootstrap-rejected-stage2-v1"' >/dev/null
+line_of 'echo "status=rejected"' >/dev/null
+line_of 'chmod 400 "${stage2_rejected_receipt}"' >/dev/null
+
+echo "PASS: bootstrap failure evidence retention contract"

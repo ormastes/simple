@@ -1,6 +1,7 @@
 # Test Runner Simple Specification
 
-> Tests covering Simple Test Runner Argument Parsing, Simple Test Runner SPipe docgen propagation, Simple Test Runner Discovery, Simple Test Runner Output Parsing, Simple Test Runner Artifact Layout, Simple Test Runner Timeout, Simple Test Runner Recursion Guard, Simple Test Runner Rust Fallback, Simple Test Runner Execution Modes, Simple Test Runner Seed Shuffle, Simple Test Runner Output Formats, Simple Test Runner Env Propagation, Simple Test Runner Skip Features, Simple Test Runner Test DB.
+*Source: `test/01_unit/app/tooling/test_runner_simple_spec.spl`*
+*Last Updated: 2026-03-29*
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -880,251 +881,16 @@ expect(timed_out).to_equal(true)
 #### normal exit code is not timeout
 
 - normal exit code is not timeout
-   - Expected: timed_out is false
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 5 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-UNIT
-step("normal exit code is not timeout")
-val exit_code = 0
-val timed_out = exit_code == -1
-expect(timed_out).to_equal(false)
-```
-
-</details>
-
-### Simple Test Runner Recursion Guard
-
-#### env var name is SIMPLE_TEST_RUNNER_RUST
-
 - env var name is SIMPLE_TEST_RUNNER_RUST
-   - Expected: guard_var equals `SIMPLE_TEST_RUNNER_RUST`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 4 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-UNIT
-step("env var name is SIMPLE_TEST_RUNNER_RUST")
-val guard_var = "SIMPLE_TEST_RUNNER_RUST"
-expect(guard_var).to_equal("SIMPLE_TEST_RUNNER_RUST")
-```
-
-</details>
-
-#### guard value is 1
-
 - guard value is 1
-   - Expected: guard_value equals `1`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 4 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-UNIT
-step("guard value is 1")
-val guard_value = "1"
-expect(guard_value).to_equal("1")
-```
-
-</details>
-
-#### Rust runner detects guard and skips Simple dispatch
-
 - Rust runner detects guard and skips Simple dispatch
-   - Expected: uses_rust is true
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 5 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-UNIT
-step("Rust runner detects guard and skips Simple dispatch")
-val guard_set = true
-val uses_rust = guard_set
-expect(uses_rust).to_equal(true)
-```
-
-</details>
-
-### Simple Test Runner Rust Fallback
-
-#### falls back for --watch flag
-
 - falls back for --watch flag
-   - Expected: needs_rust is true
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 5 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-UNIT
-step("falls back for --watch flag")
-val flag = "--watch"
-val needs_rust = flag == "--watch"
-expect(needs_rust).to_equal(true)
-```
-
-</details>
-
-#### falls back for --parallel flag
-
 - falls back for --parallel flag
-   - Expected: needs_rust is true
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 5 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-UNIT
-step("falls back for --parallel flag")
-val flag = "--parallel"
-val needs_rust = flag == "--parallel"
-expect(needs_rust).to_equal(true)
-```
-
-</details>
-
-#### falls back for --json flag
-
 - falls back for --json flag
-   - Expected: needs_rust is true
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 5 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-UNIT
-step("falls back for --json flag")
-val flag = "--json"
-val needs_rust = flag == "--json"
-expect(needs_rust).to_equal(true)
-```
-
-</details>
-
-#### does not fall back for --doc flag
-
 - does not fall back for --doc flag
-   - Expected: needs_rust is false
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 5 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-UNIT
-step("does not fall back for --doc flag")
-val flag = "--doc"
-val needs_rust = flag == "--watch" or flag == "--parallel" or flag == "--json"
-expect(needs_rust).to_equal(false)
-```
-
-</details>
-
-#### does not fall back for --list flag
-
 - does not fall back for --list flag
-   - Expected: needs_rust is false
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 5 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-UNIT
-step("does not fall back for --list flag")
-val flag = "--list"
-val needs_rust = flag == "--watch" or flag == "--parallel" or flag == "--json"
-expect(needs_rust).to_equal(false)
-```
-
-</details>
-
-#### does not fall back for --seed flag
-
 - does not fall back for --seed flag
-   - Expected: needs_rust is false
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 5 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-UNIT
-step("does not fall back for --seed flag")
-val flag = "--seed"
-val needs_rust = flag == "--watch" or flag == "--parallel" or flag == "--json"
-expect(needs_rust).to_equal(false)
-```
-
-</details>
-
-#### does not fall back for --list-skip-features
-
 - does not fall back for --list-skip-features
-   - Expected: needs_rust is false
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 5 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-UNIT
-step("does not fall back for --list-skip-features")
-val flag = "--list-skip-features"
-val needs_rust = flag == "--watch" or flag == "--parallel" or flag == "--json"
-expect(needs_rust).to_equal(false)
-```
-
-</details>
-
-### Simple Test Runner Execution Modes
-
-#### interpreter mode runs file directly
-
 - interpreter mode runs file directly
    - Expected: mode equals `interpreter`
 
@@ -1598,82 +1364,89 @@ expect(status).to_equal("completed")
 
 ## Overview
 
-Tests covering Simple Test Runner Argument Parsing, Simple Test Runner SPipe docgen propagation, Simple Test Runner Discovery, Simple Test Runner Output Parsing, Simple Test Runner Artifact Layout, Simple Test Runner Timeout, Simple Test Runner Recursion Guard, Simple Test Runner Rust Fallback, Simple Test Runner Execution Modes, Simple Test Runner Seed Shuffle, Simple Test Runner Output Formats, Simple Test Runner Env Propagation, Simple Test Runner Skip Features, Simple Test Runner Test DB.
-- Simple Test Runner Argument Parsing
-- Simple Test Runner SPipe docgen propagation
-- Simple Test Runner Discovery
-- Simple Test Runner Output Parsing
-- Simple Test Runner Artifact Layout
-- Simple Test Runner Timeout
-- Simple Test Runner Recursion Guard
-- Simple Test Runner Rust Fallback
-- Simple Test Runner Execution Modes
-- Simple Test Runner Seed Shuffle
-- Simple Test Runner Output Formats
-- Simple Test Runner Env Propagation
-- Simple Test Runner Skip Features
-- Simple Test Runner Test DB
+Documentation was generated from executable SPipe scenarios.
 
-## Scenario Summary
+## Evidence
+
+### Artifacts
+
+- build/test-artifacts/unit/app/tooling/test_runner_simple/summary.txt
+
+### Logs
+
+- build/test-artifacts/unit/app/tooling/test_runner_simple/output.log
+
+## Test Summary
 
 | Metric | Count |
-|--------|------:|
-| Total scenarios | 71 |
-| Active scenarios | 71 |
-| Slow scenarios | 0 |
-| Skipped scenarios | 0 |
-| Pending scenarios | 0 |
+|--------|-------|
+| Scenarios | 64 |
+| Slow Scenarios | 0 |
+| Skipped Scenarios | 0 |
 
+## Scenarios
 
-</details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-UNIT`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `298a6df211e3e82e4977beae1e0de2189c1eb7eb27a6d3b0d1e482f245a9c606`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `298a6df211e3e82e4977beae1e0de2189c1eb7eb27a6d3b0d1e482f245a9c606`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `298a6df211e3e82e4977beae1e0de2189c1eb7eb27a6d3b0d1e482f245a9c606`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
-
-SSpec documentization score: 86/100
-source: test/unit/app/tooling/test_runner_simple_spec.spl
-mirror: doc/06_spec/unit/app/tooling/test_runner_simple_spec.md (current)
-findings: 6 blockers: 0
-  narrative=100 structure=100 oracle=70
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/unit/app/tooling/test_runner_simple_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/unit/app/tooling/test_runner_simple_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/unit/app/tooling/test_runner_simple_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 11 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/unit/app/tooling/test_runner_simple_spec.spl:117:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'defaults to test/ path when no path given' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/unit/app/tooling/test_runner_simple_spec.spl:123:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'parses --mode smf flag' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/unit/app/tooling/test_runner_simple_spec.spl:129:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'parses --mode=native equals syntax' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->
+- defaults to test/ path when no path given
+- parses --mode smf flag
+- parses --mode=native equals syntax
+- parses --timeout flag with seconds
+- parses --fail-fast flag
+- parses --only-slow flag
+- parses --only-skipped flag
+- parses --seed flag
+- parses --list-ignored flag
+- parses --safe-mode flag
+- parses --force-rebuild flag
+- parses --keep-artifacts flag
+- parses --all flag
+- parses --doc format flag
+- parses --format doc flag
+- parses --list-skip-features flag
+- parses --planned-only flag
+- identifies spec files by _spec. pattern
+- identifies test files by _test. pattern
+- rejects non-spl files
+- filters unit tests by excluding integration and system paths
+- filters integration tests by path
+- filters system tests by path
+- extracts passed count from examples line
+- handles zero failures
+- falls back to exit code when no output parsed
+- marks non-zero exit as failure when no output parsed
+- tracks skipped count separately
+- writes summaries under build/test-artifacts
+- writes safe-mode subprocess output to output.log
+- converts seconds to milliseconds
+- detects timeout by exit_code -1
+- normal exit code is not timeout
+- env var name is SIMPLE_TEST_RUNNER_RUST
+- guard value is 1
+- Rust runner detects guard and skips Simple dispatch
+- falls back for --watch flag
+- falls back for --parallel flag
+- falls back for --json flag
+- does not fall back for --doc flag
+- does not fall back for --list flag
+- does not fall back for --seed flag
+- does not fall back for --list-skip-features
+- interpreter mode runs file directly
+- SMF mode compiles then runs .smf
+- native mode compiles then runs binary
+- hash produces consistent result for same input
+- different seeds produce different hashes
+- default format shows PASS prefix
+- default format shows FAIL prefix
+- default format shows TOUT prefix for timeout
+- doc format shows basename only
+- sets SIMPLE_TEST_MODE for interpreter
+- sets SIMPLE_TEST_MODE for smf
+- sets SIMPLE_TEST_FILTER for slow
+- sets SIMPLE_TEST_FILTER for skipped
+- sets SIMPLE_TEST_SHOW_TAGS to 1
+- extracts feature IDs from file header
+- extracts category from file header
+- extracts status from file header
+- planned-only filters by status
+- run record contains pass and fail counts
+- run record uses microsecond timestamp as run_id
+- run record status is completed

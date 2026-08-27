@@ -12,7 +12,7 @@ use compiler.core.ast.{arm_get_pattern, arm_get_body}
 use compiler.core.ast.{EXPR_INT_LIT, EXPR_FLOAT_LIT, EXPR_STRING_LIT, EXPR_BOOL_LIT, EXPR_NIL_LIT}
 use compiler.core.ast.{EXPR_IDENT, EXPR_BINARY, EXPR_UNARY, EXPR_CALL, EXPR_INDEX}
 use compiler.core.ast.{EXPR_FIELD_ACCESS, EXPR_METHOD_CALL, EXPR_ARRAY_LIT, EXPR_DICT_LIT}
-use compiler.core.ast.{EXPR_IF, EXPR_MATCH, EXPR_FOR, EXPR_WHILE, EXPR_BLOCK}
+use compiler.core.ast.{EXPR_IF, EXPR_IF_CHAIN, EXPR_MATCH, EXPR_FOR, EXPR_WHILE, EXPR_BLOCK}
 use compiler.core.ast.{EXPR_RETURN, EXPR_BREAK, EXPR_CONTINUE, EXPR_RANGE}
 use compiler.core.ast.{EXPR_ASSIGN, EXPR_COMPOUND_ASSIGN, EXPR_STRUCT_LIT}
 use compiler.core.ast.{EXPR_UNIT, EXPR_PASS, EXPR_PASS_TODO, EXPR_PASS_DO_NOTHING, EXPR_PASS_DN, EXPR_INTERPOLATED_STRING}
@@ -33,13 +33,17 @@ use compiler.core.types.{named_type_find, named_type_name}
 use compiler.core.types.{fn_sig_find, fn_sig_ret_type}
 use compiler.core.types.{int_to_str}
 use compiler.core.compiler.cg_helpers.{cg_emit, cg_emit_line, cg_emit_blank, cg_indent_inc, cg_indent_dec}
-use compiler.core.compiler.cg_helpers.{et_has}
 use compiler.core.compiler.cg_helpers.{vt_push_scope, vt_pop_scope, vt_add, vt_find}
 use compiler.core.compiler.cg_helpers.{st_add, st_find, sa_find}
 use compiler.core.compiler.cg_helpers.{is_text_type, is_array_type}
 use compiler.core.compiler.cg_helpers.{cg_infer_expr_type, cg_spl_wrap, cg_spl_access}
+use compiler.core.compiler.cg_helpers.{cg_flat_if_chain_condition_only, cg_backend_unsupported_expr}
 use compiler.core.compiler.cg_helpers.{cg_escape_string, cg_binop_to_c, cg_compound_op_to_c}
 use compiler.core.compiler.cg_helpers.{cg_asm_match, cg_asm_assert}
+use compiler.frontend.core.if_chain_nodes.{FORM_EXPR}
+use compiler.frontend.core.if_chain_nodes.{flat_if_chain_form_get, flat_if_chain_first_arm_get, flat_if_chain_arm_count_get}
+use compiler.frontend.core.if_chain_nodes.{flat_if_chain_else_expr_get}
+use compiler.frontend.core.if_chain_nodes.{flat_if_arm_next_get, flat_if_arm_head_get, flat_if_arm_then_expr_get}
 
 # ===== Expression Codegen =====
 
@@ -126,6 +130,9 @@ fn cg_expr(idx: i64) -> text:
 
     if tag == EXPR_IF:
         return cg_if_expr(idx)
+
+    if tag == EXPR_IF_CHAIN:
+        return cg_if_chain_expr(idx)
 
     if tag == EXPR_RETURN:
         val left = expr_get_left(idx)
@@ -319,13 +326,6 @@ fn cg_call_expr(idx: i64) -> text:
     if callee_name == "print":
         return cg_print_call(call_args)
 
-    # `assert cond[, msg]` desugars to __assert(...) in parser_stmts.spl.
-    # ponytail: message argument is not threaded into the C diagnostic yet —
-    # spl_assert only prints "Assertion failed"; widen spl_assert if it matters.
-    if callee_name == "__assert":
-        if call_args.len() > 0:
-            return "spl_assert((int)(" + cg_expr(call_args[0]) + "))"
-
     if callee_name == "range":
         return cg_range_call(call_args)
 
@@ -491,8 +491,6 @@ fn cg_field_access_expr(idx: i64) -> text:
     val base_idx = expr_get_left(idx)
     val field_name = expr_get_str(idx)
     val base_c = cg_expr(base_idx)
-    if expr_get_tag(base_idx) == EXPR_IDENT and et_has(base_c) and vt_find(base_c) < 0 and st_find(base_c) == "":
-        return base_c + "_" + field_name
     # self.field -> self->field (self is a pointer in impl methods)
     if base_c == "self":
         return "self->" + field_name
@@ -535,17 +533,6 @@ fn cg_method_call_expr(idx: i64) -> text:
             val arg_c = cg_expr(call_args[0])
             return "spl_str_ends_with(" + recv_c + ", " + arg_c + ")"
     if method_name == "index_of":
-        # Two-arg `index_of(needle, start)`: byte-offset search. Previously
-        # the `len() > 0` guard matched a two-arg call too and SILENTLY
-        # dropped the start argument. Composed as a statement-expression
-        # (already idiomatic in this lane — see the array/dict literals)
-        # that clamps start into [0, len] and offset-adds, which reproduces
-        # rt_text_find's contract exactly: start < 0 -> 0; non-empty needle
-        # past the end -> -1; empty needle -> min(start, len).
-        if call_args.len() >= 2:
-            val arg_c = cg_expr(call_args[0])
-            val arg2_c = cg_expr(call_args[1])
-            return "({ const char* __io_s = (" + recv_c + "); int64_t __io_st = (int64_t)(" + arg2_c + "); int64_t __io_len = (int64_t)strlen(__io_s); if (__io_st < 0) __io_st = 0; if (__io_st > __io_len) __io_st = __io_len; int64_t __io_f = spl_str_index_of(__io_s + __io_st, (" + arg_c + ")); __io_f < 0 ? (int64_t)-1 : __io_f + __io_st; })"
         if call_args.len() > 0:
             val arg_c = cg_expr(call_args[0])
             return "spl_str_index_of(" + recv_c + ", " + arg_c + ")"
@@ -554,7 +541,7 @@ fn cg_method_call_expr(idx: i64) -> text:
             val arg1 = cg_expr(call_args[0])
             val arg2 = cg_expr(call_args[1])
             return "spl_str_replace(" + recv_c + ", " + arg1 + ", " + arg2 + ")"
-    if method_name == "trim" or method_name == "strip":
+    if method_name == "trim":
         return "spl_str_trim(" + recv_c + ")"
     if method_name == "slice":
         if call_args.len() >= 2:
@@ -717,6 +704,76 @@ fn cg_if_expr(idx: i64) -> text:
         return "(" + cond + " ? " + then_c + " : " + else_c + ")"
     return "(" + cond + " ? " + then_c + " : SplValue{})"
 
+fn cg_if_chain_expr(idx: i64) -> text:
+    val chain_id = expr_get_extra(idx)
+    if flat_if_chain_form_get(chain_id) != FORM_EXPR:
+        return cg_backend_unsupported_expr("malformed expression if-chain owner")
+    if not cg_flat_if_chain_condition_only(chain_id):
+        return cg_backend_unsupported_expr("if val/var and pattern arms are not supported")
+
+    var result = ""
+    var arm_id = flat_if_chain_first_arm_get(chain_id)
+    var remaining = flat_if_chain_arm_count_get(chain_id)
+    var closing_count = 0
+    while arm_id >= 0 and remaining > 0:
+        result = result + "(" + cg_expr(flat_if_arm_head_get(arm_id)) + " ? "
+        result = result + cg_expr(flat_if_arm_then_expr_get(arm_id)) + " : "
+        closing_count = closing_count + 1
+        arm_id = flat_if_arm_next_get(arm_id)
+        remaining = remaining - 1
+
+    val else_idx = flat_if_chain_else_expr_get(chain_id)
+    if else_idx >= 0 and expr_get_tag(else_idx) != EXPR_UNIT:
+        result = result + cg_expr(else_idx)
+    else:
+        result = result + "SplValue{}"
+    var close_i = 0
+    while close_i < closing_count:
+        result = result + ")"
+        close_i = close_i + 1
+    result
+
+fn cg_emit_flat_if_expr_branch(expr_idx: i64):
+    if expr_idx >= 0 and expr_get_tag(expr_idx) == EXPR_BLOCK:
+        val branch_stmts = expr_get_stmts(expr_idx)
+        var i = 0
+        while i < branch_stmts.len():
+            cg_stmt(branch_stmts[i])
+            i = i + 1
+    elif expr_idx >= 0:
+        cg_emit_line(cg_expr(expr_idx) + ";")
+    else:
+        cg_emit_line(cg_backend_unsupported_expr("missing if-chain branch") + ";")
+
+fn cg_emit_if_chain_as_stmt(idx: i64):
+    val chain_id = expr_get_extra(idx)
+    if flat_if_chain_form_get(chain_id) != FORM_EXPR or not cg_flat_if_chain_condition_only(chain_id):
+        cg_emit_line(cg_backend_unsupported_expr("if-chain binding arm in statement position") + ";")
+        return
+    var arm_id = flat_if_chain_first_arm_get(chain_id)
+    var remaining = flat_if_chain_arm_count_get(chain_id)
+    var first = true
+    while arm_id >= 0 and remaining > 0:
+        val prefix = if first: "if (" else: "} else if ("
+        cg_emit_line(prefix + cg_expr(flat_if_arm_head_get(arm_id)) + ") {")
+        cg_indent_inc()
+        vt_push_scope()
+        cg_emit_flat_if_expr_branch(flat_if_arm_then_expr_get(arm_id))
+        vt_pop_scope()
+        cg_indent_dec()
+        first = false
+        arm_id = flat_if_arm_next_get(arm_id)
+        remaining = remaining - 1
+    val else_idx = flat_if_chain_else_expr_get(chain_id)
+    if else_idx >= 0 and expr_get_tag(else_idx) != EXPR_UNIT:
+        cg_emit_line("} else {")
+        cg_indent_inc()
+        vt_push_scope()
+        cg_emit_flat_if_expr_branch(else_idx)
+        vt_pop_scope()
+        cg_indent_dec()
+    cg_emit_line("}")
+
 # ===== Module-level If as Statement =====
 
 fn cg_emit_if_as_stmt(idx: i64):
@@ -797,8 +854,8 @@ fn cg_slice_expr(idx: i64) -> text:
 use compiler.core.compiler.cg_stmt.*
 
 export cg_expr, cg_stmt
-export cg_emit_if_as_stmt, cg_emit_for_as_stmt, cg_emit_while_as_stmt
+export cg_emit_if_as_stmt, cg_emit_if_chain_as_stmt, cg_emit_for_as_stmt, cg_emit_while_as_stmt
 export cg_block_expr, cg_for_expr, cg_while_expr, cg_match_expr
 export cg_val_decl_stmt, cg_var_decl_stmt, cg_assign_stmt, cg_compound_assign_stmt
-export cg_if_stmt, cg_for_stmt, cg_while_stmt, cg_match_stmt, cg_block_stmt
+export cg_if_stmt, cg_if_chain_stmt, cg_for_stmt, cg_while_stmt, cg_match_stmt, cg_block_stmt
 export cg_emit_array_init

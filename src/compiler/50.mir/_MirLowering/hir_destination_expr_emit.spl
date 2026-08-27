@@ -1,0 +1,851 @@
+# Direct destination-HIR expression consumer.  The row number remains the
+# recursive identity; this module never constructs HirExpr/HirStmt/HirBlock or
+# HirType values.
+use compiler.hir.hir_lowering.hir_destination_registry_reader.*
+use compiler.hir.hir_lowering.hir_destination_graph.*
+use compiler.hir.hir_lowering.hir_destination_block_values.*
+use compiler.mir._MirLowering.hir_destination_receipt.*
+use compiler.mir._MirLowering.hir_destination_types.*
+use compiler.mir._MirLowering.hir_destination_expr_memo.*
+use compiler.mir.mir_data.*
+use compiler.mir.mir_instructions.{MirInst, MirInstKind, MirOperand, MirOperandKind, MirBinOp,
+    MirUnaryOp, AggregateKind, GpuBarrierScope, GpuMemoryScope, MirAsmOperand}
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir.mir_types.{LocalId, MirType, MirTypeKind, MirConstValue, MirSignature}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.common.module_path_naming.{module_logical_name_from_path}
+
+fn destination_binop(shape: i64) -> MirBinOp:
+    if shape == 0: return MirBinOp.Add
+    if shape == 1: return MirBinOp.Sub
+    if shape == 2: return MirBinOp.Mul
+    if shape == 3: return MirBinOp.Div
+    if shape == 4: return MirBinOp.Rem
+    if shape == 5: return MirBinOp.Pow
+    if shape == 6: return MirBinOp.MatMul
+    if shape == 7: return MirBinOp.Eq
+    if shape == 8: return MirBinOp.Ne
+    if shape == 9: return MirBinOp.Lt
+    if shape == 10: return MirBinOp.Le
+    if shape == 11: return MirBinOp.Gt
+    if shape == 12: return MirBinOp.Ge
+    if shape == 15: return MirBinOp.BitAnd
+    if shape == 16: return MirBinOp.BitOr
+    if shape == 17: return MirBinOp.BitXor
+    if shape == 18: return MirBinOp.Shl
+    if shape == 19: return MirBinOp.Shr
+    if shape == 20: return MirBinOp.BroadcastAdd
+    if shape == 21: return MirBinOp.BroadcastSub
+    if shape == 22: return MirBinOp.BroadcastMul
+    if shape == 23: return MirBinOp.BroadcastDiv
+    MirBinOp.BroadcastPow
+
+fn destination_unary(shape: i64) -> MirUnaryOp:
+    if shape == 1: return MirUnaryOp.Not
+    if shape == 2: return MirUnaryOp.BitNot
+    if shape == 6: return MirUnaryOp.Transpose
+    MirUnaryOp.Neg
+
+impl MirLowering:
+    me destination_memo_publish_local(row: i64, shape: i64,
+            operator_shape: i64, reusable: bool, local: LocalId) -> LocalId:
+        if reusable and local.id >= 0:
+            self.destination_expr_memo.publish(row, self.builder.current_block.id,
+                MirOperand(kind: MirOperandKind.Copy(local)))
+        local
+
+    me destination_expr_type(r: MirDestinationFunctionReceipt, row: i64,
+            expected_type: MirType?) -> MirType:
+        val type_row = hdr_expr_type(r.slot, r.generation, row)
+        if type_row >= 0: return self.destination_checked_type(r, type_row,
+            "expression")
+        if val expected = expected_type: return expected
+        self.error_fatal("E-MIR-DESTINATION-TYPE: expression has neither frozen nor contextual type", nil)
+        MirType.unit()
+
+    me destination_expr_range_operands(r: MirDestinationFunctionReceipt,
+            handle: i64, expected_type: MirType?) -> [MirOperand]:
+        var operands: [MirOperand] = []
+        if handle < 0 or hdr_range_kind(r.slot, r.generation, handle) != HD_RANGE_EXPR:
+            return operands
+        val subtype = hdr_range_subtype(r.slot, r.generation, handle)
+        val count = hdr_range_length(r.slot, r.generation, handle)
+        var offset = 0
+        while offset < count:
+            val child_row = hdr_range_value(r.slot, r.generation, handle, subtype, offset)
+            val child = self.mir_destination_lower_expr_row(r, child_row, expected_type)
+            operands.push(mir_operand_copy(child))
+            offset = offset + 1
+        operands
+
+    me destination_call_operands(r: MirDestinationFunctionReceipt,
+            handle: i64) -> [MirOperand]:
+        var operands: [MirOperand] = []
+        if handle < 0 or hdr_range_kind(r.slot, r.generation, handle) != HD_RANGE_AUX:
+            return operands
+        val subtype = hdr_range_subtype(r.slot, r.generation, handle)
+        val count = hdr_range_length(r.slot, r.generation, handle)
+        var offset = 0
+        while offset < count:
+            val aux = hdr_range_value(r.slot, r.generation, handle, subtype, offset)
+            if hdr_aux_shape(r.slot, r.generation, aux) != HD_AUX_CALL_ARG:
+                self.error_fatal("E-MIR-DESTINATION-EXPR: malformed call argument row", nil)
+                return []
+            val value = self.mir_destination_lower_expr_row(r,
+                hdr_aux_i64(r.slot, r.generation, aux, 0), nil)
+            operands.push(mir_operand_copy(value))
+            offset = offset + 1
+        operands
+
+    me destination_named_expr_operands(r: MirDestinationFunctionReceipt,
+            handle: i64) -> [MirOperand]:
+        var operands: [MirOperand] = []
+        val subtype = hdr_range_subtype(r.slot, r.generation, handle)
+        val count = hdr_range_length(r.slot, r.generation, handle)
+        var offset = 0
+        while offset < count:
+            val aux = hdr_range_value(r.slot, r.generation, handle, subtype, offset)
+            if hdr_aux_shape(r.slot, r.generation, aux) != HD_AUX_NAMED_EXPR:
+                self.error_fatal("E-MIR-DESTINATION-EXPR: malformed named field row", nil)
+                return []
+            val value = self.mir_destination_lower_expr_row(r,
+                hdr_aux_i64(r.slot, r.generation, aux, 0), nil)
+            operands.push(mir_operand_copy(value))
+            offset = offset + 1
+        operands
+
+    me destination_callee_operand(r: MirDestinationFunctionReceipt,
+            row: i64) -> MirOperand?:
+        val shape = hdr_expr_shape(r.slot, r.generation, row)
+        if (shape == HD_EXPR_VAR or shape == HD_EXPR_NAMED_VAR or
+                shape == HD_EXPR_QUALIFIED_NAMED_VAR):
+            val symbol = hdr_expr_i64(r.slot, r.generation, row, 0)
+            val module_row = if shape == HD_EXPR_QUALIFIED_NAMED_VAR:
+                hdr_expr_i64(r.slot, r.generation, row, 1)
+            else: r.module_index
+            val symbol_row = hdr_destination_symbol_lookup_in_module(r.slot,
+                r.generation, module_row, symbol)
+            var name = hdr_expr_text(r.slot, r.generation, row, 0)
+            if name == "": name = hdr_destination_symbol_name(r.slot,
+                r.generation, symbol_row)
+            if shape == HD_EXPR_QUALIFIED_NAMED_VAR:
+                val owner_symbol = hdr_destination_symbol_owner(r.slot,
+                    r.generation, symbol_row)
+                if owner_symbol >= 0:
+                    val owner_row = hdr_destination_symbol_lookup_in_module(
+                        r.slot, r.generation, module_row, owner_symbol)
+                    val owner_name = hdr_destination_symbol_name(r.slot,
+                        r.generation, owner_row)
+                    if owner_row < 0 or owner_name == "": return nil
+                    name = owner_name + "." + name
+                else:
+                    name = module_logical_name_from_path(hdr_module_name(r.slot,
+                        r.generation, module_row)) + "." + name
+            if name == "": return nil
+            var function_type = self.destination_expr_type(r, row, nil)
+            match function_type.kind:
+                case FuncPtr(_): ()
+                case _:
+                    function_type = MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                        params: [], return_type: MirType.i64(), is_variadic: false)))
+            return Some(MirOperand(kind: MirOperandKind.Const(
+                MirConstValue.Str(name.replace("::", ".")), function_type)))
+        val local = self.mir_destination_lower_expr_row(r, row, nil)
+        if local.id < 0: return nil
+        Some(mir_operand_copy(local))
+
+    me destination_option_is_some(local: LocalId) -> LocalId:
+        val fn_type = MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+            params: [MirType.i64()], return_type: MirType.bool(), is_variadic: false)))
+        val func = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_is_some"), fn_type))
+        var option_builder = self.builder
+        val result = option_builder.emit_call(func, [mir_operand_copy(local)], MirType.bool())
+        self.builder = option_builder
+        result ?? LocalId(id: -1)
+
+    me destination_pattern_test(r: MirDestinationFunctionReceipt,
+            pattern: i64, value: LocalId) -> LocalId:
+        val shape = hdr_pattern_shape(r.slot, r.generation, pattern)
+        if shape == HD_PATTERN_WILDCARD:
+            return self.builder.emit_const_bool(true)
+        if shape == HD_PATTERN_BINDING:
+            self.bind_local(hdr_pattern_i64(r.slot, r.generation, pattern, 0), value)
+            return self.builder.emit_const_bool(true)
+        if shape == HD_PATTERN_LITERAL:
+            val literal = self.mir_destination_lower_expr_row(r,
+                hdr_pattern_i64(r.slot, r.generation, pattern, 0), nil)
+            var pattern_builder = self.builder
+            val result = pattern_builder.emit_binop(MirBinOp.Eq,
+                mir_operand_copy(value), mir_operand_copy(literal), MirType.bool())
+            self.builder = pattern_builder
+            return result
+        self.destination_complex_pattern_test(r, pattern, value)
+
+    me mir_destination_lower_expr_row(r: MirDestinationFunctionReceipt, row: i64,
+            expected_type: MirType?) -> LocalId:
+        # Shape is deliberately read exactly once.  Every recursive edge below
+        # carries the original scalar row index rather than materialising HIR.
+        val shape = hdr_expr_shape(r.slot, r.generation, row)
+        val operator_shape = if shape == HD_EXPR_UNARY or shape == HD_EXPR_BINARY:
+            hdr_expr_i64(r.slot, r.generation, row, 0)
+        else: -1
+        # A row without an encoded HIR type may be requested under different
+        # expected types even in one block; it is never a valid memo key.
+        val memo_type_stable = hdr_expr_type(r.slot, r.generation, row) >= 0
+        val memo_reusable = memo_type_stable and self.destination_preflight.expr_is_transitively_pure(row)
+        if memo_reusable:
+            if val memo = self.destination_expr_memo.lookup(row, self.builder.current_block.id):
+                match memo.kind:
+                    case MirOperandKind.Copy(local): return local
+                    case _: ()
+        val type_ = self.destination_expr_type(r, row, expected_type)
+        if shape == HD_EXPR_INT:
+            val dest = self.builder.new_temp(type_)
+            self.builder.emit_const(dest, MirConstValue.Int(
+                hdr_expr_i64(r.slot, r.generation, row, 0)), type_)
+            return self.destination_memo_publish_local(row, shape, operator_shape, memo_reusable, dest)
+        if shape == HD_EXPR_FLOAT:
+            val dest = self.builder.new_temp(type_)
+            self.builder.emit_const(dest, MirConstValue.Float(
+                hdr_float_value(r.slot, r.generation, row)), type_)
+            return self.destination_memo_publish_local(row, shape, operator_shape, memo_reusable, dest)
+        if shape == HD_EXPR_STRING:
+            val dest = self.builder.new_temp(type_)
+            self.builder.emit_const(dest, MirConstValue.Str(
+                hdr_expr_text(r.slot, r.generation, row, 0)), type_)
+            return self.destination_memo_publish_local(row, shape, operator_shape, memo_reusable, dest)
+        if shape == HD_EXPR_BOOL:
+            val dest = self.builder.new_temp(type_)
+            self.builder.emit_const(dest, MirConstValue.Bool(
+                hdr_expr_bool(r.slot, r.generation, row, 0)), type_)
+            return self.destination_memo_publish_local(row, shape, operator_shape, memo_reusable, dest)
+        if shape == HD_EXPR_CHAR:
+            val dest = self.builder.new_temp(type_)
+            self.builder.emit_const(dest, MirConstValue.Int(
+                hdr_expr_i64(r.slot, r.generation, row, 0)), type_)
+            return self.destination_memo_publish_local(row, shape, operator_shape, memo_reusable, dest)
+        if shape == HD_EXPR_UNIT:
+            val dest = self.builder.new_temp(type_)
+            self.builder.emit_const(dest, MirConstValue.Zero, type_)
+            return self.destination_memo_publish_local(row, shape, operator_shape, memo_reusable, dest)
+        if shape == HD_EXPR_NIL:
+            val dest = self.builder.new_temp(type_)
+            self.builder.emit_const(dest, MirConstValue.Zero, type_)
+            return self.destination_memo_publish_local(row, shape, operator_shape, memo_reusable, dest)
+        if shape == HD_EXPR_VAR or shape == HD_EXPR_NAMED_VAR or shape == HD_EXPR_QUALIFIED_NAMED_VAR:
+            val local = self.find_local(hdr_expr_i64(r.slot, r.generation, row, 0))
+            if local.id >= 0: return local
+            self.error_fatal("E-MIR-DESTINATION-EXPR: unresolved local expression row " + row.to_text(), nil)
+            return LocalId(id: -1)
+        if shape == HD_EXPR_BINARY:
+            val op_shape = hdr_expr_i64(r.slot, r.generation, row, 0)
+            if op_shape == 13 or op_shape == 14 or op_shape >= 25:
+                self.error_fatal("E-MIR-DESTINATION-EXPR: binary control/special operator requires dedicated scalar lowering", nil)
+                return LocalId(id: -1)
+            val left = self.mir_destination_lower_expr_row(r, hdr_expr_i64(r.slot, r.generation, row, 1), nil)
+            val right = self.mir_destination_lower_expr_row(r, hdr_expr_i64(r.slot, r.generation, row, 2), nil)
+            var binary_builder = self.builder
+            val result = binary_builder.emit_binop(destination_binop(op_shape),
+                mir_operand_copy(left), mir_operand_copy(right), type_)
+            self.builder = binary_builder
+            return self.destination_memo_publish_local(row, shape, operator_shape, memo_reusable, result)
+        if shape == HD_EXPR_UNARY:
+            val op_shape = hdr_expr_i64(r.slot, r.generation, row, 0)
+            if op_shape >= 3 and op_shape <= 5:
+                self.error_fatal("E-MIR-DESTINATION-EXPR: reference unary operator requires place lowering", nil)
+                return LocalId(id: -1)
+            val value = self.mir_destination_lower_expr_row(r, hdr_expr_i64(r.slot, r.generation, row, 1), nil)
+            var unary_builder = self.builder
+            val result = unary_builder.emit_unary(destination_unary(op_shape), mir_operand_copy(value), type_)
+            self.builder = unary_builder
+            return self.destination_memo_publish_local(row, shape, operator_shape, memo_reusable, result)
+        if shape == HD_EXPR_ARRAY or shape == HD_EXPR_TUPLE or shape == HD_EXPR_SET:
+            val values = self.destination_expr_range_operands(r,
+                hdr_expr_range(r.slot, r.generation, row, false), nil)
+            var aggregate_builder = self.builder
+            val kind = if shape == HD_EXPR_TUPLE: AggregateKind.Tuple else: AggregateKind.Array(type_)
+            val result = aggregate_builder.emit_aggregate(kind, values, type_)
+            self.builder = aggregate_builder
+            return result
+        if shape == HD_EXPR_ARRAY_REPEAT:
+            val value = self.mir_destination_lower_expr_row(r,
+                hdr_expr_i64(r.slot, r.generation, row, 0), nil)
+            val count = self.mir_destination_lower_expr_row(r,
+                hdr_expr_i64(r.slot, r.generation, row, 1), Some(MirType.i64()))
+            val boxed = self.box_runtime_value(value)
+            var repeat_builder = self.builder
+            val count_i64 = repeat_builder.emit_cast(mir_operand_copy(count), MirType.i64())
+            val repeat_fn = MirOperand(kind: MirOperandKind.Const(
+                MirConstValue.Str("rt_array_repeat"),
+                MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                    params: [MirType.i64(), MirType.i64()], return_type: type_,
+                    is_variadic: false)))))
+            val result = repeat_builder.emit_call(repeat_fn,
+                [mir_operand_copy(boxed), mir_operand_copy(count_i64)], type_)
+            self.builder = repeat_builder
+            val local = result ?? LocalId(id: -1)
+            if local.id < 0:
+                self.error_fatal("E-MIR-DESTINATION-EXPR: array-repeat call produced no local", nil)
+                return local
+            self.runtime_array_locals[local.id] = true
+            self.mark_runtime_value_local(local.id)
+            return local
+        if shape == HD_EXPR_DICT:
+            return self.lower_destination_dict_row(r, row, type_)
+        if shape == HD_EXPR_CAST or shape == HD_EXPR_AS:
+            val value = self.mir_destination_lower_expr_row(r, hdr_expr_i64(r.slot, r.generation, row, 0), nil)
+            val target = self.destination_checked_type(r,
+                hdr_expr_i64(r.slot, r.generation, row, 1), "cast target")
+            var cast_builder = self.builder
+            val result = cast_builder.emit_cast(mir_operand_copy(value), target)
+            self.builder = cast_builder
+            return self.destination_memo_publish_local(row, shape, operator_shape, memo_reusable, result)
+        if shape == HD_EXPR_STRUCT:
+            val type_row = hdr_expr_i64(r.slot, r.generation, row, 0)
+            val symbol = hdr_type_i64(r.slot, r.generation, type_row, 0)
+            val fields = self.destination_struct_expr_operands(r, type_row,
+                hdr_expr_range(r.slot, r.generation, row, false))
+            var struct_builder = self.builder
+            val result = struct_builder.emit_aggregate(AggregateKind.Struct(
+                SymbolId(id: symbol)), fields, type_)
+            self.builder = struct_builder
+            return result
+        if shape == HD_EXPR_ENUM:
+            val type_row = hdr_expr_i64(r.slot, r.generation, row, 0)
+            val enum_symbol = hdr_type_i64(r.slot, r.generation, type_row, 0)
+            val defining_module = hdr_type_i64(r.slot, r.generation, type_row, 1)
+            if defining_module < 0 or hdr_module_identity(r.slot, r.generation,
+                    defining_module) < 0:
+                self.error_fatal("E-MIR-DESTINATION-ENUM: defining-module authority is absent", nil)
+                return LocalId(id: -1)
+            val enum_symbol_row = hdr_destination_symbol_lookup_in_module(r.slot,
+                r.generation, defining_module, enum_symbol)
+            val enum_name = hdr_destination_symbol_name(r.slot, r.generation,
+                enum_symbol_row)
+            val declaration_row = hdr_decl_lookup(r.slot, r.generation,
+                defining_module, enum_symbol)
+            val variant = hdr_expr_text(r.slot, r.generation, row, 0)
+            val variant_ordinal = hdr_decl_enum_variant_lookup(r.slot,
+                r.generation, declaration_row, variant)
+            if (enum_symbol_row < 0 or enum_name == "" or declaration_row < 0 or
+                    variant_ordinal < 0):
+                self.error_fatal("E-MIR-DESTINATION-ENUM: unknown variant " + enum_name + "." + variant, nil)
+                return LocalId(id: -1)
+            val has_payload = hdr_expr_bool(r.slot, r.generation, row, 0)
+            val payload_aux = hdr_expr_i64(r.slot, r.generation, row, 1)
+            val enum_errors_before = self.errors.len()
+            val values = self.destination_enum_expr_operands(r, declaration_row, variant_ordinal,
+                has_payload, payload_aux)
+            if self.errors.len() > enum_errors_before: return LocalId(id: -1)
+            var payload = self.builder.emit_const_int(0)
+            if has_payload:
+                if values.len() == 1:
+                    match values[0].kind:
+                        case MirOperandKind.Copy(local): payload = local
+                        case _: ()
+                elif values.len() > 1:
+                    val tuple_new = MirOperand(kind: MirOperandKind.Const(
+                        MirConstValue.Str("rt_tuple_new"), MirType(kind: MirTypeKind.FuncPtr(
+                            MirSignature(params: [MirType.i64()], return_type: MirType.i64(),
+                                is_variadic: false)))))
+                    val tuple_set = MirOperand(kind: MirOperandKind.Const(
+                        MirConstValue.Str("rt_tuple_set"), MirType(kind: MirTypeKind.FuncPtr(
+                            MirSignature(params: [MirType.i64(), MirType.i64(), MirType.i64()],
+                                return_type: MirType.i64(), is_variadic: false)))))
+                    var tuple_builder = self.builder
+                    val tuple = tuple_builder.emit_call(tuple_new,
+                        [mir_operand_const_int(values.len())], MirType.i64())
+                    payload = tuple ?? LocalId(id: -1)
+                    var value_offset = 0
+                    while value_offset < values.len():
+                        tuple_builder.emit_call(tuple_set, [mir_operand_copy(payload),
+                            mir_operand_const_int(value_offset), values[value_offset]], MirType.i64())
+                        value_offset = value_offset + 1
+                    self.builder = tuple_builder
+            val enum_id = self.builder.emit_const_int(declaration_row)
+            val discriminant = if hdr_decl_enum_variant_has_discriminant(r.slot,
+                    r.generation, declaration_row, variant_ordinal):
+                self.mir_destination_lower_expr_row(r,
+                    hdr_decl_enum_variant_i64(r.slot, r.generation,
+                        declaration_row, variant_ordinal, 2), Some(MirType.i64()))
+            else:
+                self.builder.emit_const_int(variant_ordinal)
+            val enum_fn = MirOperand(kind: MirOperandKind.Const(
+                MirConstValue.Str("rt_enum_new"), MirType(kind: MirTypeKind.FuncPtr(
+                    MirSignature(params: [MirType.i64(), MirType.i64(), MirType.i64()],
+                        return_type: MirType.i64(), is_variadic: false)))))
+            var enum_builder = self.builder
+            val raw = enum_builder.emit_call(enum_fn, [mir_operand_copy(enum_id),
+                mir_operand_copy(discriminant), mir_operand_copy(payload)], MirType.i64())
+            self.builder = enum_builder
+            if val local = raw: return self.tag_enum_construct_result(local)
+            self.error_fatal("E-MIR-DESTINATION-ENUM: runtime constructor returned no local", nil)
+            return LocalId(id: -1)
+        if shape == HD_EXPR_EXISTS or shape == HD_EXPR_NULL_COALESCE:
+            val left = self.mir_destination_lower_expr_row(r,
+                hdr_expr_i64(r.slot, r.generation, row, 0), nil)
+            val present = self.destination_option_is_some(left)
+            if present.id < 0:
+                self.error_fatal("E-MIR-DESTINATION-EXPR: option presence test produced no MIR local", nil)
+                return LocalId(id: -1)
+            var option_builder = self.builder
+            val some_block = option_builder.new_block(Some("destination_option_some"))
+            val none_block = option_builder.new_block(Some("destination_option_none"))
+            val merge_block = option_builder.new_block(Some("destination_option_merge"))
+            val result = option_builder.new_temp(type_)
+            option_builder.terminate_if(mir_operand_copy(present), some_block, none_block)
+            option_builder.switch_to_block(some_block)
+            self.builder = option_builder
+            var payload = self.option_payload_or_self(left)
+            payload = self.enum_payload_value(payload, type_)
+            option_builder = self.builder
+            option_builder.emit_copy(result, payload)
+            option_builder.terminate_goto(merge_block)
+            option_builder.switch_to_block(none_block)
+            self.builder = option_builder
+            if shape == HD_EXPR_NULL_COALESCE:
+                val fallback = self.mir_destination_lower_expr_row(r,
+                    hdr_expr_i64(r.slot, r.generation, row, 1), Some(type_))
+                option_builder = self.builder
+                option_builder.emit_copy(result, fallback)
+            else:
+                option_builder.emit_const(result, MirConstValue.Int(3), type_)
+            if not option_builder.current_block_has_explicit_terminator():
+                option_builder.terminate_goto(merge_block)
+            option_builder.switch_to_block(merge_block)
+            self.builder = option_builder
+            return result
+        if shape == HD_EXPR_TUPLE_INDEX:
+            val base = self.mir_destination_lower_expr_row(r, hdr_expr_i64(r.slot, r.generation, row, 0), nil)
+            var field_builder = self.builder
+            val result = field_builder.emit_get_field(mir_operand_copy(base),
+                hdr_expr_i64(r.slot, r.generation, row, 1), type_)
+            self.builder = field_builder
+            return result
+        if shape == HD_EXPR_FIELD or shape == HD_EXPR_RESOLVED_FIELD:
+            if not hdr_expr_bool(r.slot, r.generation, row, 0):
+                self.error_fatal("E-MIR-DESTINATION-EXPR: unresolved field has no authoritative ordinal", nil)
+                return LocalId(id: -1)
+            val module_row = if shape == HD_EXPR_RESOLVED_FIELD:
+                hdr_expr_i64(r.slot, r.generation, row, 2)
+            else: r.module_index
+            val field_symbol = hdr_expr_i64(r.slot, r.generation, row, 1)
+            val symbol_row = hdr_destination_symbol_lookup_in_module(r.slot,
+                r.generation, module_row, field_symbol)
+            val owner = hdr_destination_symbol_owner(r.slot, r.generation, symbol_row)
+            val member = hdr_destination_member_lookup_name(r.slot, r.generation,
+                module_row, owner, hdr_expr_text(r.slot, r.generation, row, 0))
+            val ordinal = hdr_destination_member_ordinal(r.slot, r.generation, member)
+            if ordinal < 0:
+                self.error_fatal("E-MIR-DESTINATION-EXPR: resolved field member authority is absent", nil)
+                return LocalId(id: -1)
+            val base = self.mir_destination_lower_expr_row(r,
+                hdr_expr_i64(r.slot, r.generation, row, 0), nil)
+            var field_builder = self.builder
+            val result = field_builder.emit_get_field(mir_operand_copy(base), ordinal, type_)
+            self.builder = field_builder
+            return result
+        if shape == HD_EXPR_INDEX:
+            val base = self.mir_destination_lower_expr_row(r,
+                hdr_expr_i64(r.slot, r.generation, row, 0), nil)
+            val index = self.mir_destination_lower_expr_row(r,
+                hdr_expr_i64(r.slot, r.generation, row, 1), Some(MirType.i64()))
+            var index_builder = self.builder
+            val pointer = index_builder.emit_gep(mir_operand_copy(base),
+                [mir_operand_copy(index)], MirType.ptr(type_, false))
+            val result = index_builder.emit_load(mir_operand_copy(pointer), type_)
+            self.builder = index_builder
+            return result
+        if shape == HD_EXPR_BLOCK or shape == HD_EXPR_LOSS or shape == HD_EXPR_NOGRAD or shape == HD_EXPR_UNSAFE:
+            val result = self.lower_destination_block(r,
+                hdr_expr_i64(r.slot, r.generation, row, 0), Some(type_))
+            if val local = result: return local
+            if type_.kind == MirTypeKind.Unit:
+                val dest = self.builder.new_temp(type_)
+                self.builder.emit_const(dest, MirConstValue.Zero, type_)
+                return dest
+            self.error_fatal("E-MIR-DESTINATION-EXPR: value block produced no result", nil)
+            return LocalId(id: -1)
+        if shape == HD_EXPR_CALL:
+            if val lambda_result = self.try_destination_lambda_call(r, row, type_):
+                return lambda_result
+            val callee = self.destination_callee_operand(r,
+                hdr_expr_i64(r.slot, r.generation, row, 0))
+            if not callee.?:
+                self.error_fatal("E-MIR-DESTINATION-EXPR: call target is not callable", nil)
+                return LocalId(id: -1)
+            val args = self.destination_call_operands(r,
+                hdr_expr_range(r.slot, r.generation, row, false))
+            var call_builder = self.builder
+            val result = call_builder.emit_call_value(callee ?? mir_operand_const_int(0), args, type_)
+            self.builder = call_builder
+            return result
+        if shape == HD_EXPR_METHOD_CALL or shape == HD_EXPR_STATIC_CALL:
+            val resolution = hdr_expr_i64(r.slot, r.generation, row, 1)
+            val resolution_shape = hdr_aux_i64(r.slot, r.generation, resolution, 0)
+            if resolution_shape >= HD_RESOLUTION_QUALIFIED_INSTANCE:
+                val defining_module = hdr_method_resolution_defining_module(
+                    r.slot, r.generation, resolution)
+                if defining_module < 0:
+                    self.error_fatal("E-MIR-DESTINATION-EXPR: qualified method authority is absent", nil)
+                    return LocalId(id: -1)
+            val function_symbol = hdr_aux_i64(r.slot, r.generation, resolution, 1)
+            if function_symbol < 0:
+                self.error_fatal("E-MIR-DESTINATION-EXPR: resolved method/static callable is absent", nil)
+                return LocalId(id: -1)
+            val defining_module = if resolution_shape >= HD_RESOLUTION_QUALIFIED_INSTANCE:
+                hdr_method_resolution_defining_module(r.slot, r.generation, resolution)
+            else: r.module_index
+            val function_row = hdr_destination_symbol_lookup_in_module(r.slot,
+                r.generation, defining_module, function_symbol)
+            var function_name = hdr_destination_symbol_name(r.slot, r.generation,
+                function_row)
+            if function_name == "": function_name = hdr_expr_text(r.slot,
+                r.generation, row, 0)
+            val member_resolution = (resolution_shape == HD_RESOLUTION_INSTANCE or
+                resolution_shape == HD_RESOLUTION_TRAIT or
+                resolution_shape == HD_RESOLUTION_STATIC or
+                resolution_shape == HD_RESOLUTION_QUALIFIED_INSTANCE or
+                resolution_shape == HD_RESOLUTION_QUALIFIED_TRAIT or
+                resolution_shape == HD_RESOLUTION_QUALIFIED_STATIC)
+            if member_resolution:
+                val owner_symbol = hdr_destination_symbol_owner(r.slot,
+                    r.generation, function_row)
+                val owner_row = hdr_destination_symbol_lookup_in_module(r.slot,
+                    r.generation, defining_module, owner_symbol)
+                val owner_name = hdr_destination_symbol_name(r.slot,
+                    r.generation, owner_row)
+                if owner_symbol < 0 or owner_row < 0 or owner_name == "":
+                    self.error_fatal("E-MIR-DESTINATION-EXPR: resolved member callable lacks owner authority", nil)
+                    return LocalId(id: -1)
+                function_name = owner_name + "." + function_name
+            elif resolution_shape == HD_RESOLUTION_QUALIFIED_FREE:
+                function_name = module_logical_name_from_path(hdr_module_name(
+                    r.slot, r.generation, defining_module)) + "." + function_name
+            val callee = MirOperand(kind: MirOperandKind.Const(
+                MirConstValue.Str(function_name.replace("::", ".")),
+                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [],
+                    return_type: type_, is_variadic: false)))))
+            var args: [MirOperand] = []
+            if shape == HD_EXPR_METHOD_CALL:
+                val receiver = self.mir_destination_lower_expr_row(r,
+                    hdr_expr_i64(r.slot, r.generation, row, 0), nil)
+                args.push(mir_operand_copy(receiver))
+            val explicit_args = self.destination_call_operands(r,
+                hdr_expr_range(r.slot, r.generation, row, false))
+            for arg in explicit_args: args.push(arg)
+            var resolved_call_builder = self.builder
+            val result = resolved_call_builder.emit_call_value(callee, args, type_)
+            self.builder = resolved_call_builder
+            return result
+        if shape == HD_EXPR_RETURN:
+            var return_builder = self.builder
+            if hdr_expr_bool(r.slot, r.generation, row, 0):
+                val value = self.mir_destination_lower_expr_row(r,
+                    hdr_expr_i64(r.slot, r.generation, row, 0), expected_type)
+                self.emit_destination_pending_finally(r)
+                return_builder = self.builder
+                if not return_builder.current_block_has_explicit_terminator():
+                    return_builder.terminate_return(Some(mir_operand_copy(value)))
+            else:
+                self.emit_destination_pending_finally(r)
+                return_builder = self.builder
+                if not return_builder.current_block_has_explicit_terminator():
+                    return_builder.terminate_return(nil)
+            self.builder = return_builder
+            return LocalId(id: -1)
+        if shape == HD_EXPR_AWAIT:
+            val promise = self.mir_destination_lower_expr_row(r,
+                hdr_expr_i64(r.slot, r.generation, row, 0), nil)
+            var await_builder = self.builder
+            val dest = await_builder.new_temp(type_)
+            await_builder.emit(MirInst(kind: MirInstKind.Await(dest: dest,
+                promise: mir_operand_copy(promise)), span: await_builder.current_span))
+            self.builder = await_builder
+            return dest
+        if shape == HD_EXPR_YIELD:
+            var yielded: MirOperand? = nil
+            if hdr_expr_bool(r.slot, r.generation, row, 0):
+                val value = self.mir_destination_lower_expr_row(r,
+                    hdr_expr_i64(r.slot, r.generation, row, 0), nil)
+                yielded = Some(mir_operand_copy(value))
+            var yield_builder = self.builder
+            yield_builder.emit(MirInst(kind: MirInstKind.Yield(value: yielded),
+                span: yield_builder.current_span))
+            val dest = yield_builder.new_temp(type_)
+            yield_builder.emit_const(dest, MirConstValue.Zero, type_)
+            self.builder = yield_builder
+            return dest
+        if shape == HD_EXPR_SPAWN:
+            val handler = self.mir_destination_lower_expr_row(r,
+                hdr_expr_i64(r.slot, r.generation, row, 0), nil)
+            var spawn_builder = self.builder
+            val dest = spawn_builder.new_temp(type_)
+            spawn_builder.emit(MirInst(kind: MirInstKind.Spawn(dest: dest,
+                handler: mir_operand_copy(handler), args: []), span: spawn_builder.current_span))
+            self.builder = spawn_builder
+            return dest
+        if shape == HD_EXPR_THROW:
+            val payload_row = hdr_expr_i64(r.slot, r.generation, row, 0)
+            val payload = self.mir_destination_lower_expr_row(r, payload_row, nil)
+            var throw_builder = self.builder
+            # Keep destination lowering on the same exception ABI as flat
+            # lowering: the thrown value's frozen type row determines the
+            # collision-free catch tag, and every propagation route keeps
+            # that tag paired with the payload.  An active unwind edge owns
+            # catch/finally cleanup, so do not eagerly execute lexical finally
+            # before dispatching to it.  Without an unwind owner, nonlocal
+            # transfer follows the ordinary pending-finally rule.
+            val throw_type_tag = destination_exception_type_tag(r,
+                hdr_expr_type(r.slot, r.generation, payload_row))
+            if throw_builder.unwind_target.? and throw_builder.unwind_payload.?:
+                throw_builder.emit(MirInst(kind: MirInstKind.Intrinsic(
+                    nil, "__simple_exception_set_type_tag",
+                    [mir_operand_const_int(throw_type_tag)]),
+                    span: throw_builder.current_span))
+                throw_builder.emit_copy(throw_builder.unwind_payload.unwrap(), payload)
+                if throw_builder.unwind_type_tag.?:
+                    throw_builder.emit_const(throw_builder.unwind_type_tag.unwrap(),
+                        MirConstValue.Int(throw_type_tag), MirType.i64())
+                throw_builder.terminate_goto(throw_builder.unwind_target.unwrap())
+            else:
+                self.emit_destination_pending_finally(r)
+                throw_builder = self.builder
+                if not throw_builder.current_block_has_explicit_terminator():
+                    throw_builder.emit(MirInst(kind: MirInstKind.Intrinsic(
+                        nil, "__simple_exception_set_type_tag",
+                        [mir_operand_const_int(throw_type_tag)]),
+                        span: throw_builder.current_span))
+                    throw_builder.terminate_throw(mir_operand_copy(payload),
+                        mir_operand_const_int(throw_type_tag))
+            self.builder = throw_builder
+            return LocalId(id: -1)
+        if shape == HD_EXPR_BREAK or shape == HD_EXPR_CONTINUE:
+            if self.loop_stack.len() == 0:
+                self.error_fatal("E-MIR-DESTINATION-EXPR: loop transfer outside loop", nil)
+                return LocalId(id: -1)
+            val (continue_block, break_block) = self.loop_stack[self.loop_stack.len() - 1]
+            self.emit_destination_pending_finally(r)
+            var transfer_builder = self.builder
+            if not transfer_builder.current_block_has_explicit_terminator():
+                if shape == HD_EXPR_BREAK:
+                    transfer_builder.terminate_goto(break_block)
+                else:
+                    transfer_builder.terminate_goto(continue_block)
+            self.builder = transfer_builder
+            return LocalId(id: -1)
+        if shape == HD_EXPR_IF:
+            val condition = self.mir_destination_lower_expr_row(r,
+                hdr_expr_i64(r.slot, r.generation, row, 0), Some(MirType.bool()))
+            var if_builder = self.builder
+            val then_block = if_builder.new_block(Some("destination_if_then"))
+            val else_block = if_builder.new_block(Some("destination_if_else"))
+            val merge_block = if_builder.new_block(Some("destination_if_merge"))
+            val result = if_builder.new_temp(type_)
+            if_builder.terminate_if(mir_operand_copy(condition), then_block, else_block)
+            if_builder.switch_to_block(then_block)
+            self.builder = if_builder
+            val then_value = self.lower_destination_block(r,
+                hdr_expr_i64(r.slot, r.generation, row, 1), Some(type_))
+            if_builder = self.builder
+            if val value = then_value: if_builder.emit_copy(result, value)
+            if not if_builder.current_block_has_explicit_terminator(): if_builder.terminate_goto(merge_block)
+            if_builder.switch_to_block(else_block)
+            self.builder = if_builder
+            if hdr_expr_bool(r.slot, r.generation, row, 0):
+                val else_value = self.lower_destination_block(r,
+                    hdr_expr_i64(r.slot, r.generation, row, 2), Some(type_))
+                if_builder = self.builder
+                if val value = else_value: if_builder.emit_copy(result, value)
+            if not if_builder.current_block_has_explicit_terminator(): if_builder.terminate_goto(merge_block)
+            if_builder.switch_to_block(merge_block)
+            self.builder = if_builder
+            return result
+        if shape == HD_EXPR_IF_CHAIN:
+            val arms = hdr_expr_range(r.slot, r.generation, row, false)
+            val subtype = hdr_range_subtype(r.slot, r.generation, arms)
+            val count = hdr_range_length(r.slot, r.generation, arms)
+            if count <= 0:
+                self.error_fatal("E-MIR-DESTINATION-EXPR: empty if-chain", nil)
+                return LocalId(id: -1)
+            var chain_builder = self.builder
+            val result = chain_builder.new_temp(type_)
+            val merge = chain_builder.new_block(Some("destination_if_chain_merge"))
+            self.builder = chain_builder
+            var offset = 0
+            while offset < count:
+                val arm = hdr_range_value(r.slot, r.generation, arms, subtype, offset)
+                val condition = self.mir_destination_lower_expr_row(r,
+                    hdr_aux_i64(r.slot, r.generation, arm, 0), Some(MirType.bool()))
+                chain_builder = self.builder
+                val body = chain_builder.new_block(Some("destination_if_chain_arm"))
+                val next = chain_builder.new_block(Some("destination_if_chain_next"))
+                chain_builder.terminate_if(mir_operand_copy(condition), body, next)
+                chain_builder.switch_to_block(body)
+                self.builder = chain_builder
+                val value = self.lower_destination_block(r,
+                    hdr_aux_i64(r.slot, r.generation, arm, 1), Some(type_))
+                chain_builder = self.builder
+                if val local = value: chain_builder.emit_copy(result, local)
+                if not chain_builder.current_block_has_explicit_terminator():
+                    chain_builder.terminate_goto(merge)
+                chain_builder.switch_to_block(next)
+                self.builder = chain_builder
+                offset = offset + 1
+            chain_builder = self.builder
+            if hdr_expr_bool(r.slot, r.generation, row, 0):
+                val else_value = self.lower_destination_block(r,
+                    hdr_expr_i64(r.slot, r.generation, row, 0), Some(type_))
+                chain_builder = self.builder
+                if val local = else_value: chain_builder.emit_copy(result, local)
+            elif type_.kind == MirTypeKind.Unit:
+                chain_builder.emit_const(result, MirConstValue.Zero, type_)
+            else:
+                self.error_fatal("E-MIR-DESTINATION-EXPR: value if-chain has no else block", nil)
+            if not chain_builder.current_block_has_explicit_terminator():
+                chain_builder.terminate_goto(merge)
+            chain_builder.switch_to_block(merge)
+            self.builder = chain_builder
+            return result
+        if shape == HD_EXPR_MATCH:
+            val scrutinee = self.mir_destination_lower_expr_row(r,
+                hdr_expr_i64(r.slot, r.generation, row, 0), nil)
+            val arms = hdr_expr_range(r.slot, r.generation, row, false)
+            val subtype = hdr_range_subtype(r.slot, r.generation, arms)
+            val count = hdr_range_length(r.slot, r.generation, arms)
+            var match_builder = self.builder
+            val result = match_builder.new_temp(type_)
+            val merge = match_builder.new_block(Some("destination_match_merge"))
+            self.builder = match_builder
+            var offset = 0
+            var exhaustive = false
+            while offset < count:
+                val arm = hdr_range_value(r.slot, r.generation, arms, subtype, offset)
+                val pattern_row = hdr_aux_i64(r.slot, r.generation, arm, 0)
+                val pattern_shape = hdr_pattern_shape(r.slot, r.generation, pattern_row)
+                if ((pattern_shape == HD_PATTERN_WILDCARD or pattern_shape == HD_PATTERN_BINDING) and
+                        not hdr_aux_bool(r.slot, r.generation, arm, 0)):
+                    exhaustive = true
+                val matches = self.destination_pattern_test(r,
+                    pattern_row, scrutinee)
+                match_builder = self.builder
+                val body = match_builder.new_block(Some("destination_match_arm"))
+                val next = match_builder.new_block(Some("destination_match_next"))
+                match_builder.terminate_if(mir_operand_copy(matches), body, next)
+                match_builder.switch_to_block(body)
+                self.builder = match_builder
+                if hdr_aux_bool(r.slot, r.generation, arm, 0):
+                    val guard = self.mir_destination_lower_expr_row(r,
+                        hdr_aux_i64(r.slot, r.generation, arm, 1), Some(MirType.bool()))
+                    match_builder = self.builder
+                    val guarded_body = match_builder.new_block(Some("destination_match_guarded"))
+                    match_builder.terminate_if(mir_operand_copy(guard), guarded_body, next)
+                    match_builder.switch_to_block(guarded_body)
+                    self.builder = match_builder
+                val value = self.lower_destination_block(r,
+                    hdr_aux_i64(r.slot, r.generation, arm, 2), Some(type_))
+                match_builder = self.builder
+                if val local = value: match_builder.emit_copy(result, local)
+                if not match_builder.current_block_has_explicit_terminator():
+                    match_builder.terminate_goto(merge)
+                match_builder.switch_to_block(next)
+                self.builder = match_builder
+                offset = offset + 1
+            match_builder = self.builder
+            if exhaustive:
+                if not match_builder.current_block_has_explicit_terminator():
+                    match_builder.terminate_goto(merge)
+            else:
+                self.error_fatal("E-MIR-DESTINATION-MATCH: non-exhaustive scalar match", nil)
+                match_builder.terminate_unreachable()
+            match_builder.switch_to_block(merge)
+            self.builder = match_builder
+            return result
+        if shape == HD_EXPR_LOOP or shape == HD_EXPR_WHILE:
+            var loop_builder = self.builder
+            val head = loop_builder.new_block(Some("destination_loop_head"))
+            val body = loop_builder.new_block(Some("destination_loop_body"))
+            val exit_block = loop_builder.new_block(Some("destination_loop_exit"))
+            loop_builder.terminate_goto(head)
+            loop_builder.switch_to_block(head)
+            self.builder = loop_builder
+            if shape == HD_EXPR_WHILE:
+                val condition = self.mir_destination_lower_expr_row(r,
+                    hdr_expr_i64(r.slot, r.generation, row, 0), Some(MirType.bool()))
+                loop_builder = self.builder
+                loop_builder.terminate_if(mir_operand_copy(condition), body, exit_block)
+            else:
+                loop_builder.terminate_goto(body)
+            loop_builder.switch_to_block(body)
+            self.builder = loop_builder
+            self.loop_stack.push((head, exit_block))
+            val body_row = if shape == HD_EXPR_WHILE:
+                hdr_expr_i64(r.slot, r.generation, row, 1)
+            else: hdr_expr_i64(r.slot, r.generation, row, 0)
+            self.lower_destination_block(r, body_row, nil)
+            self.loop_stack.pop()
+            loop_builder = self.builder
+            if not loop_builder.current_block_has_explicit_terminator(): loop_builder.terminate_goto(head)
+            loop_builder.switch_to_block(exit_block)
+            val result = loop_builder.new_temp(type_)
+            loop_builder.emit_const(result, MirConstValue.Zero, type_)
+            self.builder = loop_builder
+            return result
+        if shape == HD_EXPR_GPU_INTRINSIC:
+            val kind = hdr_expr_i64(r.slot, r.generation, row, 0)
+            val dim = hdr_expr_i64(r.slot, r.generation, row, 1)
+            val args = self.destination_expr_range_operands(r,
+                hdr_expr_range(r.slot, r.generation, row, false), nil)
+            var gpu_builder = self.builder
+            val dest = gpu_builder.new_temp(type_)
+            if kind == 0:
+                gpu_builder.emit(MirInst(kind: MirInstKind.GpuGlobalId(dest, dim), span: gpu_builder.current_span))
+            elif kind == 1:
+                gpu_builder.emit(MirInst(kind: MirInstKind.GpuLocalId(dest, dim), span: gpu_builder.current_span))
+            elif kind == 2:
+                gpu_builder.emit(MirInst(kind: MirInstKind.GpuBlockId(dest, dim), span: gpu_builder.current_span))
+            elif kind == 3:
+                gpu_builder.emit(MirInst(kind: MirInstKind.GpuBlockDim(dest, dim), span: gpu_builder.current_span))
+            elif kind == 4:
+                gpu_builder.emit(MirInst(kind: MirInstKind.GpuGridDim(dest, dim), span: gpu_builder.current_span))
+            elif kind == 5:
+                gpu_builder.emit(MirInst(kind: MirInstKind.GpuBarrier(GpuBarrierScope.Workgroup), span: gpu_builder.current_span))
+            elif kind == 6:
+                gpu_builder.emit(MirInst(kind: MirInstKind.GpuMemFence(GpuMemoryScope.Workgroup), span: gpu_builder.current_span))
+            elif kind == 7 and args.len() == 3:
+                gpu_builder.emit(MirInst(kind: MirInstKind.GpuAtomicCas(dest,
+                    args[0], args[1], args[2]), span: gpu_builder.current_span))
+            else:
+                self.error_fatal("E-MIR-DESTINATION-EXPR: configured GPU intrinsic kind is unsupported by MIR backend", nil)
+                return LocalId(id: -1)
+            self.builder = gpu_builder
+            return dest
+        if shape == HD_EXPR_INLINE_ASM:
+            return self.lower_destination_inline_asm_row(r,
+                hdr_expr_i64(r.slot, r.generation, row, 0), type_)
+        if shape == HD_EXPR_RANGE:
+            # The legacy helper currently emits a Const(Int(0)) function
+            # placeholder rather than a named rt_range* operand.  Reproducing
+            # that would create backend-invalid call semantics.
+            self.error_fatal("E-MIR-DESTINATION-RANGE-UNSUPPORTED: legacy lower_range uses an unresolved zero function placeholder", nil)
+            return LocalId(id: -1)
+        if shape == HD_EXPR_CUSTOM_BLOCK:
+            val block_value = hdr_expr_i64(r.slot, r.generation, row, 0)
+            val block_shape = hdr_bv_shape(r.slot, r.generation, block_value)
+            if block_shape == HD_BV_EXPR:
+                return self.mir_destination_lower_expr_row(r,
+                    hdr_bv_i64(r.slot, r.generation, block_value, 0), expected_type)
+            # Legacy lower_custom_block allocates an uninitialized result temp
+            # and explicitly documents runtime evaluation as a future
+            # placeholder.  Do not claim semantics the existing MIR lacks.
+            self.error_fatal("E-MIR-DESTINATION-BLOCK-VALUE-UNSUPPORTED: legacy lower_custom_block returns an uninitialized placeholder for shape " +
+                block_shape.to_text(), nil)
+            return LocalId(id: -1)
+
+        if val dense_result = self.lower_destination_dense_expr_row(
+                r, row, shape, type_, expected_type):
+            return dense_result
+
+        self.error_fatal("E-MIR-DESTINATION-EXPR: unsupported canonical expression shape " + shape.to_text(), nil)
+        LocalId(id: -1)

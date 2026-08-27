@@ -30,9 +30,7 @@ use compiler.core.ast_expr.{
 }
 use compiler.core.ast_stmt.{STMT_FOR, stmt_tag, stmt_expr, stmt_count}
 use compiler.core.tokens.{TOK_PLUS}
-use compiler.blocks.sugar_registry.{
-    apply_sugar_rules_ast, has_ast_rewrite_rules, ast_rewrite_rule_generation
-}
+use compiler.blocks.sugar_registry.{apply_sugar_rules_ast}
 
 var _collection_desugar_rewrites: i64 = 0
 
@@ -51,11 +49,6 @@ fn desugar_collections(start_from: i64, stmt_start: i64):
     _collection_desugar_rewrites = 0
     var i = start_from
     val count = expr_count()
-    # Avoid scanning the whole registry for every arena node on the normal
-    # empty/static path. The generation receipt retains visibility if an
-    # executable rule is registered or removed while this pass is in progress.
-    var ast_rule_generation = ast_rewrite_rule_generation()
-    var dynamic_ast_rules = has_ast_rewrite_rules()
 
     while i < count:
         val tag = expr_tag[i]
@@ -74,48 +67,21 @@ fn desugar_collections(start_from: i64, stmt_start: i64):
         # expr_tag[i] to pick up any tag changes made by the built-in arms above.
         # [STATIC-NEXT] replace dynamic registry call with inlined specialised
         # lowering when static rule baking (FR-PLUG-0004) lands.
-        val current_ast_rule_generation = ast_rewrite_rule_generation()
-        if current_ast_rule_generation != ast_rule_generation:
-            ast_rule_generation = current_ast_rule_generation
-            dynamic_ast_rules = has_ast_rewrite_rules()
-
-        if dynamic_ast_rules:
-            val _new_tag = expr_tag[i]
-            val _rewritten = apply_sugar_rules_ast(_new_tag, i)
-            if _rewritten != i:
-                # A plugin rule replaced the node with a newly-allocated node.
-                # NOTE: in-place mutations (modifying expr_tag/expr_left/etc. of
-                # node i and returning i) are the supported shape and will NOT
-                # increment the counter here — they take effect via the arena side
-                # effect directly. Structural replacement (_rewritten != i) requires
-                # the caller's parent to be updated to point to _rewritten; that
-                # parent-pointer fixup is deferred to the next iteration.
-                _collection_desugar_rewrites = _collection_desugar_rewrites + 1
+        val _new_tag = expr_tag[i]
+        val _rewritten = apply_sugar_rules_ast(_new_tag, i)
+        if _rewritten != i:
+            # A plugin rule replaced the node with a newly-allocated node.
+            # NOTE: in-place mutations (modifying expr_tag/expr_left/etc. of
+            # node i and returning i) are the supported shape and will NOT
+            # increment the counter here — they take effect via the arena side
+            # effect directly. Structural replacement (_rewritten != i) requires
+            # the caller's parent to be updated to point to _rewritten; that
+            # parent-pointer fixup is deferred to the next iteration.
+            _collection_desugar_rewrites = _collection_desugar_rewrites + 1
 
         i = i + 1
 
     # Scan statement arena: STMT_FOR stores iterable in stmt_expr
-    var j = stmt_start
-    val s_count = stmt_count()
-    while j < s_count:
-        if stmt_tag[j] == STMT_FOR:
-            try_rewrite_chars_iter_stmt(j)
-        j = j + 1
-
-fn desugar_collections_static(start_from: i64, stmt_start: i64):
-    """Built-in rewrites only, for targets that deliberately exclude plugins."""
-    _collection_desugar_rewrites = 0
-    var i = start_from
-    val count = expr_count()
-    while i < count:
-        val tag = expr_tag[i]
-        if tag == EXPR_ASSIGN:
-            try_rewrite_assign(i)
-        elif tag == EXPR_COMPOUND_ASSIGN:
-            try_rewrite_compound_assign(i)
-        elif tag == EXPR_FOR or tag == EXPR_LIST_COMP:
-            try_rewrite_chars_iter_expr(i)
-        i = i + 1
     var j = stmt_start
     val s_count = stmt_count()
     while j < s_count:
@@ -227,12 +193,6 @@ fn try_rewrite_assign(e: i64):
         # (would need multiple push calls or a different pattern)
         return
 
-    # Scalar-addend gate: a literal/unary/binary addend can only ever be a
-    # scalar or text value -- never a collection -- so leave the plain
-    # Assign(Binary(+, ...)) shape alone (e.g. `x = x + 1`, `s = s + "a"`).
-    if is_definite_scalar_addend(rhs_right):
-        return
-
     # Pattern B: x = x + other_arr → x.merge(other_arr)
     expr_tag[e] = EXPR_METHOD_CALL
     expr_left[e] = target
@@ -266,11 +226,6 @@ fn try_rewrite_compound_assign(e: i64):
             expr_right[e] = -1
             _collection_desugar_rewrites = _collection_desugar_rewrites + 1
             return
-        return
-
-    # Scalar-addend gate (same rationale as try_rewrite_assign above): leave
-    # `x += 1` / `s += "a"` as plain CompoundAssign arithmetic.
-    if is_definite_scalar_addend(value):
         return
 
     # x += other_arr → x.merge(other_arr)

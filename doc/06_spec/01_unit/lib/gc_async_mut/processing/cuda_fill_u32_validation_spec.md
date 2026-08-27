@@ -20,6 +20,9 @@
 - should reject invalid IR with zero device provenance
    - Expected: zero.reason equals `invalid-element-count`
 
+Zero-sized, overflowing, and unsupported requests fail before any CUDA driver
+operation. Every failure has its exact validation reason, empty output, and
+zero backend handle/device identity.
 
 <details>
 <summary>Executable SSpec</summary>
@@ -34,7 +37,7 @@ val zero = processing_ir_execute_cuda(processing_ir_fill_u32(0, 7u32))
 expect(zero.reason).to_equal("invalid-element-count")
 _expect_rejected(zero, "invalid-element-count")
 _expect_rejected(processing_ir_execute_cuda(processing_ir_fill_u32(536870912, 7u32)), "output-size-overflow")
-_expect_rejected(processing_ir_execute_cuda(ProcessingIr(op: 99, element_count: 1, value: 7u32, width: 1, height: 1, stride: 1, x: 0, y: 0, rect_width: 1, rect_height: 1)), "unsupported-op")
+_expect_rejected(processing_ir_execute_cuda(ProcessingIr(op: 99, element_count: 1, value: 7u32)), "unsupported-op")
 ```
 
 </details>

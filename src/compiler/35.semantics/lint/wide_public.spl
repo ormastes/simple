@@ -9,7 +9,8 @@
 #
 # Counts:
 # - Each name in DECL_EXPORT declarations
-# - Duplicate exported names only once
+# - Each declaration with is_pub flag set
+# (de-duplicated: a name that appears in both is counted once)
 #
 # Does NOT flag:
 # - Re-export modules (__init__.spl, mod.spl) when using file-aware check
@@ -17,7 +18,7 @@
 # Works with the arena-based core AST (integer-tagged nodes).
 
 use compiler.core.ast.{
-    decl_get_tag, decl_get_imports
+    decl_get_tag, decl_get_name, decl_get_imports, decl_get_visibility_text
 }
 
 # ============================================================================
@@ -36,7 +37,6 @@ struct WidePublicWarning:
     message: text
     export_count: i64
     threshold: i64
-    line: i64 = 1
 
     fn fmt() -> text:
         "[" + self.code + "] " + self.severity + ": " + self.message + " (" + int_to_str(self.export_count) + " symbols, threshold " + int_to_str(self.threshold) + ")"
@@ -81,7 +81,9 @@ fn check_wide_public(decl_indices: [i64]) -> [WidePublicWarning]:
 fn check_wide_public_with_threshold(decl_indices: [i64], threshold: i64) -> [WidePublicWarning]:
     """Run wide-public lint on module declarations.
 
-    Counts distinct names in DECL_EXPORT entries.
+    Counts the total number of publicly exported symbols from:
+    - DECL_EXPORT entries (each name in the export list)
+    - Declarations with the pub flag set
 
     If the total exceeds the threshold, emits W0404.
     """
@@ -99,6 +101,13 @@ fn check_wide_public_with_threshold(decl_indices: [i64], threshold: i64) -> [Wid
                 if not list_contains(exported_names, base):
                     exported_names.push(base)
             continue
+
+        # Count only declarations that are truly public, not scoped variants.
+        if decl_get_visibility_text(idx) == "public":
+            val dname = decl_get_name(idx)
+            if dname != "":
+                if not list_contains(exported_names, dname):
+                    exported_names.push(dname)
 
     val count = exported_names.len()
     if count > threshold:
@@ -118,10 +127,9 @@ fn check_wide_public_file(decl_indices: [i64], file_path: text) -> [WidePublicWa
     Skips the check entirely for __init__.spl and mod.spl files,
     which are facade re-export modules where large export surfaces are expected.
     """
-    val normalized_path = file_path.replace("\\", "/")
-    if normalized_path == "__init__.spl" or normalized_path.ends_with("/__init__.spl"):
+    if file_path.ends_with("__init__.spl"):
         return []
-    if normalized_path == "mod.spl" or normalized_path.ends_with("/mod.spl"):
+    if file_path.ends_with("mod.spl"):
         return []
     check_wide_public(decl_indices)
 
@@ -132,7 +140,7 @@ fn check_wide_public_file(decl_indices: [i64], file_path: text) -> [WidePublicWa
 fn strip_alias(name: text) -> text:
     """Strip alias suffix from export name. 'foo:bar' -> 'foo'."""
     for i in 0..name.len():
-        if name.slice(i, i + 1) == ":":
+        if name.char_at(i) == ":":
             return name.slice(0, i)
     name
 

@@ -1,16 +1,6 @@
 #!/bin/sh
 # Produce a GUEST-NATIVE static clang for SimpleOS: build/os/clang_static/bin/clang_static
 #
-# ============================================================================
-# DEPRECATED (desktop SimpleOS). This static self-contained relink stands in for
-# a real loader. The proper path is the general FS-exec loader launching an
-# ordinary on-disk x86_64-unknown-simpleos ELF from /usr/bin/clang (or a
-# SIMPLEOS_TOOLCHAIN_DIR env path) — no special static-relink step. This script
-# is kept ONLY as a legacy fallback until the FS-exec lane (FR-SOS-020+) is
-# complete. Do NOT build new desktop work on it. Policy + migration:
-# doc/07_guide/os/simpleos_llvm_toolchain.md § "Desktop SimpleOS launch policy".
-# ============================================================================
-#
 # WHAT THIS DOES
 #   The stage-2 cross build (src/os/port/llvm/build.shs 'cross') compiles all of
 #   clang/LLVM as x86_64-unknown-simpleos *objects* but its final `bin/clang-20`
@@ -48,7 +38,6 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
 LLVM_SRC="${LLVM_SRC:-$HOME/llvm-project}"
 TRIPLE="${SIMPLEOS_TARGET_TRIPLE:-${SIMPLE_TARGET:-x86_64-unknown-simpleos}}"
-TOOL="${SIMPLEOS_LLVM_TOOL:-clang}"
 
 SYSROOT="$REPO_ROOT/build/os/sysroot"
 CROSS_DIR="$REPO_ROOT/build/os/llvm/cross-$TRIPLE"
@@ -76,7 +65,7 @@ LDSCRIPT="$SYSROOT/share/simpleos/simpleos.ld"
 # --- Prerequisites -----------------------------------------------------------
 for f in "$CROSS_DIR/build.ninja" "$SYSROOT/lib/crt0.o" "$LDSCRIPT" "$BUILTINS" \
          "$SYSROOT/lib/libc++abi.a" "$SYSROOT/lib/libunwind.a" \
-         "$SYSROOT/lib/libsimpleos_c.a" "$SYSROOT/lib/libsimple_runtime.a" "$SYSROOT/lib/libm.a"; do
+         "$SYSROOT/lib/libsimpleos_c.a" "$SYSROOT/lib/libm.a"; do
     if [ ! -e "$f" ]; then
         echo "[clang_static] ERROR: missing prerequisite: $f"
         echo "[clang_static] Run: sh $SCRIPT_DIR/build.shs cross   (and sysroot.shs)"
@@ -102,14 +91,12 @@ ARCS=""
 for a in $ARCS_STR; do
     case "$a" in *.a) ARCS="$ARCS $CROSS_DIR/$a" ;; esac
 done
-[ -n "$OBJS" ] || { echo "[clang_static] ERROR: no $TOOL objects parsed from build.ninja"; exit 1; }
+[ -n "$OBJS" ] || { echo "[clang_static] ERROR: no driver objects parsed from build.ninja"; exit 1; }
 
 # --- Pick the libc++ that matches the objects' ABI namespace -----------------
 SAMPLE_OBJ="$(printf '%s\n' $OBJS | head -1)"
 if $NM "$SAMPLE_OBJ" 2>/dev/null | grep -q '21_LIBCPP_ABI_NAMESPACE'; then
     echo "[clang_static] cross objects use the literal _LIBCPP_ABI_NAMESPACE (pre-__1)."
-    LIBCXX_A="$WORK/libc++_litns.a"
-    if [ ! -f "$LIBCXX_A" ]; then
     echo "[clang_static] Building a namespace-matched libc++ (litns) ..."
     SHADOW="$WORK/shadow_include"
     mkdir -p "$SHADOW" "$WORK/litns_obj"
@@ -123,9 +110,9 @@ if $NM "$SAMPLE_OBJ" 2>/dev/null | grep -q '21_LIBCPP_ABI_NAMESPACE'; then
         flat="$(printf '%s' "$src" | tr '/' '_')"
         $CXX -isystem "$SHADOW" $LIBCXX_FLAGS -c "$LLVM_SRC/libcxx/src/$src" -o "$WORK/litns_obj/$flat.o"
     done
+    LIBCXX_A="$WORK/libc++_litns.a"
     rm -f "$LIBCXX_A"
     $AR rcs "$LIBCXX_A" "$WORK"/litns_obj/*.o
-    fi
     echo "[clang_static] litns libc++ built: $LIBCXX_A"
 else
     echo "[clang_static] cross objects use __1; linking against stock sysroot libc++.a"
@@ -133,14 +120,14 @@ else
 fi
 
 # --- Final static link -------------------------------------------------------
-echo "[clang_static] Linking static SimpleOS $TOOL ..."
+echo "[clang_static] Linking static SimpleOS clang ..."
 $CXX --target="$TRIPLE" --sysroot="$SYSROOT" \
     -static -nostdlib -no-pie -fuse-ld=lld \
     -Wl,-T,"$LDSCRIPT" \
     -Wl,--eh-frame-hdr -Wl,--no-dependent-libraries -Wl,--allow-multiple-definition \
     "$SYSROOT/lib/crt0.o" $OBJS \
     -Wl,--start-group $ARCS "$LIBCXX_A" "$SYSROOT/lib/libc++abi.a" "$SYSROOT/lib/libunwind.a" \
-        "$SYSROOT/lib/libsimpleos_c.a" "$SYSROOT/lib/libsimple_runtime.a" "$SYSROOT/lib/libm.a" "$BUILTINS" -Wl,--end-group \
+        "$SYSROOT/lib/libsimpleos_c.a" "$SYSROOT/lib/libm.a" "$BUILTINS" -Wl,--end-group \
     -o "$OUT_BIN"
 
 # --- Verify ------------------------------------------------------------------

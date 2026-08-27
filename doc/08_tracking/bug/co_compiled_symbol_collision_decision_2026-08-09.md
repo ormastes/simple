@@ -1,7 +1,7 @@
 # Co-compiled symbol collisions — root cause, distribution, and decision
 
 **Date:** 2026-08-09
-Status: OPEN — reproducible.
+Status: FIXED-IN-SEED-SOURCE (pending redeploy) 2026-08-25 — see the section at the end. Historical body below unchanged.
 
 **The earlier `CLOSED (not reproducible)` stamp (and its 2026-08-17
 "re-verified by source inspection") was wrong and is retracted.** It was
@@ -282,3 +282,56 @@ A phase that does not move the number did not land.
 The 149 at-risk specs should be re-run and re-verified **after** Phase 1, and
 their prior green results should not be cited as evidence for any specific
 module's behaviour until then.
+
+## FIXED-IN-SEED-SOURCE (pending redeploy) — 2026-08-25 (module,name)-keyed registry
+
+The underlying name-keyed co-compile registry defect is FIXED IN SEED SOURCE
+(not yet deployed; built binary sha256
+27f4e599f3e4f48d637ff53f7691c2d4660be0c84e17ba35b508a811d12c734f from a clean
+origin/main (54b8cef2700) worktree at /mnt/data/tmp/claude-1000/caret-clean).
+
+Mechanism fixed, per lane:
+- Interpreter (interpreter_call/mod.rs `filter_overloads_by_caller_binding`):
+  bare-name overload candidates are pre-filtered through the CALLING module —
+  its own definitions, then its `__simple_flatten_import_binding__=` bindings
+  (facade/`export use` chains followed, glob sources included), before any
+  arity/type scoring. Top-level entry statements execute under the "<entry>"
+  owner (interpreter_eval.rs guard) so spec `it`-block lambdas inherit it.
+- Cranelift JIT (hir/lower): a bare name defined by 2+ DISTINCT owners keeps
+  the FIRST owner's definition bare and emits every LATER owner's definition
+  under `flatten_owner_mangled_name(owner, name)`; call sites are rewritten
+  per caller (`resolve_duplicate_fn_symbol`: own module, import binding,
+  unique glob source). Two glob sources both providing the name is a hard
+  error in both lanes.
+- Pure-Simple mirror (src/compiler/10.frontend/core/interpreter):
+  `func_table_register_owned` (module_loader_core) + per-importer
+  `func_import_binding_register` (eval_decls DECL_USE) +
+  `func_resolve_for_caller` consulted in eval_calls before the flat table.
+  Spec: test/01_unit/compiler/interpreter/cross_module_owned_fn_resolution_spec.spl (5/5).
+
+Deviation from the intended hard error: a no-route caller (neither defines
+nor imports the name) falls back to the historical first-registered pick with
+a warn-once, NOT a fatal error — the 350-symbol same-signature sync/async
+mirror family (e.g. `step`) is reachable from virtually every spec and a
+fatal diagnostic measured type_domain_resolver_spec at 0/4. Promote to fatal
+once the mirror family is namespaced.
+
+Evidence (all on sha 27f4e599..., clean worktree): 3-file repro prints "a" on
+both engines in BOTH import orders with engine receipts; sabotage replays of
+both real incidents pass (json_helpers_spec 45/45 with the
+`use std.mcp.helpers.{...}` import reinstated; chat_tui_input_spec 22/22 with
+the old utf8 `char_from_code` U+FFFD stub reinstated);
+cross_module_symbol_collision_spec 2/2 with SIMPLE_BIN pointed at the new
+seed (JIT arm was RED by design before); module_resolver/resolution battery
+green at baseline; Rust unit tests
+pipeline::module_loader::duplicate_fn_resolution_tests 2/2.
+
+Known limitation of the pure-Simple mirror (seed lanes are NOT affected): it
+covers own-module calls and DIRECT selective imports only. A binding through a
+re-export facade (`use std.string_core.{char_from_code}` -> facade
+`src/lib/string_core.spl` re-exporting `src/lib/common/string_core.spl`) or a
+glob import records no per-name edge to the DECLARING file, so
+`func_resolve_for_caller` misses and falls back to the flat table — i.e.
+pre-existing behavior, no regression, but the char_from_code incident class is
+fixed in the seed lanes only. Follow-up: facade-chain following in the
+pure-Simple binding table, mirroring the seed's bounded owner_bindings walk.

@@ -1,0 +1,448 @@
+# Private, streaming FAT32 publication for one canonical 8.3 or validated LFN leaf.
+# The allocated chain is unreachable from the namespace until seal publishes
+# one retained, cluster-local LFN+SFN span.
+use std.fs_driver.fat32_core.{
+    Fat32Core, Fat32PrivatePublishLeaseV1, Fat32PrivatePublishReceiptV1,
+    Fat32PrivatePublishBindingV1, Fat32PrivatePublishOutcomeKindV1,
+    Fat32PrivatePublishOutcomeV1, FAT32_FREE,
+    FAT32_MAX_PRIVATE_PUBLICATIONS, FAT32_HANDLE_GEN_SHIFT, _fat32_path_valid
+}
+use std.fs_driver.fat32_dir_ops.{fat32_reserve_private_dirent}
+use std.fs_driver.fat32_parsers.{_split_path}
+use std.common.crypto.sha256.{sha256_stream_v1_new, sha256_stream_v1_update, sha256_stream_v1_finish_hex}
+use std.common.structural.digest.hash256.{hash256_hex_valid}
+
+fn _private_slot(lease: Fat32PrivatePublishLeaseV1) -> i32:
+    if (lease._id & 0xFFFFFFFFu64) == 0u64:
+        return -1
+    ((lease._id & 0xFFFFFFFFu64) - 1u64).to_i32()
+
+fn _private_binding(core: Fat32Core, lease: Fat32PrivatePublishLeaseV1) -> Fat32PrivatePublishBindingV1?:
+    val slot = _private_slot(lease)
+    if slot < 0 or slot >= core.private_publications.len():
+        return nil
+    val binding = core.private_publications[slot]
+    if binding.active and not binding.retired and binding.lease_id == lease._id and
+            binding.owner_id == core.owner_id and lease._core_owner_id == core.owner_id and
+            binding.generation == lease._slot_generation:
+        return Some(binding)
+    nil
+
+fn _private_retire(core: Fat32Core, slot: i32, quarantined: bool):
+    core.private_publications[slot].active = false
+    core.private_publications[slot].retired = true
+    core.private_publications[slot].quarantined = quarantined
+
+fn _private_receipt(binding: Fat32PrivatePublishBindingV1, digest: text, durable: bool) -> Fat32PrivatePublishReceiptV1:
+    Fat32PrivatePublishReceiptV1(
+        path: binding.path,
+        atomic_scope: if binding.dirent_span_slots == 1u32:
+            "one-canonical-8.3-path-dirent"
+        else:
+            "one-cluster-complete-lfn-sfn-span",
+        size: binding.expected_size, content_sha256: digest,
+        start_cluster: binding.start_cluster, parent_cluster: binding.parent_cluster,
+        dirent_cluster: binding.dirent_cluster, dirent_offset: binding.dirent_offset,
+        durable: durable)
+
+fn _private_alias_checksum(alias: [u8]) -> u8:
+    var sum: u32 = 0u32
+    var i = 0
+    while i < 11:
+        val carry = if (sum & 1u32) != 0u32: 0x80u32 else: 0u32
+        sum = (carry + (sum >> 1u32) + alias[i].to_u32()) & 0xFFu32
+        i = i + 1
+    sum.to_u8()
+
+fn _private_fill_dirent_span(data: [u8], binding: Fat32PrivatePublishBindingV1) -> [u8]:
+    var out = data
+    val lfn_slots = binding.dirent_span_slots.to_i32() - 1
+    val checksum = _private_alias_checksum(binding.generated_alias)
+    val positions: [i32] = [1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30]
+    var physical = 0
+    while physical < lfn_slots:
+        val off = binding.dirent_offset + physical * 32
+        var clear = 0
+        while clear < 32:
+            out[off + clear] = 0u8
+            clear = clear + 1
+        val ordinal = lfn_slots - physical
+        out[off] = ordinal.to_u8() | (if ordinal == lfn_slots: 0x40u8 else: 0u8)
+        out[off + 11] = 0x0Fu8
+        out[off + 13] = checksum
+        var ui = 0
+        while ui < 13:
+            val source = (ordinal - 1) * 13 + ui
+            val unit = if source < binding.lfn_units.len(): binding.lfn_units[source]
+                else if source == binding.lfn_units.len(): 0
+                else: 0xFFFF
+            out[off + positions[ui]] = (unit & 0xFF).to_u8()
+            out[off + positions[ui] + 1] = ((unit >> 8) & 0xFF).to_u8()
+            ui = ui + 1
+        physical = physical + 1
+    val off = binding.dirent_offset + lfn_slots * 32
+    var i = 0
+    while i < 32:
+        out[off + i] = 0u8
+        i = i + 1
+    i = 0
+    while i < 11:
+        out[off + i] = binding.generated_alias[i]
+        i = i + 1
+    out[off + 11] = 0x20u8
+    out[off + 20] = ((binding.start_cluster >> 16u32) & 0xFFu32).to_u8()
+    out[off + 21] = ((binding.start_cluster >> 24u32) & 0xFFu32).to_u8()
+    out[off + 26] = (binding.start_cluster & 0xFFu32).to_u8()
+    out[off + 27] = ((binding.start_cluster >> 8u32) & 0xFFu32).to_u8()
+    val size = binding.expected_size
+    out[off + 28] = (size & 0xFFu64).to_u8()
+    out[off + 29] = ((size >> 8u64) & 0xFFu64).to_u8()
+    out[off + 30] = ((size >> 16u64) & 0xFFu64).to_u8()
+    out[off + 31] = ((size >> 24u64) & 0xFFu64).to_u8()
+    out
+
+fn _private_alloc_cluster(core: Fat32Core, slot: i32,
+        binding: Fat32PrivatePublishBindingV1) -> Result<u32, text>:
+    val limit = core.total_clusters + 2u32
+    var cluster = core.private_publish_next_free_hint
+    if cluster < 2u32 or cluster >= limit:
+        cluster = 2u32
+    val start = cluster
+    var wrapped = false
+    while not wrapped or cluster < start:
+        val entry = core.read_fat_entry(cluster)?
+        if entry == FAT32_FREE:
+            var owned = binding
+            owned.pending_cluster = cluster
+            owned.pending_link_from = binding.tail_cluster
+            core.private_publications[slot] = owned
+            # The cleanup owner knows the exact candidate before the first
+            # allocation write whose acknowledgement can be indeterminate.
+            core.write_fat_entry(cluster, 0x0FFFFFF8u32)?
+            core.private_publish_next_free_hint = if cluster + 1u32 < limit: cluster + 1u32 else: 2u32
+            return Ok(cluster)
+        cluster = cluster + 1u32
+        if cluster >= limit:
+            cluster = 2u32
+            wrapped = true
+    Err("no free clusters")
+
+impl Fat32Core:
+    me fn begin_private_publish(path: text, expected_size: u64, expected_sha256: text) -> Result<Fat32PrivatePublishLeaseV1, text>:
+        if not self.mounted or not self.durable_flush_supported:
+            return Err("FAT32 private publication requires durable flush")
+        if expected_size > 0xFFFFFFFFu64 or not hash256_hex_valid(expected_sha256):
+            return Err("invalid FAT32 private publication seal")
+        val parts = _split_path(path)
+        if not _fat32_path_valid(path) or parts.len() == 0 or parts[parts.len() - 1] == "":
+            return Err("FAT32 private publication requires a valid path")
+        self.private_publish_durable_barrier()?
+        val reservation = fat32_reserve_private_dirent(self, path)?
+        for live in self.private_publications:
+            if live.active and not live.retired and live.owner_id == self.owner_id:
+                var same_alias = true
+                var ai = 0
+                while ai < 11:
+                    if live.generated_alias[ai] != reservation.generated_alias[ai]:
+                        same_alias = false
+                    ai = ai + 1
+                if same_alias:
+                    return Err("FAT32 private generated alias already leased")
+                if live.dirent_cluster == reservation.dirent_cluster:
+                    val live_end = live.dirent_offset + live.dirent_span_slots.to_i32() * 32
+                    val reserved_end = reservation.dirent_offset + reservation.span_slots.to_i32() * 32
+                    if live.dirent_offset < reserved_end and reservation.dirent_offset < live_end:
+                        return Err("FAT32 private retained span overlaps an active lease")
+        var slot = 0
+        while slot < self.private_publications.len():
+            val candidate = self.private_publications[slot]
+            if not candidate.active and not candidate.quarantined and
+                    candidate.generation != 0xFFFFFFFFu32:
+                break
+            slot = slot + 1
+        if slot >= FAT32_MAX_PRIVATE_PUBLICATIONS:
+            return Err("too many FAT32 private publications")
+        var generation = 1u32
+        if slot < self.private_publications.len():
+            val prior = self.private_publications[slot]
+            generation = prior.generation + 1u32
+        val authority = self._mint_authority_tag()
+        if authority == 0u32:
+            return Err("FAT32 private publication authority exhausted")
+        val id = authority.to_u64() * FAT32_HANDLE_GEN_SHIFT + (slot + 1).to_u64()
+        val binding = Fat32PrivatePublishBindingV1(
+            active: true, retired: false, quarantined: false,
+            generation: generation, lease_id: id, owner_id: self.owner_id,
+            path: path, expected_size: expected_size, expected_sha256: expected_sha256,
+            bytes_written: 0u64, start_cluster: 0u32, tail_cluster: 0u32,
+            tail_bytes_used: 0, pending_cluster: 0u32, pending_link_from: 0u32,
+            publication_attempted: false,
+            parent_cluster: reservation.parent_cluster, dirent_cluster: reservation.dirent_cluster,
+            dirent_offset: reservation.dirent_offset, dirent_span_slots: reservation.span_slots,
+            generated_alias: reservation.generated_alias, lfn_units: reservation.lfn_units)
+        if slot < self.private_publications.len():
+            self.private_publications[slot] = binding
+        else:
+            self.private_publications.push(binding)
+        Ok(Fat32PrivatePublishLeaseV1(
+            _id: id, _core_owner_id: self.owner_id, _slot_generation: generation))
+
+    me fn write_private_publish(lease: Fat32PrivatePublishLeaseV1, data: [u8]) -> Result<u64, text>:
+        var binding = match _private_binding(self, lease):
+            case Some(value): value
+            case None: return Err("invalid FAT32 private publication lease")
+        val slot = _private_slot(lease)
+        if binding.bytes_written + data.len().to_u64() > binding.expected_size:
+            return Err("FAT32 private publication exceeds expected size")
+        val cluster_bytes = (self.bytes_per_sector * self.sectors_per_cluster).to_i32()
+        var source = 0
+        while source < data.len():
+            if binding.tail_cluster < 2u32 or binding.tail_bytes_used == cluster_bytes:
+                val cluster_result = _private_alloc_cluster(self, slot, binding)
+                if cluster_result.is_err():
+                    if self.private_publications[slot].pending_cluster >= 2u32:
+                        _private_retire(self, slot, true)
+                        return Err("quarantined FAT32 private allocation")
+                    return Err("FAT32 private allocation failed; lease remains abortable")
+                val cluster = cluster_result.unwrap()
+                val prior_tail = binding.tail_cluster
+                binding = self.private_publications[slot]
+                if prior_tail >= 2u32:
+                    if self.write_fat_entry(prior_tail, cluster).is_err():
+                        _private_retire(self, slot, true)
+                        return Err("quarantined FAT32 private FAT link")
+                else:
+                    binding.start_cluster = cluster
+                binding.tail_cluster = cluster
+                binding.tail_bytes_used = 0
+                binding.pending_cluster = 0u32
+                binding.pending_link_from = 0u32
+                self.private_publications[slot] = binding
+            var block: [u8] = []
+            if binding.tail_bytes_used == 0:
+                var clear = 0
+                while clear < cluster_bytes:
+                    block.push(0u8)
+                    clear = clear + 1
+            else:
+                block = match self.read_cluster_uncached_device(binding.tail_cluster):
+                    case Ok(value): value
+                    case Err(_):
+                        self.private_publications[slot] = binding
+                        val cleanup = self.abort_private_publish(lease)
+                        if cleanup.is_err():
+                            return Err("quarantined FAT32 private tail read cleanup: " + cleanup.unwrap_err())
+                        return Err("FAT32 private tail read failed; allocation reclaimed")
+            val available = cluster_bytes - binding.tail_bytes_used
+            val take = if data.len() - source < available: data.len() - source else: available
+            var bi = 0
+            while bi < take:
+                block[binding.tail_bytes_used + bi] = data[source + bi]
+                bi = bi + 1
+            if self.write_cluster_uncached_device(binding.tail_cluster, block).is_err():
+                self.private_publications[slot] = binding
+                _private_retire(self, slot, true)
+                return Err("quarantined FAT32 private data write")
+            source = source + take
+            binding.tail_bytes_used = binding.tail_bytes_used + take
+        binding.bytes_written = binding.bytes_written + data.len().to_u64()
+        self.private_publications[slot] = binding
+        Ok(binding.bytes_written)
+
+    me fn seal_private_publish(lease: Fat32PrivatePublishLeaseV1) -> Fat32PrivatePublishOutcomeV1:
+        var binding = match _private_binding(self, lease):
+            case Some(value): value
+            case None: return Fat32PrivatePublishOutcomeV1(kind: Fat32PrivatePublishOutcomeKindV1.NotPublished,
+                lease_active: false, reason: "invalid FAT32 private publication lease", receipt: nil)
+        val slot = _private_slot(lease)
+        if binding.bytes_written != binding.expected_size:
+            return Fat32PrivatePublishOutcomeV1(kind: Fat32PrivatePublishOutcomeKindV1.NotPublished,
+                lease_active: true, reason: "FAT32 private publication size mismatch", receipt: nil)
+        if self.private_publish_durable_barrier().is_err():
+            _private_retire(self, slot, true)
+            return Fat32PrivatePublishOutcomeV1(kind: Fat32PrivatePublishOutcomeKindV1.NotPublished,
+                lease_active: false, reason: "FAT32 private pre-publication flush failed; cleanup owner retained", receipt: nil)
+        var stream = sha256_stream_v1_new()
+        var remaining = binding.expected_size
+        if remaining > 0u64 and binding.start_cluster < 2u32:
+            return Fat32PrivatePublishOutcomeV1(kind: Fat32PrivatePublishOutcomeKindV1.NotPublished,
+                lease_active: true, reason: "FAT32 private chain is absent", receipt: nil)
+        val private_chain = if binding.start_cluster >= 2u32:
+            match self.follow_chain(binding.start_cluster):
+                case Ok(value): value
+                case Err(_):
+                    return Fat32PrivatePublishOutcomeV1(kind: Fat32PrivatePublishOutcomeKindV1.NotPublished,
+                        lease_active: true, reason: "FAT32 private chain readback failed", receipt: nil)
+        else: []
+        var chain_i = 0
+        while remaining > 0u64 and chain_i < private_chain.len():
+            val stored = match self.read_cluster_uncached_device(private_chain[chain_i]):
+                case Ok(value): value
+                case Err(_):
+                    return Fat32PrivatePublishOutcomeV1(kind: Fat32PrivatePublishOutcomeKindV1.NotPublished,
+                        lease_active: true, reason: "FAT32 private data readback failed", receipt: nil)
+            var offset = 0
+            while offset < stored.len() and remaining > 0u64:
+                val bounded_remaining = if remaining > 65536u64: 65536 else: remaining.to_i32()
+                val available = stored.len() - offset
+                val take = if available < bounded_remaining: available else: bounded_remaining
+                if not sha256_stream_v1_update(stream, stored[offset:offset + take]):
+                    return Fat32PrivatePublishOutcomeV1(kind: Fat32PrivatePublishOutcomeKindV1.NotPublished,
+                        lease_active: true, reason: "FAT32 private readback SHA-256 failed", receipt: nil)
+                offset = offset + take
+                remaining = remaining - take.to_u64()
+            chain_i = chain_i + 1
+        if remaining != 0u64:
+            return Fat32PrivatePublishOutcomeV1(kind: Fat32PrivatePublishOutcomeKindV1.NotPublished,
+                lease_active: true, reason: "FAT32 private chain shorter than sealed size", receipt: nil)
+        val digest = match sha256_stream_v1_finish_hex(stream):
+            case Some(value): value
+            case None:
+                return Fat32PrivatePublishOutcomeV1(kind: Fat32PrivatePublishOutcomeKindV1.NotPublished,
+                    lease_active: true, reason: "FAT32 private readback SHA-256 finish failed", receipt: nil)
+        if digest != binding.expected_sha256:
+            return Fat32PrivatePublishOutcomeV1(kind: Fat32PrivatePublishOutcomeKindV1.NotPublished,
+                lease_active: true, reason: "FAT32 private publication SHA-256 mismatch", receipt: nil)
+        # Exactly one fresh uncached snapshot is used after data/FAT durability.
+        # The single directory-mutation owner retained this cluster-local span,
+        # so seal neither resolves nor rescans the pathname.
+        var dir_data = match self.read_cluster_uncached_device(binding.dirent_cluster):
+            case Ok(value): value
+            case Err(_):
+                return Fat32PrivatePublishOutcomeV1(kind: Fat32PrivatePublishOutcomeKindV1.NotPublished,
+                    lease_active: true, reason: "FAT32 retained directory snapshot failed", receipt: nil)
+        val off = binding.dirent_offset
+        val span_bytes = binding.dirent_span_slots.to_i32() * 32
+        if off < 0 or off + span_bytes > dir_data.len():
+            return Fat32PrivatePublishOutcomeV1(kind: Fat32PrivatePublishOutcomeKindV1.NotPublished,
+                lease_active: true, reason: "FAT32 retained span escaped its cluster", receipt: nil)
+        var i = 0
+        while i < span_bytes:
+            if dir_data[off + i] != 0x00u8 and dir_data[off + i] != 0xE5u8:
+                return Fat32PrivatePublishOutcomeV1(kind: Fat32PrivatePublishOutcomeKindV1.NotPublished,
+                    lease_active: true, reason: "FAT32 retained span changed", receipt: nil)
+            i = i + 32
+        dir_data = _private_fill_dirent_span(dir_data, binding)
+        binding.publication_attempted = true
+        self.private_publications[slot] = binding
+        if self.write_cluster_uncached_device(binding.dirent_cluster, dir_data).is_err():
+            _private_retire(self, slot, true)
+            return Fat32PrivatePublishOutcomeV1(kind: Fat32PrivatePublishOutcomeKindV1.Indeterminate,
+                lease_active: false, reason: "FAT32 directory publication indeterminate",
+                receipt: Some(_private_receipt(binding, digest, false)))
+        self._cluster_cache_put(binding.dirent_cluster, dir_data)
+        self.invalidate_dentry_cache()
+        if self.private_publish_durable_barrier().is_err():
+            _private_retire(self, slot, true)
+            return Fat32PrivatePublishOutcomeV1(kind: Fat32PrivatePublishOutcomeKindV1.Indeterminate,
+                lease_active: false, reason: "FAT32 publication durability indeterminate",
+                receipt: Some(_private_receipt(binding, digest, false)))
+        _private_retire(self, slot, false)
+        val receipt = _private_receipt(binding, digest, true)
+        Fat32PrivatePublishOutcomeV1(kind: Fat32PrivatePublishOutcomeKindV1.Published,
+            lease_active: false, reason: "", receipt: Some(receipt))
+
+    me fn abort_private_publish(lease: Fat32PrivatePublishLeaseV1) -> Result<(), text>:
+        val binding = match _private_binding(self, lease):
+            case Some(value): value
+            case None: return Err("invalid FAT32 private publication lease")
+        val slot = _private_slot(lease)
+        var pending_seen = false
+        if binding.start_cluster >= 2u32:
+            val chain = match self.follow_chain(binding.start_cluster):
+                case Ok(value): value
+                case Err(_):
+                    _private_retire(self, slot, true)
+                    return Err("quarantined FAT32 private abort chain")
+            for cluster in chain:
+                if cluster == binding.pending_cluster:
+                    pending_seen = true
+                if self.write_fat_entry(cluster, FAT32_FREE).is_err():
+                    _private_retire(self, slot, true)
+                    return Err("quarantined FAT32 private abort reclaim")
+        if binding.pending_cluster >= 2u32 and not pending_seen:
+            if self.write_fat_entry(binding.pending_cluster, FAT32_FREE).is_err():
+                _private_retire(self, slot, true)
+                return Err("quarantined FAT32 private pending allocation reclaim")
+        if self.private_publish_durable_barrier().is_err():
+            _private_retire(self, slot, true)
+            return Err("quarantined FAT32 private abort durability")
+        _private_retire(self, slot, false)
+        Ok(())
+
+    me fn cleanup_quarantined_private_publish(lease: Fat32PrivatePublishLeaseV1) -> Fat32PrivatePublishOutcomeV1:
+        val slot = _private_slot(lease)
+        if slot < 0 or slot >= self.private_publications.len():
+            return Fat32PrivatePublishOutcomeV1(kind: Fat32PrivatePublishOutcomeKindV1.NotPublished,
+                lease_active: false, reason: "unknown FAT32 quarantine cleanup authority", receipt: nil)
+        var binding = self.private_publications[slot]
+        if not binding.quarantined or binding.lease_id != lease._id or
+                binding.owner_id != self.owner_id or lease._core_owner_id != self.owner_id or
+                binding.generation != lease._slot_generation:
+            return Fat32PrivatePublishOutcomeV1(kind: Fat32PrivatePublishOutcomeKindV1.NotPublished,
+                lease_active: false, reason: "invalid FAT32 quarantine cleanup authority", receipt: nil)
+        if binding.publication_attempted:
+            val observed = match self.read_cluster_uncached_device(binding.dirent_cluster):
+                case Ok(value): value
+                case Err(_):
+                    return Fat32PrivatePublishOutcomeV1(kind: Fat32PrivatePublishOutcomeKindV1.Indeterminate,
+                        lease_active: false, reason: "quarantined FAT32 publication remains unreadable", receipt: nil)
+            # Every successful terminal observation becomes the canonical
+            # cache image before any Published/NotPublished/Indeterminate
+            # return, so later owner operations cannot resurrect stale bytes.
+            self._cluster_cache_put(binding.dirent_cluster, observed)
+            self.invalidate_dentry_cache()
+            val off = binding.dirent_offset
+            val span_bytes = binding.dirent_span_slots.to_i32() * 32
+            if off < 0 or off + span_bytes > observed.len():
+                return Fat32PrivatePublishOutcomeV1(kind: Fat32PrivatePublishOutcomeKindV1.Indeterminate,
+                    lease_active: false, reason: "quarantined FAT32 publication span invalid", receipt: nil)
+            var blank = observed
+            var si = 0
+            while si < span_bytes:
+                blank[off + si] = 0u8
+                si = si + 1
+            val expected = _private_fill_dirent_span(blank, binding)
+            var exact = true
+            si = 0
+            while si < span_bytes:
+                if observed[off + si] != expected[off + si]:
+                    exact = false
+                si = si + 1
+            if exact:
+                if self.private_publish_durable_barrier().is_err():
+                    return Fat32PrivatePublishOutcomeV1(kind: Fat32PrivatePublishOutcomeKindV1.Indeterminate,
+                        lease_active: false, reason: "observed FAT32 publication is not durable", receipt: nil)
+                _private_retire(self, slot, false)
+                return Fat32PrivatePublishOutcomeV1(kind: Fat32PrivatePublishOutcomeKindV1.Published,
+                    lease_active: false, reason: "", receipt: Some(_private_receipt(binding, binding.expected_sha256, true)))
+            var all_free = true
+            si = 0
+            while si < span_bytes:
+                if observed[off + si] != 0x00u8 and observed[off + si] != 0xE5u8:
+                    all_free = false
+                si = si + 32
+            if not all_free:
+                return Fat32PrivatePublishOutcomeV1(kind: Fat32PrivatePublishOutcomeKindV1.Indeterminate,
+                    lease_active: false, reason: "quarantined FAT32 publication span is partially observable", receipt: nil)
+        binding.active = true
+        binding.retired = false
+        binding.quarantined = false
+        self.private_publications[slot] = binding
+        val cleanup = self.abort_private_publish(lease)
+        if cleanup.is_err():
+            return Fat32PrivatePublishOutcomeV1(kind: Fat32PrivatePublishOutcomeKindV1.Indeterminate,
+                lease_active: false, reason: cleanup.unwrap_err(), receipt: nil)
+        Fat32PrivatePublishOutcomeV1(kind: Fat32PrivatePublishOutcomeKindV1.NotPublished,
+            lease_active: false, reason: "quarantined private allocation reclaimed", receipt: nil)
+
+    me fn cleanup_private_publish(lease: Fat32PrivatePublishLeaseV1) -> Fat32PrivatePublishOutcomeV1:
+        match _private_binding(self, lease):
+            case Some(_):
+                val cleanup = self.abort_private_publish(lease)
+                if cleanup.is_err():
+                    return Fat32PrivatePublishOutcomeV1(kind: Fat32PrivatePublishOutcomeKindV1.Indeterminate,
+                        lease_active: false, reason: cleanup.unwrap_err(), receipt: nil)
+                Fat32PrivatePublishOutcomeV1(kind: Fat32PrivatePublishOutcomeKindV1.NotPublished,
+                    lease_active: false, reason: "private allocation reclaimed", receipt: nil)
+            case None: self.cleanup_quarantined_private_publish(lease)

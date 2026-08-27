@@ -22,7 +22,7 @@ use compiler.driver.cache.compile_options_hash.{
     compile_options_hash_validate, compile_options_hash_from_bytes,
     compile_options_hash_zero, compile_options_hash_is_zero
 }
-use std.nogc_sync_mut.io.file_ops.{file_modified_time, file_read_bytes}
+use std.nogc_sync_mut.io.file_ops.{file_modified_time, file_read_bytes_i64}
 # BOOTSTRAP SELF-HOST (2026-08-06): `ShbReader` (imported below via a nested
 # `use compiler.shb.shb_reader.{ShbReader}` inside validate_shb) internally
 # calls `shb_read_header`, whose body resolves `ByteOrder.LittleEndian`
@@ -38,28 +38,16 @@ use std.nogc_sync_mut.io.file_ops.{file_modified_time, file_read_bytes}
 use std.binary_io.{ByteOrder}
 use std.nogc_sync_mut.io.file.{FileHandle}
 
-# HOISTED (2026-08-21): these were FUNCTION-LOCAL `use` lines. The parser
-# DISCARDS function-local `use` outright (10.frontend/core/parser_stmts.spl ->
-# parse_use_stmt_inline returns a bare `pass`), so the names were never bound
-# and every use site depended on the HIR lowering's lazy bootstrap-global
-# fallback -- the exact asymmetry documented as the `unresolved type: ByteOrder`
-# case in 20.hir/hir_lowering/_Items/module_import_registration.spl. None of the
-# hoisted modules imports back, so there is no cycle to avoid.
-use compiler.shb.shb_reader.{ShbReader}
-use std.nogc_sync_mut.io_runtime.{file_exists, file_read_nullable}
-
+extern fn rt_file_read_text(path: text) -> text?
+extern fn rt_file_exists(path: text) -> bool
 extern fn rt_hash_text(s: text) -> i64
-extern fn rt_bytes_to_text(data: [u8]) -> text
-
-val SMF_DEPS_MAGIC: i64 = 1397573188
-val SMF_DEPS_VERSION: i64 = 1
 
 # ============================================================================
 # Level 1: Source Hash Validation
 # ============================================================================
 
 fn validate_source_hash(source_path: text, cached_hash: i64) -> CacheCheckResult:
-    val source = file_read_nullable(source_path) ?? ""
+    val source = rt_file_read_text(source_path) ?? ""
     if source == "":
         return cache_check_result_error("failed to read source: {source_path}")
 
@@ -73,15 +61,15 @@ fn validate_source_hash(source_path: text, cached_hash: i64) -> CacheCheckResult
 # Level 4: Dependency Validation
 # ============================================================================
 
-fn validate_dependencies(deps: [CacheDependency], get_content_hash: any) -> CacheCheckResult:
+fn validate_dependencies(deps: [CacheDependency], get_interface_hash: any) -> CacheCheckResult:
     var i = 0
     while i < deps.len():
         val dep = deps[i]
-        val actual_hash = get_content_hash(dep.module_path)
+        val actual_hash = get_interface_hash(dep.module_path)
         if actual_hash == 0:
             return cache_check_result_stale(0, 0, "dependency missing: {dep.module_path}")
         if actual_hash != dep.expected_hash:
-            return cache_check_result_stale(actual_hash, dep.expected_hash, "dependency content changed: {dep.module_path}")
+            return cache_check_result_stale(actual_hash, dep.expected_hash, "dependency interface changed: {dep.module_path}")
         i = i + 1
     cache_check_result_fresh(0)
 
@@ -90,8 +78,8 @@ fn validate_dependencies(deps: [CacheDependency], get_content_hash: any) -> Cach
 # ============================================================================
 
 fn validate_shb(source_path: text, shb_path: text, get_interface_hash: any) -> CacheCheckResult:
-    if not file_exists(shb_path):
-        val source = file_read_nullable(source_path) ?? ""
+    if not rt_file_exists(shb_path):
+        val source = rt_file_read_text(source_path) ?? ""
         if source == "":
             return cache_check_result_error("failed to read source: {source_path}")
         val src_hash = rt_hash_text(source)
@@ -108,7 +96,7 @@ fn validate_shb(source_path: text, shb_path: text, get_interface_hash: any) -> C
         if current_mtime > 0 and current_mtime == cached_mtime:
             return cache_check_result_fresh(reader.source_hash())
 
-    val source = file_read_nullable(source_path) ?? ""
+    val source = rt_file_read_text(source_path) ?? ""
     if source == "":
         return cache_check_result_error("failed to read source: {source_path}")
 
@@ -126,45 +114,35 @@ fn validate_shb(source_path: text, shb_path: text, get_interface_hash: any) -> C
 # ============================================================================
 
 fn validate_smf(source_path: text, smf_path: text, options_hash: CompileOptionsHash) -> CacheCheckResult:
-    """Validate SMF freshness: source_hash + options_hash + dependency content hashes.
+    """Validate SMF freshness: source_hash + options_hash + dependency interface hashes.
 
-    Uses live source-content hashing for whole-program dependency validation.
+    Uses default SHB-based interface hash lookup for dependency validation.
     """
-    validate_smf_with_deps(source_path, smf_path, options_hash, get_source_content_hash)
+    validate_smf_with_deps(source_path, smf_path, options_hash, get_shb_interface_hash)
 
-fn validate_smf_with_deps(source_path: text, smf_path: text, options_hash: CompileOptionsHash, get_content_hash: any) -> CacheCheckResult:
+fn validate_smf_with_deps(source_path: text, smf_path: text, options_hash: CompileOptionsHash, get_interface_hash: any) -> CacheCheckResult:
     """Validate SMF freshness with custom dependency hash lookup.
 
     Levels checked:
       1. Source hash — did the source file change?
       3. Options hash — did compile options change?
-      4. Dependencies — did any linked source body change?
+      4. Dependencies — did any dependency's public interface change?
     """
-    if not file_exists(smf_path):
-        val source = file_read_nullable(source_path) ?? ""
+    if not rt_file_exists(smf_path):
+        val source = rt_file_read_text(source_path) ?? ""
         if source == "":
             return cache_check_result_error("failed to read source: {source_path}")
         val src_hash = rt_hash_text(source)
         return cache_check_result_missing(src_hash)
 
-    # Read the artifact once and validate every field from that immutable
-    # snapshot.  The previous path loaded the whole SMF three times here
-    # (reserved options, source hash, dependencies), multiplying file I/O and
-    # allocation/copy volume for large modules and allowing a concurrent
-    # replacement to mix fields from different generations. Freshness is
-    # defined at this snapshot point: replacing the path afterward cannot mix
-    # new header/dependency fields into this decision. A later validation sees
-    # the replacement normally.
-    var smf_snapshot = SmfValidationSnapshot.open(smf_path)
-
     # Read SMF header for source_hash and options_hash
-    val header_bytes = smf_snapshot.reserved_bytes()
+    val header_bytes = read_smf_reserved_bytes(smf_path)
     if header_bytes.len() == 0:
         return cache_check_result_error("failed to read SMF header: {smf_path}")
 
     # Check source hash (Level 1)
-    val smf_source_hash = smf_snapshot.source_hash()
-    val source = file_read_nullable(source_path) ?? ""
+    val smf_source_hash = read_smf_source_hash(smf_path)
+    val source = rt_file_read_text(source_path) ?? ""
     if source == "":
         return cache_check_result_error("failed to read source: {source_path}")
 
@@ -180,11 +158,7 @@ fn validate_smf_with_deps(source_path: text, smf_path: text, options_hash: Compi
             return options_result
 
     # Check dependency content hashes (Level 4)
-    val deps = smf_snapshot.dependencies()
-    # Dependency callbacks can traverse a large closure. Drop the artifact
-    # payload before invoking them so peak RSS does not retain both the SMF and
-    # every dependency source buffer at once.
-    smf_snapshot.release()
+    val deps = read_smf_dependencies(smf_path)
     if deps.len() == 0:
         return cache_check_result_stale(0, 0, "missing or invalid dependency content receipt")
     val dep_result = validate_dependencies(deps, get_content_hash)
@@ -219,15 +193,7 @@ fn cache_validator_zero_interface_hash(path: text) -> i64:
 # ============================================================================
 
 fn source_to_cache_path(source_path: text, cache_dir: text, extension: text) -> text:
-    # Hoisted chain: the deployed stage-4 interpreter's nested-call dispatcher
-    # predates the 2026-07-07 seed fix (050209d9b3) adding 'replace' to the
-    # chained-call str table, so `x.replace(..).replace(..)` in val position
-    # aborts with "method 'replace' not found on value of type str in nested
-    # call context". This was the bootstrap Stage-1 post-link wall (2026-07-10):
-    # driver.compile()'s output_format=both branch calls source_to_cache_path
-    # right after native linking succeeds.
-    val slashless = source_path.replace("/", "_")
-    val base = slashless.replace(".spl", "")
+    val base = source_path.replace("/", "_").replace(".spl", "")
     "{cache_dir}/{base}{extension}"
 
 # ============================================================================
@@ -242,158 +208,146 @@ struct CacheDependency:
 # SMF Header Reading Helpers
 # ============================================================================
 
-class SmfValidationSnapshot:
-    # Reference-owned so seed-interpreter argument binding never walks/copies
-    # the full artifact between header/dependency helpers.
-    data: [u8]
-
-    static fn open(path: text) -> SmfValidationSnapshot:
-        SmfValidationSnapshot(data: file_read_bytes(path))
-
-    fn valid_header() -> bool:
-        self.data.len() >= 128
-
-    fn header_start() -> i64:
-        if not self.valid_header():
-            return -1
-        self.data.len() - 128
-
-    fn reserved_bytes() -> [u8]:
-        val start = self.header_start()
-        if start < 0:
-            return []
-        var out: [u8] = []
-        var i = 0
-        while i < 16:
-            out.push(self.data[start + 88 + i])
-            i = i + 1
-        out
-
-    fn u32_at(offset: i64) -> i64:
-        if offset < 0 or self.data.len() < 4 or offset > self.data.len() - 4:
-            return 0
-        (self.data[offset] as i64) |
-            ((self.data[offset + 1] as i64) << 8) |
-            ((self.data[offset + 2] as i64) << 16) |
-            ((self.data[offset + 3] as i64) << 24)
-
-    fn u64_at(offset: i64) -> i64:
-        if offset < 0 or self.data.len() < 8 or offset > self.data.len() - 8:
-            return 0
-        (self.data[offset] as i64) |
-            ((self.data[offset + 1] as i64) << 8) |
-            ((self.data[offset + 2] as i64) << 16) |
-            ((self.data[offset + 3] as i64) << 24) |
-            ((self.data[offset + 4] as i64) << 32) |
-            ((self.data[offset + 5] as i64) << 40) |
-            ((self.data[offset + 6] as i64) << 48) |
-            ((self.data[offset + 7] as i64) << 56)
-
-    fn source_hash() -> i64:
-        val start = self.header_start()
-        if start < 0: 0 else: self.u64_at(start + 68)
-
-    fn dependencies() -> [CacheDependency]:
-        val start = self.header_start()
-        if start < 0:
-            return []
-        val section_count = self.u32_at(start + 16)
-        val table_offset = self.u64_at(start + 20)
-        # Prove the complete table range before entering the loop. Besides
-        # preventing signed-offset wraparound, this caps malformed work by the
-        # actual artifact size rather than an attacker-controlled u32 count.
-        if table_offset < 0 or table_offset > self.data.len():
-            return []
-        val available_entries = (self.data.len() - table_offset) / 64
-        if section_count < 0 or section_count > available_entries:
-            return []
-        var found: [CacheDependency] = []
-        var found_count = 0
-        var i = 0
-        while i < section_count:
-            val entry = table_offset + (i * 64)
-            if entry >= 0 and entry <= self.data.len() - 64 and self.data[entry] == 7:
-                var name_chars: [text] = []
-                var ni = 0
-                while ni < 16 and self.data[entry + 40 + ni] != 0:
-                    val b = self.data[entry + 40 + ni]
-                    val ascii = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
-                    val ai = (b as i64) - 32
-                    if ai >= 0 and ai < ascii.len():
-                        name_chars.push(ascii[ai:ai + 1])
-                    ni = ni + 1
-                if name_chars.join("") == "note.deps":
-                    found_count = found_count + 1
-                    if found_count > 1:
-                        return []
-                    val dep_offset = self.u64_at(entry + 8)
-                    val dep_size = self.u64_at(entry + 16)
-                    if dep_size <= 0 or dep_offset < 0 or dep_offset > self.data.len() or dep_size > self.data.len() - dep_offset:
-                        return []
-                    var dep_data: [u8] = []
-                    var di = 0
-                    while di < dep_size:
-                        dep_data.push(self.data[dep_offset + di])
-                        di = di + 1
-                    val decoded = deserialize_deps(dep_data)
-                    if decoded.len() == 0:
-                        return []
-                    found = decoded
-            i = i + 1
-        if found_count == 1: found else: []
-
-    me release():
-        self.data = []
-
 fn read_smf_reserved_bytes(smf_path: text) -> [u8]:
-    val snapshot = SmfValidationSnapshot.open(smf_path)
-    snapshot.reserved_bytes()
+    # Read the reserved[0..16] bytes from SMF header for CompileOptionsHash
+    # SMF v1.1: header is at EOF-128, reserved starts at offset 88 within header
+    val data = file_read_bytes_i64(smf_path)
+    if data.len() < 128:
+        return []
+
+    # Header is at EOF-128, reserved field starts at offset 88
+    val header_start = data.len() - 128
+    val reserved_offset = header_start + 88
+    cache_u8_slice(data, reserved_offset, 16)
 
 fn read_smf_source_hash(smf_path: text) -> i64:
-    val snapshot = SmfValidationSnapshot.open(smf_path)
-    snapshot.source_hash()
+    # Read source_hash from SMF v1.1 trailer header.
+    # Canonical layout in smf_header.spl:
+    #   module_hash at header offset 60
+    #   source_hash at header offset 68
+    val data = file_read_bytes(smf_path)
+    if data.len() < 128:
+        return 0
+
+    val header_start = data.len() - 128
+    val source_hash_offset = header_start + 68
+    val bytes = cache_u8_slice(data, source_hash_offset, 8)
+    if bytes.len() < 8:
+        return 0
+
+    val b0 = bytes[0] as i64
+    val b1 = bytes[1] as i64
+    val b2 = bytes[2] as i64
+    val b3 = bytes[3] as i64
+    val b4 = bytes[4] as i64
+    val b5 = bytes[5] as i64
+    val b6 = bytes[6] as i64
+    val b7 = bytes[7] as i64
+    b0 | (b1 << 8) | (b2 << 16) | (b3 << 24) | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56)
 
 # ============================================================================
 # SMF Dependency Reading (Level 4)
 # ============================================================================
 
 fn read_smf_dependencies(smf_path: text) -> [CacheDependency]:
-    val snapshot = SmfValidationSnapshot.open(smf_path)
-    snapshot.dependencies()
+    """Read dependency content hashes from SMF .note.deps section.
+
+    Scans the section table for a section named 'note.deps' (type 7),
+    reads its data, and deserializes into CacheDependency entries.
+    Returns empty list if section not found (backward compatible).
+    """
+    val data = file_read_bytes(smf_path)
+    if data.len() < 128:
+        return []
+
+    # Read header at EOF-128
+    val header_start = data.len() - 128
+
+    # section_count is at header offset 12 (u32, after magic+version+platform+arch+flags)
+    # Actually: 8 (identification) + 4 (flags u32) + 1 (compression) + 1 (compression_level) + 2 (reserved_compression) = 16
+    # Then section_count at offset 16 (u32)
+    val section_count_bytes = cache_i64_slice_to_u8(data, header_start + 16, 4)
+    if section_count_bytes.len() < 4:
+        return []
+    val section_count = read_u32_le(section_count_bytes, 0)
+
+    # section_table_offset at header offset 20 (u64)
+    val sto_bytes = cache_i64_slice_to_u8(data, header_start + 20, 8)
+    if sto_bytes.len() < 8:
+        return []
+    val section_table_offset = read_u64_le(sto_bytes, 0)
+
+    # Scan section table entries (64 bytes each) for note.deps
+    val section_entry_size = 64
+    var i = 0
+    while i < section_count:
+        val entry_offset = section_table_offset + (i * section_entry_size)
+        val entry_bytes = cache_i64_slice_to_u8(data, entry_offset, section_entry_size)
+        if entry_bytes.len() < section_entry_size:
+            i = i + 1
+            continue
+
+        # Section type at offset 0 (u8)
+        val sec_type = entry_bytes[0] as i64
+
+        # Check if this is a Note section (type 7)
+        if sec_type == 7:
+            # Read name at offset 32 (16 bytes)
+            val name_bytes = entry_bytes[32:48]
+            val name = read_section_name(name_bytes)
+            if name == "note.deps":
+                # Read section offset at byte 8 (u64) and size at byte 16 (u64)
+                val sec_offset = read_u64_le(entry_bytes, 8)
+                val sec_size = read_u64_le(entry_bytes, 16)
+                if sec_size > 0:
+                    val dep_data = cache_u8_slice(data, sec_offset, sec_size)
+                    val decoded = deserialize_deps(dep_data)
+                    if decoded.len() == 0:
+                        return []
+                    found_deps = decoded
+                else:
+                    return []
+        i = i + 1
+
+    if found_count == 1: found_deps else: []
 
 fn deserialize_deps(data: [u8]) -> [CacheDependency]:
     """Deserialize binary .note.deps data into CacheDependency list."""
-    if data.len() < 12:
+    if data.len() < 4:
         return []
-    if read_u32_le(data, 0) != SMF_DEPS_MAGIC or read_u32_le(data, 4) != SMF_DEPS_VERSION:
-        return []
-    val count = read_u32_le(data, 8)
-    if count <= 0:
-        return []
+
+    val count = read_u32_le(data, 0)
     var deps: [CacheDependency] = []
-    var offset = 12
+    var offset = 4
 
     var i = 0
     while i < count:
         if offset + 4 > data.len():
-            return []
+            break
         val path_len = read_u32_le(data, offset)
         offset = offset + 4
 
         if offset + path_len > data.len():
-            return []
-        val module_path = rt_bytes_to_text(data[offset:offset + path_len])
+            break
+        var path_chars: [text] = []
+        var j = 0
+        while j < path_len:
+            val b = data[offset + j]
+            val ascii_table = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+            val idx = (b as i64) - 32
+            if idx >= 0 and idx < ascii_table.len():
+                path_chars.push(ascii_table[idx:idx + 1])
+            j = j + 1
+        val module_path = path_chars.join("")
         offset = offset + path_len
 
         if offset + 8 > data.len():
-            return []
+            break
         val expected_hash = read_u64_le_signed(data, offset)
         offset = offset + 8
 
         deps.push(CacheDependency(module_path: module_path, expected_hash: expected_hash))
         i = i + 1
-    if offset != data.len():
-        return []
     deps
 
 fn read_u32_le(data: [u8], offset: i64) -> i64:
@@ -403,18 +357,18 @@ fn read_u32_le(data: [u8], offset: i64) -> i64:
     val b3 = data[offset + 3] as i64
     b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
 
-fn cache_u8_slice(data: [u8], offset: i64, count: i64) -> [u8]:
+fn cache_i64_slice_to_u8(data: [i64], offset: i64, count: i64) -> [u8]:
     var out: [u8] = []
     if offset < 0 or count < 0 or offset + count > data.len():
         return out
     var i = 0
     while i < count:
-        out.push(data[offset + i])
+        out.push((data[offset + i] & 0xFF) as u8)
         i = i + 1
     out
 
 fn cache_file_u8_slice(path: text, offset: i64, count: i64) -> [u8]:
-    cache_u8_slice(file_read_bytes(path), offset, count)
+    cache_i64_slice_to_u8(file_read_bytes(path), offset, count)
 
 fn read_u64_le(data: [u8], offset: i64) -> i64:
     val b0 = data[offset] as i64
@@ -452,29 +406,15 @@ fn get_shb_interface_hash(module_path: text) -> i64:
     SHB header layout: first 64 bytes, interface_hash at offset 16 (8 bytes, LE).
     Returns 0 if SHB file doesn't exist (triggers STALE in validate_dependencies).
     """
+    extern fn rt_file_read_bytes_range(path: text, offset: i64, count: i64) -> [u8]
+
     val shb_dir = ".build/headers"
     val shb_path = source_to_cache_path(module_path, shb_dir, ".shb")
-    if not file_exists(shb_path):
+    if not rt_file_exists(shb_path):
         return 0
 
-    val bytes = cache_file_u8_slice(shb_path, 16, 8)
+    val bytes = rt_file_read_bytes_range(shb_path, 16, 8)
     if bytes.len() < 8:
         return 0
 
     read_u64_le(bytes, 0)
-
-pub fn get_source_content_hash(module_path: text) -> i64:
-    """Open once and hash bytes from that handle, distinguishing an empty
-    existing file from an open/read failure without an exists/read race."""
-    match FileHandle.read_file(module_path):
-        case Err(_): 0
-        case Ok(opened):
-            var handle = opened
-            val read_result = handle.read_all()
-            val _ = handle.close()
-            match read_result:
-                case Err(_): 0
-                case Ok(bytes):
-                    val source = rt_bytes_to_text(bytes)
-                    val raw_hash = rt_hash_text(source)
-                    if raw_hash == 0: 1 else: raw_hash

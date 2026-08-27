@@ -8,6 +8,7 @@ Audience: compiler and tooling engineers who maintain this spec
 
 use std.io.{file_read}
 use std.io_runtime.{process_run}
+use app.io.mod.{process_run_timeout}
 use std.spec.*
 
 val DEPLOY = "scripts/bootstrap/bootstrap-from-scratch.sh"
@@ -22,19 +23,30 @@ fn step_run_rollback_fixture(tamper_backup: bool) -> (text, text, i64):
     val tamper = if tamper_backup: "printf tampered >> bin/release/test-platform/simple.pre_deploy; " else: ""
     val command =
         "set -eu; root=/tmp/bootstrap-rollback-contract-$$; " +
-        "trap 'rm -rf \"$root\"' EXIT; mkdir -p \"$root/scripts/bootstrap\" \"$root/scripts/setup\" \"$root/bin/release/test-platform\"; " +
+        "trap 'rm -rf \"$root\"' EXIT; mkdir -p \"$root/scripts/bootstrap\" \"$root/scripts/setup\" \"$root/scripts/check/lib\" \"$root/bin/release/test-platform\" \"$root/src/compiler\" \"$root/src/app\" \"$root/src/lib\" \"$root/src/runtime\" \"$root/examples/10_tooling\"; " +
         "cp " + ROLLBACK + " \"$root/scripts/bootstrap/rollback-bootstrap-deploy.shs\"; " +
+        "cp scripts/check/lib/bootstrap-stage3-provenance.shs \"$root/scripts/check/lib/bootstrap-stage3-provenance.shs\"; cp -R scripts/check/lib/bootstrap-stage3 \"$root/scripts/check/lib/bootstrap-stage3\"; cp scripts/check/lib/stage4-candidate-provenance.shs \"$root/scripts/check/lib/stage4-candidate-provenance.shs\"; " +
+        "printf '%s\\n' '#!/bin/sh' 'exit 0' > \"$root/scripts/bootstrap/bootstrap-from-scratch.sh\"; chmod 755 \"$root/scripts/bootstrap/bootstrap-from-scratch.sh\"; " +
         "printf '%s\\n' '#!/bin/sh' 'exit 0' > \"$root/scripts/setup/setup.shs\"; chmod 755 \"$root/scripts/setup/setup.shs\"; " +
+        "for source_root in src/compiler src/app src/lib src/runtime examples/10_tooling; do printf '%s\\n' fixture > \"$root/$source_root/input.spl\"; done; printf '%s\\n' 'bin/' > \"$root/.gitignore\"; cd \"$root\"; git init -q; git add .; git -c user.name=fixture -c user.email=fixture@example.invalid commit -qm fixture; " +
         "printf '%s\\n' '#!/bin/sh' '# enum construction: unregistered enum' '# current-generation' 'echo 2' > \"$root/bin/release/test-platform/simple\"; " +
         "printf '%s\\n' '#!/bin/sh' '# enum construction: unregistered enum' '# backup-generation' 'echo 2' > \"$root/bin/release/test-platform/simple.pre_deploy\"; " +
-        "chmod 755 \"$root/bin/release/test-platform/simple\" \"$root/bin/release/test-platform/simple.pre_deploy\"; cd \"$root\"; " +
+        "cp \"$root/bin/release/test-platform/simple\" \"$root/bin/stage4-simple\"; chmod 755 \"$root/bin/release/test-platform/simple\" \"$root/bin/release/test-platform/simple.pre_deploy\" \"$root/bin/stage4-simple\"; " +
         "if command -v sha256sum >/dev/null 2>&1; then hash='sha256sum'; elif command -v shasum >/dev/null 2>&1; then hash='shasum -a 256'; else hash='sha256 -q'; fi; " +
         "cur=$(eval $hash bin/release/test-platform/simple | awk '{print $1}'); back=$(eval $hash bin/release/test-platform/simple.pre_deploy | awk '{print $1}'); " +
-        "printf '%s\\n' schema=bootstrap-deploy-receipt-v1 platform=test-platform current_path=bin/release/test-platform/simple current_sha256=$cur backup_path=bin/release/test-platform/simple.pre_deploy backup_sha256=$back deployment_status=pass > bin/release/test-platform/bootstrap-deploy-receipt.env; " +
+        "export BOOTSTRAP_STAGE3_FACADE_PATH=$root/scripts/check/lib/bootstrap-stage3-provenance.shs STAGE4_PROVENANCE_HELPER_PATH=$root/scripts/check/lib/stage4-candidate-provenance.shs; . $BOOTSTRAP_STAGE3_FACADE_PATH; . $STAGE4_PROVENANCE_HELPER_PATH; stage4_write_current_tree_identity $root/bin/current-tree.env $root; field() { bootstrap_stage3_manifest_value \"$1\" $root/bin/current-tree.env; }; " +
+        "producer=$root/scripts/bootstrap/bootstrap-from-scratch.sh; producer_sha=$(eval $hash $producer | awk '{print $1}'); printf '%s\\n' source_snapshot_sha256=$(field stage3_source_snapshot_sha256) git_state_sha256=$(field git_state_sha256) git_head=$(field git_head) git_dirty_fingerprint=$(field git_dirty_fingerprint) bootstrap_script_path=$producer bootstrap_script_sha256=$producer_sha > $root/bin/stage3.env; stage3_sha=$(eval $hash $root/bin/stage3.env | awk '{print $1}'); " +
+        "printf '%s\\n' schema=simple-bootstrap-stage4-provenance-v1 output_path=$root/bin/stage4-simple output_sha256=$cur repository_root=$root source_revision_kind=content-sha256 source_revision=$(field source_revision) source_roots=src/compiler:src/lib:src/app:src/runtime:examples/10_tooling stage3_source_snapshot_sha256=$(field stage3_source_snapshot_sha256) git_state_sha256=$(field git_state_sha256) git_head=$(field git_head) git_dirty_fingerprint=$(field git_dirty_fingerprint) stage3_producer_path=$producer stage3_producer_sha256=$producer_sha stage3_provenance_path=$root/bin/stage3.env stage3_provenance_sha256=$stage3_sha > $root/bin/stage4.env; stage4_provenance_sha=$(eval $hash $root/bin/stage4.env | awk '{print $1}'); " +
+        "printf '%s\\n' status=verified stage4_candidate_sha256=$cur stage4_provenance_sha256=$stage4_provenance_sha repository_root=$root source_revision_kind=content-sha256 source_revision=$(field source_revision) source_roots=src/compiler:src/lib:src/app:src/runtime:examples/10_tooling stage3_source_snapshot_sha256=$(field stage3_source_snapshot_sha256) git_state_sha256=$(field git_state_sha256) git_head=$(field git_head) git_dirty_fingerprint=$(field git_dirty_fingerprint) stage3_producer_path=$producer stage3_producer_sha256=$producer_sha > $root/bin/stage3-acceptance.env; acceptance_sha=$(eval $hash $root/bin/stage3-acceptance.env | awk '{print $1}'); " +
+        "printf '%s\\n' schema=bootstrap-deploy-receipt-v1 platform=test-platform current_path=bin/release/test-platform/simple current_sha256=$cur stage4_candidate_path=$root/bin/stage4-simple stage4_candidate_sha256=$cur stage4_provenance_path=$root/bin/stage4.env stage4_provenance_sha256=$stage4_provenance_sha backup_path=bin/release/test-platform/simple.pre_deploy backup_sha256=$back deployment_status=pass stage3_current_acceptance_status=verified stage3_current_acceptance_receipt=$root/bin/stage3-acceptance.env stage3_current_acceptance_receipt_sha256=$acceptance_sha repository_root=$root source_revision_kind=content-sha256 source_revision=$(field source_revision) source_roots=src/compiler:src/lib:src/app:src/runtime:examples/10_tooling stage3_source_snapshot_sha256=$(field stage3_source_snapshot_sha256) git_state_sha256=$(field git_state_sha256) git_head=$(field git_head) git_dirty_fingerprint=$(field git_dirty_fingerprint) stage3_producer_path=$producer stage3_producer_sha256=$producer_sha > bin/release/test-platform/bootstrap-deploy-receipt.env; " +
         tamper + "set +e; sh scripts/bootstrap/rollback-bootstrap-deploy.shs test-platform; rc=$?; set -e; " +
         "if grep -q backup-generation bin/release/test-platform/simple; then echo active_generation=backup; else echo active_generation=current; fi; " +
         "if grep -q current-generation bin/release/test-platform/simple.pre_deploy; then echo backup_generation=current; else echo backup_generation=backup; fi; exit $rc"
-    process_run("/bin/sh", ["-c", command])
+    val wrapped = command.replace(
+        "set +e; sh scripts/bootstrap/rollback-bootstrap-deploy.shs test-platform; rc=$?; set -e;",
+        "set +e; sh scripts/bootstrap/rollback-bootstrap-deploy.shs test-platform >rollback.out 2>rollback.err; rc=$?; set -e; cat rollback.out; cat rollback.err >&2;"
+    )
+    process_run_timeout("/bin/sh", ["-c", wrapped], 20000)
 
 describe "Bootstrap deployment rollback contract":
     it "retains a known-good backup and atomically publishes scoped deployment evidence":
@@ -44,6 +56,8 @@ describe "Bootstrap deployment rollback contract":
         expect(deploy).to_contain("bootstrap-deploy-receipt-v1")
         expect(deploy).to_contain("mv \"${receipt_tmp}\" \"${deploy_receipt}\"")
         expect(deploy).to_contain("platform_acceptance_claimed=false")
+        expect(deploy).to_contain("stage3_current_acceptance_receipt_sha256")
+        expect(deploy).to_contain("git_dirty_fingerprint")
         expect(deploy).to_contain("backup_created=0")
         expect(deploy).to_contain("else\n    rm -f \"${prev_bin}\"")
         expect(deploy).to_contain("[ \"${backup_created}\" -eq 1 ]")
@@ -57,6 +71,8 @@ describe "Bootstrap deployment rollback contract":
         expect(rollback).to_contain("[ ! -L \"${backup}\" ]")
         expect(rollback).to_contain("fail_receipt current_hash")
         expect(rollback).to_contain("fail_receipt backup_hash")
+        expect(rollback).to_contain("fail_receipt stale_current_tree")
+        expect(rollback).to_contain("fail_receipt current_worktree")
 
     it "prevalidates the backup and restores the old compiler when setup fails":
         step("Verify: prevalidates the backup and restores the old compiler when setup fails")

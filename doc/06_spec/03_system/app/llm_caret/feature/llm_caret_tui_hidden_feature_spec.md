@@ -1,6 +1,6 @@
 # LLM Caret TUI and Hidden-Feature System Spec
 
-> Exercises the production Caret TUI submission state transition without a live terminal or paid provider. The scenarios drive the input widget model through `run_chat_tui_submission`, dummy responder, transcript renderer, permission gate, retry policy, Claude REPL error route, and production hidden-command dispatch/admission. Provider, model, resume, and new-conversation commands must refresh visible state; a new conversation must receive a fresh session ID. The pure raw-key decoder and input-widget transition are covered; live PTY reads and terminal frame timing are not claimed by this component spec.
+> Exercises the production Caret TUI submission transition without a live terminal or paid provider. The scenarios drive `run_chat_tui_submission`, ANSI/UTF-8 input reduction, transcript rendering, permissions, persistence, retry decisions, and production hidden-command dispatch. Raw-terminal byte acquisition and frame timing remain a separate evidence boundary.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -11,7 +11,7 @@
 
 # LLM Caret TUI and Hidden-Feature System Spec
 
-Exercises the production Caret TUI submission state transition without a live terminal or paid provider. The scenarios drive the input widget model through `run_chat_tui_submission`, dummy responder, transcript renderer, permission gate, retry policy, Claude REPL error route, and production hidden-command dispatch/admission. Provider, model, resume, and new-conversation commands must refresh visible state; a new conversation must receive a fresh session ID. The pure raw-key decoder and input-widget transition are covered; live PTY reads and terminal frame timing are not claimed by this component spec.
+Exercises the production Caret TUI submission transition without a live terminal or paid provider. The scenarios drive `run_chat_tui_submission`, ANSI/UTF-8 input reduction, transcript rendering, permissions, persistence, retry decisions, and production hidden-command dispatch. Raw-terminal byte acquisition and frame timing remain a separate evidence boundary.
 
 ## At a Glance
 
@@ -24,19 +24,19 @@ Exercises the production Caret TUI submission state transition without a live te
 | Design | doc/05_design/llm_caret_claude_cli_full_parity.md |
 | Research | doc/01_research/local/llm_caret_claude_cli_harden.md |
 | Source | `test/03_system/app/llm_caret/feature/llm_caret_tui_hidden_feature_spec.spl` |
-| Updated | 2026-08-26 |
-| Generator | `simple spipe-docgen` (Simple) |
+| Updated | 2026-07-24 |
+| Generator | Manual synchronization; `simple spipe-docgen` rerun blocked |
 
 ## Overview
 
 Exercises the production Caret TUI submission state transition without a live
-terminal or paid provider. The scenarios drive the input widget model through
-`run_chat_tui_submission`, dummy responder, transcript renderer, permission
-gate, retry policy, Claude REPL error route, and production hidden-command
-dispatch/admission. Provider, model, resume, and new-conversation commands must
-refresh visible state; a new conversation must receive a fresh session ID. The
-pure raw-key decoder and input-widget transition are covered; live PTY reads
-and terminal frame timing are not claimed by this component spec.
+terminal or paid provider. The scenarios drive `run_chat_tui_submission`,
+ANSI/UTF-8 input reduction, transcript rendering, permission handling,
+persistence, retry decisions, and production hidden-command dispatch.
+Provider, model, resume, and new-conversation
+commands must refresh visible state; a new conversation must receive a fresh
+session ID. The pure raw-key decoder and input-widget transition are covered;
+live PTY reads and terminal frame timing remain outside this spec.
 
 **Requirement IDs:** REQ-LLM-CARET-FULL-003, REQ-LLM-CARET-FULL-006
 **Requirements:** doc/02_requirements/feature/llm_caret_claude_cli_full_parity.md
@@ -62,13 +62,18 @@ Display policy: `embed_tui`
 
 | Category | Count |
 |----------|------:|
-| TUI Captures | 1 |
+| Expected TUI Captures | 1 |
+| Executed TUI Captures | 0 |
 
 ### TUI Captures
 
 | Item | Kind | Path |
 |------|------|------|
-| `caret_tui.txt` | TUI capture | `build/test-artifacts/03_system/app/llm_caret/feature/llm_caret_tui_hidden_feature/caret_tui.txt` |
+| `caret_tui.txt` | Expected TUI capture; not executed | `build/test-artifacts/03_system/app/llm_caret/feature/llm_caret_tui_hidden_feature/caret_tui.txt` |
+
+The executable runner is currently blocked, so the capture path above is an
+expected artifact location, not passing runtime evidence. This manual was
+synchronized from the executable source without running docgen.
 
 ## Scenarios
 
@@ -76,31 +81,15 @@ Display policy: `embed_tui`
 
 #### should accept visible input and render provider transcript and status
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-LLM-CARET-FULL-003
-# @req REQ-LLM-CARET-FULL-006
-```
-
-</details>
-
-#### should apply raw terminal navigation without leaking escape bytes
-
-- should apply raw terminal navigation without leaking escape bytes
 - Open the caret TUI
+   - Expected: ui.input.value equals `case.prompt`
 - Send a prompt through the visible input
+   - Expected: tui_transcript_len() equals `2`
 - Check transcript and status
-   - Expected: decoder_state equals `0`
-   - Expected: input.value equals `>abc!`
+   - Expected: check_tui_snapshot(snapshot, case) equals `matched`
+   - Expected: dir_create_all(ARTIFACT_DIR) is true
+   - Expected: file_write(TUI_CAPTURE_PATH, snapshot) is true
+   - Expected: file_read(TUI_CAPTURE_PATH) equals `snapshot`
 
 
 <details>
@@ -110,8 +99,47 @@ Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("should apply raw terminal navigation without leaking escape bytes")
+val case = CaretTuiFeatureCase(
+    prompt: "hello caret",
+    provider: "dummy",
+    model: "dummy-hello",
+    session_id: "tui-session",
+    expected_reply: "fixture-dummy-ok"
+)
+
+step("Open the caret TUI")
+val ui = setup_tui_fixture(case)
+expect(ui.input.value).to_equal(case.prompt)
+
+step("Send a prompt through the visible input")
+val snapshot = run_tui_action(case, ui)
+expect(tui_transcript_len()).to_equal(2)
+
+step("Check transcript and status")
+expect(check_tui_snapshot(snapshot, case)).to_equal("matched")
+expect(dir_create_all(ARTIFACT_DIR)).to_be(true)
+expect(file_write(TUI_CAPTURE_PATH, snapshot)).to_be(true)
+expect(file_read(TUI_CAPTURE_PATH)).to_equal(snapshot)
+```
+
+</details>
+
+#### should apply raw terminal navigation without leaking escape bytes
+
+- Open the caret TUI
+- Send a prompt through the visible input
+- Check transcript and status
+   - Expected: decoder_state equals `0`
+   - Expected: input.value equals `>abc!`
+   - Expected: input.value contains no `[` escape continuation
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Complete executable scenario source.
+
+```simple
 step("Open the caret TUI")
 val ui = make_chat_tui_with_status(
     "llm_caret - dummy",
@@ -137,26 +165,22 @@ expect(input.value.contains("[")).to_be(false)
 
 #### should reduce raw editing paging and Enter to one prompt
 
-- should reduce raw editing paging and Enter to one prompt
 - Open the caret TUI
 - Edit a Unicode prompt and request both paging directions
-   - Expected: edited.action equals `RAW_LINE_CONTINUE`
-   - Expected: older.action equals `RAW_LINE_PAGE_UP`
-   - Expected: newer.action equals `RAW_LINE_PAGE_DOWN`
+   - Expected: each input byte continues the current line
+   - Expected: Ctrl-P and Ctrl-N emit page-up and page-down actions
 - Submit one prompt without raw-byte leakage
-   - Expected: submitted.action equals `RAW_LINE_SUBMIT`
-   - Expected: submitted.submitted equals `hi한`
+   - Expected: submitted action is `RAW_LINE_SUBMIT`
+   - Expected: submitted text equals `hi한`
+   - Expected: submitted text contains no `[` escape continuation
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 25 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
+Complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("should reduce raw editing paging and Enter to one prompt")
 step("Open the caret TUI")
 var state = make_raw_line_state(
     make_chat_tui_with_status(
@@ -186,27 +210,21 @@ expect(submitted.submitted.contains("[")).to_be(false)
 
 #### should surface provider switching through the visible transcript
 
-- should surface provider switching through the visible transcript
 - Open the caret TUI
 - Send a prompt through the visible input
 - Check transcript and status
-   - Expected: switched.ui.title equals `llm_caret - openai_compat`
+   - Expected: provider switch refreshes title/status without model submission
    - Expected: tui_transcript_line_text(0) equals `System: provider set to openai_compat`
-   - Expected: resumed.conversation.len() equals `1`
-   - Expected: tui_transcript_line_text(0) equals `You: restored`
-   - Expected: started.conversation.len() equals `0`
-   - Expected: started.session_id equals `new-session`
+   - Expected: resume restores session status, conversation, and transcript
+   - Expected: new starts `new-session` with an empty conversation
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 46 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
+Complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("should surface provider switching through the visible transcript")
 step("Open the caret TUI")
 tui_transcript_reset()
 val ui = make_chat_tui_with_status(
@@ -257,25 +275,20 @@ expect(tui_transcript_line_text(0)).to_equal(
 
 #### should show permission-denied tool output without executing the command
 
-- should show permission-denied tool output without executing the command
 - Open the caret TUI
 - Send a prompt through the visible input
 - Check transcript and status
-   - Expected: PERSIST_COUNT equals `1`
-   - Expected: PERSIST_SESSION equals `permission-session`
-   - Expected: tui_transcript_len() equals `3`
-   - Expected: tui_transcript_line_text(0) equals `You: run a command`
+   - Expected: result.submitted_to_model is true
+   - Expected: persistence runs once for `permission-session`
+   - Expected: transcript contains user, denied tool, and assistant lines
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 29 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
+Complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("should show permission-denied tool output without executing the command")
 step("Open the caret TUI")
 tui_transcript_reset()
 PERSIST_COUNT = 0
@@ -309,10 +322,13 @@ expect(tui_transcript_line_text(2)).to_equal(
 
 #### should expose bounded retry decisions and the terminal error route
 
-- should expose bounded retry decisions and the terminal error route
 - Open the caret TUI
    - Expected: queryEventRoute("error", false, false) equals `show query error`
 - Send a prompt through the visible input
+   - Expected: should_retry(429, 1, policy) is true
+   - Expected: should_retry(503, 3, policy) is true
+   - Expected: should_retry(503, 4, policy) is false
+   - Expected: should_retry(400, 1, policy) is false
 - Check transcript and status
    - Expected: effective_delay_ms(1, policy, 75) equals `75`
    - Expected: effective_delay_ms(1, policy, 1000) equals `100`
@@ -321,12 +337,10 @@ expect(tui_transcript_line_text(2)).to_equal(
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("should expose bounded retry decisions and the terminal error route")
 val policy = RetryPolicy(
     max_attempts: 4,
     base_delay_ms: 10,
@@ -354,21 +368,19 @@ expect(effective_delay_ms(1, policy, 1000)).to_equal(100)
 
 #### should resolve the hidden debug command while excluding it from visible commands
 
-- should resolve the hidden debug command while excluding it from visible commands
 - Enable the hidden-feature fixture
 - Check the hidden-feature gate
    - Expected: check_hidden_feature_gate(case, lookup) equals `hidden`
+   - Expected: disabled hidden and unknown commands return the same message
+   - Expected: admitted inspection reports ID/name without secret input
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 39 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
+Complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("should resolve the hidden debug command while excluding it from visible commands")
 val case = CaretHiddenFeatureCase(
     command: "/debug-tool-call",
     alias: "debug_tool_call",
@@ -385,19 +397,10 @@ expect(admitRootCommand(case.command, false).found).to_be(false)
 val rejected = dispatch_slash(
     "debug-tool-call", "call-1", _hooks("hidden-session")
 )
-# Reproduce (2026-08-25): comparing against a different command name
-# could never hold (`/debug-tool-call` vs `/not-registered`). A gated
-# hidden name must render exactly like an unknown command of the SAME
-# name (line ~482 below pins the alias form the same way).
 val unknown = dispatch_slash(
     "not-registered", "", _hooks("hidden-session")
 )
-expect(rejected.message).to_equal(
-    "Unknown command: /debug-tool-call (try /help)"
-)
-expect(rejected.message.replace("debug-tool-call", "not-registered")).to_equal(
-    unknown.message
-)
+expect(rejected.message).to_equal(unknown.message)
 val executed = dispatch_slash(
     "debug-tool-call",
     "{\"type\":\"tool_use\",\"id\":\"call-1\",\"name\":\"bash\",\"input\":{\"command\":\"echo sk-ant-fixture-secret\"}}",
@@ -412,20 +415,19 @@ expect(executed.message.contains("sk-ant-fixture-secret")).to_be(false)
 
 #### should reject disabled commands even when hidden features are enabled
 
-- should reject disabled commands even when hidden features are enabled
 - Enable the hidden-feature fixture
 - Check the hidden-feature gate
+   - Expected: disabled command metadata is retained
+   - Expected: disabled commands are never admitted
+   - Expected: production dispatch reports the command disabled
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
+Complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("should reject disabled commands even when hidden features are enabled")
 step("Enable the hidden-feature fixture")
 val metadata = findRootCommand("/remote-setup")
 val admitted = admitRootCommand("/remote-setup", true)
@@ -444,40 +446,20 @@ expect(dispatched.message).to_contain("Command disabled")
 
 #### should preserve TUI state and suppress model persistence for hidden aliases
 
-- should preserve TUI state and suppress model persistence for hidden aliases
-- Enable the hidden-feature fixture
-   - Expected: rejected.conversation equals `seeded`
-   - Expected: rejected.session_id equals `hidden-session`
-   - Expected: rejected.ui.title equals `ui.title`
-   - Expected: rejected.ui.status equals `ui.status`
-   - Expected: rejected.ui.input.value equals ``
-   - Expected: MODEL_COUNT equals `0`
-   - Expected: PERSIST_COUNT equals `0`
-- Dispatch the admitted hidden alias through TUI submission
-   - Expected: admitted.conversation equals `seeded`
-   - Expected: admitted.session_id equals `hidden-session`
-   - Expected: admitted.ui.title equals `ui.title`
-   - Expected: admitted.ui.status equals `ui.status`
-   - Expected: MODEL_COUNT equals `0`
-   - Expected: PERSIST_COUNT equals `0`
-- Check disabled alias rejection and zero side effects
-   - Expected: disabled.conversation equals `seeded`
-   - Expected: disabled.session_id equals `hidden-session`
-   - Expected: disabled.ui.title equals `ui.title`
-   - Expected: disabled.ui.status equals `ui.status`
-   - Expected: MODEL_COUNT equals `0`
-   - Expected: PERSIST_COUNT equals `0`
-
+- Enable the hidden-feature fixture.
+- Dispatch the admitted hidden alias through TUI submission.
+- Check disabled alias rejection and zero side effects.
+  - Expected: default-hidden, enabled-hidden, and disabled aliases never reach
+    the responder or persistence hook.
+  - Expected: conversation, session, title, and status remain unchanged.
+  - Expected: each path renders one exact System transcript line.
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 64 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
+Complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("should preserve TUI state and suppress model persistence for hidden aliases")
 val ui = make_chat_tui_with_status(
     "llm_caret - dummy",
     "provider=dummy model=dummy-hello session=hidden-session"
@@ -546,8 +528,8 @@ expect(PERSIST_COUNT).to_equal(0)
 
 #### should keep SGTTI out of the normal Caret product and TUI entrypoints
 
-- should keep SGTTI out of the normal Caret product and TUI entrypoints
 - Enable the hidden-feature fixture
+   - Expected: lookup.command.hidden is true
 - Check the hidden-feature gate
    - Expected: _source_excludes_sgtti("src/app/llm_caret/main.spl") equals `excluded`
    - Expected: _source_excludes_sgtti("src/app/llm_caret/chat_tui.spl") equals `excluded`
@@ -556,12 +538,10 @@ expect(PERSIST_COUNT).to_equal(0)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("should keep SGTTI out of the normal Caret product and TUI entrypoints")
 val case = CaretHiddenFeatureCase(
     command: "/debug-tool-call",
     alias: "debug_tool_call",
@@ -584,11 +564,15 @@ expect(_source_excludes_sgtti("src/app/llm_caret/chat_tui.spl")).to_equal("exclu
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 10 |
-| Active scenarios | 10 |
+| Total scenarios | 9 |
+| Active scenarios | 9 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
+
+Execution status: not run in this synchronization because the executable
+runner is blocked. Active means the scenarios are enabled in source; it does
+not claim a runtime PASS.
 
 
 ## Related Documentation
@@ -600,77 +584,3 @@ expect(_source_excludes_sgtti("src/app/llm_caret/chat_tui.spl")).to_equal("exclu
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-- `REQ-LLM-CARET-FULL-003`
-- `REQ-LLM-CARET-FULL-006`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `3e788a528044f979906c560f19992f5a9096018b4c086cb57b88489bb2ff98d2`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `3e788a528044f979906c560f19992f5a9096018b4c086cb57b88489bb2ff98d2`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `3e788a528044f979906c560f19992f5a9096018b4c086cb57b88489bb2ff98d2`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **80/100**; effective score: **80/100**; blockers: **0**.
-
-SSpec documentization score: 80/100
-source: test/03_system/app/llm_caret/feature/llm_caret_tui_hidden_feature_spec.spl
-mirror: doc/06_spec/03_system/app/llm_caret/feature/llm_caret_tui_hidden_feature_spec.md (current)
-findings: 13 blockers: 0
-  narrative=100 structure=60 oracle=70
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/app/llm_caret/feature/llm_caret_tui_hidden_feature_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/app/llm_caret/feature/llm_caret_tui_hidden_feature_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/app/llm_caret/feature/llm_caret_tui_hidden_feature_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 13 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/03_system/app/llm_caret/feature/llm_caret_tui_hidden_feature_spec.spl:256:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'should accept visible input and render provider transcript and status' has no visible step flow
-  why: Ordered visible actions make the manual operable.
-  improve: Add ordered step("...") calls for meaningful actions.
-test/03_system/app/llm_caret/feature/llm_caret_tui_hidden_feature_spec.spl:256:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should accept visible input and render provider transcript and status' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/03_system/app/llm_caret/feature/llm_caret_tui_hidden_feature_spec.spl:284:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should apply raw terminal navigation without leaking escape bytes' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/03_system/app/llm_caret/feature/llm_caret_tui_hidden_feature_spec.spl:284:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should apply raw terminal navigation without leaking escape bytes' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/app/llm_caret/feature/llm_caret_tui_hidden_feature_spec.spl:307:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should reduce raw editing paging and Enter to one prompt' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/03_system/app/llm_caret/feature/llm_caret_tui_hidden_feature_spec.spl:307:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should reduce raw editing paging and Enter to one prompt' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/app/llm_caret/feature/llm_caret_tui_hidden_feature_spec.spl:334:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should surface provider switching through the visible transcript' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/03_system/app/llm_caret/feature/llm_caret_tui_hidden_feature_spec.spl:334:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should surface provider switching through the visible transcript' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/app/llm_caret/feature/llm_caret_tui_hidden_feature_spec.spl:382:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should show permission-denied tool output without executing the command' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/03_system/app/llm_caret/feature/llm_caret_tui_hidden_feature_spec.spl:413:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should expose bounded retry decisions and the terminal error route' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-<!-- sspec-maintain:scorecard:end -->

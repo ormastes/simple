@@ -1,0 +1,174 @@
+# Container runtime bridge — connects container lifecycle intent to the live
+# managed workload launch seam.  The ECS manager remains the policy/lifecycle
+# owner; this adapter is the only place that may turn an approved container
+# policy into a scheduler task.
+
+use os.services.container.container_manager.{ContainerWorld, SpawnRequest}
+use os.services.workload.workload_manifest.{CompiledExecutionPolicy}
+use os.kernel.loader.managed_workload_launch.{launch_compiled_workload_into_scheduler}
+use os.kernel.security.execution_context.{KernelCallContext}
+use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.types.task_types.{TaskId, TaskState}
+use os.kernel.arch.arch_context.{Architecture}
+use os.kernel.types.task_types.{TaskPriority}
+use os.kernel.ipc.ipc.{IpcManager}
+use os.kernel.lifecycle.task_exit_teardown.{teardown_exited_task_authority}
+
+pub struct ContainerRuntimeStart:
+    container_index: i64
+    pid: i64
+    request: SpawnRequest?
+    scheduler: Scheduler
+    reason: text
+
+pub struct ContainerRuntimeExit:
+    accepted: bool
+    scheduler: Scheduler
+    ipc: IpcManager
+
+fn _failed_start(idx: i64, scheduler: Scheduler, reason: text) -> ContainerRuntimeStart:
+    ContainerRuntimeStart(
+        container_index: idx, pid: -13, request: nil,
+        scheduler: scheduler, reason: reason
+    )
+
+class ContainerRuntime:
+    """Live bindings for a single container-manager world.
+
+    `runtime_pids` is deliberately separate from the manager's model monitor
+    handle.  A model lifecycle transition cannot invent a task ID; this vector
+    is written only after `launch_compiled_workload_into_scheduler` succeeds.
+    """
+    world: ContainerWorld
+    runtime_pids: [i64]
+
+impl ContainerRuntime:
+    static fn new(world: ContainerWorld) -> ContainerRuntime:
+        var pids: [i64] = []
+        var i = 0
+        while i < world.count():
+            pids.push(0)
+            i = i + 1
+        ContainerRuntime(world: world, runtime_pids: pids)
+
+    fn runtime_pid_of(self, idx: i64) -> i64:
+        if idx < 0 or idx >= self.runtime_pids.len():
+            return 0
+        self.runtime_pids[idx]
+
+    fn is_live(self, idx: i64) -> bool:
+        self.runtime_pid_of(idx) > 0
+
+    me start_into_scheduler(
+        idx: i64,
+        context: KernelCallContext,
+        policy: CompiledExecutionPolicy,
+        bytes: [u8],
+        arch: Architecture,
+        argv: [text],
+        envp: [text],
+        priority: TaskPriority,
+        scheduler: Scheduler
+    ) -> ContainerRuntimeStart:
+        if idx < 0 or idx >= self.world.count():
+            return _failed_start(idx, scheduler, "unknown container")
+        if self.is_live(idx):
+            return _failed_start(idx, scheduler, "container already has a live task")
+        if self.world.lifecycle_state(idx) == "running":
+            return _failed_start(idx, scheduler, "container lifecycle already running")
+        if policy.image.content_hash != self.world.image_digest_of(idx):
+            return _failed_start(idx, scheduler, "container image/policy hash mismatch")
+        val view = self.world.kernel_view_of(idx)
+        # A container's filesystem namespace is selected at create/restart by
+        # ContainerWorld. The workload policy may only name that exact
+        # concrete root; accepting a broader policy root here would turn the
+        # shared launcher into a container-escape path.
+        if view.root == "" or policy.isolation_spec.filesystem_view != view.root:
+            return _failed_start(idx, scheduler, "container filesystem/policy root mismatch")
+
+        val launched = launch_compiled_workload_into_scheduler(
+            context, policy, bytes, arch, argv, envp, priority, scheduler
+        )
+        if launched.pid <= 0:
+            return ContainerRuntimeStart(
+                container_index: idx, pid: launched.pid, request: nil,
+                scheduler: launched.scheduler, reason: "managed workload launch failed"
+            )
+
+        # The kernel allocates task IDs, so only now can the container's PID
+        # view name its own workload.  Do this before lifecycle state changes:
+        # a process is never exposed as a running container with an incomplete
+        # process namespace.
+        if not self.world.bind_runtime_pid(idx, launched.pid):
+            var failed_scheduler = launched.scheduler
+            failed_scheduler.exit_task_by_id(TaskId(id: launched.pid as u64), -125)
+            return _failed_start(idx, failed_scheduler, "could not bind live task to container pid view")
+
+        # Only a real child task permits the model lifecycle to become running.
+        val request = self.world.sys_start(idx)
+        var pids = self.runtime_pids
+        pids[idx] = launched.pid
+        self.runtime_pids = pids
+        ContainerRuntimeStart(
+            container_index: idx, pid: launched.pid, request: Some(request),
+            scheduler: launched.scheduler, reason: ""
+        )
+
+    me note_exit_from_task(idx: i64, pid: i64, exit_code: i64) -> bool:
+        """Accept a kernel-origin exit notification for the bound task.
+
+        The manager still performs the grant/view teardown through its existing
+        monitor/reap path.  This adapter only accepts an exit for a real live
+        binding and clears that binding before any restart can occur.
+        """
+        if not self.is_live(idx):
+            return false
+        if self.runtime_pid_of(idx) != pid:
+            return false
+        self.world.post_monitor_report(idx, "exited", exit_code)
+        var pids = self.runtime_pids
+        pids[idx] = 0
+        self.runtime_pids = pids
+        true
+
+    me reconcile_exit_from_scheduler(
+        idx: i64,
+        scheduler: Scheduler,
+        ipc: IpcManager
+    ) -> ContainerRuntimeExit:
+        """Consume an actual scheduler zombie transition for one container.
+
+        This is the live bridge until the kernel exports a dedicated process-
+        exit notification endpoint.  It deliberately refuses a missing or
+        still-running TCB, so the container model cannot manufacture an exit
+        event.  A zombie's recorded exit code becomes the monitor observation
+        consumed by the existing grant/view teardown path.
+        """
+        if not self.is_live(idx):
+            return ContainerRuntimeExit(accepted: false, scheduler: scheduler, ipc: ipc)
+        val pid = self.runtime_pid_of(idx)
+        val task = scheduler.get_task(TaskId(id: pid as u64))
+        if task == nil:
+            return ContainerRuntimeExit(accepted: false, scheduler: scheduler, ipc: ipc)
+        val exited = task.unwrap()
+        if exited.state != TaskState.Zombie:
+            return ContainerRuntimeExit(accepted: false, scheduler: scheduler, ipc: ipc)
+
+        # A monitor-observed leader exit is the container job's lifetime
+        # boundary. Reclaim the already-zombied leader and every still-live
+        # worker before terminating the remaining job members, so no endpoint,
+        # DMA record, device grant, or compatibility capability survives a
+        # restart transition.
+        var cleaned_ipc = teardown_exited_task_authority(exited.id, ipc)
+        var live_scheduler = scheduler
+        val members = live_scheduler.live_job_member_ids(exited.security.job_id)
+        for member in members:
+            val member_tcb = live_scheduler.get_task(member)
+            if member_tcb != nil:
+                cleaned_ipc = teardown_exited_task_authority(member, cleaned_ipc)
+        live_scheduler.terminate_job(exited.security.job_id, exited.exit_code)
+        val accepted = self.note_exit_from_task(idx, pid, exited.exit_code)
+        ContainerRuntimeExit(accepted: accepted, scheduler: live_scheduler, ipc: cleaned_ipc)
+
+    me reap_exits() -> i64:
+        self.world.sys_monitor()

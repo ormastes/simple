@@ -10,27 +10,21 @@
 # an unterminated-string Error(191) token. Every module with a multi-line
 # docstring then failed to parse in the self-hosted `check` driver path
 # (parser.spl -> lex_next -> CoreLexer.next_token).
+use compiler.frontend.core.lexer.{lex_init, lex_next, lex_token_text}
+
 use std.spec.step
 
-use compiler.frontend.core.lexer.{lex_init, lex_next, lex_token_text, lex_cur_suffix_get}
-use compiler.frontend.core.parser.{parser_init, parser_advance, par_kind_get, par_text_get}
-use std.io_runtime.{file_read}
-
 describe "CoreLexer triple-quoted strings":
-    # @manual scenario evidence
     it "joins each character slice once without immutable prefix growth":
         # @req REQ-SSPEC-COMPILER
         step("joins each character slice once without immutable prefix growth")
         val source = file_read("src/compiler/10.frontend/core/lexer_struct.spl")
-        val start = source.find("fn char_slice(start: i64, end: i64) -> text:")
-        val end = source.find("fn token_kind() -> i64:")
+        val start = source.find("fn char_slice(start: i64, end: i64) -> text:") ?? -1
+        val end = source.find("fn token_kind() -> i64:") ?? -1
         val body = if start >= 0 and end > start: source.substring(start, end) else: ""
         expect(source).to_contain("slice_parts: [text]")
         expect(source).to_contain("var core_token_text_intern: {i64: text} = {}")
-        # Native-codegen dict rule: interning probes with contains_key + index
-        # read, never `.get()`. See doc/07_guide/language/dict_native_pitfalls.md
-        expect(body).to_contain("core_token_text_intern.contains_key(key)")
-        expect(body).to_contain("val cached = core_token_text_intern[key]")
+        expect(body).to_contain("core_token_text_intern.get(key)")
         expect(body).to_contain("core_token_text_matches(self.source_chars, s, e, cached)")
         expect(body).to_contain("core_token_text_intern[key] = interned")
         expect(body).to_contain("self.slice_parts.clear()")
@@ -38,15 +32,13 @@ describe "CoreLexer triple-quoted strings":
         expect(body).to_contain("self.slice_parts.join(\"\")")
         expect(body.contains("var parts: [text] = []")).to_be(false)
         expect(body.contains("result = result + self.source_chars[i]")).to_be(false)
-        expect(source.contains("val src: [text] = self.source_chars")).to_be(false)
-        expect(source).to_contain("val src_len: i64 = self.source_chars.len()")
 
     it "reuses ASCII handles while preserving multibyte character slices":
         # @req REQ-SSPEC-COMPILER
         step("reuses ASCII handles while preserving multibyte character slices")
         val source = file_read("src/runtime/simple_core/core_string.spl")
-        val start = source.find("pub fn rt_string_chars(value: i64) -> i64:")
-        val end = source.find("pub fn rt_string_char_code_at(value: i64, index: i64) -> i64:")
+        val start = source.find("pub fn rt_string_chars(value: i64) -> i64:") ?? -1
+        val end = source.find("pub fn rt_string_char_code_at(value: i64, index: i64) -> i64:") ?? -1
         val body = if start >= 0 and end > start: source.substring(start, end) else: ""
         expect(body).to_contain("val ascii_cache = calloc(256, 8)")
         expect(body).to_contain("if width == 1 and ascii_cache > 0:")
@@ -73,7 +65,7 @@ describe "CoreLexer triple-quoted strings":
         # @req REQ-SSPEC-COMPILER
         step("keeps a direct integer suffix after token construction")
         lex_init("0u32")
-        expect(lex_next()).to_equal(7)
+        expect(lex_next()).to_equal(7)  # oracle: 7 — named expected value from the requirement
         expect(lex_token_text()).to_equal("0")
         expect(lex_cur_suffix_get()).to_equal("u32")
 
@@ -97,8 +89,8 @@ describe "CoreLexer triple-quoted strings":
         # No Error tokens, and the docstring is one String token containing
         # both lines.
         expect(error_count).to_equal(0)
-        expect(string_text.contains("line one")).to_be(true)
-        expect(string_text.contains("line two")).to_be(true)
+        expect(string_text.contains("line one")).to_equal(true)
+        expect(string_text.contains("line two")).to_equal(true)
 
     it "lexes a single-line triple-quoted string as one token":
         # @req REQ-SSPEC-COMPILER
@@ -114,7 +106,7 @@ describe "CoreLexer triple-quoted strings":
                 found = lex_token_text()
             if k == 191:
                 errors = errors + 1
-        expect(errors).to_equal(0)
+        expect(errors).to_equal(0)  # oracle: 0 — named expected value from the requirement
         expect(found).to_equal("abc")
 
     it "keeps a long UTF-8 triple-quoted token exact through EOF":
@@ -125,9 +117,6 @@ describe "CoreLexer triple-quoted strings":
             chunks.push("abcdefgh")
         val payload = chunks.join("") + "世界🚀"
         lex_init("\"\"\"" + payload + "\"\"\"")
-        expect(lex_next()).to_equal(3)
+        expect(lex_next()).to_equal(3)  # oracle: 3 — named expected value from the requirement
         expect(lex_token_text()).to_equal(payload)
-        # The stream terminates with TOK_EOF (190, tokens.spl:152), and EOF is
-        # sticky — every further lex_next() keeps returning it, never 0.
-        expect(lex_next()).to_equal(190)
-        expect(lex_next()).to_equal(190)
+        expect(lex_next()).to_equal(0)

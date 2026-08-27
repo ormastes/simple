@@ -65,17 +65,6 @@ extern size_t strlen(const char *s);
 extern void serial_puts(const char *s);
 extern void serial_putchar(char c);
 
-/* gdt64_tss_desc is defined for real in boot/crt0.s as a 16-byte TSS descriptor
- * INSIDE gdt64 (selector 0x30, within the GDTR limit, in writable .data). The
- * former weak free-floating .bss array here was never seen by `ltr 0x30` (the
- * CPU reads the active GDT, not this symbol), so it made rt_x86_tss_init's
- * descriptor write a no-op and ltr #GP(0x30). Removed in favour of the crt0.s
- * slot. */
-
-__attribute__((weak)) void spl_x86_on_user_fault(void) {
-    serial_puts("[fault] user fault hook missing\r\n");
-}
-
 /* serial_puthex is `static` in baremetal_stubs.c and not linkable from here.
  * The rt_tuple_/rt_closure_ diagnostic prints below are debug-only, so stub
  * them out locally rather than teaching the other TU to export the helper.
@@ -88,7 +77,6 @@ extern RuntimeValue rt_string_from_cstr(const char *cstr);
 extern RuntimeValue rt_string_new(RuntimeValue data, RuntimeValue len_val);
 extern RuntimeValue rt_string_concat(RuntimeValue a, RuntimeValue b);
 extern RuntimeValue rt_string_len(RuntimeValue str);
-extern RuntimeValue rt_string_data(RuntimeValue str);
 extern RuntimeValue rt_value_to_string(RuntimeValue val);
 extern RuntimeValue rt_array_new(RuntimeValue cap);
 extern int8_t rt_array_push(RuntimeValue arr, RuntimeValue val);
@@ -97,8 +85,6 @@ extern RuntimeValue rt_array_len(RuntimeValue arr);
 extern RuntimeValue rt_native_eq(RuntimeValue a, RuntimeValue b);
 extern RuntimeValue rt_enum_new(RuntimeValue eid, RuntimeValue disc, RuntimeValue payload);
 extern RuntimeValue rt_print(RuntimeValue val);
-extern RuntimeValue rt_map_set(RuntimeValue map, RuntimeValue key, RuntimeValue value);
-extern RuntimeValue rt_map_remove(RuntimeValue map, RuntimeValue key);
 
 /* Helper: decode to RuntimeString */
 static RuntimeString *_decode_str(RuntimeValue v) {
@@ -1302,30 +1288,10 @@ RuntimeValue rt_slice(RuntimeValue collection, RuntimeValue start, RuntimeValue 
 /* ---- Miscellaneous genuinely useful ---- */
 
 RuntimeValue rt_char_from_code(RuntimeValue code) {
-    int64_t c = (int64_t)code;
-    if (c < 0 || c > 0x10FFFF || (c >= 0xD800 && c <= 0xDFFF))
-        return rt_string_from_cstr("");
-    char buf[5] = { 0, 0, 0, 0, 0 };
-    RuntimeValue len = 1;
-    if (c < 0x80) {
-        buf[0] = (char)c;
-    } else if (c < 0x800) {
-        len = 2;
-        buf[0] = (char)(0xC0 | (c >> 6));
-        buf[1] = (char)(0x80 | (c & 0x3F));
-    } else if (c < 0x10000) {
-        len = 3;
-        buf[0] = (char)(0xE0 | (c >> 12));
-        buf[1] = (char)(0x80 | ((c >> 6) & 0x3F));
-        buf[2] = (char)(0x80 | (c & 0x3F));
-    } else {
-        len = 4;
-        buf[0] = (char)(0xF0 | (c >> 18));
-        buf[1] = (char)(0x80 | ((c >> 12) & 0x3F));
-        buf[2] = (char)(0x80 | ((c >> 6) & 0x3F));
-        buf[3] = (char)(0x80 | (c & 0x3F));
-    }
-    return rt_string_new((RuntimeValue)(uintptr_t)buf, len);
+    int64_t c = DECODE_INT(code);
+    if (c < 0 || c > 127) c = '?';
+    char buf[2] = { (char)c, '\0' };
+    return rt_string_from_cstr(buf);
 }
 
 RuntimeValue rt_str_hash(RuntimeValue str) {
@@ -1353,24 +1319,6 @@ RuntimeValue rt_text_to_bytes(RuntimeValue str) {
         rt_array_push(arr, ENCODE_INT((int64_t)(unsigned char)s->data[i]));
     }
     return arr;
-}
-
-uint64_t rt_text_raw_z_size(RuntimeValue str) {
-    return (uint64_t)rt_string_len(str) + 1U;
-}
-
-uint64_t rt_text_copy_z_to_raw(uint64_t dst, RuntimeValue str) {
-    char *out = (char *)(uintptr_t)dst;
-    const char *src = (const char *)(uintptr_t)rt_string_data(str);
-    uint64_t len = (uint64_t)rt_string_len(str);
-    if (!out) return 0;
-    if (!src) {
-        out[0] = '\0';
-        return 1;
-    }
-    for (uint64_t i = 0; i < len; i++) out[i] = src[i];
-    out[len] = '\0';
-    return len + 1U;
 }
 
 RuntimeValue rt_bytes_from_raw(RuntimeValue ptr, RuntimeValue len) {
@@ -1452,81 +1400,8 @@ static inline uint64_t _rdtsc(void) {
     __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
     return ((uint64_t)hi << 32) | lo;
 }
-
-static inline void _cpuid(uint32_t leaf, uint32_t *a, uint32_t *b,
-                          uint32_t *c, uint32_t *d) {
-    __asm__ volatile("cpuid"
-                     : "=a"(*a), "=b"(*b), "=c"(*c), "=d"(*d)
-                     : "a"(leaf), "c"(0));
-}
-
-#ifndef SIMPLEOS_BOOT_TSC_PIT_MAX_POLLS
-#define SIMPLEOS_BOOT_TSC_PIT_MAX_POLLS 10000000ULL
-#endif
-
-static inline uint8_t _boot_inb(uint16_t port) {
-    uint8_t value;
-    __asm__ volatile("inb %1, %0" : "=a"(value) : "Nd"(port));
-    return value;
-}
-
-static inline void _boot_outb(uint16_t port, uint8_t value) {
-    __asm__ volatile("outb %0, %1" : : "a"(value), "Nd"(port));
-}
-
-static uint64_t _pit_tsc_frequency_hz(void) {
-    const uint16_t pit_count = 11932U;
-    uint8_t original_control = _boot_inb(0x61);
-    uint8_t stopped_control = (uint8_t)(original_control & 0xFEU);
-    _boot_outb(0x61, stopped_control);
-    _boot_outb(0x43, 0xB0);
-    _boot_outb(0x42, (uint8_t)(pit_count & 0xFFU));
-    _boot_outb(0x42, (uint8_t)(pit_count >> 8));
-    uint64_t start = _rdtsc();
-    _boot_outb(0x61, (uint8_t)(stopped_control | 0x01U));
-    uint64_t polls = 0;
-    uint8_t saw_low = 0;
-    uint8_t saw_transition = 0;
-    while (polls < SIMPLEOS_BOOT_TSC_PIT_MAX_POLLS) {
-        uint8_t output_high = (uint8_t)(_boot_inb(0x61) & 0x20U);
-        if (output_high == 0) saw_low = 1;
-        if (saw_low != 0 && output_high != 0) {
-            saw_transition = 1;
-            break;
-        }
-        polls++;
-    }
-    uint64_t end = _rdtsc();
-    _boot_outb(0x61, original_control);
-    if (saw_transition == 0 || end <= start) return 0;
-    return ((end - start) * 1193182ULL) / pit_count;
-}
-
-static uint64_t _tsc_frequency_hz(void) {
-    static uint64_t cached;
-    static uint8_t initialized;
-    uint32_t a, b, c, d;
-    if (initialized != 0) return cached;
-    initialized = 1;
-    _cpuid(0, &a, &b, &c, &d);
-    if (a >= 0x15) {
-        uint32_t max_leaf = a;
-        _cpuid(0x15, &a, &b, &c, &d);
-        if (a != 0 && b != 0 && c != 0) {
-            cached = ((uint64_t)c * b) / a;
-            if (cached != 0) return cached;
-        }
-        if (max_leaf >= 0x16) {
-            _cpuid(0x16, &a, &b, &c, &d);
-            if (a != 0) cached = (uint64_t)a * 1000000ULL;
-        }
-    }
-    if (cached == 0) cached = _pit_tsc_frequency_hz();
-    return cached;
-}
 #else
 static inline uint64_t _rdtsc(void) { return 0; }
-static uint64_t _tsc_frequency_hz(void) { return 0; }
 #endif
 
 static uint64_t _boot_tsc = 0;
@@ -1534,10 +1409,8 @@ static uint64_t _boot_tsc = 0;
 RuntimeValue rt_time_now(void) {
     if (_boot_tsc == 0) _boot_tsc = _rdtsc();
     uint64_t elapsed = _rdtsc() - _boot_tsc;
-    uint64_t frequency = _tsc_frequency_hz();
-    if (frequency == 0) return ENCODE_INT(0);
-    return ENCODE_INT((int64_t)((elapsed / frequency) * 1000ULL
-        + ((elapsed % frequency) * 1000ULL) / frequency));
+    /* Approximate: assume ~2 GHz TSC */
+    return ENCODE_INT((int64_t)(elapsed / 2000000));
 }
 
 RuntimeValue rt_time_ms(void) {
@@ -1551,10 +1424,7 @@ RuntimeValue rt_time_millis(void) {
 RuntimeValue rt_time_now_micros(void) {
     if (_boot_tsc == 0) _boot_tsc = _rdtsc();
     uint64_t elapsed = _rdtsc() - _boot_tsc;
-    uint64_t frequency = _tsc_frequency_hz();
-    if (frequency == 0) return ENCODE_INT(0);
-    return ENCODE_INT((int64_t)((elapsed / frequency) * 1000000ULL
-        + ((elapsed % frequency) * 1000000ULL) / frequency));
+    return ENCODE_INT((int64_t)(elapsed / 2000));
 }
 
 RuntimeValue rt_time_now_unix_micros(void) {
@@ -1662,14 +1532,7 @@ RuntimeValue rt_hostname(void) { return rt_string_from_cstr("simpleos"); }
 RuntimeValue rt_native_build(RuntimeValue args) { (void)args; return NIL_VALUE; }
 RuntimeValue rt_dyn_torch_tensor_from_bits_1d(RuntimeValue a, RuntimeValue b) { (void)a; (void)b; return NIL_VALUE; }
 
-RuntimeValue rt_dict_insert(RuntimeValue d, RuntimeValue k, RuntimeValue v) {
-    RuntimeValue out = rt_map_set(d, k, v);
-    return IS_NIL(out) ? FALSE_VALUE : TRUE_VALUE;
-}
-
-RuntimeValue rt_dict_remove(RuntimeValue d, RuntimeValue k) {
-    return IS_NIL(rt_map_remove(d, k)) ? FALSE_VALUE : TRUE_VALUE;
-}
+RuntimeValue rt_dict_insert(RuntimeValue d, RuntimeValue k, RuntimeValue v) { (void)d; (void)k; (void)v; return NIL_VALUE; }
 RuntimeValue rt_ensure_dir(RuntimeValue path) { (void)path; return NIL_VALUE; }
 RuntimeValue rt_exec(RuntimeValue cmd) { (void)cmd; return NIL_VALUE; }
 RuntimeValue rt_shell(RuntimeValue cmd, RuntimeValue args, RuntimeValue env) { (void)cmd; (void)args; (void)env; return NIL_VALUE; }
@@ -1800,11 +1663,7 @@ NOP1(rt_set_macro_trace)
 NOP1(rt_file_copy)
 NOP2(rt_file_copy_to)
 NOP1(rt_file_create)
-/* rt_file_exists is NOT stubbed here: baremetal_stubs.c defines it for real
- * over the FAT32-on-NVMe API, with the (ptr, len) ABI its call sites emit.
- * This NOP1 was a second STRONG definition returning NIL_VALUE; under the
- * freestanding link's `-z muldefs` it won by link order, so every existence
- * probe in std.enterprise_store's file backend answered "no" (lane W10-B). */
+NOP1(rt_file_exists)
 NOP1(rt_file_is_dir)
 NOP1(rt_file_is_file)
 NOP2(rt_file_lock)
@@ -2267,7 +2126,6 @@ NOP2(rt_lyon_transform_matrix)
 NOP1(rt_lyon_transform_identity)
 NOP2(rt_lyon_transform_apply)
 NOP1(rt_font_load)
-NOP2(rt_font_load_bytes)
 NOP2(rt_font_load_from_memory)
 NOP3(rt_font_render)
 NOP3(rt_font_measure)
@@ -2639,28 +2497,11 @@ NOP2(rt_simd_add_f32x8)
 NOP2(rt_simd_add_f64x2)
 NOP2(rt_simd_add_f64x4)
 NOP2(rt_simd_add_i32x4)
-NOP2(rt_simd_add_i64x4)
-NOP2(rt_simd_add_u32x4)
-NOP2(rt_simd_and_i32x4)
-NOP2(rt_simd_and_i32x8)
-NOP2(rt_simd_and_u32x4)
-NOP2(rt_simd_or_i32x4)
-NOP2(rt_simd_or_i32x8)
-NOP2(rt_simd_or_u32x4)
-NOP2(rt_simd_shl_i32x4)
-NOP2(rt_simd_shl_i32x8)
-NOP2(rt_simd_shr_i32x4)
-NOP2(rt_simd_shr_i32x8)
 NOP2(rt_simd_sub_f32x4)
 NOP2(rt_simd_sub_f32x8)
 NOP2(rt_simd_sub_f64x2)
 NOP2(rt_simd_sub_f64x4)
 NOP2(rt_simd_sub_i32x4)
-NOP2(rt_simd_sub_i64x4)
-NOP2(rt_simd_sub_u32x4)
-NOP2(rt_simd_xor_i32x4)
-NOP2(rt_simd_xor_i32x8)
-NOP2(rt_simd_xor_u32x4)
 NOP2(rt_simd_mul_f32x4)
 NOP2(rt_simd_mul_f32x8)
 NOP2(rt_simd_mul_f64x2)
@@ -3123,9 +2964,61 @@ NOP2(rt_driver_submit_stencil)
  * =================================================================== */
 
 /* ARM32 — 28 functions */
+NOP0(rt_arm32_cpsid_i)
+NOP0(rt_arm32_cpsid_if)
+NOP0(rt_arm32_cpsie_i)
+NOP0(rt_arm32_cpsie_if)
+NOP0(rt_arm32_dmb)
+NOP0(rt_arm32_dsb)
+NOP0(rt_arm32_isb)
+NOP1(rt_arm32_mcr_cntp_ctl)
+NOP1(rt_arm32_mcr_cntp_tval)
+NOP1(rt_arm32_mcr_dacr)
+NOP1(rt_arm32_mcr_sctlr)
+NOP0(rt_arm32_mcr_tlbiall)
+NOP1(rt_arm32_mcr_tlbimva)
+NOP1(rt_arm32_mcr_ttbcr)
+NOP1(rt_arm32_mcr_ttbr0)
+NOP1(rt_arm32_mcr_ttbr1)
+NOP1(rt_arm32_mcr_vbar)
+NOP0(rt_arm32_mrc_cntfrq)
+NOP0(rt_arm32_mrc_cntp_ctl)
+NOP0(rt_arm32_mrc_midr)
 NOP0(rt_arm32_mrc_mpidr)
+NOP0(rt_arm32_mrc_sctlr)
+NOP0(rt_arm32_mrc_ttbr0)
+NOP0(rt_arm32_mrc_ttbr1)
+NOP0(rt_arm32_mrrc_cntpct_hi)
+NOP0(rt_arm32_mrrc_cntpct_lo)
+NOP0(rt_arm32_wfe)
+NOP0(rt_arm32_wfi)
 
 /* ARM64 — 25 functions */
+NOP1(rt_arm64_daif_clr)
+NOP1(rt_arm64_daif_set)
+NOP0(rt_arm64_dmb)
+NOP0(rt_arm64_dsb)
+NOP0(rt_arm64_isb)
+NOP0(rt_arm64_mrs_cntfrq_el0)
+NOP0(rt_arm64_mrs_cntp_ctl_el0)
+NOP0(rt_arm64_mrs_cntpct_el0)
+NOP0(rt_arm64_mrs_currentel)
+NOP0(rt_arm64_mrs_mpidr_el1)
+NOP0(rt_arm64_mrs_sctlr_el1)
+NOP0(rt_arm64_mrs_ttbr0_el1)
+NOP0(rt_arm64_mrs_ttbr1_el1)
+NOP1(rt_arm64_msr_cntp_ctl_el0)
+NOP1(rt_arm64_msr_cntp_tval_el0)
+NOP1(rt_arm64_msr_mair_el1)
+NOP1(rt_arm64_msr_sctlr_el1)
+NOP1(rt_arm64_msr_tcr_el1)
+NOP1(rt_arm64_msr_ttbr0_el1)
+NOP1(rt_arm64_msr_ttbr1_el1)
+NOP1(rt_arm64_msr_vbar_el1)
+NOP0(rt_arm64_tlbi_alle1)
+NOP1(rt_arm64_tlbi_vae1)
+NOP0(rt_arm64_wfe)
+NOP0(rt_arm64_wfi)
 
 /* RISC-V 32 — 17 functions */
 NOP0(rt_rv32_csrr_mcause)
@@ -3134,6 +3027,7 @@ NOP0(rt_rv32_csrr_mhartid)
 NOP0(rt_rv32_csrr_mie)
 NOP0(rt_rv32_csrr_mstatus)
 NOP0(rt_rv32_csrr_mtvec)
+NOP0(rt_rv32_csrr_satp)
 NOP0(rt_rv32_csrr_time)
 NOP1(rt_rv32_csrw_mcause)
 NOP1(rt_rv32_csrw_mepc)
@@ -3142,6 +3036,8 @@ NOP1(rt_rv32_csrw_mstatus)
 NOP1(rt_rv32_csrw_mtvec)
 NOP1(rt_rv32_fence)
 NOP0(rt_rv32_mret)
+NOP0(rt_rv32_wfi)
+NOP0(rt_rv32_sfence_vma)
 
 /* ===================================================================
  * 5. AUTO-GENERATED REMAINING STUBS
@@ -3283,7 +3179,6 @@ NOP2(rt_cranelift_isub)
 NOP2(rt_cranelift_jump)
 NOP2(rt_cranelift_load)
 NOP2(rt_cranelift_new_aot_module)
-NOP2(rt_cranelift_new_aot_module_triple)
 NOP2(rt_cranelift_new_module)
 NOP2(rt_cranelift_new_signature)
 NOP2(rt_cranelift_null)
@@ -3391,8 +3286,6 @@ NOP2(rt_font_bitmap_free)
 NOP2(rt_font_bitmap_get_pixel)
 NOP2(rt_font_bitmap_height)
 NOP2(rt_font_bitmap_width)
-NOP2(rt_font_bitmap_xoff)
-NOP2(rt_font_bitmap_yoff)
 NOP2(rt_font_glyph_advance)
 NOP2(rt_font_glyph_bitmap)
 NOP2(rt_font_line_height)
@@ -3678,6 +3571,7 @@ NOP2(rt_rapier2d_world_cast_ray)
 NOP2(rt_rapier2d_world_get_contacts)
 NOP2(rt_rapier2d_world_intersection_test)
 NOP2(rt_read_cr0)
+NOP2(rt_read_msr)
 NOP2(rt_read_stdin_line)
 NOP2(rt_regex_captures_len)
 NOP2(rt_regex_destroy)
@@ -3697,7 +3591,20 @@ NOP2(rt_rocm_memset)
 NOP2(rt_rocm_stream_synchronize)
 NOP2(rt_rocm_synchronize)
 NOP2(rt_rocm_unload_module)
+NOP2(rt_rv32_csrr_scause)
+NOP2(rt_rv32_csrr_sepc)
+NOP2(rt_rv32_csrr_sie)
+NOP2(rt_rv32_csrr_sip)
+NOP2(rt_rv32_csrr_sstatus)
+NOP2(rt_rv32_csrr_stval)
+NOP2(rt_rv32_csrr_stvec)
+NOP2(rt_rv32_csrw_satp)
+NOP2(rt_rv32_csrw_sepc)
+NOP2(rt_rv32_csrw_sie)
+NOP2(rt_rv32_csrw_sstatus)
+NOP2(rt_rv32_csrw_stvec)
 NOP2(rt_rv32_sbi_call)
+NOP2(rt_rv32_sfence_vma_all)
 NOP2(rt_sdl2_clear_quit)
 NOP2(rt_sdl2_event_key_mod)
 NOP2(rt_sdl2_event_key_sym)
@@ -3954,6 +3861,7 @@ NOP2(rt_vulkan_submit_and_wait)
 NOP2(rt_vulkan_wait_fence)
 NOP2(rt_vulkan_wait_idle)
 NOP2(rt_write_cr0)
+NOP2(rt_write_msr)
 NOP2(rt_ws_receive)
 NOP2(rt_zip_extract_file)
 
@@ -3969,30 +3877,6 @@ RuntimeValue FontRenderer_dot_browser_serif_default(void) { return NIL_VALUE; }
 RuntimeValue KLogEntry_dot_from_bytes(void) { return NIL_VALUE; }
 RuntimeValue QualcommBackend_dot_is_adreno_gpu(void) { return FALSE_VALUE; }
 RuntimeValue tools__pkg__pkg_repository__TlsClient(void) { return NIL_VALUE; }
-
-/* rt_cuda_device_identity / rt_vulkan_accepted_compute_submit_count: these
- * are raw-i64 ABI (not tagged RuntimeValue -- see &[I64],&[I64] in
- * codegen/runtime_sffi.rs), so they must NOT use the NOP1/NOP0 macros
- * above (those return the tagged NIL_VALUE bit pattern, which a raw-int
- * caller would not see as <= 0). Reached via Engine2DReadback's
- * device-identity-stamped CUDA readback path (backend_cuda.spl, added
- * 0c3bfb3b792) and the Vulkan frame-batching accepted-submit counter
- * (sffi_vulkan.spl:vulkan_sffi_accepted_compute_submit_count) -- both
- * survive as symbol references here for the same "closure spillover"
- * reason documented above, even though this baremetal kernel never
- * initializes a CUDA or Vulkan backend. This mirrors the hosted runtime's
- * own already-reviewed "feature not compiled in" convention exactly:
- * cuda_runtime.rs `#[cfg(not(feature = "cuda"))] fn rt_cuda_device_identity
- * (..) -> i64 { 0 }` and vulkan_graphics_runtime_compute.rs
- * `#[cfg(not(feature = "vulkan"))] { 0 }`. 0 ("no identity" / "zero
- * submissions accepted") is the honest, permanently-correct answer on a
- * machine with no CUDA or Vulkan hardware, not a fabricated placeholder --
- * the CUDA caller already treats <= 0 as "unknown/no device"
- * (backend_cuda.spl: `if device_identity <= 0: return
- * engine2d_readback([], "device_identity_unknown")`).
- */
-RuntimeValue rt_cuda_device_identity(RuntimeValue device) { (void)device; return 0; }
-RuntimeValue rt_vulkan_accepted_compute_submit_count(void) { return 0; }
 RuntimeValue generate_css(void) { return rt_string_from_cstr(""); }
 RuntimeValue noalloc_log_debug(void) { return NIL_VALUE; }
 RuntimeValue panic(void) { return NIL_VALUE; }
@@ -4147,37 +4031,10 @@ RuntimeValue rt_webgpu_present(void) { return NIL_VALUE; }
 RuntimeValue rt_webgpu_shutdown(void) { return NIL_VALUE; }
 RuntimeValue rt_webgpu_upload_pixels(void) { return NIL_VALUE; }
 RuntimeValue text_dot_from_char_code(RuntimeValue code) {
-    int64_t cp = DECODE_INT(code);
-    /* Reject invalid codepoints: negative, above U+10FFFF, or a UTF-16
-       surrogate (U+D800..U+DFFF). Same "can't represent it" empty-string
-       policy as std.common.string_core.char_from_code_inline on the
-       pure-Simple side (see
-       doc/08_tracking/bug/char_from_code_non_ascii_unsupported_2026-07-20.md). */
-    if (cp < 0 || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) {
-        return rt_string_new((RuntimeValue)(uintptr_t)0, (RuntimeValue)0);
-    }
-    uint8_t buf[4];
-    uint64_t len;
-    if (cp < 0x80) {
-        buf[0] = (uint8_t)cp;
-        len = 1;
-    } else if (cp < 0x800) {
-        buf[0] = (uint8_t)(0xC0 | (cp >> 6));
-        buf[1] = (uint8_t)(0x80 | (cp & 0x3F));
-        len = 2;
-    } else if (cp < 0x10000) {
-        buf[0] = (uint8_t)(0xE0 | (cp >> 12));
-        buf[1] = (uint8_t)(0x80 | ((cp >> 6) & 0x3F));
-        buf[2] = (uint8_t)(0x80 | (cp & 0x3F));
-        len = 3;
-    } else {
-        buf[0] = (uint8_t)(0xF0 | (cp >> 18));
-        buf[1] = (uint8_t)(0x80 | ((cp >> 12) & 0x3F));
-        buf[2] = (uint8_t)(0x80 | ((cp >> 6) & 0x3F));
-        buf[3] = (uint8_t)(0x80 | (cp & 0x3F));
-        len = 4;
-    }
-    return rt_string_new((RuntimeValue)(uintptr_t)buf, (RuntimeValue)len);
+    char buf[2];
+    buf[0] = (char)(DECODE_INT(code) & 0x7F);
+    buf[1] = '\0';
+    return rt_string_from_cstr(buf);
 }
 
 /* End of rt_extras.c */

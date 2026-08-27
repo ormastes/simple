@@ -1,0 +1,30 @@
+# Twelve-source fail-closed fault aggregation for runtime pipeline v8.
+
+use compiler.mir.hwir.types.{CoreConfig, HwClockDomain, HwCombOp, HwConstant, HwCostModel, HwModule, HwModuleDef, HwNodeId, HwOrigin, HwPort, HwSignal}
+
+pub fn strict_riscv_scalar_runtime_global_fault_gate_v8(name: text, config: CoreConfig) -> Result<HwModuleDef, text>:
+    if name == "": return Err("HWIR-E-RISCV-RUNTIME-GLOBAL-FAULT-GATE-V8-ID: gate requires a module name")
+    val error = config.diagnostic(); if error != "": return Err(error)
+    val faults = ["router_fault", "decoded_uop_skid_fault", "adapter_fault", "selector_fault", "pending_fault", "projection_fault", "muldiv_fault", "csr_fault", "lsu_fault", "fence_fault", "merge_fault", "completion_skid_fault"]
+    val raws = ["input_valid", "input_ready", "completion_valid", "completion_ready", "bus_request_valid", "bus_response_ready", "fence_effect_valid", "bus_request_ready", "bus_response_valid", "fence_effect_ready", "csr_lookup_valid", "csr_lookup_read_enable", "csr_commit_valid"]
+    var ports: [HwPort] = []
+    for fault in faults: ports.push(HwPort.input(fault, "Bits", 1))
+    ports.push(HwPort.input("sticky_fault", "Bits", 1))
+    for raw in raws: ports.push(HwPort.input("raw_" + raw, "Bits", 1))
+    ports.push(HwPort.output("fault_in", "Bits", 1))
+    for raw in raws: ports.push(HwPort.output(raw, "Bits", 1))
+    var signals: [HwSignal] = []
+    for index in 0..11: signals.push(HwSignal.comb("fault_or_" + index.to_text(), "Bits", 1))
+    signals.push(HwSignal.comb("global_fault", "Bits", 1)); signals.push(HwSignal.comb("not_fault", "Bits", 1))
+    var ops = [HwCombOp.binary("or", "fault_or_0", faults[0], faults[1], 1)]
+    var index = 2
+    while index < faults.len():
+        ops.push(HwCombOp.binary("or", "fault_or_" + (index - 1).to_text(), "fault_or_" + (index - 2).to_text(), faults[index], 1))
+        index = index + 1
+    ops.push(HwCombOp.unary("passthrough", "fault_in", "fault_or_10", 1))
+    ops.push(HwCombOp.binary("or", "global_fault", "fault_or_10", "sticky_fault", 1))
+    ops.push(HwCombOp.binary("xor", "not_fault", "global_fault", "one1", 1))
+    for raw in raws: ops.push(HwCombOp.binary("and", raw, "raw_" + raw, "not_fault", 1))
+    val module = HwModuleDef(summary: HwModule(name: name, profile: config.profile, port_count: ports.len(), signal_count: signals.len(), register_count: 0, memory_count: 0, comb_op_count: ops.len(), clock_domain_count: 1, fallback_function: "", cost: HwCostModel.empty()), config: config, node_id: HwNodeId.module_root(name), origins: [HwOrigin(node_id: HwNodeId.child(name, "global-fault"), source_name: "riscv.scalar.runtime-pipeline.v8.global-fail-closed-gate")], ports: ports, signals: signals, constants: [HwConstant.bits("one1", 1, 1)], comb_ops: ops, compare_ops: [], select_ops: [], clock_domains: [HwClockDomain.default_domain()])
+    val shape_error = module.shape_diagnostic(); if shape_error != "": return Err(shape_error)
+    Ok(module)

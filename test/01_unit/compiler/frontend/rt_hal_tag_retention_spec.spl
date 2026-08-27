@@ -25,11 +25,11 @@ fn rt_hal_lowered_calls(source: text) -> [text]:
                     case _: pass
     calls
 
-fn rt_hal_semantic_errors(source: text) -> [text]:
+fn rt_hal_semantic_errors(source: text, plan_path: text = "") -> [text]:
     val parsed = parse_and_build_module(source, "rt_hal_signature.spl")
     var lowering = HirLowering.with_filename("rt_hal_signature.spl")
     val hir = lowering.lower_module(parsed)
-    validate_rt_hal_tags({"rt_hal_signature": hir})
+    validate_rt_hal_tags({"rt_hal_signature": hir}, plan_path)
 
 describe "rt(hal) frontend metadata":
     it "defaults to Pure Simple without comparator flags":
@@ -46,7 +46,11 @@ describe "rt(hal) frontend metadata":
         for import_ in module.imports:
             if import_.module == "std.nogc_sync_mut.rt_hal.boundary":
                 has_boundary_import = true
-        expect(has_boundary_import).to_equal(true)
+        expect(has_boundary_import).to_equal(false)
+        val calls = rt_hal_lowered_calls(
+            "@rt(hal)\nfn clock_read() -> i64:\n    0\n"
+        )
+        expect(calls.contains("rt_hal_boundary_dispatch")).to_equal(false)
 
     it "retains explicitly requested comparison providers":
         val module = parse_and_build_module(
@@ -57,6 +61,19 @@ describe "rt(hal) frontend metadata":
         expect(metadata.is_rt_hal).to_equal(true)
         expect(metadata.rt_hal_compare_c).to_equal(true)
         expect(metadata.rt_hal_compare_rust).to_equal(true)
+        var has_boundary_import = false
+        var has_process_import = false
+        var has_env_import = false
+        for import_ in module.imports:
+            if import_.module == "std.nogc_sync_mut.rt_hal.boundary":
+                has_boundary_import = true
+            elif import_.module == "std.nogc_sync_mut.rt_hal.process_task_arena":
+                has_process_import = true
+            elif import_.module == "app.io.env_access_host":
+                has_env_import = true
+        expect(has_boundary_import).to_equal(true)
+        expect(has_process_import).to_equal(true)
+        expect(has_env_import).to_equal(true)
 
     it "retains invalid provider evidence for semantic rejection":
         val module = parse_and_build_module(
@@ -88,12 +105,20 @@ describe "rt(hal) frontend metadata":
 
     it "fails closed when arguments cannot be transported canonically":
         val errors = rt_hal_semantic_errors(
-            "@rt(hal)\nfn clock_read(port: i64) -> i64:\n    port\n"
+            "@rt(hal, c)\nfn clock_read(port: i64) -> i64:\n    port\n",
+            "/rt-hal-plan.sdn"
         )
         expect(errors.join("\n")).to_contain("E-RT-HAL-SIGNATURE")
 
     it "fails closed when a return cannot be transported as an i64 receipt":
         val errors = rt_hal_semantic_errors(
-            "@rt(hal)\nfn clock_read() -> text:\n    \"ready\"\n"
+            "@rt(hal, rust)\nfn clock_read() -> text:\n    \"ready\"\n",
+            "/rt-hal-plan.sdn"
         )
         expect(errors.join("\n")).to_contain("E-RT-HAL-SIGNATURE")
+
+    it "accepts an ordinary Pure-only ABI without comparator transport":
+        val errors = rt_hal_semantic_errors(
+            "@rt(hal)\nfn describe(port: i64) -> text:\n    port.to_text()\n"
+        )
+        expect(errors.len()).to_equal(0)

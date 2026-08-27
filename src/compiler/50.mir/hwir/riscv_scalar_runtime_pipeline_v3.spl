@@ -1,0 +1,316 @@
+# Closed typed runtime scalar pipeline with ALU, control, and illegal lanes.
+
+use std.common.crypto.sha256.{sha256_text}
+use compiler.mir.hwir.types.{CoreConfig, HwModuleDef, HwNodeId, HwPort}
+use compiler.mir.hwir.sequential.{HwSequentialModuleDef}
+use compiler.mir.hwir.combinational_composition.{HwCombCompositionDef}
+use compiler.mir.hwir.riscv_scalar_decoder.{strict_riscv_scalar_decoder_hwir}
+use compiler.mir.hwir.riscv_scalar_decoded_uop_interface.{HwScalarDecodedUopInterface,
+    strict_hw_scalar_decoded_uop_interface}
+use compiler.mir.hwir.riscv_scalar_decode_dispatch_owner.{strict_riscv_scalar_decoded_uop_skid}
+use compiler.mir.hwir.riscv_scalar_runtime_alu.{strict_riscv_scalar_runtime_alu_hwir}
+use compiler.mir.hwir.riscv_scalar_runtime_control_composition.{
+    strict_riscv_scalar_runtime_control_composition}
+use compiler.mir.hwir.riscv_scalar_runtime_illegal_provider.{
+    strict_riscv_scalar_runtime_illegal_provider}
+use compiler.mir.hwir.riscv_scalar_runtime_completion_selector_v3.{
+    strict_riscv_scalar_runtime_completion_selector_v3}
+use compiler.mir.hwir.riscv_scalar_completion_skid.{strict_riscv_scalar_completion_skid}
+use compiler.mir.hwir.riscv_scalar_runtime_pipeline_support.{
+    strict_riscv_scalar_runtime_fault_owner, strict_riscv_scalar_runtime_completion_defaults}
+use lib.hardware.riscv_common.isa.scalar_database.{RiscvScalarDecoderPlan,
+    riscv_scalar_decoder_plan}
+
+pub class HwScalarRuntimePipelineV3Binding:
+    source_owner: text
+    source_port: text
+    destination_owner: text
+    destination_port: text
+    bit_width: i32
+
+    me canonical_text() -> text:
+        [self.source_owner, self.source_port, self.destination_owner,
+            self.destination_port, self.bit_width.to_text()].join("|")
+
+fn pipeline_v3_top_ports(x: i32) -> [HwPort]:
+    [HwPort.input("clk", "Bits", 1), HwPort.input("rst", "Bits", 1),
+        HwPort.input("in_valid", "Bits", 1), HwPort.output("in_ready", "Bits", 1),
+        HwPort.input("instruction", "Bits", 32),
+        HwPort.input("instruction_length_bytes", "Bits", 3),
+        HwPort.input("rs1_value", "Bits", x), HwPort.input("rs2_value", "Bits", x),
+        HwPort.input("pc_before", "Bits", x), HwPort.input("fallthrough_pc", "Bits", x),
+        HwPort.input("privilege", "Bits", 2), HwPort.input("provider_event_id", "Bits", 64),
+        HwPort.input("decode_event_id", "Bits", 64),
+        HwPort.input("completion_ready", "Bits", 1),
+        HwPort.output("completion_valid", "Bits", 1),
+        HwPort.output("completion_rd", "Bits", 5),
+        HwPort.output("completion_rd_write", "Bits", 1),
+        HwPort.output("completion_rd_value", "Bits", x),
+        HwPort.output("completion_pc_after", "Bits", x),
+        HwPort.output("completion_execute_trap_valid", "Bits", 1),
+        HwPort.output("completion_execute_trap_cause", "Bits", x),
+        HwPort.output("completion_execute_trap_tval", "Bits", x),
+        HwPort.output("completion_redirect_valid", "Bits", 1),
+        HwPort.output("completion_redirect_target", "Bits", x),
+        HwPort.output("completion_provider_event_id", "Bits", 64),
+        HwPort.output("completion_decode_event_id", "Bits", 64),
+        HwPort.output("completion_illegal_valid", "Bits", 1),
+        HwPort.output("runtime_protocol_fault", "Bits", 1)]
+
+fn pipeline_v3_add(rows: [HwScalarRuntimePipelineV3Binding], source_owner: text,
+    source_port: text, destination_owner: text, destination_port: text,
+    width: i32) -> [HwScalarRuntimePipelineV3Binding]:
+    var result = rows
+    result.push(HwScalarRuntimePipelineV3Binding(source_owner: source_owner,
+        source_port: source_port, destination_owner: destination_owner,
+        destination_port: destination_port, bit_width: width))
+    result
+
+fn pipeline_v3_port(ports: [HwPort], name: text) -> Option<HwPort>:
+    for port in ports:
+        if port.name == name: return Some(port)
+    nil
+
+fn pipeline_v3_bindings(x: i32, row_width: i32,
+    control_ports: [HwPort]) -> [HwScalarRuntimePipelineV3Binding]:
+    var rows: [HwScalarRuntimePipelineV3Binding] = []
+    rows = pipeline_v3_add(rows, "composition", "instruction", "decoder", "instruction", 32)
+    for owner in ["uop_skid", "completion_skid", "fault_owner"]:
+        rows = pipeline_v3_add(rows, "composition", "clk", owner, "clk", 1)
+        rows = pipeline_v3_add(rows, "composition", "rst", owner, "rst", 1)
+    rows = pipeline_v3_add(rows, "composition", "in_valid", "uop_skid", "upstream_valid", 1)
+    for field in [("decoded_valid", "decoded_valid", 1),
+            ("decoded_row_index", "decoded_row_index", row_width),
+            ("decoded_execution_class", "decoded_execution_class", 3),
+            ("decoded_memory_effect", "decoded_memory_effect", 3),
+            ("decoded_semantic_opcode", "decoded_semantic_opcode", 6),
+            ("decoded_operand_width_32", "decoded_declared_operand_width_is_32", 1),
+            ("canonical_instruction", "canonical_instruction", 32),
+            ("instruction_rd_field", "instruction_rd_field", 5),
+            ("instruction_rs1_field", "instruction_rs1_field", 5),
+            ("instruction_rs2_field", "instruction_rs2_field", 5)]:
+        rows = pipeline_v3_add(rows, "decoder", field[0], "uop_skid",
+            "upstream_" + field[1], field[2])
+    for field in [("instruction", "original_instruction", 32),
+            ("instruction_length_bytes", "instruction_length_bytes", 3),
+            ("rs1_value", "rs1_value", x), ("rs2_value", "rs2_value", x),
+            ("pc_before", "pc_before", x), ("fallthrough_pc", "fallthrough_pc", x),
+            ("privilege", "privilege", 2), ("provider_event_id", "provider_event_id", 64),
+            ("decode_event_id", "decode_event_id", 64)]:
+        rows = pipeline_v3_add(rows, "composition", field[0], "uop_skid",
+            "upstream_" + field[1], field[2])
+    val uop_fields = [("uop_valid", 1), ("decode_legal", 1),
+        ("decoded_row_index", row_width), ("decoded_execution_class", 3),
+        ("decoded_memory_effect", 3), ("decoded_semantic_opcode", 6),
+        ("decoded_declared_operand_width_is_32", 1), ("canonical_instruction", 32),
+        ("original_instruction", 32), ("instruction_length_bytes", 3),
+        ("instruction_rd_field", 5), ("instruction_rs1_field", 5),
+        ("instruction_rs2_field", 5), ("rs1_value", x), ("rs2_value", x),
+        ("pc_before", x), ("fallthrough_pc", x), ("privilege", 2),
+        ("provider_event_id", 64), ("decode_event_id", 64), ("lineage_valid", 1)]
+    for field in uop_fields:
+        rows = pipeline_v3_add(rows, "uop_skid", field[0], "alu", field[0], field[1])
+        if pipeline_v3_port(control_ports, field[0]) != nil:
+            rows = pipeline_v3_add(rows, "uop_skid", field[0], "control", field[0], field[1])
+    for field in [("uop_valid", 1), ("decode_legal", 1), ("illegal_valid", 1),
+            ("lineage_valid", 1), ("privilege", 2), ("original_instruction", 32),
+            ("canonical_instruction", 32), ("instruction_length_bytes", 3),
+            ("pc_before", x), ("fallthrough_pc", x), ("provider_event_id", 64),
+            ("decode_event_id", 64)]:
+        rows = pipeline_v3_add(rows, "uop_skid", field[0], "illegal_provider", field[0], field[1])
+    for field in [("uop_valid", "uop_valid", 1),
+            ("illegal_valid", "uop_illegal_valid", 1),
+            ("lineage_valid", "uop_lineage_valid", 1),
+            ("decoded_execution_class", "uop_decoded_execution_class", 3),
+            ("privilege", "uop_privilege", 2),
+            ("original_instruction", "uop_original_instruction", 32),
+            ("canonical_instruction", "uop_canonical_instruction", 32),
+            ("instruction_length_bytes", "uop_instruction_length_bytes", 3),
+            ("pc_before", "uop_pc_before", x),
+            ("fallthrough_pc", "uop_fallthrough_pc", x),
+            ("provider_event_id", "uop_provider_event_id", 64),
+            ("decode_event_id", "uop_decode_event_id", 64)]:
+        rows = pipeline_v3_add(rows, "uop_skid", field[0], "selector", field[1], field[2])
+    for lane in [("alu", "retire_valid", "protocol_fault"),
+            ("control", "completion_valid", "protocol_fault"),
+            ("illegal_provider", "completion_valid", "protocol_fault")]:
+        val prefix = if lane[0] == "illegal_provider": "illegal" else: lane[0]
+        rows = pipeline_v3_add(rows, lane[0], lane[1], "selector", prefix + "_valid", 1)
+        rows = pipeline_v3_add(rows, lane[0], lane[2], "selector", prefix + "_fault", 1)
+    rows = pipeline_v3_add(rows, "completion_skid", "upstream_ready", "selector", "completion_ready", 1)
+    rows = pipeline_v3_add(rows, "selector", "uop_ready", "uop_skid", "uop_ready", 1)
+    rows = pipeline_v3_add(rows, "selector", "selected_valid", "completion_skid", "upstream_valid", 1)
+    rows = pipeline_v3_add(rows, "composition", "completion_ready", "completion_skid", "downstream_ready", 1)
+    val payload = [("privilege", 2), ("original_instruction", 32),
+        ("canonical_instruction", 32), ("instruction_length_bytes", 3),
+        ("pc_before", x), ("pc_after", x), ("rd", 5), ("rd_write", 1),
+        ("rd_value", x), ("memory_address", x), ("memory_read_mask", 32),
+        ("memory_write_mask", 32), ("memory_read_data", x), ("memory_write_data", x),
+        ("execute_trap_valid", 1), ("execute_trap_cause", x), ("execute_trap_tval", x),
+        ("memory_trap_valid", 1), ("memory_trap_cause", x), ("memory_trap_tval", x),
+        ("redirect_valid", 1), ("redirect_target", x), ("provider_event_id", 64),
+        ("decode_event_id", 64), ("illegal_valid", 1)]
+    for field in payload:
+        val alu_source = if ["privilege", "original_instruction", "canonical_instruction",
+            "instruction_length_bytes", "pc_before", "pc_after", "rd", "rd_write",
+            "rd_value"].contains(field[0]): "retire_" + field[0] else: field[0]
+        val actual_alu_owner = if ["privilege", "original_instruction", "canonical_instruction",
+            "instruction_length_bytes", "pc_before", "pc_after", "rd", "rd_write",
+            "rd_value"].contains(field[0]): "alu" elif ["provider_event_id", "decode_event_id"].contains(field[0]): "uop_skid" else: "defaults"
+        val actual_alu_source = if actual_alu_owner == "alu": alu_source
+            elif field[0] == "illegal_valid": "memory_trap_valid" else: field[0]
+        rows = pipeline_v3_add(rows, actual_alu_owner, actual_alu_source,
+            "selector", "alu_" + field[0], field[1])
+        rows = pipeline_v3_add(rows, "control", "completion_" + field[0],
+            "selector", "control_" + field[0], field[1])
+        rows = pipeline_v3_add(rows, "illegal_provider", "completion_" + field[0],
+            "selector", "illegal_" + field[0], field[1])
+        rows = pipeline_v3_add(rows, "selector", "selected_" + field[0],
+            "completion_skid", "upstream_" + field[0], field[1])
+    rows = pipeline_v3_add(rows, "selector", "selector_fault", "fault_owner", "fault_in", 1)
+    rows = pipeline_v3_add(rows, "uop_skid", "upstream_ready", "composition", "in_ready", 1)
+    for field in [("completion_valid", 1), ("completion_rd", 5),
+            ("completion_rd_write", 1), ("completion_rd_value", x),
+            ("completion_pc_after", x), ("completion_execute_trap_valid", 1),
+            ("completion_execute_trap_cause", x), ("completion_execute_trap_tval", x),
+            ("completion_redirect_valid", 1), ("completion_redirect_target", x),
+            ("completion_provider_event_id", 64), ("completion_decode_event_id", 64),
+            ("completion_illegal_valid", 1)]:
+        rows = pipeline_v3_add(rows, "completion_skid", field[0],
+            "composition", field[0], field[1])
+    rows = pipeline_v3_add(rows, "fault_owner", "protocol_fault", "composition",
+        "runtime_protocol_fault", 1)
+    rows
+
+fn pipeline_v3_direction(ports: [HwPort], name: text) -> text:
+    if val port = pipeline_v3_port(ports, name): return port.direction
+    ""
+
+fn pipeline_v3_width(ports: [HwPort], name: text) -> i32:
+    if val port = pipeline_v3_port(ports, name): return port.bit_width
+    0
+
+pub class HwScalarRuntimePipelineV3:
+    node_id: HwNodeId
+    module_name: text
+    config: CoreConfig
+    plan: RiscvScalarDecoderPlan
+    descriptor: HwScalarDecodedUopInterface
+    decoder: HwModuleDef
+    uop_skid: HwSequentialModuleDef
+    alu: HwModuleDef
+    control: HwCombCompositionDef
+    illegal_provider: HwModuleDef
+    selector: HwModuleDef
+    completion_skid: HwSequentialModuleDef
+    fault_owner: HwSequentialModuleDef
+    defaults: HwModuleDef
+    top_ports: [HwPort]
+    bindings: [HwScalarRuntimePipelineV3Binding]
+
+    me owner_ports(owner: text) -> [HwPort]:
+        if owner == "composition": return self.top_ports
+        if owner == "decoder": return self.decoder.ports
+        if owner == "uop_skid": return self.uop_skid.ports
+        if owner == "alu": return self.alu.ports
+        if owner == "control": return self.control.top_ports
+        if owner == "illegal_provider": return self.illegal_provider.ports
+        if owner == "selector": return self.selector.ports
+        if owner == "completion_skid": return self.completion_skid.ports
+        if owner == "fault_owner": return self.fault_owner.ports
+        if owner == "defaults": return self.defaults.ports
+        []
+
+    me local_diagnostic() -> text:
+        var destinations: [text] = []
+        for row in self.bindings:
+            val source_direction = pipeline_v3_direction(self.owner_ports(row.source_owner), row.source_port)
+            val destination_direction = pipeline_v3_direction(self.owner_ports(row.destination_owner), row.destination_port)
+            if ((row.source_owner == "composition" and source_direction != "in") or
+                (row.source_owner != "composition" and source_direction != "out") or
+                (row.destination_owner == "composition" and destination_direction != "out") or
+                (row.destination_owner != "composition" and destination_direction != "in")):
+                return "HWIR-E-RISCV-RUNTIME-PIPELINE-V3-ENDPOINT: binding endpoint direction is invalid"
+            if (pipeline_v3_width(self.owner_ports(row.source_owner), row.source_port) != row.bit_width or
+                pipeline_v3_width(self.owner_ports(row.destination_owner), row.destination_port) != row.bit_width):
+                return "HWIR-E-RISCV-RUNTIME-PIPELINE-V3-WIDTH: binding endpoint width is invalid"
+            val key = (row.destination_owner + "." + row.destination_port).lower()
+            if destinations.contains(key):
+                return "HWIR-E-RISCV-RUNTIME-PIPELINE-V3-DRIVER: every destination requires one driver"
+            destinations.push(key)
+        for owner in ["decoder", "uop_skid", "alu", "control", "illegal_provider",
+                "selector", "completion_skid", "fault_owner", "defaults"]:
+            for port in self.owner_ports(owner):
+                if port.direction == "in" and not destinations.contains((owner + "." + port.name).lower()):
+                    return "HWIR-E-RISCV-RUNTIME-PIPELINE-V3-INPUT: every child input requires one driver"
+        for port in self.top_ports:
+            if port.direction == "out" and not destinations.contains(("composition." + port.name).lower()):
+                return "HWIR-E-RISCV-RUNTIME-PIPELINE-V3-TOP: every top output requires one driver"
+        ""
+
+    me diagnostic() -> text:
+        val local = self.local_diagnostic(); if local != "": return local
+        val rebuilt = strict_riscv_scalar_runtime_pipeline_v3(self.module_name, self.config)
+        if rebuilt.is_err(): return rebuilt.err().unwrap()
+        val canonical = rebuilt.ok().unwrap()
+        if self.bindings.len() != canonical.bindings.len():
+            return "HWIR-E-RISCV-RUNTIME-PIPELINE-V3-CANONICAL: pipeline requires exact ordered bindings"
+        var index = 0
+        while index < self.bindings.len():
+            if self.bindings[index].canonical_text() != canonical.bindings[index].canonical_text():
+                return "HWIR-E-RISCV-RUNTIME-PIPELINE-V3-CANONICAL: pipeline requires exact ordered bindings"
+            index = index + 1
+        if self.structural_sha256() != canonical.structural_sha256():
+            return "HWIR-E-RISCV-RUNTIME-PIPELINE-V3-CANONICAL: pipeline requires exact compiler-owned children"
+        ""
+
+    me structural_sha256() -> text:
+        var rows = ["hwir-riscv-scalar-runtime-pipeline/v3", self.node_id.value,
+            self.module_name, self.config.profile, self.plan.structural_sha256(),
+            self.descriptor.structural_sha256(), self.decoder.structural_sha256(),
+            self.uop_skid.structural_sha256(), self.alu.structural_sha256(),
+            self.control.structural_sha256(), self.illegal_provider.structural_sha256(),
+            self.selector.structural_sha256(), self.completion_skid.structural_sha256(),
+            self.fault_owner.structural_sha256(), self.defaults.structural_sha256()]
+        for port in self.top_ports:
+            rows.push([port.name, port.direction, port.type_name,
+                port.bit_width.to_text()].join("|"))
+        for binding in self.bindings: rows.push(binding.canonical_text())
+        sha256_text(rows.join("\n"))
+
+pub fn strict_riscv_scalar_runtime_pipeline_v3(module_name: text,
+    config: CoreConfig) -> Result<HwScalarRuntimePipelineV3, text>:
+    if module_name == "":
+        return Err("HWIR-E-RISCV-RUNTIME-PIPELINE-V3-ID: pipeline requires a module name")
+    val config_error = config.diagnostic(); if config_error != "": return Err(config_error)
+    if config.compressed_decode_profile != "none":
+        return Err("HWIR-E-RISCV-RUNTIME-PIPELINE-V3-COMPRESSED: v3 requires canonical four-byte lineage")
+    val plan = riscv_scalar_decoder_plan(config.isa_profile)?
+    val decoder = strict_riscv_scalar_decoder_hwir(module_name + "_decoder", config, plan)?
+    val descriptor = strict_hw_scalar_decoded_uop_interface(config, plan, decoder)?
+    val uop_skid = strict_riscv_scalar_decoded_uop_skid(module_name + "_uop_skid",
+        plan, decoder, descriptor)?
+    val alu = strict_riscv_scalar_runtime_alu_hwir(module_name + "_alu", config, plan)?
+    val control_owner = strict_riscv_scalar_runtime_control_composition(
+        module_name + "_control", config, plan)?
+    val illegal_provider = strict_riscv_scalar_runtime_illegal_provider(
+        module_name + "_illegal", config)?
+    val selector = strict_riscv_scalar_runtime_completion_selector_v3(
+        module_name + "_selector", config)?
+    val completion_skid = strict_riscv_scalar_completion_skid(
+        module_name + "_completion_skid", config)?
+    val fault_owner = strict_riscv_scalar_runtime_fault_owner(
+        module_name + "_fault_owner", config)?
+    val defaults = strict_riscv_scalar_runtime_completion_defaults(
+        module_name + "_defaults", config)?
+    val pipeline = HwScalarRuntimePipelineV3(node_id: HwNodeId.module_root(module_name),
+        module_name: module_name, config: config, plan: plan, descriptor: descriptor,
+        decoder: decoder, uop_skid: uop_skid, alu: alu,
+        control: control_owner.composition, illegal_provider: illegal_provider,
+        selector: selector, completion_skid: completion_skid,
+        fault_owner: fault_owner, defaults: defaults,
+        top_ports: pipeline_v3_top_ports(config.xlen),
+        bindings: pipeline_v3_bindings(config.xlen, descriptor.row_width,
+            control_owner.composition.top_ports))
+    val local = pipeline.local_diagnostic(); if local != "": return Err(local)
+    Ok(pipeline)

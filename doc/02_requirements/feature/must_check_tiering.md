@@ -15,6 +15,9 @@ textual SDN ledger.
 - REQ-MCT-003: The textual ledger must bind a stable gate ID, source
   fingerprint, status, command, time, evidence path/hash, owner, and unblock
   condition. Stale, malformed, unowned, vacuous, or tampered state fails closed.
+  A TODO receipt may earn its first PASS only through an explicit producer
+  command bound to a committed evidence blob; that PASS remains durable while
+  the same committed blob and hash remain present.
 - REQ-MCT-004: A successful bootstrap-produced ledger must be consumable by the
   next committed-ref push check without rerunning expensive work.
 - REQ-MCT-005: Unfinished sdoctest, Caret, server/GPU, SimpleOS/SBC/QEMU,

@@ -162,7 +162,7 @@ fn perf_facts_invalidated(preservation: PerfFactPreservation) -> [PerfFactKind]:
 fn perf_instruction_access(inst: MirInst) -> MirInstructionAccess:
     var access = MirInstructionAccess([], [], true)
     match inst.kind:
-        case Const(dest, _, _) | Alloc(dest, _) | LoadGlobal(dest, _) | GlobalAddr(dest, _, _):
+        case Const(dest, _, _) | Alloc(dest, _) | LoadGlobal(dest, _):
             access.define(dest)
         case Copy(dest, source) | Move(dest, source):
             access.define(dest)
@@ -299,9 +299,18 @@ fn perf_instruction_access(inst: MirInst) -> MirInstructionAccess:
             # Launch arguments are still encoded as text, while VHDL process
             # bodies are hidden CFG edges. Neither can authorize liveness.
             return MirInstructionAccess([], [], false)
+        case GpuLaunchConfigured(grid, block, _):
+            # DEF/USE is complete for this instruction: the configuration
+            # operands are its only local uses. Structured device-region CFG
+            # modeling is a separate fact and must not make DEF/USE incomplete.
+            access.use_operands(grid)
+            access.use_operands(block)
         case GpuGlobalId(dest, _) | GpuLocalId(dest, _) | GpuBlockId(dest, _) |
              GpuBlockDim(dest, _) | GpuGridDim(dest, _) | GpuSharedAlloc(dest, _, _) |
              MirWarpActivesMask(dest): access.define(dest)
+        case GpuSharedAllocInit(dest, _, _, init):
+            access.define(dest)
+            access.use_operand(init)
         case GpuAtomicOp(dest, _, pointer, value):
             access.define(dest)
             access.use_operand(pointer)
@@ -406,15 +415,10 @@ fn perf_terminator_access(terminator: MirTerminator) -> MirInstructionAccess:
             if value.?: access.use_operand(value.unwrap())
         case If(condition, _, _): access.use_operand(condition)
         case Switch(value, _, _): access.use_operand(value)
-        case CallTerminator(dest, function, args, _, _, unwind_payload_dest, unwind_type_tag_dest):
+        case CallTerminator(dest, function, args, _, _):
             if dest.?: access.define(dest.unwrap())
-            if unwind_payload_dest.?: access.define(unwind_payload_dest.unwrap())
-            if unwind_type_tag_dest.?: access.define(unwind_type_tag_dest.unwrap())
             access.use_operand(function)
             for arg in args: access.use_operand(arg)
-        case Throw(payload, type_tag) | Resume(payload, type_tag):
-            access.use_operand(payload)
-            access.use_operand(type_tag)
         case Goto(_) | Unreachable | Abort(_): pass_dn
     access
 
@@ -438,18 +442,22 @@ fn perf_facts_build_liveness(
         return PerfLivenessBuild(live_in, live_out, false, 0, true)
     if not inputs_complete:
         return PerfLivenessBuild(live_in, live_out, false, 0, false)
-    live_in = [false; cell_count]
-    live_out = [false; cell_count]
+    var cell = 0
+    while cell < cell_count:
+        live_in.push(false)
+        live_out.push(false)
+        cell = cell + 1
     if block_count == 0 or local_count == 0:
         return PerfLivenessBuild(live_in, live_out, true, 0, false)
 
     # Predecessor worklist. `top` reuses the fixed live prefix instead of
     # slicing or growing a queue on every propagation step.
-    var worklist: [i64] = [0; block_count]
-    var queued: [bool] = [true; block_count]
+    var worklist: [i64] = []
+    var queued: [bool] = []
     var block_pos = 0
     while block_pos < block_count:
-        worklist[block_pos] = block_pos
+        worklist.push(block_pos)
+        queued.push(true)
         block_pos = block_pos + 1
     var top = block_count
     var visits = 0
@@ -463,16 +471,12 @@ fn perf_facts_build_liveness(
         queued[current_index] = false
         visits = visits + 1
         val current_block = func.blocks[current_index]
-        # Adjacency is immutable during the solve. Resolve it once per block
-        # visit rather than repeating a dictionary lookup and array-value
-        # extraction for every local.
-        val current_successors = successors[current_block.id.id] ?? []
         var in_changed = false
         var local_pos = 0
         while local_pos < local_count:
             val bit = current_index * local_count + local_pos
             var new_out = live_out[bit]
-            for successor in current_successors:
+            for successor in (successors[current_block.id.id] ?? []):
                 val successor_index = block_index[successor.id]
                 if live_in[successor_index * local_count + local_pos]:
                     new_out = true
@@ -487,9 +491,10 @@ fn perf_facts_build_liveness(
             for predecessor in (predecessors[current_block.id.id] ?? []):
                 val predecessor_index = block_index[predecessor]
                 if not queued[predecessor_index]:
-                    # A popped slot always exists: at most block_count unique
-                    # indices can be queued, enforced by the queued bitmap.
-                    worklist[top] = predecessor_index
+                    if top < worklist.len():
+                        worklist[top] = predecessor_index
+                    else:
+                        worklist.push(predecessor_index)
                     queued[predecessor_index] = true
                     top = top + 1
     PerfLivenessBuild(live_in, live_out, true, visits, false)
@@ -583,10 +588,22 @@ fn perf_facts_terminator_successors(term: MirTerminator) -> [BlockId]:
                 result.push(target_case.target)
             result.push(default)
             result
-        case CallTerminator(_, _, _, normal, unwind, _, _):
+        case CallTerminator(_, _, _, normal, unwind):
             match unwind:
                 case Some(unwind_target): [normal, unwind_target]
                 case nil: [normal]
+
+fn perf_facts_instruction_region_target(inst: MirInst) -> BlockId?:
+    """Return the nested CFG region owned by an instruction, when present.
+
+    This is structural CFG authority, separate from DEF/USE coverage.  A GPU
+    launch body is detached from the ordinary terminator edge so omitting this
+    edge would make a live device region appear unreachable to shared RPO,
+    dominator, reachability, and future block-removal consumers.
+    """
+    match inst.kind:
+        case GpuLaunchConfigured(_, _, body): Some(body)
+        case _: nil
 
 fn perf_facts_build_internal(func: MirFunction, raw_request: PerfFactRequest) -> PerfFacts:
     val request = perf_fact_request_with_dependencies(raw_request)
@@ -624,14 +641,13 @@ fn perf_facts_build_internal(func: MirFunction, raw_request: PerfFactRequest) ->
     val fact_cell_count = func.blocks.len() * local_count
     val liveness_cells_admitted = (
         request.liveness and def_use_complete and fact_cell_count <= 4000000)
-    var block_definition_bits: [bool] = if liveness_cells_admitted:
-        [false; fact_cell_count]
-    else:
-        []
-    var block_use_bits: [bool] = if liveness_cells_admitted:
-        [false; fact_cell_count]
-    else:
-        []
+    var block_definition_bits: [bool] = []
+    var block_use_bits: [bool] = []
+    var fact_cell = 0
+    while liveness_cells_admitted and fact_cell < fact_cell_count:
+        block_definition_bits.push(false)
+        block_use_bits.push(false)
+        fact_cell = fact_cell + 1
 
     for block in func.blocks:
         if request.cfg:
@@ -639,7 +655,22 @@ fn perf_facts_build_internal(func: MirFunction, raw_request: PerfFactRequest) ->
                 duplicate_block_identity_count = duplicate_block_identity_count + 1
             else:
                 block_index[block.id.id] = index
-            val block_successors = perf_facts_terminator_successors(block.terminator)
+            var block_successors = perf_facts_terminator_successors(block.terminator)
+            # Structured instruction regions are reachability roots from their
+            # containing block even though ordinary host control continues via
+            # the terminator.  Fold them into the one shared CFG fact so every
+            # consumer sees the same graph and no removal pass can orphan them.
+            for instruction in block.instructions:
+                val region_target = perf_facts_instruction_region_target(instruction)
+                if region_target.?:
+                    val target = region_target.unwrap()
+                    var already_present = false
+                    for successor in block_successors:
+                        if successor.id == target.id:
+                            already_present = true
+                            break
+                    if not already_present:
+                        block_successors.push(target)
             successors[block.id.id] = block_successors
             for successor in block_successors:
                 if not predecessor_bucket_index.has(successor.id):
@@ -689,22 +720,16 @@ fn perf_facts_build_internal(func: MirFunction, raw_request: PerfFactRequest) ->
                 else:
                     def_use_complete = false
                     invalid_local_reference_count = invalid_local_reference_count + 1
-            var edge_definition0 = -1
-            var edge_definition1 = -1
-            var edge_definition2 = -1
+            var unwind_edge_definition = -1
             match block.terminator:
-                case CallTerminator(dest, _, _, _, unwind, unwind_payload_dest, unwind_type_tag_dest):
-                    if unwind.?:
-                        if dest.?: edge_definition0 = dest.unwrap().id
-                        if unwind_payload_dest.?: edge_definition1 = unwind_payload_dest.unwrap().id
-                        if unwind_type_tag_dest.?: edge_definition2 = unwind_type_tag_dest.unwrap().id
+                case CallTerminator(dest, _, _, _, unwind):
+                    if dest.? and unwind.?: unwind_edge_definition = dest.unwrap().id
                 case _: pass_dn
             for local in terminator_access.defs:
                 if local_index.has(local.id):
                     val position = local_index[local.id]
                     definition_buckets[position].push(MirDefUseSite(block.id, -1, local, true))
-                    if (liveness_cells_admitted and local.id != edge_definition0 and
-                        local.id != edge_definition1 and local.id != edge_definition2):
+                    if liveness_cells_admitted and local.id != unwind_edge_definition:
                         block_definition_bits[(index - 1) * local_count + position] = true
                 else:
                     def_use_complete = false

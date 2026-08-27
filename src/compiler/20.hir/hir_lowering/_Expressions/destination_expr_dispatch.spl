@@ -1,0 +1,108 @@
+# Destination-owned expression dispatcher.
+#
+# The process registry is the sole owner of the graph.  HirLowering retains
+# only its scalar lease, and every recursive lowering method exchanges scalar
+# indices through the hdw facade.  The public boundary owns the one rollback
+# checkpoint; recursive calls deliberately do not allocate nested checkpoints.
+use compiler.frontend.parser_types_expr.*
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.hir_destination_registry_writer.*
+
+impl HirLowering:
+    me destination_expr_unsupported(e: Expr, feature: text) -> i64:
+        self.error("destination HIR has no lossless expression route for {feature}", e.span)
+        -1
+
+    # Caller boundary.  A failure removes the entire unpublished recursive
+    # suffix and retains a stable diagnostic in the HirLowering owner.
+    me lower_hir_expr_into_destination(e: Expr) -> i64:
+        val slot = self.destination_slot
+        val generation = self.destination_generation
+        val checkpoint = hdw_checkpoint(slot, generation)
+        if checkpoint < 0:
+            self.error("destination HIR expression checkpoint was rejected", e.span)
+            return -1
+        val diagnostic_count = self.diagnostic_messages.len()
+        val result = self.destination_lower_expr(e)
+        if result < 0:
+            # hdw_recover intentionally does not retain its message after a
+            # successful rollback.  The failing family helper owns the one
+            # stable, feature-specific caller diagnostic; do not mask it with
+            # a second generic report here.
+            hdw_recover(slot, generation, checkpoint, "E-HIR-DEST-EXPR-LOWERING")
+            if self.diagnostic_messages.len() == diagnostic_count:
+                self.error("E-HIR-DEST-EXPR-LOWERING: destination expression lowering failed", e.span)
+            return -1
+        if not hdw_commit_checkpoint(slot, generation, checkpoint):
+            hdw_recover(slot, generation, checkpoint,
+                "E-HIR-DEST-EXPR-COMMIT")
+            self.error("E-HIR-DEST-EXPR-COMMIT: destination expression checkpoint commit failed", e.span)
+            return -1
+        result
+
+    # Recursive no-checkpoint dispatcher.  Family helpers reserve exactly one
+    # parent row before descending and publish that row only after every child
+    # and typed range is ready.
+    me destination_lower_expr(e: Expr) -> i64:
+        match e.kind:
+            case ExprKind.IntLit(_): self.destination_lower_literals_access(e)
+            case ExprKind.FloatLit(_): self.destination_lower_literals_access(e)
+            case ExprKind.StringLit(_, _): self.destination_lower_literals_access(e)
+            case ExprKind.BoolLit(_): self.destination_lower_literals_access(e)
+            case ExprKind.NilLit: self.destination_lower_literals_access(e)
+            case ExprKind.ArrayLit(_): self.destination_lower_literals_access(e)
+            case ExprKind.ArrayRepeat(_, _): self.destination_lower_literals_access(e)
+            case ExprKind.TupleLit(_): self.destination_lower_literals_access(e)
+            case ExprKind.DictLit(_): self.destination_lower_literals_access(e)
+            case ExprKind.SetLit(_): self.destination_lower_literals_access(e)
+            case ExprKind.Ident(_): self.destination_lower_literals_access(e)
+            case ExprKind.Field(_, _): self.destination_lower_literals_access(e)
+            case ExprKind.Index(_, _): self.destination_lower_literals_access(e)
+            case ExprKind.OptionalChain(_, _): self.destination_lower_literals_access(e)
+            case ExprKind.NullCoalesce(_, _): self.destination_lower_literals_access(e)
+            case ExprKind.ExistsCheck(_): self.destination_lower_literals_access(e)
+            case ExprKind.ForceUnwrap(_): self.destination_lower_literals_access(e)
+            case ExprKind.Cast(_, _): self.destination_lower_literals_access(e)
+            case ExprKind.Binary(_, _, _): self.destination_lower_literals_access(e)
+            case ExprKind.Unary(_, _): self.destination_lower_literals_access(e)
+            case ExprKind.Range(_, _, _, _): self.destination_lower_literals_access(e)
+
+            case ExprKind.Call(_, _): self.destination_lower_calls_control(e)
+            case ExprKind.MethodCall(_, _, _): self.destination_lower_calls_control(e)
+            case ExprKind.If(_, _, _): self.destination_lower_calls_control(e)
+            case ExprKind.IfChain(_, _): self.destination_lower_calls_control(e)
+            case ExprKind.MatchCase(_, _): self.destination_lower_calls_control(e)
+            case ExprKind.Try(_): self.destination_lower_calls_control(e)
+            case ExprKind.TryCatch(_, _, _): self.destination_lower_calls_control(e)
+            case ExprKind.Lambda(_, _): self.destination_lower_calls_control(e)
+            case ExprKind.Block(_): self.destination_lower_calls_control(e)
+            case ExprKind.Await(_): self.destination_lower_calls_control(e)
+            case ExprKind.Yield(_): self.destination_lower_calls_control(e)
+            case ExprKind.Return(_): self.destination_lower_calls_control(e)
+            case ExprKind.Break(_): self.destination_lower_calls_control(e)
+            case ExprKind.Continue(_): self.destination_lower_calls_control(e)
+            case ExprKind.Throw(_): self.destination_lower_calls_control(e)
+
+            case ExprKind.ListComprehension(_, _): self.destination_lower_special_expr(e)
+            case ExprKind.DictComprehension(_, _, _): self.destination_lower_special_expr(e)
+            case ExprKind.StructLit(_, _): self.destination_lower_special_expr(e)
+            case ExprKind.EnumLit(_, _, _): self.destination_lower_special_expr(e)
+            case ExprKind.LossBlock(_): self.destination_lower_special_expr(e)
+            case ExprKind.NogradBlock(_): self.destination_lower_special_expr(e)
+            case ExprKind.UnsafeBlock(_, _): self.destination_lower_special_expr(e)
+            case ExprKind.AsmBlock(_): self.destination_lower_special_expr(e)
+            case ExprKind.AsmMatch(_): self.destination_lower_special_expr(e)
+            case ExprKind.CustomBlock(_, _): self.destination_lower_special_expr(e)
+            case ExprKind.Spawn(_): self.destination_lower_special_expr(e)
+            case ExprKind.ArrayLitSuffix(_, _): self.destination_lower_special_expr(e)
+            case ExprKind.KernelLaunch(_, _, _, _): self.destination_lower_special_expr(e)
+            case ExprKind.GpuIntrinsic(_, _): self.destination_lower_special_expr(e)
+            case ExprKind.Error: self.destination_lower_literals_access(e)
+
+            # Assign is consumed by destination statement lowering.  Seeing it
+            # here means frontend statement normalization was bypassed.
+            case ExprKind.Assign(_, _, _): self.destination_expr_unsupported(e, "E-HIR-DEST-ASSIGN-IN-EXPR: assignment in expression position")
+            # These parser forms have no lossless HirExpr/destination shape in
+            # the current schema.  Do not erase their payload into Error.
+
+export HirLowering

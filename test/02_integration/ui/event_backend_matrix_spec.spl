@@ -1,9 +1,3 @@
-"""
-## Purpose and audience
-Purpose: This spec proves host platform event backend detection.
-Audience: Maintainers of the Simple integration suite reviewing this behavior.
-"""
-# @req: REQ-EVENTBACKENDMATRIX-001
 # @tag: ui, io, events, backend, integration, ci
 # @cover src/lib/nogc_async_mut/io/platform_event.spl 40%
 # @cover src/lib/nogc_async_mut/io/event_loop.spl 30%
@@ -35,6 +29,8 @@ Audience: Maintainers of the Simple integration suite reviewing this behavior.
 #   5. UISession event path smoke (synthetic keypress -> state update),
 #      both through the pure reducer and through a live session.
 
+use std.spec.step
+
 use std.spec.*
 use std.io.platform_event.{EventBackend, detect_backend, PlatformEvent}
 use std.io.event_loop.{EventLoop}
@@ -48,11 +44,11 @@ use common.ui.widget.{UITree, UIState, UIEvent}
 use common.ui.builder.{text_widget}
 use common.ui.event.{process_event}
 use nogc_sync_mut.ui.session.{UISession, new_session}
-use std.nogc_sync_mut.io_runtime.{platform_name}
 
 # Same os gate platform_event.spl itself consults inside detect_backend().
 # Redeclared here so the backend assertion can be EXACT per-OS instead of a
 # weakened "any valid variant" check, while staying honest off-Linux.
+extern fn rt_platform_name() -> text
 
 fn _backend_name_of(backend: EventBackend) -> text:
     match backend:
@@ -111,21 +107,19 @@ fn _event_loop_smoke_mask() -> i64:
     mask
 
 describe "host platform event backend detection":
+    # @manual scenario evidence
 
     it "returns a valid EventBackend variant":
-        # @req: REQ-EVENTBACKENDMATRIX-001
-        step("returns a valid EventBackend variant")
         val name = _backend_name_of(detect_backend())
         val valid = name == "epoll" or name == "kqueue" or name == "iocp" or name == "event_port" or name == "poll"
         assert_true(valid)
 
     it "matches the running OS exactly (Epoll on this Linux host)":
-        step("matches the running OS exactly (Epoll on this Linux host)")
         # Conditional on the module's own os gate (rt_platform_name), NOT a
         # weakened assert: on the Linux CI host the "linux" branch runs and
         # pins Epoll exactly; every other platform pins its own exact
         # backend per the documented contract in platform_event.spl.
-        val platform = platform_name()
+        val platform = rt_platform_name()
         var expected = "poll"
         if platform == "linux":
             expected = "epoll"
@@ -139,14 +133,12 @@ describe "host platform event backend detection":
         expect(name).to_equal(expected)
 
     it "PlatformEvent.new() adopts the detected backend":
-        step("PlatformEvent.new() adopts the detected backend")
         val pe = PlatformEvent.new()
         expect(pe.backend_name()).to_equal(_backend_name_of(detect_backend()))
 
 describe "EventLoop smoke on the native backend":
 
     it "creates, polls non-blocking with no fds, and closes cleanly":
-        step("creates, polls non-blocking with no fds, and closes cleanly")
         # All 5 stages — see _event_loop_smoke_mask's comment for the bit map
         # and the interp-shim regression this gates.
         expect(_event_loop_smoke_mask()).to_equal(31)
@@ -154,7 +146,6 @@ describe "EventLoop smoke on the native backend":
 describe "interaction backend composition":
 
     it "composes hit_stack, capture/target/bubble dispatch, and pointer-capture redirect":
-        step("composes hit_stack, capture/target/bubble dispatch, and pointer-capture ")
         # Three nested rects: root(1) > mid(2) > inner(3); inner paints on
         # top via tree_order (same stacking context / layer / z).
         val proxies = [
@@ -214,7 +205,6 @@ describe "interaction backend composition":
 describe "window event backends on a headless host":
 
     it "pins the winit event type codes against drift":
-        step("pins the winit event type codes against drift")
         # Constants only — no window, no event loop thread. See the header
         # note for why no availability probe is exercised (and the SDL2
         # named-constant gap).
@@ -227,7 +217,6 @@ describe "window event backends on a headless host":
 describe "UISession event path smoke":
 
     it "processes a synthetic keypress through the pure reducer":
-        step("processes a synthetic keypress through the pure reducer")
         val root = text_widget("evt_matrix_root", "Events")
         val tree = UITree.new(root)
         var s0 = UIState.new(tree)
@@ -238,7 +227,6 @@ describe "UISession event path smoke":
         expect(s2.mode_name()).to_equal("NORMAL")
 
     it "routes a synthetic keypress through a live session":
-        step("routes a synthetic keypress through a live session")
         val root = text_widget("evt_matrix_sess_root", "Session")
         val tree = UITree.new(root)
         var session = new_session(tree)

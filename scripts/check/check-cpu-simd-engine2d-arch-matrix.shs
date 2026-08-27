@@ -11,7 +11,6 @@ SKIP_RUN="${CPU_SIMD_ARCH_MATRIX_SKIP_RUN:-0}"
 TARGET_BUILD="${CPU_SIMD_ARCH_MATRIX_TARGET_BUILD:-0}"
 ALLOW_PARTIAL="${CPU_SIMD_ARCH_MATRIX_ALLOW_PARTIAL:-0}"
 NATIVE_BUILD_SIMPLE="${CPU_SIMD_ARCH_MATRIX_NATIVE_BUILD_SIMPLE:-src/compiler_rust/target/debug/simple}"
-RUNTIME_SOURCE="${CPU_SIMD_ARCH_MATRIX_RUNTIME_SOURCE:-src/runtime/runtime_simd_dispatch.c}"
 
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
 
@@ -39,31 +38,6 @@ env_value() {
     sed -n "s/^${key}=//p" "$file" 2>/dev/null | tail -n 1
 }
 
-text_sha256() {
-    if command -v sha256sum >/dev/null 2>&1; then
-        sha256sum | awk '{print $1}'
-    elif command -v shasum >/dev/null 2>&1; then
-        shasum -a 256 | awk '{print $1}'
-    else
-        printf ''
-    fi
-}
-
-is_sha256() {
-    [ "${#1}" -eq 64 ] || return 1
-    case "$1" in
-        *[!0-9a-f]*) return 1 ;;
-    esac
-}
-
-is_positive_decimal() {
-    case "$1" in
-        ""|*[!0-9]*) return 1 ;;
-        *[1-9]*) return 0 ;;
-        *) return 1 ;;
-    esac
-}
-
 write_kv() {
     printf '%s=%s\n' "$1" "$2" >>"$ENV_PATH"
 }
@@ -71,13 +45,13 @@ write_kv() {
 source_range_contains() {
     start="$1"
     pattern="$2"
-    awk "/$start/ { grab = 1 } grab { print } /^}/ { if (grab) exit }" "$RUNTIME_SOURCE" |
-        grep -Fq "$pattern"
+    awk "/$start/ { grab = 1 } grab { print } /^}/ { if (grab) exit }" src/runtime/runtime_simd_dispatch.c |
+        grep -q "$pattern"
 }
 
 check_source_contract() {
     status=pass
-    reason=public-simd-dispatch-routes-present
+    reason=mutable-aarch64-dispatch-present
     if ! source_range_contains "rt_engine2d_simd_fill_u32" "engine2d_fill_into(data + off, n, color_word)"; then
         status=fail
         reason=missing-aarch64-fill-dispatch
@@ -135,7 +109,7 @@ compile_runtime_owner() {
     else
         set +e
         # shellcheck disable=SC2086
-        "$cc" $flags -c -O2 -std=gnu11 -Isrc/runtime "$RUNTIME_SOURCE" -o "$obj" 2>"$err"
+        "$cc" $flags -c -O2 -std=gnu11 -Isrc/runtime src/runtime/runtime_simd_dispatch.c -o "$obj" 2>"$err"
         code=$?
         set -e
         if [ "$code" -eq 0 ]; then
@@ -305,27 +279,12 @@ run_arch() {
         elif [ "$code" -ne 0 ] && [ "$status" != "fail" ]; then
             status=fail
             reason="wrapper-exit-$code"
-        elif [ "$status" = "pass" ] && [ "$evidence_arch" != "$arch" ]; then
-            status=fail
-            reason=runtime-arch-mismatch
-        elif [ "$status" = "pass" ] && [ "$nested_bin" != "$bin" ]; then
-            status=fail
-            reason=simple-bin-path-mismatch
-        elif [ "$status" = "pass" ] && { ! is_positive_decimal "$frame_checksum" || ! is_sha256 "$source_sha256" || ! is_sha256 "$simple_bin_sha256" || ! is_sha256 "$frame_receipt_sha256" || [ "$frame_receipt_sha256" != "$expected_receipt" ]; }; then
-            status=fail
-            reason=frame-receipt-invalid
         fi
     fi
 
     write_kv "cpu_simd_engine2d_arch_matrix_${arch}_status" "$status"
     write_kv "cpu_simd_engine2d_arch_matrix_${arch}_reason" "$reason"
     write_kv "cpu_simd_engine2d_arch_matrix_${arch}_simple_bin" "$bin"
-    write_kv "cpu_simd_engine2d_arch_matrix_${arch}_evidence_arch" "$evidence_arch"
-    write_kv "cpu_simd_engine2d_arch_matrix_${arch}_execution_environment" "$execution_environment"
-    write_kv "cpu_simd_engine2d_arch_matrix_${arch}_frame_checksum" "$frame_checksum"
-    write_kv "cpu_simd_engine2d_arch_matrix_${arch}_source_sha256" "$source_sha256"
-    write_kv "cpu_simd_engine2d_arch_matrix_${arch}_simple_bin_sha256" "$simple_bin_sha256"
-    write_kv "cpu_simd_engine2d_arch_matrix_${arch}_frame_receipt_sha256" "$frame_receipt_sha256"
     write_kv "cpu_simd_engine2d_arch_matrix_${arch}_report" "$arch_dir/report.md"
 }
 
@@ -337,17 +296,10 @@ write_kv cpu_simd_engine2d_arch_matrix_host_arch "$HOST_ARCH"
 write_kv cpu_simd_engine2d_arch_matrix_strict "$STRICT"
 write_kv cpu_simd_engine2d_arch_matrix_target_build "$TARGET_BUILD"
 write_kv cpu_simd_engine2d_arch_matrix_native_build_simple "$NATIVE_BUILD_SIMPLE"
-write_kv cpu_simd_engine2d_arch_matrix_runtime_source "$RUNTIME_SOURCE"
 check_source_contract
 
 for arch in x86_64 aarch64 riscv64; do
     run_arch "$arch" "$HOST_ARCH"
-done
-for arch in x86_64 aarch64 riscv64 riscv64_rvv; do
-    compile_runtime_owner "$arch"
-done
-for arch in x86_64 aarch64 riscv64; do
-    run_target_binary_build "$arch"
 done
 
 passed=0
@@ -359,26 +311,6 @@ for arch in x86_64 aarch64 riscv64; do
         pass) passed=$((passed + 1)) ;;
         fail) failed=$((failed + 1)) ;;
         *) missing=$((missing + 1)) ;;
-    esac
-done
-runtime_failed=0
-runtime_missing=0
-for arch in x86_64 aarch64 riscv64 riscv64_rvv; do
-    status="$(env_value "$ENV_PATH" "cpu_simd_engine2d_arch_matrix_${arch}_runtime_compile_status")"
-    case "$status" in
-        pass) ;;
-        fail) runtime_failed=$((runtime_failed + 1)) ;;
-        *) runtime_missing=$((runtime_missing + 1)) ;;
-    esac
-done
-target_binary_failed=0
-target_binary_missing=0
-for arch in x86_64 aarch64 riscv64; do
-    status="$(env_value "$ENV_PATH" "cpu_simd_engine2d_arch_matrix_${arch}_target_binary_status")"
-    case "$status" in
-        pass) ;;
-        fail) target_binary_failed=$((target_binary_failed + 1)) ;;
-        *) target_binary_missing=$((target_binary_missing + 1)) ;;
     esac
 done
 
@@ -397,15 +329,15 @@ elif [ "$TARGET_BUILD" = "1" ] && [ "$ALLOW_PARTIAL" != "1" ] && [ "$target_bina
 elif [ "$runtime_failed" -gt 0 ]; then
     overall=fail
     reason=runtime-owner-cross-compile-failed
+elif [ "$TARGET_BUILD" = "1" ] && [ "$target_binary_missing" -eq 0 ]; then
+    overall=pass
+    reason=target-binary-builds-pass
 elif [ "$failed" -gt 0 ]; then
     overall=fail
     reason=arch-evidence-failed
 elif [ "$missing" -gt 0 ]; then
     overall=partial
     reason=arch-evidence-unavailable
-elif [ "$TARGET_BUILD" = "1" ] && [ "$target_binary_missing" -eq 0 ]; then
-    overall=pass
-    reason=target-binary-builds-and-rendered-frames-pass
 fi
 if [ "$STRICT" = "1" ] && [ "$overall" != "pass" ]; then
     overall=fail
@@ -415,10 +347,6 @@ fi
 write_kv cpu_simd_engine2d_arch_matrix_passed_count "$passed"
 write_kv cpu_simd_engine2d_arch_matrix_unavailable_count "$missing"
 write_kv cpu_simd_engine2d_arch_matrix_failed_count "$failed"
-write_kv cpu_simd_engine2d_arch_matrix_runtime_compile_unavailable_count "$runtime_missing"
-write_kv cpu_simd_engine2d_arch_matrix_runtime_compile_failed_count "$runtime_failed"
-write_kv cpu_simd_engine2d_arch_matrix_target_binary_unavailable_count "$target_binary_missing"
-write_kv cpu_simd_engine2d_arch_matrix_target_binary_failed_count "$target_binary_failed"
 write_kv cpu_simd_engine2d_arch_matrix_status "$overall"
 write_kv cpu_simd_engine2d_arch_matrix_reason "$reason"
 

@@ -1,0 +1,480 @@
+# Typed, deterministic MIR coverage inventory foundation.
+#
+# This module deliberately owns no MIR opcode, lowering, runtime-counter, or
+# backend behavior.  It freezes the V1 identities and the fail-closed
+# zero-count manifest boundary which those later phases must consume.
+
+use std.common.crypto.sha256.{sha256_text}
+use std.common.encoding.sha256_contract.{sha256_lower_hex_valid}
+
+pub enum MirCoverageModeV1:
+    Disabled
+    Decisions
+    DecisionsAndConditions
+
+pub enum MirCoverageSiteKindV1:
+    IfDecision
+    WhileDecision
+    AndCondition
+    OrCondition
+
+pub struct MirCoverageSourceV1:
+    authored_path: text
+    source_sha256: text
+    source_text: text
+
+pub struct MirCoverageSiteKeyV1:
+    authored_path: text
+    source_sha256: text
+    canonical_function_name: text
+    byte_start: i64
+    byte_end: i64
+    line: i64
+    column: i64
+    kind: MirCoverageSiteKindV1
+    source_preorder_occurrence: i64
+    anchor_sha256: text
+
+pub struct MirCoverageConditionSiteV1:
+    decision: MirCoverageSiteKeyV1
+    condition: MirCoverageSiteKeyV1
+
+# Immutable sideband records retained after closure finalization. Source text
+# exists only while validating exact spans and is deliberately absent here.
+pub struct MirCoverageSourceIdentityV1:
+    authored_path: text
+    source_sha256: text
+
+pub struct MirCoverageDecisionRecordV1:
+    semantic_id: text
+    runtime_id: i64
+    site: MirCoverageSiteKeyV1
+
+pub struct MirCoverageConditionRecordV1:
+    decision_semantic_id: text
+    decision_runtime_id: i64
+    semantic_id: text
+    runtime_id: i64
+    site: MirCoverageSiteKeyV1
+
+pub struct MirCoverageCatalogV1:
+    mode: MirCoverageModeV1
+    sources: [MirCoverageSourceIdentityV1]
+    decisions: [MirCoverageDecisionRecordV1]
+    conditions: [MirCoverageConditionRecordV1]
+    zero_count_sdn: text
+    zero_count_sdn_sha256: text
+    catalog_sha256: text
+    publishable: bool
+
+fn mir_coverage_mode_name_v1(mode: MirCoverageModeV1) -> text:
+    match mode:
+        case Disabled: "disabled"
+        case Decisions: "decisions"
+        case DecisionsAndConditions: "decisions-and-conditions"
+
+fn mir_coverage_site_kind_name_v1(kind: MirCoverageSiteKindV1) -> text:
+    match kind:
+        case IfDecision: "if-decision"
+        case WhileDecision: "while-decision"
+        case AndCondition: "and-condition"
+        case OrCondition: "or-condition"
+
+fn mir_coverage_decision_kind_v1(kind: MirCoverageSiteKindV1) -> bool:
+    kind == MirCoverageSiteKindV1.IfDecision or
+        kind == MirCoverageSiteKindV1.WhileDecision
+
+fn mir_coverage_condition_kind_v1(kind: MirCoverageSiteKindV1) -> bool:
+    kind == MirCoverageSiteKindV1.AndCondition or
+        kind == MirCoverageSiteKindV1.OrCondition
+
+fn mir_coverage_sdn_atom_valid_v1(value: text) -> bool:
+    value != "" and value == value.trim() and
+        not value.contains(",") and not value.contains("|") and
+        not value.contains("\n") and not value.contains("\r") and
+        not value.contains("\t")
+
+fn mir_coverage_authored_path_valid_v1(path: text) -> bool:
+    if not mir_coverage_sdn_atom_valid_v1(path): return false
+    if path.starts_with("/") or path.contains("\\") or path.contains(":"):
+        return false
+    for component in path.split("/"):
+        if component == "" or component == "." or component == "..":
+            return false
+    true
+
+fn mir_coverage_function_name_valid_v1(name: text) -> bool:
+    mir_coverage_sdn_atom_valid_v1(name) and not name.contains(" ")
+
+fn mir_coverage_frame_v1(value: text) -> text:
+    value.len().to_string() + ":" + value
+
+fn mir_coverage_site_canonical_text_v1(site: MirCoverageSiteKeyV1) -> text:
+    "MirCoverageSiteKey-v1" +
+        mir_coverage_frame_v1(site.authored_path) +
+        mir_coverage_frame_v1(site.source_sha256) +
+        mir_coverage_frame_v1(site.canonical_function_name) +
+        mir_coverage_frame_v1(site.byte_start.to_string()) +
+        mir_coverage_frame_v1(site.byte_end.to_string()) +
+        mir_coverage_frame_v1(site.line.to_string()) +
+        mir_coverage_frame_v1(site.column.to_string()) +
+        mir_coverage_frame_v1(mir_coverage_site_kind_name_v1(site.kind)) +
+        mir_coverage_frame_v1(site.source_preorder_occurrence.to_string()) +
+        mir_coverage_frame_v1(site.anchor_sha256)
+
+fn mir_coverage_site_id_v1(site: MirCoverageSiteKeyV1) -> text:
+    val prefix = if mir_coverage_decision_kind_v1(site.kind):
+        "mir-v1-d-"
+    else:
+        "mir-v1-c-"
+    prefix + sha256_text(mir_coverage_site_canonical_text_v1(site))
+
+# A condition's semantic identity includes its intended parent decision. This
+# prevents a condition nested inside two containing decision spans from being
+# reparented without changing the committed identity.
+fn mir_coverage_condition_canonical_text_v1(
+    decision: MirCoverageSiteKeyV1,
+    condition: MirCoverageSiteKeyV1
+) -> text:
+    "MirCoverageConditionKey-v1" +
+        mir_coverage_frame_v1(mir_coverage_site_id_v1(decision)) +
+        mir_coverage_frame_v1(mir_coverage_site_canonical_text_v1(condition))
+
+fn mir_coverage_condition_id_v1(
+    decision: MirCoverageSiteKeyV1,
+    condition: MirCoverageSiteKeyV1
+) -> text:
+    "mir-v1-c-" + sha256_text(
+        mir_coverage_condition_canonical_text_v1(decision, condition))
+
+# Runtime probes accept u32 identifiers, while the hash above remains the
+# stable semantic identity used to compare inventories across builds.  V1
+# allocates nonzero runtime IDs only after canonical sorting so input discovery
+# order cannot perturb emitted probes or their zero-count SDN rows.
+fn mir_coverage_runtime_id_for_site_v1(
+    sorted_sites: [MirCoverageSiteKeyV1],
+    site: MirCoverageSiteKeyV1
+) -> i64:
+    val target = mir_coverage_site_canonical_text_v1(site)
+    var index = 0
+    while index < sorted_sites.len():
+        if mir_coverage_site_canonical_text_v1(sorted_sites[index]) == target:
+            return index + 1
+        index = index + 1
+    0
+
+fn mir_coverage_source_diagnostic_v1(source: MirCoverageSourceV1) -> text:
+    if not mir_coverage_authored_path_valid_v1(source.authored_path):
+        return "MIRCOV-E-SOURCE-PATH: authored source path must be canonical repository-relative SDN-safe text"
+    if not sha256_lower_hex_valid(source.source_sha256):
+        return "MIRCOV-E-SOURCE-HASH: source identity must be lowercase SHA-256"
+    if sha256_text(source.source_text) != source.source_sha256:
+        return "MIRCOV-E-SOURCE-HASH: source identity does not match the bound source text"
+    ""
+
+fn mir_coverage_source_index_v1(
+    sources: [MirCoverageSourceV1],
+    authored_path: text
+) -> i64:
+    var found = -1
+    var index = 0
+    while index < sources.len():
+        if sources[index].authored_path == authored_path:
+            if found >= 0: return -2
+            found = index
+        index = index + 1
+    found
+
+fn mir_coverage_site_diagnostic_v1(
+    site: MirCoverageSiteKeyV1,
+    sources: [MirCoverageSourceV1],
+    require_decision: bool
+) -> text:
+    if not mir_coverage_authored_path_valid_v1(site.authored_path):
+        return "MIRCOV-E-SITE-PATH: site path must be canonical repository-relative SDN-safe text"
+    if not mir_coverage_function_name_valid_v1(site.canonical_function_name):
+        return "MIRCOV-E-SITE-FUNCTION: canonical function name is missing or not SDN-safe"
+    if not sha256_lower_hex_valid(site.source_sha256) or
+            not sha256_lower_hex_valid(site.anchor_sha256):
+        return "MIRCOV-E-SITE-HASH: site source and anchor identities must be lowercase SHA-256"
+    if site.byte_start < 0 or site.byte_end <= site.byte_start or
+            site.line <= 0 or site.column <= 0 or
+            site.source_preorder_occurrence < 0:
+        return "MIRCOV-E-SITE-SPAN: site requires a nonempty span positive line/column and nonnegative occurrence"
+    if site.byte_end > 2147483647 or site.line > 2147483647 or
+            site.column > 2147483647 or
+            site.source_preorder_occurrence > 2147483647:
+        return "MIRCOV-E-SITE-SPAN: site location exceeds the V1 bounded identity range"
+    if require_decision and not mir_coverage_decision_kind_v1(site.kind):
+        return "MIRCOV-E-SITE-KIND: decision inventory contains a condition kind"
+    if not require_decision and not mir_coverage_condition_kind_v1(site.kind):
+        return "MIRCOV-E-SITE-KIND: condition inventory contains a decision kind"
+    val source_index = mir_coverage_source_index_v1(sources, site.authored_path)
+    if source_index == -2:
+        return "MIRCOV-E-SOURCE-DUPLICATE: authored source path is bound more than once"
+    if source_index < 0:
+        return "MIRCOV-E-SITE-SOURCE: site authored source is absent from the finalized closure"
+    val source = sources[source_index]
+    if source.source_sha256 != site.source_sha256:
+        return "MIRCOV-E-SITE-SOURCE: site source identity differs from the finalized source binding"
+    if site.byte_end > source.source_text.len():
+        return "MIRCOV-E-SITE-SPAN: site span exceeds the bound source text"
+    val anchor = source.source_text.substring(site.byte_start, site.byte_end)
+    if sha256_text(anchor) != site.anchor_sha256:
+        return "MIRCOV-E-SITE-ANCHOR: anchor identity differs from the exact bound source span"
+    ""
+
+fn mir_coverage_sorted_sites_v1(sites: [MirCoverageSiteKeyV1]) -> [MirCoverageSiteKeyV1]:
+    var result = sites
+    var i = 0
+    while i < result.len():
+        var j = i + 1
+        while j < result.len():
+            if mir_coverage_site_canonical_text_v1(result[j]) <
+                    mir_coverage_site_canonical_text_v1(result[i]):
+                val temporary = result[i]
+                result[i] = result[j]
+                result[j] = temporary
+            j = j + 1
+        i = i + 1
+    result
+
+fn mir_coverage_sorted_conditions_v1(
+    conditions: [MirCoverageConditionSiteV1]
+) -> [MirCoverageConditionSiteV1]:
+    var result = conditions
+    var i = 0
+    while i < result.len():
+        var j = i + 1
+        while j < result.len():
+            val left = mir_coverage_site_canonical_text_v1(result[i].decision) +
+                mir_coverage_site_canonical_text_v1(result[i].condition)
+            val right = mir_coverage_site_canonical_text_v1(result[j].decision) +
+                mir_coverage_site_canonical_text_v1(result[j].condition)
+            if right < left:
+                val temporary = result[i]
+                result[i] = result[j]
+                result[j] = temporary
+            j = j + 1
+        i = i + 1
+    result
+
+fn mir_coverage_sorted_sources_v1(
+    sources: [MirCoverageSourceV1]
+) -> [MirCoverageSourceV1]:
+    var result = sources
+    var i = 0
+    while i < result.len():
+        var j = i + 1
+        while j < result.len():
+            if result[j].authored_path < result[i].authored_path:
+                val temporary = result[i]
+                result[i] = result[j]
+                result[j] = temporary
+            j = j + 1
+        i = i + 1
+    result
+
+fn mir_coverage_source_set_diagnostic_v1(
+    sources: [MirCoverageSourceV1]
+) -> text:
+    var paths: [text] = []
+    for source in sources:
+        val diagnostic = mir_coverage_source_diagnostic_v1(source)
+        if diagnostic != "": return diagnostic
+        if paths.contains(source.authored_path):
+            return "MIRCOV-E-SOURCE-DUPLICATE: authored source path is bound more than once"
+        paths.push(source.authored_path)
+    ""
+
+# Render the finalized pre-optimization inventory in the runtime test runner's
+# existing SDN table grammar.  Counts are constants by construction: runtime
+# observations are never accepted as an input to this function.
+pub fn mir_coverage_render_zero_count_sdn_v1(
+    mode: MirCoverageModeV1,
+    sources: [MirCoverageSourceV1],
+    decisions: [MirCoverageSiteKeyV1],
+    conditions: [MirCoverageConditionSiteV1]
+) -> Result<text, text>:
+    val source_error = mir_coverage_source_set_diagnostic_v1(sources)
+    if source_error != "": return Err(source_error)
+    if mode == MirCoverageModeV1.Disabled:
+        if decisions.len() != 0 or conditions.len() != 0:
+            return Err("MIRCOV-E-MODE: disabled coverage cannot retain instrumentation sites")
+        return Ok("")
+    if decisions.len() == 0:
+        return Err("MIRCOV-E-EMPTY: enabled coverage requires at least one decision site")
+    if mode == MirCoverageModeV1.Decisions and conditions.len() != 0:
+        return Err("MIRCOV-E-MODE: decision-only coverage cannot retain condition sites")
+
+    var decision_keys: [text] = []
+    for decision in decisions:
+        val diagnostic = mir_coverage_site_diagnostic_v1(decision, sources, true)
+        if diagnostic != "": return Err(diagnostic)
+        val key = mir_coverage_site_canonical_text_v1(decision)
+        if decision_keys.contains(key):
+            return Err("MIRCOV-E-DECISION-DUPLICATE: decision site key appears more than once")
+        decision_keys.push(key)
+
+    var condition_keys: [text] = []
+    for binding in conditions:
+        val parent_error = mir_coverage_site_diagnostic_v1(binding.decision, sources, true)
+        if parent_error != "": return Err(parent_error)
+        val condition_error = mir_coverage_site_diagnostic_v1(binding.condition, sources, false)
+        if condition_error != "": return Err(condition_error)
+        val parent_key = mir_coverage_site_canonical_text_v1(binding.decision)
+        if not decision_keys.contains(parent_key):
+            return Err("MIRCOV-E-CONDITION-PARENT: condition references a decision outside the finalized inventory")
+        if binding.condition.authored_path != binding.decision.authored_path or
+                binding.condition.source_sha256 != binding.decision.source_sha256 or
+                binding.condition.canonical_function_name !=
+                    binding.decision.canonical_function_name:
+            return Err("MIRCOV-E-CONDITION-OWNER: condition must share its decision source and canonical function")
+        if binding.condition.byte_start < binding.decision.byte_start or
+                binding.condition.byte_end > binding.decision.byte_end:
+            return Err("MIRCOV-E-CONDITION-SPAN: condition span must lie within its decision span")
+        val condition_key = mir_coverage_site_canonical_text_v1(binding.condition)
+        if condition_keys.contains(condition_key):
+            return Err("MIRCOV-E-CONDITION-DUPLICATE: condition site key appears more than once")
+        condition_keys.push(condition_key)
+
+    val sorted_decisions = mir_coverage_sorted_sites_v1(decisions)
+    val sorted_conditions = mir_coverage_sorted_conditions_v1(conditions)
+    # Zero is reserved by runtime integrations.  The maximum allocated value
+    # must fit the probe ABI's unsigned 32-bit ID fields.
+    if sorted_decisions.len() > 4294967295 or sorted_conditions.len() > 4294967295:
+        return Err("MIRCOV-E-RUNTIME-ID: coverage inventory exceeds the nonzero u32 runtime ID range")
+    var lines: [text] = []
+    lines.push("# Compiler MIR zero-count coverage manifest")
+    lines.push("version: 1.0")
+    lines.push("decisions |id, file, line, column, true_count, false_count|")
+    var decision_index = 0
+    while decision_index < sorted_decisions.len():
+        val decision = sorted_decisions[decision_index]
+        val runtime_id = decision_index + 1
+        lines.push("    {runtime_id}, {decision.authored_path}, {decision.line}, {decision.column}, 0, 0")
+        decision_index = decision_index + 1
+    lines.push("")
+    lines.push("conditions |decision_id, condition_id, file, line, column, true_count, false_count|")
+    var condition_index = 0
+    while condition_index < sorted_conditions.len():
+        val binding = sorted_conditions[condition_index]
+        val decision_runtime_id = mir_coverage_runtime_id_for_site_v1(
+            sorted_decisions, binding.decision)
+        val condition_runtime_id = condition_index + 1
+        lines.push("    {decision_runtime_id}, {condition_runtime_id}, {binding.condition.authored_path}, {binding.condition.line}, {binding.condition.column}, 0, 0")
+        condition_index = condition_index + 1
+    Ok(lines.join("\n"))
+
+fn mir_coverage_catalog_canonical_text_v1(
+    mode: MirCoverageModeV1,
+    sources: [MirCoverageSourceIdentityV1],
+    decisions: [MirCoverageDecisionRecordV1],
+    conditions: [MirCoverageConditionRecordV1],
+    zero_count_sdn: text
+) -> text:
+    var parts: [text] = ["MirCoverageCatalog-v1"]
+    parts.push(mir_coverage_frame_v1(mir_coverage_mode_name_v1(mode)))
+    for source in sources:
+        parts.push(mir_coverage_frame_v1(source.authored_path))
+        parts.push(mir_coverage_frame_v1(source.source_sha256))
+    for decision in decisions:
+        parts.push(mir_coverage_frame_v1(decision.semantic_id))
+        parts.push(mir_coverage_frame_v1(decision.runtime_id.to_string()))
+        parts.push(mir_coverage_frame_v1(
+            mir_coverage_site_canonical_text_v1(decision.site)))
+    for condition in conditions:
+        parts.push(mir_coverage_frame_v1(condition.decision_semantic_id))
+        parts.push(mir_coverage_frame_v1(condition.decision_runtime_id.to_string()))
+        parts.push(mir_coverage_frame_v1(condition.semantic_id))
+        parts.push(mir_coverage_frame_v1(condition.runtime_id.to_string()))
+        parts.push(mir_coverage_frame_v1(
+            mir_coverage_site_canonical_text_v1(condition.site)))
+    parts.push(mir_coverage_frame_v1(zero_count_sdn))
+    parts.join("")
+
+# Finalize all authored modules in one closure so runtime IDs cannot reset at a
+# module boundary. The returned catalog is intentionally nonpublishable until
+# a later compiler change proves that matching MIR probes were emitted.
+pub fn mir_coverage_finalize_v1(
+    mode: MirCoverageModeV1,
+    sources: [MirCoverageSourceV1],
+    decisions: [MirCoverageSiteKeyV1],
+    conditions: [MirCoverageConditionSiteV1]
+) -> Result<MirCoverageCatalogV1, text>:
+    val rendered_result = mir_coverage_render_zero_count_sdn_v1(
+        mode, sources, decisions, conditions)
+    val zero_count_sdn = match rendered_result:
+        case Ok(value): value
+        case Err(message): return Err(message)
+
+    if mode == MirCoverageModeV1.Disabled:
+        val canonical = mir_coverage_catalog_canonical_text_v1(
+            mode, [], [], [], "")
+        return Ok(MirCoverageCatalogV1(
+            mode, [], [], [], "", sha256_text(""), sha256_text(canonical),
+            false))
+
+    var source_identities: [MirCoverageSourceIdentityV1] = []
+    for source in mir_coverage_sorted_sources_v1(sources):
+        source_identities.push(MirCoverageSourceIdentityV1(
+            source.authored_path, source.source_sha256))
+
+    val sorted_decisions = mir_coverage_sorted_sites_v1(decisions)
+    var decision_records: [MirCoverageDecisionRecordV1] = []
+    var decision_index = 0
+    while decision_index < sorted_decisions.len():
+        val site = sorted_decisions[decision_index]
+        decision_records.push(MirCoverageDecisionRecordV1(
+            mir_coverage_site_id_v1(site), decision_index + 1, site))
+        decision_index = decision_index + 1
+
+    val sorted_conditions = mir_coverage_sorted_conditions_v1(conditions)
+    var condition_records: [MirCoverageConditionRecordV1] = []
+    var condition_index = 0
+    while condition_index < sorted_conditions.len():
+        val binding = sorted_conditions[condition_index]
+        val decision_runtime_id = mir_coverage_runtime_id_for_site_v1(
+            sorted_decisions, binding.decision)
+        condition_records.push(MirCoverageConditionRecordV1(
+            mir_coverage_site_id_v1(binding.decision), decision_runtime_id,
+            mir_coverage_condition_id_v1(
+                binding.decision, binding.condition), condition_index + 1,
+            binding.condition))
+        condition_index = condition_index + 1
+
+    val canonical = mir_coverage_catalog_canonical_text_v1(
+        mode, source_identities, decision_records, condition_records,
+        zero_count_sdn)
+    Ok(MirCoverageCatalogV1(
+        mode, source_identities, decision_records, condition_records,
+        zero_count_sdn, sha256_text(zero_count_sdn), sha256_text(canonical),
+        false))
+
+# V1 has no MIR probe-emission capability. A caller must not publish the
+# sideband inventory merely because it finalized and hashed successfully.
+pub fn mir_coverage_catalog_publication_guard_v1(
+    _catalog: MirCoverageCatalogV1
+) -> Result<bool, text>:
+    Err("MIRCOV-E-PROBES-ABSENT: finalized coverage inventory has no proven MIR probe emission capability")
+
+# A catalog/plan attachment must bind the exact finalized sideband bytes, but
+# this check deliberately does not make the catalog publishable.
+pub fn mir_coverage_catalog_snapshot_diagnostic_v1(
+    catalog: MirCoverageCatalogV1
+) -> text:
+    if catalog.publishable:
+        return "MIRCOV-ATTACH-E-CATALOG-PUBLISHABLE: V1 catalog must remain nonpublishable before admitted lowering"
+    if catalog.zero_count_sdn_sha256 != sha256_text(catalog.zero_count_sdn):
+        return "MIRCOV-ATTACH-E-CATALOG-SNAPSHOT: zero-count manifest hash differs from its bytes"
+    val canonical = mir_coverage_catalog_canonical_text_v1(
+        catalog.mode, catalog.sources, catalog.decisions, catalog.conditions,
+        catalog.zero_count_sdn)
+    if catalog.catalog_sha256 != sha256_text(canonical):
+        return "MIRCOV-ATTACH-E-CATALOG-SNAPSHOT: catalog hash differs from its canonical contents"
+    ""
+
+export mir_coverage_mode_name_v1, mir_coverage_site_kind_name_v1
+export mir_coverage_site_canonical_text_v1, mir_coverage_site_id_v1
+export mir_coverage_condition_canonical_text_v1, mir_coverage_condition_id_v1
+export mir_coverage_catalog_snapshot_diagnostic_v1

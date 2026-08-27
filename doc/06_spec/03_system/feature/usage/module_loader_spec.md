@@ -2,6 +2,29 @@
 
 > Simple Module Format (SMF) is the binary module format:
 
+<!-- sdn-diagram:id=module_loader_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=module_loader_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+module_loader_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=module_loader_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 32 | 32 | 0 | 0 |
@@ -21,7 +44,7 @@ Simple Module Format (SMF) is the binary module format:
 | Category | Runtime \| Module System |
 | Status | Implemented |
 | Source | `test/03_system/feature/usage/module_loader_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## SMF Format
@@ -46,8 +69,6 @@ Simple Module Format (SMF) is the binary module format:
 
 ```simple
 # Load a module
-use std.spec.step
-
 val module = loader.load("path/to/module.smf")
 
 # Get a function by name
@@ -63,22 +84,17 @@ val addr = registry.resolve_symbol("my_func")
 
 #### rejects bad magic number
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- rejects bad magic number
+1. fn test bad magic
+2. expect test bad magic
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("rejects bad magic number")
 fn test_bad_magic() -> bool:
     # Header with wrong magic should fail
     # "BAD!" instead of "SMF\0"
@@ -93,18 +109,17 @@ expect test_bad_magic()
 
 #### resolves symbol by name
 
-- resolves symbol by name
+1. fn test lookup by name
+2. expect test lookup by name
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("resolves symbol by name")
 fn test_lookup_by_name() -> bool:
     # Lookup "foo" should return symbol with value 123
     true
@@ -116,18 +131,17 @@ expect test_lookup_by_name()
 
 #### returns symbol name from offset
 
-- returns symbol name from offset
+1. fn test symbol name
+2. expect test symbol name
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns symbol name from offset")
 fn test_symbol_name() -> bool:
     # symbol_name should return "bar" for bar symbol
     true
@@ -141,18 +155,17 @@ expect test_symbol_name()
 
 #### patches local symbol address
 
-- patches local symbol address
+1. fn test local relocation
+2. expect test local relocation
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("patches local symbol address")
 fn test_local_relocation() -> bool:
     # Abs64 relocation should patch base + symbol.value
     true
@@ -166,18 +179,17 @@ expect test_local_relocation()
 
 #### loads minimal module
 
-- loads minimal module
+1. fn test load minimal
+2. expect test load minimal
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("loads minimal module")
 fn test_load_minimal() -> bool:
     # Loading valid SMF should succeed
     true
@@ -189,18 +201,17 @@ expect test_load_minimal()
 
 #### executable module has entry point
 
-- executable module has entry point
+1. fn test entry point
+2. expect test entry point
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("executable module has entry point")
 fn test_entry_point() -> bool:
     # Executable module should have entry_point
     true
@@ -212,18 +223,17 @@ expect test_entry_point()
 
 #### code memory contains expected bytes
 
-- code memory contains expected bytes
+1. fn test code bytes
+2. expect test code bytes
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("code memory contains expected bytes")
 fn test_code_bytes() -> bool:
     # Code should contain 0xC3 (ret instruction)
     true
@@ -237,18 +247,17 @@ expect test_code_bytes()
 
 #### caches loaded modules
 
-- caches loaded modules
+1. fn test cache
+2. expect test cache
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("caches loaded modules")
 fn test_cache() -> bool:
     # Loading same path twice should return same Arc
     true
@@ -260,18 +269,17 @@ expect test_cache()
 
 #### resolves exported symbol
 
-- resolves exported symbol
+1. fn test resolve symbol
+2. expect test resolve symbol
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("resolves exported symbol")
 fn test_resolve_symbol() -> bool:
     # Registry should find "entry" symbol
     true
@@ -283,18 +291,17 @@ expect test_resolve_symbol()
 
 #### resolves imports via registry
 
-- resolves imports via registry
+1. fn test import resolution
+2. expect test import resolution
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("resolves imports via registry")
 fn test_import_resolution() -> bool:
     # Importer's relocation should be patched to provider's address
     true
@@ -308,18 +315,17 @@ expect test_import_resolution()
 
 #### name_str returns trimmed name
 
-- name_str returns trimmed name
+1. fn test name str
+2. expect test name str
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("name_str returns trimmed name")
 fn test_name_str() -> bool:
     # "code" section should have name_str "code"
     true
@@ -331,18 +337,17 @@ expect test_name_str()
 
 #### executable section has EXEC flag
 
-- executable section has EXEC flag
+1. fn test exec flag
+2. expect test exec flag
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("executable section has EXEC flag")
 fn test_exec_flag() -> bool:
     # Code section should be executable
     true
@@ -354,18 +359,17 @@ expect test_exec_flag()
 
 #### data section has WRITE flag
 
-- data section has WRITE flag
+1. fn test write flag
+2. expect test write flag
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("data section has WRITE flag")
 fn test_write_flag() -> bool:
     # Data section should be writable
     true
@@ -377,18 +381,17 @@ expect test_write_flag()
 
 #### rodata section is read-only
 
-- rodata section is read-only
+1. fn test readonly
+2. expect test readonly
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("rodata section is read-only")
 fn test_readonly() -> bool:
     # RoData should not be writable or executable
     true
@@ -400,18 +403,17 @@ expect test_readonly()
 
 #### section can have all flags
 
-- section can have all flags
+1. fn test all flags
+2. expect test all flags
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("section can have all flags")
 fn test_all_flags() -> bool:
     # Section with READ|WRITE|EXEC should have all properties
     true
@@ -425,18 +427,17 @@ expect test_all_flags()
 
 #### get_function returns None for data symbol
 
-- get_function returns None for data symbol
+1. fn test get function data
+2. expect test get function data
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("get_function returns None for data symbol")
 fn test_get_function_data() -> bool:
     # Data symbols should not be returned by get_function
     true
@@ -448,18 +449,17 @@ expect test_get_function_data()
 
 #### source_hash is readable
 
-- source_hash is readable
+1. fn test source hash
+2. expect test source hash
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("source_hash is readable")
 fn test_source_hash() -> bool:
     # Module should expose source_hash from header
     true
@@ -471,18 +471,17 @@ expect test_source_hash()
 
 #### entry_point returns None for non-executable
 
-- entry_point returns None for non-executable
+1. fn test entry non exec
+2. expect test entry non exec
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("entry_point returns None for non-executable")
 fn test_entry_non_exec() -> bool:
     # Library modules should not have entry_point
     true
@@ -494,18 +493,17 @@ expect test_entry_non_exec()
 
 #### get_function works on library modules
 
-- get_function works on library modules
+1. fn test library get function
+2. expect test library get function
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("get_function works on library modules")
 fn test_library_get_function() -> bool:
     # Library modules can still have get_function work
     true
@@ -517,18 +515,17 @@ expect test_library_get_function()
 
 #### exports lists global symbols
 
-- exports lists global symbols
+1. fn test exports
+2. expect test exports
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("exports lists global symbols")
 fn test_exports() -> bool:
     # exports() should return global symbols
     true
@@ -540,18 +537,17 @@ expect test_exports()
 
 #### is_reloadable checks flag
 
-- is_reloadable checks flag
+1. fn test is reloadable
+2. expect test is reloadable
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("is_reloadable checks flag")
 fn test_is_reloadable() -> bool:
     # Reloadable modules should return true
     true
@@ -565,18 +561,17 @@ expect test_is_reloadable()
 
 #### get_fn finds existing function
 
-- get_fn finds existing function
+1. fn test get fn
+2. expect test get fn
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("get_fn finds existing function")
 fn test_get_fn() -> bool:
     # DynModule.get_fn should find "entry"
     true
@@ -588,18 +583,17 @@ expect test_get_fn()
 
 #### get_fn returns None for missing
 
-- get_fn returns None for missing
+1. fn test get fn missing
+2. expect test get fn missing
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("get_fn returns None for missing")
 fn test_get_fn_missing() -> bool:
     # Missing symbol should return None
     true
@@ -611,18 +605,17 @@ expect test_get_fn_missing()
 
 #### entry_fn returns entry point
 
-- entry_fn returns entry point
+1. fn test entry fn
+2. expect test entry fn
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("entry_fn returns entry point")
 fn test_entry_fn() -> bool:
     # DynModule.entry_fn should work
     true
@@ -636,18 +629,17 @@ expect test_entry_fn()
 
 #### unload removes from cache
 
-- unload removes from cache
+1. fn test unload
+2. expect test unload
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("unload removes from cache")
 fn test_unload() -> bool:
     # Unload should succeed and remove module
     true
@@ -659,18 +651,17 @@ expect test_unload()
 
 #### unload returns false for uncached
 
-- unload returns false for uncached
+1. fn test unload uncached
+2. expect test unload uncached
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("unload returns false for uncached")
 fn test_unload_uncached() -> bool:
     # Unloading non-cached path returns false
     true
@@ -682,18 +673,17 @@ expect test_unload_uncached()
 
 #### reload replaces cached module
 
-- reload replaces cached module
+1. fn test reload
+2. expect test reload
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("reload replaces cached module")
 fn test_reload() -> bool:
     # Reload should return new instance
     true
@@ -705,18 +695,17 @@ expect test_reload()
 
 #### reload updates cache
 
-- reload updates cache
+1. fn test reload cache
+2. expect test reload cache
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("reload updates cache")
 fn test_reload_cache() -> bool:
     # After reload, load returns reloaded instance
     true
@@ -730,18 +719,17 @@ expect test_reload_cache()
 
 #### resolve returns None for unknown symbol
 
-- resolve returns None for unknown symbol
+1. fn test unknown symbol
+2. expect test unknown symbol
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("resolve returns None for unknown symbol")
 fn test_unknown_symbol() -> bool:
     # Unknown symbols should not resolve
     true
@@ -753,18 +741,17 @@ expect test_unknown_symbol()
 
 #### resolve ignores local symbols
 
-- resolve ignores local symbols
+1. fn test local not resolved
+2. expect test local not resolved
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("resolve ignores local symbols")
 fn test_local_not_resolved() -> bool:
     # Local symbols should not be resolvable via registry
     true
@@ -776,18 +763,17 @@ expect test_local_not_resolved()
 
 #### load nonexistent fails
 
-- load nonexistent fails
+1. fn test load nonexistent
+2. expect test load nonexistent
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("load nonexistent fails")
 fn test_load_nonexistent() -> bool:
     # Loading missing file should error
     true
@@ -799,18 +785,17 @@ expect test_load_nonexistent()
 
 #### unload nonexistent returns false
 
-- unload nonexistent returns false
+1. fn test unload nonexistent
+2. expect test unload nonexistent
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("unload nonexistent returns false")
 fn test_unload_nonexistent() -> bool:
     # Unloading missing path returns false
     true
@@ -832,51 +817,3 @@ expect test_unload_nonexistent()
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `0fa8fcbc5064833f20d8d8d414e031a7b8cc1e6e33d05e2b9ec0b6ffcf89e7b1`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `0fa8fcbc5064833f20d8d8d414e031a7b8cc1e6e33d05e2b9ec0b6ffcf89e7b1`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `0fa8fcbc5064833f20d8d8d414e031a7b8cc1e6e33d05e2b9ec0b6ffcf89e7b1`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/03_system/feature/usage/module_loader_spec.spl
-mirror: doc/06_spec/03_system/feature/usage/module_loader_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/feature/usage/module_loader_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/feature/usage/module_loader_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/feature/usage/module_loader_spec.spl:68:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'rejects bad magic number' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/usage/module_loader_spec.spl:88:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'resolves symbol by name' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/usage/module_loader_spec.spl:97:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'returns symbol name from offset' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

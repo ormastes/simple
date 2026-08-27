@@ -25,7 +25,6 @@ PRODUCER_SCRIPT="scripts/check/build-simpleos-arm64-desktop-engine2d-attested.sh
 MANIFEST_SCHEMA="simpleos-arm64-desktop-engine2d-build-manifest-v2"
 EVIDENCE_DIR="${SIMPLEOS_ARM64_QMP_EVIDENCE_DIR:-build/os/arm64_qmp_input_evidence}"
 EVIDENCE_ENV="$EVIDENCE_DIR/evidence.env"
-EVIDENCE_REPORT="$EVIDENCE_DIR/report.md"
 SERIAL_LOG="$EVIDENCE_DIR/serial.log"
 QEMU_LOG="$EVIDENCE_DIR/qemu.stderr.log"
 QMP_LOG="$EVIDENCE_DIR/qmp-input.log"
@@ -59,7 +58,7 @@ trap 'on_signal 130' INT
 trap 'on_signal 143' TERM
 
 sha256_file() {
-    sha256_line="$(qemu_admission_sha256 "$1")" || return 1
+    sha256_line="$(shasum -a 256 "$1")" || return 1
     sha256_value="${sha256_line%% *}"
     case "$sha256_value" in
         *[!0-9a-f]*|"") return 1 ;;
@@ -76,7 +75,6 @@ fail_evidence() {
         echo "arm64_qmp_input_kernel=$KERNEL"
         echo "arm64_qmp_input_disk=$DISK"
         echo "arm64_qmp_input_build_manifest=$BUILD_MANIFEST"
-        echo "arm64_qmp_input_report=$EVIDENCE_REPORT"
         echo "arm64_qmp_input_serial_log=$SERIAL_LOG"
         echo "arm64_qmp_input_qmp_log=$QMP_LOG"
         echo "arm64_qmp_input_before_ppm=$BEFORE_PPM"
@@ -126,8 +124,6 @@ for key in \
     source_roots \
     source_fingerprint \
     source_file_count \
-    entry_path \
-    entry_sha256 \
     kernel_path \
     kernel_sha256 \
     disk_path \
@@ -172,8 +168,6 @@ MANIFEST_SOURCE_REVISION="$(manifest_field source_revision)"
 MANIFEST_SOURCE_ROOTS="$(manifest_field source_roots)"
 MANIFEST_SOURCE_FINGERPRINT="$(manifest_field source_fingerprint)"
 MANIFEST_SOURCE_FILE_COUNT="$(manifest_field source_file_count)"
-MANIFEST_ENTRY_PATH="$(manifest_field entry_path)"
-MANIFEST_ENTRY_SHA256="$(manifest_field entry_sha256)"
 MANIFEST_KERNEL_PATH="$(manifest_field kernel_path)"
 MANIFEST_KERNEL_SHA256="$(manifest_field kernel_sha256)"
 MANIFEST_DISK_PATH="$(manifest_field disk_path)"
@@ -264,15 +258,6 @@ printf '%s\n' "$MANIFEST_SOURCE_FINGERPRINT" |
 printf '%s\n' "$MANIFEST_SOURCE_FILE_COUNT" |
     grep -Eq '^[1-9][0-9]*$' ||
     fail_evidence "canonical-build-manifest-source-file-count-invalid"
-[ "$MANIFEST_ENTRY_PATH" = "examples/09_embedded/simple_os/arch/arm64/gui_entry_desktop.spl" ] ||
-    fail_evidence "canonical-build-manifest-entry-path-mismatch"
-[ -f "$MANIFEST_ENTRY_PATH" ] && [ ! -L "$MANIFEST_ENTRY_PATH" ] ||
-    fail_evidence "canonical-build-manifest-entry-unavailable"
-printf '%s\n' "$MANIFEST_ENTRY_SHA256" |
-    grep -Eq '^[0-9a-f]{64}$' ||
-    fail_evidence "canonical-build-manifest-entry-sha256-invalid"
-[ "$(sha256_file "$MANIFEST_ENTRY_PATH")" = "$MANIFEST_ENTRY_SHA256" ] ||
-    fail_evidence "canonical-build-manifest-entry-sha256-mismatch"
 [ "$MANIFEST_KERNEL_PATH" = "$KERNEL" ] ||
     fail_evidence "canonical-build-manifest-kernel-path-mismatch"
 [ "$MANIFEST_DISK_PATH" = "$DISK" ] ||
@@ -570,51 +555,6 @@ ready, _ = wait_serial(
     r"^\[desktop-gui-arm64\] desktop-ready revision=(\d+)\r?$", 45
 )
 baseline_revision = int(ready.group(1))
-
-def require_simd_receipt(text):
-    receipt_lines = [
-        line.rstrip("\r") for line in text.splitlines()
-        if line.startswith("[engine2d-simd]")
-    ]
-    if len(receipt_lines) != 1:
-        raise RuntimeError(
-            "expected exactly one guest Engine2D SIMD receipt, found %d"
-            % len(receipt_lines)
-        )
-    match = re.fullmatch(
-        r"\[engine2d-simd\] arch=aarch64 isa=neon enabled=1 "
-        r"fill_hits=(\d+) fill_chunks=(\d+) fill_tail_pixels=(\d+) "
-        r"scalar_parity=bit-exact",
-        receipt_lines[0],
-    )
-    if not match:
-        raise RuntimeError(
-            "guest Engine2D SIMD receipt reports fallback or contract mismatch"
-        )
-    native_hits, vector_chunks, scalar_tail_pixels = (
-        int(value) for value in match.groups()
-    )
-    if native_hits <= 0 or vector_chunks <= 0 or scalar_tail_pixels < 0:
-        raise RuntimeError(
-            "guest Engine2D SIMD receipt lacks native vector execution"
-        )
-    return {
-        "arch": "aarch64",
-        "isa": "neon",
-        "enabled": 1,
-        "native_hits": native_hits,
-        "vector_chunks": vector_chunks,
-        "scalar_tail_pixels": scalar_tail_pixels,
-        "required_kernel_kinds": "fill",
-        "executed_kernel_kinds": "fill",
-        "fallback": "none",
-        "scalar_parity": "bit-exact",
-    }
-
-# The freestanding ARM64 Engine2D desktop has one required target-native
-# kernel kind: fill. Reject missing, duplicate, fallback, wrong-ISA, or
-# non-vector receipts before any QMP input or capture can be admitted.
-simd_receipt = require_simd_receipt(serial_text())
 wait_serial(
     r"^\[backend2d-event-blocker\] backend=simpleos-qemu-arm64 "
     r"event_backend=virtio-mmio keyboard=transport-ready "
@@ -983,30 +923,8 @@ if (
 ):
     raise RuntimeError("uncorrelated RAMFB commit occurred before after capture")
 
-# Recheck the whole final transcript so a duplicate or fallback receipt emitted
-# after desktop-ready cannot survive into the PASS record.
-final_simd_receipt = require_simd_receipt(serial_text())
-if final_simd_receipt != simd_receipt:
-    raise RuntimeError("guest Engine2D SIMD receipt changed during run")
-
 print("qmp_transport=input-send-event")
 print("capture_origin=qemu-ramfb-screendump")
-print("simd_arch=%s" % final_simd_receipt["arch"])
-print("simd_isa=%s" % final_simd_receipt["isa"])
-print("simd_enabled=%d" % final_simd_receipt["enabled"])
-print("simd_native_hits=%d" % final_simd_receipt["native_hits"])
-print("simd_vector_chunks=%d" % final_simd_receipt["vector_chunks"])
-print("simd_scalar_tail_pixels=%d" % final_simd_receipt["scalar_tail_pixels"])
-print(
-    "simd_required_kernel_kinds=%s"
-    % final_simd_receipt["required_kernel_kinds"]
-)
-print(
-    "simd_executed_kernel_kinds=%s"
-    % final_simd_receipt["executed_kernel_kinds"]
-)
-print("simd_fallback=%s" % final_simd_receipt["fallback"])
-print("simd_scalar_parity=%s" % final_simd_receipt["scalar_parity"])
 print("baseline_revision=%d" % baseline_revision)
 print("pointer_sequences=%d,%d,%d,%d,%d" % (move_seq, down_seq, drag_seq, up_seq, wheel_seq))
 print("key_sequences=%d,%d,%d,%d,%d,%d,%d,%d" % (

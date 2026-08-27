@@ -11,13 +11,13 @@ use compiler.backend.llvm_target.{LlvmTargetConfig}
 use compiler.backend.backend.llvm_backend_tools.{LlvmObjectCode, compile_ir_to_object}
 use compiler.backend.llvm_ir_builder.{llvm_ir_builder_set_simpleos_header}
 use compiler.common.mir_target_context.{mir_target_context_os_from}
-use std.nogc_sync_mut.io_runtime.{env_get_opt}
+extern fn rt_env_get(key: text) -> text
 
 fn llvm_codegen_trace_enabled() -> bool:
-    (env_get_opt("SIMPLE_COMPILER_TRACE") ?? "") == "1"
+    (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1"
 
 fn llvm_codegen_bare_metal_requested() -> bool:
-    val requested_target = env_get_opt("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
+    val requested_target = rt_env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
     mir_target_context_os_from(requested_target, "") == "baremetal"
 
 fn llvm_codegen_target_config_for(options: BackendCompileOptions, bare_metal: bool) -> LlvmTargetConfig:
@@ -25,8 +25,8 @@ fn llvm_codegen_target_config_for(options: BackendCompileOptions, bare_metal: bo
         return LlvmTargetConfig.for_target_portable_numeric_baremetal(options.target, nil)
     LlvmTargetConfig.for_target_portable_numeric(options.target, nil)
 
-fn llvm_codegen_translator_for(module_name: text, target: CodegenTarget, bare_metal: bool) -> MirToLlvm:
-    if bare_metal:
+fn llvm_codegen_translator(module_name: text, target: CodegenTarget) -> MirToLlvm:
+    if llvm_codegen_bare_metal_requested():
         return MirToLlvm.create_baremetal(module_name, target, nil)
     MirToLlvm.create(module_name, target, nil)
 
@@ -43,7 +43,7 @@ fn llvm_translate_module_direct_ir_for(options: BackendCompileOptions, module: M
         case CodegenTarget.SimpleOS_X86_64: true
         case _: false
     llvm_ir_builder_set_simpleos_header(simpleos_header)
-    var translator = llvm_codegen_translator_for(module.name, options.target, bare_metal)
+    var translator = llvm_codegen_translator(module.name, options.target)
     if options.debug_info:
         translator.enable_debug_info()
     val ir = translator.translate_module(module)
@@ -54,37 +54,24 @@ pub fn llvm_translate_module_direct_ir(options: BackendCompileOptions, module: M
     llvm_translate_module_direct_ir_for(
         options, module, llvm_codegen_bare_metal_requested())
 
-pub fn llvm_compile_module_direct(options: BackendCompileOptions, module: MirModule) -> Result<CodegenOutput, CompileError>:
-    val trace_enabled = llvm_codegen_trace_enabled()
-    val bare_metal = llvm_codegen_bare_metal_requested()
-    if trace_enabled:
-        print "[llvm-direct] start"
-        print "[llvm-direct] module-name {module.name}"
-        print "[llvm-direct] function-count {module.functions.len()}"
-        for fn_ in module.functions.values():
-            print "[llvm-direct] function-name {fn_.name}"
-    # Translate MIR to LLVM IR
-    if trace_enabled:
-        print "[llvm-direct] config"
-    val config = llvm_codegen_target_config_for(options, bare_metal)
-    if trace_enabled:
-        print "[llvm-direct] translator"
-    if trace_enabled:
-        print "[llvm-direct] translate"
-    val llvm_ir = llvm_translate_module_direct_ir_for(options, module, bare_metal)
+    print "[llvm-direct] bytes"
+    val object_code: LlvmObjectCode = result.unwrap()
+    val bytes = object_code.bytes
+    print "[llvm-direct] done"
+    Ok(CodegenOutput.object(module.name, bytes))
 
     # Compile IR to object code via llc
-    if trace_enabled:
+    if llvm_codegen_trace_enabled():
         print "[llvm-direct] llc"
     val result = compile_ir_to_object(llvm_ir, config, options.opt_level)
-    if trace_enabled:
+    if llvm_codegen_trace_enabled():
         print "[llvm-direct] result"
     match result:
         Ok(object_code):
-            if trace_enabled:
+            if llvm_codegen_trace_enabled():
                 print "[llvm-direct] bytes"
             val bytes = object_code.bytes
-            if trace_enabled:
+            if llvm_codegen_trace_enabled():
                 print "[llvm-direct] done"
             Ok(CodegenOutput.object(module.name, bytes))
         Err(err_msg):
@@ -95,18 +82,17 @@ pub fn llvm_compile_module_direct_compiled(options: BackendCompileOptions, modul
     val bare_metal = llvm_codegen_bare_metal_requested()
     if trace_enabled:
         print "[llvm-direct] compiled:start"
-    val config = llvm_codegen_target_config_for(options, bare_metal)
-    var translator = llvm_codegen_translator_for(
-        "app.cli.bootstrap_main", options.target, bare_metal)
+    val config = llvm_codegen_target_config(options)
+    var translator = llvm_codegen_translator("app.cli.bootstrap_main", options.target)
     if options.debug_info:
         translator.enable_debug_info()
     val llvm_ir = translator.translate_module(module)
     val result = compile_ir_to_object(llvm_ir, config, options.opt_level)
     match result:
         Ok(object_code):
-            if trace_enabled:
+            if llvm_codegen_trace_enabled():
                 print "[llvm-direct] compiled:bytes"
-            val compiled_module: CompiledModule = CompiledModule(
+            Ok(CompiledModule(
                 name: "app.cli.bootstrap_main",
                 object_code: object_code.bytes,
                 has_assembly: false,
@@ -115,8 +101,7 @@ pub fn llvm_compile_module_direct_compiled(options: BackendCompileOptions, modul
                 llvm_ir: "",
                 symbols: [],
                 compile_time_ms: 0
-            )
-            Ok(compiled_module)
+            ))
         Err(err_msg):
             Err(compileerror_backend_error(BackendKind.Llvm, err_msg))
 
@@ -136,21 +121,21 @@ impl Codegen for LlvmCodegenAdapter:
             case AArch64_MacOS | X86_64_MacOS: true
             case Riscv64: true
             case X86: true
-            case Arm: true
+            case Arm32: true
             case Riscv32: true
-            case Native | Host: true
             case Wasm32: false
             case Wasm64: false
+            case C: false
             case CudaPtx: false
-            case HipHsaco: false
-            case OpenClC | OpenClSpirv: false
             case VulkanSpirv: false
+            case Metal: false
+            case OpenCL: false
             case Avr: false
             case I8086: false
     fn output_kind() -> CodegenOutputKind: CodegenOutputKind.ObjectCode
 
     fn compile_module(module: MirModule) -> Result<CodegenOutput, CompileError>:
-        llvm_compile_module_direct(self.options, module)
+        llvm_compile_module_direct(module, self.options)
 
 # ============================================================================
 # Exports

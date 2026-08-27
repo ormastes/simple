@@ -1,0 +1,306 @@
+# workbook_codec_roundtrip_spec
+
+> Purpose: the behavior asserted in this spec  Audience: engineers reading this spec to confirm the behavior still holds.
+
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 7 | 7 | 0 | 0 |
+
+<details>
+<summary>Full Scenario Manual</summary>
+
+# workbook_codec_roundtrip_spec
+
+Purpose: the behavior asserted in this spec  Audience: engineers reading this spec to confirm the behavior still holds.
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Application |
+| Status | Active |
+| Source | `test/01_unit/app/office/workbook_codec_roundtrip_spec.spl` |
+| Updated | 2026-08-22 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Purpose and audience
+
+Purpose: the behavior asserted in this spec  Audience: engineers reading this spec to confirm the behavior still holds.
+
+## Operator workflow
+
+1. Run `bin/simple test test/01_unit/app/office/workbook_codec_roundtrip_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the behavior under test.
+
+## Compatibility and limitations
+
+Covers the behavior asserted here; platform-specific behavior is out of scope.
+
+## Scenarios
+
+### Workbook codec (formula-preserving save/reopen)
+
+#### reloads and recalculates DOUBLE (registry function) and SUM (builtin) to the right values
+
+- Verify: reloads and recalculates DOUBLE (registry function) and SUM (builtin) to the right values
+   - Expected: cell_display_text(sheet.get_cell("B1")) equals `42`
+   - Expected: cell_display_text(sheet.get_cell("B2")) equals `7`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 16 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-SSPEC-LOCAL-001
+step("Verify: reloads and recalculates DOUBLE (registry function) and SUM (builtin) to the right values")
+sheet_function_registry_reset()
+assert_true(sheets_ext_register_builtins())
+assert_true(sheet_function_registry_has("DOUBLE"))
+
+val workbook = _build_workbook()
+val sdn_text = workbook_save(workbook)
+
+match workbook_load(sdn_text):
+    case Ok(reloaded):
+        val sheet = reloaded.sheets[0]
+        expect(cell_display_text(sheet.get_cell("B1"))).to_equal("42")
+        expect(cell_display_text(sheet.get_cell("B2"))).to_equal("7")
+    case Err(e):
+        assert_true(false)
+```
+
+</details>
+
+#### preserves the formula EXPRESSION in the reloaded model, not just the display value
+
+- Verify: preserves the formula EXPRESSION in the reloaded model, not just the display value
+   - Expected: expr equals `DOUBLE(A1)`
+   - Expected: expr equals `SUM(A2:A3)`
+   - Expected: value equals `21.0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 29 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-SSPEC-LOCAL-001
+step("Verify: preserves the formula EXPRESSION in the reloaded model, not just the display value")
+sheet_function_registry_reset()
+assert_true(sheets_ext_register_builtins())
+
+val workbook = _build_workbook()
+val sdn_text = workbook_save(workbook)
+
+match workbook_decode_sdn(sdn_text):
+    case Ok(reloaded):
+        val sheet = reloaded.sheets[0]
+        match sheet.get_cell("B1").value:
+            CellValue.FormulaVal(expr, cached_display):
+                expect(expr).to_equal("DOUBLE(A1)")
+            _:
+                assert_true(false)
+        match sheet.get_cell("B2").value:
+            CellValue.FormulaVal(expr, cached_display):
+                expect(expr).to_equal("SUM(A2:A3)")
+            _:
+                assert_true(false)
+        # A1 is a plain number cell, not a formula.
+        match sheet.get_cell("A1").value:
+            CellValue.NumberVal(value):
+                expect(value).to_equal(21.0)
+            _:
+                assert_true(false)
+    case Err(e):
+        assert_true(false)
+```
+
+</details>
+
+#### keeps the SDN save deterministic across repeated saves of the same workbook
+
+- Verify: keeps the SDN save deterministic across repeated saves of the same workbook
+   - Expected: first equals `second`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Verify: keeps the SDN save deterministic across repeated saves of the same workbook")
+# @req: REQ-SSPEC-LOCAL-001
+sheet_function_registry_reset()
+assert_true(sheets_ext_register_builtins())
+
+val workbook = _build_workbook()
+val first = workbook_save(workbook)
+val second = workbook_save(workbook)
+
+expect(first).to_equal(second)
+```
+
+</details>
+
+#### round-trips a sheet name and a plain text cell
+
+- Verify: round-trips a sheet name and a plain text cell
+   - Expected: reloaded.sheets[0].name equals `Notes`
+   - Expected: cell_display_text(reloaded.sheets[0].get_cell("C1")) equals `hello world`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 13 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Verify: round-trips a sheet name and a plain text cell")
+# @req: REQ-SSPEC-LOCAL-001
+var sheet = Sheet.new("Notes")
+sheet.set_value("C1", "hello world")
+val workbook = Workbook(title: "Named", sheets: [sheet], active_sheet: 0)
+
+val sdn_text = workbook_save(workbook)
+match workbook_decode_sdn(sdn_text):
+    case Ok(reloaded):
+        expect(reloaded.sheets[0].name).to_equal("Notes")
+        expect(cell_display_text(reloaded.sheets[0].get_cell("C1"))).to_equal("hello world")
+    case Err(e):
+        assert_true(false)
+```
+
+</details>
+
+#### rejects garbage input with Err instead of crashing
+
+- Verify: rejects garbage input with Err instead of crashing
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-SSPEC-LOCAL-001
+step("Verify: rejects garbage input with Err instead of crashing")
+match workbook_decode_sdn("!!! not a workbook at all ###"):
+    case Ok(_):
+        assert_true(false)
+    case Err(err):
+        assert_false(err.is_empty())
+```
+
+</details>
+
+#### rejects well-formed SDN that is missing the 'sheets' key
+
+- Verify: rejects well-formed SDN that is missing the 'sheets' key
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Verify: rejects well-formed SDN that is missing the 'sheets' key")
+# @req: REQ-SSPEC-LOCAL-001
+match workbook_decode_sdn("{title: \"no sheets here\"}"):
+    case Ok(_):
+        assert_true(false)
+    case Err(_):
+        assert_true(true)
+```
+
+</details>
+
+#### rejects a sheets array that is present but empty
+
+- Verify: rejects a sheets array that is present but empty
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Verify: rejects a sheets array that is present but empty")
+# @req: REQ-SSPEC-LOCAL-001
+match workbook_decode_sdn("{title: \"empty\", sheets: []}"):
+    case Ok(_):
+        assert_true(false)
+    case Err(_):
+        assert_true(true)
+```
+
+</details>
+
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 7 |
+| Active scenarios | 7 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
+
+
+</details>
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `2bfa65ed80412ecfd35d1f99238c670a5d0668517591bed020b09cf7d836aa16`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `2bfa65ed80412ecfd35d1f99238c670a5d0668517591bed020b09cf7d836aa16`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `2bfa65ed80412ecfd35d1f99238c670a5d0668517591bed020b09cf7d836aa16`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **90/100**; effective score: **90/100**; blockers: **0**.
+
+SSpec documentization score: 90/100
+source: test/01_unit/app/office/workbook_codec_roundtrip_spec.spl
+mirror: doc/06_spec/01_unit/app/office/workbook_codec_roundtrip_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=90
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/app/office/workbook_codec_roundtrip_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/office/workbook_codec_roundtrip_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: assumptions/preconditions, traceability, evidence, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/office/workbook_codec_roundtrip_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-10): 1 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/01_unit/app/office/workbook_codec_roundtrip_spec.spl:54:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'reloads and recalculates DOUBLE (registry function) and SUM (builtin) to the right values' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/office/workbook_codec_roundtrip_spec.spl:72:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'preserves the formula EXPRESSION in the reloaded model, not just the display value' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/office/workbook_codec_roundtrip_spec.spl:103:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'keeps the SDN save deterministic across repeated saves of the same workbook' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

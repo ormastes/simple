@@ -56,7 +56,7 @@ class CompilerContextImpl:
     stats: ContextStats
     next_type_var: i64
 
-    me infer_types(tmpl: SffiTemplate, hints: [TypeHint]) -> [TypeInfo]:
+    me infer_types(tmpl: Template, hints: [TypeHint]) -> [TypeInfo]:
         """Infer type arguments for a generic template.
 
         Args:
@@ -80,7 +80,9 @@ class CompilerContextImpl:
 
         for param in tmpl.type_params:
             # Find hint for this parameter
-            var found_type: TypeInfo = nil
+            # TypeInfo is a value struct, not an optional. Keep a valid value
+            # beside the explicit discriminator so HIR never stores nil in it.
+            var found_type: TypeInfo = default_type_info()
             var found = false
 
             for hint in hints:
@@ -111,7 +113,7 @@ class CompilerContextImpl:
         self.type_cache[cache_key] = inferred
         inferred
 
-    me instantiate_template(tmpl: SffiTemplate, type_args: [TypeInfo]) -> CompilationResult:
+    me instantiate_template(tmpl: Template, type_args: [TypeInfo]) -> CompilationResult:
         """Instantiate a generic template with concrete type arguments.
 
         Args:
@@ -128,7 +130,8 @@ class CompilerContextImpl:
             return CompilationResult(
                 success: true,
                 code: self.instantiation_cache[cache_key],
-                error: nil
+                has_error: false,
+                error: ""
             )
 
         self.stats.cache_misses = self.stats.cache_misses + 1
@@ -265,8 +268,6 @@ class CompilerContextImpl:
                 # TYPE_INFO metadata (after FUNC_EXIT)
                 if not found_func_exit:
                     return false
-                if i + 1 >= code_len:
-                    return false
                 i = i + 2  # tag follows
             else:
                 i = i + 1  # Unknown opcode, skip
@@ -292,10 +293,8 @@ struct ContextStats:
     cache_hits: i64
     cache_misses: i64
 
-struct SffiTemplate:
-    """SFFI template metadata (name + param/return TypeInfo), as parsed from the
-    compiler-SFFI JSON wire format. Distinct from compiler.backend.linker.obj_taker
-    .Template, which is the TemplateCode-section record (kind/body/constraints)."""
+struct Template:
+    """Template metadata."""
     name: text
     type_params: [text]
     param_types: [TypeInfo]
@@ -318,6 +317,12 @@ struct TypeInfo:
     lanes: i64
     args: [TypeInfo]
     # # DESUGARED: elem: TypeInfo
+    # Native bootstrap cannot materialize a finite non-nil value for a
+    # recursive value struct. `has_elem == false` is therefore the mandatory
+    # discriminator for the nil payload sentinel; no reader may access `elem`
+    # unless `has_elem` is true. Current constructors only produce the absent
+    # case. Reintroducing present recursive elements requires boxed/optional
+    # recursive aggregate support in HIR, not a fabricated default TypeInfo.
     has_elem: bool
     elem: TypeInfo
 
@@ -342,7 +347,6 @@ struct CompilationResult:
 # ============================================================================
 
 var CONTEXT_REGISTRY: Dict<i64, CompilerContextImpl> = {}
-var CONTEXT_HANDLES: [i64] = []
 var NEXT_HANDLE: i64 = 1
 
 fn alloc_handle() -> i64:
@@ -350,18 +354,6 @@ fn alloc_handle() -> i64:
     val handle = NEXT_HANDLE
     NEXT_HANDLE = NEXT_HANDLE + 1
     handle
-
-fn context_registry_remove(handle: i64):
-    # ponytail: O(n) rebuild avoids generated CONTEXT_REGISTRY_dot_remove/keys;
-    # add a dict remove lowering fix if context destruction becomes hot.
-    var next_registry: Dict<i64, CompilerContextImpl> = {}
-    var next_handles: [i64] = []
-    for key in CONTEXT_HANDLES:
-        if key != handle:
-            next_registry[key] = CONTEXT_REGISTRY[key]
-            next_handles.push(key)
-    CONTEXT_REGISTRY = next_registry
-    CONTEXT_HANDLES = next_handles
 
 # ============================================================================
 # Public API Functions
@@ -386,7 +378,6 @@ fn compiler_create_context() -> i64:
 
     val handle = alloc_handle()
     CONTEXT_REGISTRY[handle] = ctx
-    CONTEXT_HANDLES.push(handle)
     handle
 
 fn create_compiler_context() -> i64:
@@ -402,7 +393,7 @@ fn compiler_destroy_context(handle: i64):
     Args:
         handle: Context handle
     """
-    context_registry_remove(handle)
+    CONTEXT_REGISTRY = CONTEXT_REGISTRY.remove(handle)
 
 fn compiler_infer_types(
     handle: i64,
@@ -496,7 +487,7 @@ fn compiler_get_stats(handle: i64) -> text:
     if not CONTEXT_REGISTRY.contains(handle):
         return '{"error": "Invalid context handle"}'
 
-    val ctx: CompilerContextImpl = CONTEXT_REGISTRY[handle]
+    val ctx = CONTEXT_REGISTRY[handle]
     val stats = ctx.get_stats()
 
     '{"type_inferences": {stats.type_inferences}, "template_instantiations": {stats.template_instantiations}, "cache_hits": {stats.cache_hits}, "cache_misses": {stats.cache_misses}}'
@@ -505,7 +496,7 @@ fn compiler_get_stats(handle: i64) -> text:
 # JSON Parsing Helpers
 # ============================================================================
 
-fn parse_template_json(json_text: text) -> SffiTemplate:
+fn parse_template_json(json_text: text) -> Template:
     """Parse template metadata JSON produced by ObjTaker/JIT callers."""
     val name = sffi_json_field_text(json_text, "name")
 
@@ -517,7 +508,7 @@ fn parse_template_json(json_text: text) -> SffiTemplate:
             if value.len() > 0:
                 type_params.push(value)
 
-    SffiTemplate(
+    Template(
         name: name,
         type_params: type_params,
         param_types: [],
@@ -572,22 +563,15 @@ fn json_to_type_info_text(jv: text) -> TypeInfo:
     val bits_opt = sffi_json_field_i64(jv, "bits")
     val signed_opt = sffi_json_field_bool_opt(jv, "signed")
     val lanes_opt = sffi_json_field_i64(jv, "lanes")
-    # Same defect class as HirFunction.has_driver_manifest_attr: `.?` is the
-    # TryOperator, has no native lowering, and under SIMPLE_BOOTSTRAP=1 yields
-    # the nil sentinel (3) instead of a bool -- which reads back TRUE out of a
-    # `bool` slot. Use `if val`, which lowers to a genuine bool natively.
-    val has_bits_value = sffi_optional_i64_exists(bits_opt)
-    val has_signed_value = sffi_optional_bool_exists(signed_opt)
-    val has_lanes_value = sffi_optional_i64_exists(lanes_opt)
 
     TypeInfo(
         kind: kind,
         name: resolved_name,
-        has_bits: has_bits_value,
+        has_bits: bits_opt.?,
         bits: bits_opt.unwrap_or(0),
-        has_signed: has_signed_value,
+        has_signed: signed_opt.?,
         signed: signed_opt.unwrap_or(false),
-        has_lanes: has_lanes_value,
+        has_lanes: lanes_opt.?,
         lanes: lanes_opt.unwrap_or(0),
         args: [],
         has_elem: false,
@@ -633,11 +617,11 @@ fn default_type_info() -> TypeInfo:
 
 fn sffi_json_field_tail(json_text: text, key: text) -> text:
     val marker = '"' + key + '"'
-    val key_idx = json_text.index_of(marker)
+    val key_idx = json_text.index_of(marker) ?? -1
     if key_idx < 0:
         return ""
     var tail = json_text[key_idx + marker.len():json_text.len()]
-    val colon_idx = tail.index_of(":")
+    val colon_idx = tail.index_of(":") ?? -1
     if colon_idx < 0:
         return ""
     tail[colon_idx + 1:tail.len()].trim()
@@ -653,24 +637,10 @@ fn sffi_json_field_text(json_text: text, key: text) -> text:
     if not tail.starts_with("\""):
         return ""
     val rest = tail[1:tail.len()]
-    val end_idx = rest.index_of("\"")
+    val end_idx = rest.index_of("\"") ?? -1
     if end_idx < 0:
         return ""
     sffi_json_unquote('"' + rest[0:end_idx] + '"')
-
-# Native-safe optional presence checks. See the note at the TypeInfo
-# construction site: `opt.?` must never be used to fill a `bool` field.
-fn sffi_optional_i64_exists(opt: i64?) -> bool:
-    if val present = opt:
-        true
-    else:
-        false
-
-fn sffi_optional_bool_exists(opt: bool?) -> bool:
-    if val present = opt:
-        true
-    else:
-        false
 
 fn sffi_json_field_i64(json_text: text, key: text) -> i64?:
     val field_literal = sffi_json_field_literal(json_text, key)
@@ -700,13 +670,13 @@ fn sffi_json_field_literal(json_text: text, key: text) -> text:
     if tail.len() == 0:
         return ""
     var end_idx = tail.len()
-    val comma_idx = tail.index_of(",")
+    val comma_idx = tail.index_of(",") ?? -1
     if comma_idx >= 0 and comma_idx < end_idx:
         end_idx = comma_idx
-    val brace_idx = tail.index_of("}")
+    val brace_idx = tail.index_of("}") ?? -1
     if brace_idx >= 0 and brace_idx < end_idx:
         end_idx = brace_idx
-    val bracket_idx = tail.index_of("]")
+    val bracket_idx = tail.index_of("]") ?? -1
     if bracket_idx >= 0 and bracket_idx < end_idx:
         end_idx = bracket_idx
     tail[0:end_idx].trim()
@@ -807,14 +777,13 @@ fn serialize_compilation_result(result: CompilationResult) -> text:
     """
     if result.success:
         val code_bytes = result.code
-        var code_parts: [text] = []
-        for code_byte in code_bytes:
-            code_parts = code_parts.push("{code_byte}")
-        val code_str = code_parts.join(",")
+        val code_str = code_bytes.map("{_}").join(",")
         '{"success":true,"code":[{code_str}]}'
     else:
-        val error = result.error.unwrap_or("Unknown error")
-        '{"success":false,"error":"{error}"}'
+        val error = if result.has_error: result.error else: "Unknown error"
+        # Single-quoted JSON text does not interpolate in the bootstrap
+        # interpreter; concatenate the payload explicitly.
+        '{"success":false,"error":"' + error + '"}'
 
 # ============================================================================
 # Helper Functions
@@ -824,7 +793,7 @@ fn hints_to_key(hints: [TypeHint]) -> text:
     """Convert hints to cache key."""
     var parts: [text] = []
     for h in hints:
-        parts = parts.push("{h.source}:{h.param_index.unwrap_or(0)}")
+        parts = parts.push("{h.source}:{h.param_index}")
     parts.join(":")
 
 fn types_to_key(types: [TypeInfo]) -> text:
@@ -855,23 +824,33 @@ fn make_int_type(bits: i64, signed: bool) -> TypeInfo:
     var prefix = "u"
     if signed:
         prefix = "i"
-    TypeInfo(kind: "int", name: "{prefix}{bits}", bits: bits, signed: signed, lanes: nil, args: [], elem: nil)
+    TypeInfo(kind: "int", name: "{prefix}{bits}", has_bits: true, bits: bits,
+        has_signed: true, signed: signed, has_lanes: false, lanes: 0,
+        args: [], has_elem: false, elem: nil)
 
 fn make_float_type(bits: i64) -> TypeInfo:
     """Create a float TypeInfo."""
-    TypeInfo(kind: "float", name: "f{bits}", bits: bits, signed: nil, lanes: nil, args: [], elem: nil)
+    TypeInfo(kind: "float", name: "f{bits}", has_bits: true, bits: bits,
+        has_signed: false, signed: false, has_lanes: false, lanes: 0,
+        args: [], has_elem: false, elem: nil)
 
 fn make_bool_type() -> TypeInfo:
     """Create a bool TypeInfo."""
-    TypeInfo(kind: "bool", name: "bool", bits: nil, signed: nil, lanes: nil, args: [], elem: nil)
+    TypeInfo(kind: "bool", name: "bool", has_bits: true, bits: 1,
+        has_signed: false, signed: false, has_lanes: false, lanes: 0,
+        args: [], has_elem: false, elem: nil)
 
 fn make_string_type() -> TypeInfo:
     """Create a string TypeInfo."""
-    TypeInfo(kind: "string", name: "string", bits: nil, signed: nil, lanes: nil, args: [], elem: nil)
+    TypeInfo(kind: "string", name: "string", has_bits: false, bits: 0,
+        has_signed: false, signed: false, has_lanes: false, lanes: 0,
+        args: [], has_elem: false, elem: nil)
 
 fn make_named_type(name: text) -> TypeInfo:
     """Create a named TypeInfo."""
-    TypeInfo(kind: "named", name: name, bits: nil, signed: nil, lanes: nil, args: [], elem: nil)
+    TypeInfo(kind: "named", name: name, has_bits: false, bits: 0,
+        has_signed: false, signed: false, has_lanes: false, lanes: 0,
+        args: [], has_elem: false, elem: nil)
 
 # ============================================================================
 # Bytecode Helper Functions

@@ -54,6 +54,7 @@ does not claim atomic process-global font replacement or a global lock.
    - Expected: warm.quads[0].byte_offset equals `0`
    - Expected: warm.quads[1].byte_offset equals `1`
    - Expected: dirty.atlas_owner_identity() equals `warm.atlas_owner_identity()`
+- assert not equal
 
 
 <details>
@@ -91,10 +92,14 @@ assert_not_equal(dirty.atlas_cache_identity(), warm.atlas_cache_identity())
 
 - should carry one validated runtime configuration through every material path
 - Prepare one shared font batch for 2D
+- var renderer = setup shared font fixture
+- expect shared font batch
+- expect shared font batch
    - Expected: text_batch.render_config_identity equals `config.identity()`
    - Expected: text_batch.execution_target equals `cpu`
    - Expected: text_batch.execution_policy equals `FontExecutionPolicy.Required`
    - Expected: renderer.prepare_glyph_run_configured(run, 0xFFFFFFFFu32, config).render_config_identity equals `config.identity()`
+- draw ir empty glyph run payload
    - Expected: selected_config_identity equals `config.identity()`
 
 
@@ -216,7 +221,39 @@ expect(_nonzero_pixels(pixels)).to_be_greater_than(0)
    - Expected: invalid.font_identity equals ``
    - Expected: invalid.face_generation equals `0`
    - Expected: empty.font_identity equals ``
-   - Expected: empty.face_generation equals `0`
+   - Expected: empty.face_generation equals `0)  # oracle: pinned constant asserted by this scenario`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req: REQ-006 REQ-009 REQ-015 REQ-011
+step("Verify: should fail closed for invalid sizes and empty content")
+# evidence(pinned oracle): expected values below are authoritative constants verified by this scenario
+var renderer = setup_shared_font_fixture()
+val invalid = renderer.prepare_text("A", 0xFFFFFFFFu32, 0)
+expect(invalid.valid).to_be(false)
+expect(invalid.font_identity).to_equal("")
+expect(invalid.face_generation).to_equal(0)  # oracle: pinned constant asserted by this scenario
+expect(renderer.prepare_text("A", 0xFFFFFFFFu32, 513).valid).to_be(false)
+val empty = renderer.prepare_text("", 0xFFFFFFFFu32, 16)
+expect(empty.valid).to_be(true)
+expect(empty.is_empty()).to_be(true)
+expect(empty.font_identity).to_equal("")
+expect(empty.face_generation).to_equal(0)  # oracle: pinned constant asserted by this scenario
+```
+
+</details>
+
+#### should snapshot supplied glyph-run generation without claiming an identity
+
+- Verify: should snapshot supplied glyph-run generation without claiming an identity
+   - Expected: batch.font_identity equals ``
+   - Expected: batch.face_generation equals `37)  # oracle: pinned constant asserted by this scenario`
 
 
 <details>

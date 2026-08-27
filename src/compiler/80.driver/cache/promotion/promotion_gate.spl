@@ -1,0 +1,121 @@
+# Promotion gate — the single admission point for a main-namespace mapping.
+#
+# Design §15.1 (eligibility), §15.2 (Mode B attested promotion), §15.3 (merge
+# strategies), §15.4 (write policy).
+#
+# Order of checks is deliberate and fail-closed:
+#   1. namespace write authority (a developer machine dies here, structurally)
+#   2. git provenance: clean tree, exact commit, authenticated repo,
+#      FRESH fetch, reachability from the freshly fetched tip, trusted builder,
+#      approved workflow, merge strategy
+#   3. receipt signature by a known trusted builder
+#   4. receipt-vs-facts agreement (the receipt must describe THIS build)
+#   5. determinism / hermeticity declarations for Mode B relabelling
+#
+# CAS digest verification is NOT in this list on purpose: a verified blob hash
+# proves the bytes are the bytes, never that this action produced them. Only the
+# signed mapping does that.
+
+use compiler.driver.cache.promotion.git_provenance.{
+    GitProvenanceFacts, GitAdmission,
+    git_provenance_admits, git_admission_deny, git_admission_ok
+}
+use compiler.driver.cache.promotion.promotion_receipt.{
+    PromotionReceipt, TrustedBuilder, ReceiptVerification,
+    promotion_receipt_verify, promotion_receipt_matches_facts, promotion_receipt_digest
+}
+use compiler.driver.cache.remote.namespace_policy.{
+    NamespacePolicy, CacheNamespace,
+    namespace_policy_may_write, namespace_policy_can_ever_write_main,
+    cache_trust_may_hold_main,
+    NS_MAIN
+}
+use compiler.driver.cache.remote.remote_client.{
+    RemoteCacheClient, RemoteResult, remote_promote, remote_result_soft_fail
+}
+
+# Mode B extra conditions (§15.2). All must be declared true by the producer;
+# any `false` forces Mode A (rebuild on main).
+struct PromotionAttestation:
+    action_is_deterministic: bool
+    action_is_globally_cacheable: bool
+    inputs_are_hermetic: bool
+    no_untrusted_dependency: bool
+    manifest_strictly_verified: bool
+    required_tests_passed: bool
+
+fn promotion_attestation_full() -> PromotionAttestation:
+    PromotionAttestation(
+        action_is_deterministic: true,
+        action_is_globally_cacheable: true,
+        inputs_are_hermetic: true,
+        no_untrusted_dependency: true,
+        manifest_strictly_verified: true,
+        required_tests_passed: true
+    )
+
+fn promotion_attestation_none() -> PromotionAttestation:
+    PromotionAttestation(
+        action_is_deterministic: false,
+        action_is_globally_cacheable: false,
+        inputs_are_hermetic: false,
+        no_untrusted_dependency: false,
+        manifest_strictly_verified: false,
+        required_tests_passed: false
+    )
+
+fn promotion_attestation_admits(a: PromotionAttestation) -> GitAdmission:
+    if not a.action_is_deterministic:
+        return git_admission_deny("action is not declared deterministic; main must rebuild")
+    if not a.action_is_globally_cacheable:
+        return git_admission_deny("action is not globally cacheable")
+    if not a.inputs_are_hermetic:
+        return git_admission_deny("action inputs are not hermetic/declared")
+    if not a.no_untrusted_dependency:
+        return git_admission_deny("an untrusted dependency or runtime state entered the result")
+    if not a.manifest_strictly_verified:
+        return git_admission_deny("manifest and artifacts were not strictly verified")
+    if not a.required_tests_passed:
+        return git_admission_deny("required tests/proofs did not pass")
+    git_admission_ok()
+
+# ----------------------------------------------------------------------------
+# The gate
+# ----------------------------------------------------------------------------
+
+fn promotion_gate_admit(policy: NamespacePolicy, target: CacheNamespace, facts: GitProvenanceFacts, receipt: PromotionReceipt, builders: [TrustedBuilder], attestation: PromotionAttestation) -> GitAdmission:
+    # 1. namespace authority
+    if target.kind == NS_MAIN:
+        if not namespace_policy_can_ever_write_main(policy):
+            return git_admission_deny("role " + policy.role + " can never write the main namespace (read-only developer mode is the default)")
+        if not cache_trust_may_hold_main(target.trust):
+            return git_admission_deny("namespace trust " + target.trust + " may not hold main entries")
+    if not namespace_policy_may_write(policy, target.kind):
+        return git_admission_deny("namespace policy forbids writing the " + target.kind + " namespace as role " + policy.role)
+
+    # 2. git provenance (clean/exact/authenticated/fresh/reachable/trusted/strategy)
+    val git = git_provenance_admits(facts)
+    if not git.admitted:
+        return git
+
+    # 3. receipt signature
+    val sig = promotion_receipt_verify(receipt, builders)
+    if not sig.valid:
+        return git_admission_deny("receipt rejected: " + sig.reason)
+
+    # 4. the receipt must describe THIS build
+    val facts_agree = promotion_receipt_matches_facts(receipt, facts)
+    if not facts_agree.valid:
+        return git_admission_deny("receipt rejected: " + facts_agree.reason)
+
+    # 5. Mode B relabelling preconditions
+    promotion_attestation_admits(attestation)
+
+# Admit, then copy the action-mapping reference only. Blobs are untouched.
+# The policy is taken from the client, so a caller cannot supply a policy more
+# permissive than the one the client will actually enforce on the write.
+fn promotion_gate_promote(client: RemoteCacheClient, source: CacheNamespace, target: CacheNamespace, facts: GitProvenanceFacts, receipt: PromotionReceipt, builders: [TrustedBuilder], attestation: PromotionAttestation) -> RemoteResult:
+    val verdict = promotion_gate_admit(client.policy, target, facts, receipt, builders, attestation)
+    if not verdict.admitted:
+        return remote_result_soft_fail(verdict.reason)
+    remote_promote(client, source, target, receipt.action_digest, promotion_receipt_digest(receipt))

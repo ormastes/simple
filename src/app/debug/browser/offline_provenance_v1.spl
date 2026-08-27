@@ -1,0 +1,107 @@
+# Offline browser source provenance over compiler/CDP metadata owners.
+# This module parses no source-map or DWARF binary and opens no CDP transport.
+
+use std.common.debug.capability.{CapLevel}
+use std.common.debug.contracts_v1.{
+    DebugSessionId, DebugCapabilityV1, DebugVerificationV1,
+    DebugPerturbationV1, DebugRootOperationV1, DebugTargetNodeV1,
+    BoundaryFrameV1,
+}
+use std.common.debug.service_v1.{
+    central_debug_service_v1_session, central_debug_service_v1_add_target,
+    central_debug_service_v1_authorize, central_debug_service_v1_record_outcome,
+}
+use std.common.encoding.sha256_contract.{sha256_lower_hex_valid}
+
+pub enum BrowserDebugMetadataKindV1:
+    JsSourceMap
+    WasmDwarf
+
+pub struct BrowserDebugProvenanceInputV1:
+    kind: BrowserDebugMetadataKindV1
+    artifact_build_id: text
+    source_revision: text
+    expected_source_revision: text
+    source_anchor: text
+    symbol_id: text
+    generated_location: text
+    producer: text
+    producer_verified: bool
+
+pub struct BrowserDebugProvenanceResultV1:
+    verification: DebugVerificationV1
+    support: CapLevel
+    reason: text
+    frames: [BoundaryFrameV1]
+
+fn _exact_identity(value: text) -> bool:
+    value.starts_with("sha256:") and
+        sha256_lower_hex_valid(value.substring(7, value.len()))
+
+fn _metadata_name(kind: BrowserDebugMetadataKindV1) -> text:
+    match kind:
+        case BrowserDebugMetadataKindV1.JsSourceMap: "js-source-map"
+        case BrowserDebugMetadataKindV1.WasmDwarf: "wasm-dwarf"
+
+fn _from_runtime(kind: BrowserDebugMetadataKindV1) -> text:
+    match kind:
+        case BrowserDebugMetadataKindV1.JsSourceMap: "javascript"
+        case BrowserDebugMetadataKindV1.WasmDwarf: "wasm"
+
+fn _blocked(reason: text) -> BrowserDebugProvenanceResultV1:
+    BrowserDebugProvenanceResultV1(verification: DebugVerificationV1.Blocked,
+        support: CapLevel.Unavailable, reason: reason, frames: [])
+
+fn _validate(input: BrowserDebugProvenanceInputV1, session_build_id: text) -> text:
+    if not _exact_identity(session_build_id): return "debug session lacks an exact build identity"
+    if input.artifact_build_id != session_build_id: return "metadata build identity does not match the debug session"
+    if not _exact_identity(input.source_revision): return "metadata lacks an exact source revision"
+    if input.source_revision != input.expected_source_revision: return "metadata source revision does not match the requested source"
+    if input.source_anchor.trim() == "": return "metadata lacks SourceAnchor provenance"
+    if input.symbol_id.trim() == "": return "metadata lacks SymbolId provenance"
+    if input.generated_location.trim() == "": return "metadata lacks a generated location"
+    if input.producer.trim() == "" or not input.producer_verified: return "metadata producer is not verified"
+    ""
+
+pub fn browser_offline_provenance_v1(
+    session_id: DebugSessionId,
+    parent_target_id: text,
+    input: BrowserDebugProvenanceInputV1,
+) -> Result<BrowserDebugProvenanceResultV1, text>:
+    val session = match central_debug_service_v1_session(session_id):
+        case None: return Err("debug session not found")
+        case Some(value): value
+    val receipt = central_debug_service_v1_authorize(session_id,
+        DebugRootOperationV1.Inspect, DebugPerturbationV1.Passive,
+        "browser.offline-provenance." + _metadata_name(input.kind))
+    if not receipt.allowed: return Err(receipt.reason)
+    val invalid = _validate(input, session.build_id)
+    val feature_id = parent_target_id + "/" + _metadata_name(input.kind)
+    if invalid != "":
+        central_debug_service_v1_add_target(session_id,
+            DebugTargetNodeV1(target_id: feature_id, parent_target_id: parent_target_id,
+                kind: "browser." + _metadata_name(input.kind), label: _metadata_name(input.kind)),
+            DebugCapabilityV1(target_id: feature_id, support: CapLevel.Unavailable,
+                verification: DebugVerificationV1.Blocked,
+                perturbation: DebugPerturbationV1.Passive, reason: invalid))?
+        central_debug_service_v1_record_outcome(session_id, DebugRootOperationV1.Inspect,
+            DebugPerturbationV1.Passive, "browser.offline-provenance.outcome",
+            false, false, invalid)
+        return Ok(_blocked(invalid))
+    val frame = BoundaryFrameV1(from_runtime: _from_runtime(input.kind),
+        to_runtime: "simple", source_anchor: input.source_anchor,
+        symbol_id: input.symbol_id, generated_location: input.generated_location)
+    val reason = "offline metadata from verified " + input.producer +
+        "; live source breakpoint not verified"
+    central_debug_service_v1_add_target(session_id,
+        DebugTargetNodeV1(target_id: feature_id, parent_target_id: parent_target_id,
+            kind: "browser." + _metadata_name(input.kind), label: _metadata_name(input.kind)),
+        DebugCapabilityV1(target_id: feature_id, support: CapLevel.Native,
+            verification: DebugVerificationV1.FixtureVerified,
+            perturbation: DebugPerturbationV1.Passive, reason: reason))?
+    central_debug_service_v1_record_outcome(session_id, DebugRootOperationV1.Inspect,
+        DebugPerturbationV1.Passive, "browser.offline-provenance.outcome",
+        true, false, "exact build/source provenance matched; payload redacted")
+    Ok(BrowserDebugProvenanceResultV1(
+        verification: DebugVerificationV1.FixtureVerified,
+        support: CapLevel.Native, reason: reason, frames: [frame]))

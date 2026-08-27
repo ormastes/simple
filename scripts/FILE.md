@@ -9,7 +9,6 @@ Build, audit, bootstrap, and utility scripts.
 | `audit` | Audit scripts |
 | `bootstrap` | Bootstrap scripts |
 | `check` | Verification and evidence check scripts |
-| `ci` | CI build scripts (SimpleOS toolchain artifacts) |
 | `deps` | Dependency fetching scripts |
 | `fpga` | FPGA board scripts (kria, jtag, flash) |
 | `gui` | macOS GUI launcher scripts |
@@ -20,7 +19,6 @@ Build, audit, bootstrap, and utility scripts.
 | `qemu` | QEMU test and setup scripts |
 | `resource` | Resource files |
 | `rtl` | RTL/FPGA generation scripts |
-| `scv-migration` | SCV migration acceptance step scripts (signature-gated by check-scv-migration-todo.shs) |
 | `setup` | Project setup and install scripts |
 | `smoke` | Protocol smoke test scripts |
 | `check-workspace-root-guard.shs` | Workspace root guard |

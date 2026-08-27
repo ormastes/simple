@@ -1,0 +1,160 @@
+# codex-impl
+# Bounded parser and canonicalizer for transported RT/HAL v2 type descriptors.
+# The grammar has one spelling for every token and every decimal field.  A
+# successful parse therefore proves that `raw` itself is the canonical
+# re-emission and avoids constructing an O(size * depth) intermediate string.
+
+const _RTHAL_DESCRIPTOR_MAX_BYTES: i64 = 65536
+const _RTHAL_DESCRIPTOR_MAX_DEPTH: i64 = 64
+const _RTHAL_DESCRIPTOR_MAX_NODES: i64 = 1024
+const _RTHAL_DESCRIPTOR_I64_MAX: i64 = 0x7fffffffffffffff
+
+class _RtHalExactTypeDescriptorParser:
+    raw: text
+    position: i64
+    nodes: i64
+    valid: bool
+
+impl _RtHalExactTypeDescriptorParser:
+    fn _starts_at(needle: text, end: i64) -> bool:
+        val needle_length = needle.len()
+        if self.position < 0 or needle_length > end - self.position:
+            return false
+        var index = 0
+        while index < needle_length:
+            if self.raw.char_at(self.position + index) != needle.char_at(index):
+                return false
+            index = index + 1
+        true
+
+    me _consume(needle: text, end: i64) -> bool:
+        if not self._starts_at(needle, end):
+            return false
+        self.position = self.position + needle.len()
+        true
+
+    # Parse a canonical nonnegative decimal terminated by `delimiter`.
+    # -1 is safe as the failure sentinel because the grammar is nonnegative.
+    me _decimal(delimiter: text, end: i64) -> i64:
+        if self.position >= end:
+            self.valid = false
+            return -1
+        val first = self.raw.char_at(self.position)
+        if first < "0" or first > "9":
+            self.valid = false
+            return -1
+        if first == "0":
+            self.position = self.position + 1
+            if self.position >= end or self.raw.char_at(self.position) != delimiter:
+                self.valid = false
+                return -1
+            self.position = self.position + 1
+            return 0
+        var value: i64 = 0
+        while self.position < end:
+            val ch = self.raw.char_at(self.position)
+            if ch == delimiter:
+                self.position = self.position + 1
+                return value
+            if ch < "0" or ch > "9":
+                self.valid = false
+                return -1
+            val digit = self.raw.char_code_at(self.position) - 48
+            if value > (_RTHAL_DESCRIPTOR_I64_MAX - digit) / 10:
+                self.valid = false
+                return -1
+            value = value * 10 + digit
+            self.position = self.position + 1
+        self.valid = false
+        -1
+
+    me _framed_child(depth: i64, end: i64) -> bool:
+        val child_length = self._decimal(":", end)
+        if not self.valid or child_length <= 0 or child_length > end - self.position:
+            self.valid = false
+            return false
+        val child_end = self.position + child_length
+        if not self._type(depth, child_end) or self.position != child_end:
+            self.valid = false
+            return false
+        true
+
+    me _primitive(end: i64) -> bool:
+        val remaining = end - self.position
+        if ((remaining == 4 and self._starts_at("unit", end)) or
+            (remaining == 2 and self._starts_at("i8", end)) or
+            (remaining == 3 and self._starts_at("i16", end)) or
+            (remaining == 3 and self._starts_at("i32", end)) or
+            (remaining == 3 and self._starts_at("i64", end)) or
+            (remaining == 2 and self._starts_at("u8", end)) or
+            (remaining == 3 and self._starts_at("u16", end)) or
+            (remaining == 3 and self._starts_at("u32", end)) or
+            (remaining == 3 and self._starts_at("u64", end)) or
+            (remaining == 3 and self._starts_at("f32", end)) or
+            (remaining == 3 and self._starts_at("f64", end)) or
+            (remaining == 4 and self._starts_at("bool", end)) or
+            (remaining == 4 and self._starts_at("char", end)) or
+            (remaining == 5 and self._starts_at("bytes", end)) or
+            (remaining == 9 and self._starts_at("text:utf8", end))):
+            self.position = end
+            return true
+        false
+
+    me _type(depth: i64, end: i64) -> bool:
+        if not self.valid or depth > _RTHAL_DESCRIPTOR_MAX_DEPTH or end > self.raw.len() or self.position >= end:
+            self.valid = false
+            return false
+        self.nodes = self.nodes + 1
+        if self.nodes > _RTHAL_DESCRIPTOR_MAX_NODES or not self._consume("v2;", end):
+            self.valid = false
+            return false
+
+        if self._consume("array;", end):
+            val element_count = self._decimal(";", end)
+            if not self.valid or element_count < 0:
+                self.valid = false
+                return false
+            return self._framed_child(depth + 1, end) and self.position == end
+
+        if self._consume("tuple;", end):
+            val child_count = self._decimal(";", end)
+            if not self.valid or child_count < 0 or child_count > _RTHAL_DESCRIPTOR_MAX_NODES - self.nodes:
+                self.valid = false
+                return false
+            var child_index = 0
+            while child_index < child_count:
+                if not self._framed_child(depth + 1, end):
+                    return false
+                child_index = child_index + 1
+            if self.position != end:
+                self.valid = false
+                return false
+            return true
+
+        if self._consume("result;", end):
+            if not self._framed_child(depth + 1, end):
+                return false
+            if not self._framed_child(depth + 1, end) or self.position != end:
+                self.valid = false
+                return false
+            return true
+
+        if self._primitive(end):
+            return true
+        self.valid = false
+        false
+
+    me canonical() -> text:
+        val length = self.raw.len()
+        if length <= 0 or length > _RTHAL_DESCRIPTOR_MAX_BYTES:
+            return ""
+        if not self._type(1, length) or not self.valid or self.position != length:
+            return ""
+        # All accepted terminals and decimal fields have a unique spelling.
+        self.raw
+
+pub fn rt_hal_exact_type_descriptor_canonical(raw: text) -> text:
+    var parser = _RtHalExactTypeDescriptorParser(raw: raw, position: 0, nodes: 0, valid: true)
+    parser.canonical()
+
+export rt_hal_exact_type_descriptor_canonical

@@ -1,7 +1,6 @@
 # Deletion audit: mislabeled commit `c8dbb4df4f` (394 files / 56,398 lines) — still-absent inventory
 
-- Status: OPEN (P3)
-- Status re-verified 2026-08-17 by source inspection (triage shard 02).
+- **Status:** RECOVERY ROUND 2 COMPLETE — 170 of 244 in-scope files restored;
   remaining 74 confirmed obsolete-by-design (no action needed). `tools/tauri-shell`
   was restored separately (see Related).
 - **Priority:** P1

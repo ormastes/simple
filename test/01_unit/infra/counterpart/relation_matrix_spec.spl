@@ -529,3 +529,113 @@ describe "Counterpart matrix refuses vacuous and unsound runs":
             a_source("chrome", "chromium", "h1", execution_receipt_cpu("p_chrome"))
         ])
         assert_true(matrix_run_accepted(run))
+
+
+# ============================================================================
+# Edge branches of the relation evaluators
+# ============================================================================
+# @manual_section: Relation edge branches
+
+fn a_source_items(source_id: text, group: text, hash: text, items: i64) -> SourceResult:
+    SourceResult(
+        source_id: source_id,
+        provider_id: "provider_" + source_id,
+        independence_group: group,
+        status: ProviderStatus.executed,
+        artifact: an_artifact(hash, items),
+        execution: execution_receipt_cpu("provider_" + source_id),
+        provenance: a_provenance(),
+        conversions: [],
+        diagnostics: []
+    )
+
+describe "Counterpart relation engine edge branches":
+    it "falls back to hash projection for ordered_equal with no element sequence":
+        step("Evaluate ordered_equal on two hash-equal artifacts with no elements")
+        val cell = evaluate_relation(relation_input(
+            "l", "r", CounterpartRelation.ordered_equal, ConversionLoss.identity,
+            an_artifact("h1", 4), an_artifact("h1", 4)))
+        assert_true(cell.matched)
+
+    it "reports in-order agreement when element sequences are present and equal":
+        step("Evaluate ordered_equal over identical element sequences")
+        val base = relation_input(
+            "l", "r", CounterpartRelation.ordered_equal, ConversionLoss.identity,
+            an_artifact("h1", 2), an_artifact("h2", 2))
+        val cell = evaluate_relation(relation_input_with_elements(base, ["a", "b"], ["a", "b"]))
+        assert_true(cell.matched)
+
+    it "counts a length difference as mismatches, whichever side is shorter":
+        step("Evaluate ordered_equal with the left side shorter, then the right side")
+        val base = relation_input(
+            "l", "r", CounterpartRelation.ordered_equal, ConversionLoss.identity,
+            an_artifact("h1", 3), an_artifact("h2", 3))
+        val left_short = evaluate_relation(relation_input_with_elements(base, ["a"], ["a", "b", "c"]))
+        assert_false(left_short.matched)
+        assert_equal(left_short.mismatch_count, 2)
+        val right_short = evaluate_relation(relation_input_with_elements(base, ["a", "b", "c"], ["a"]))
+        assert_false(right_short.matched)
+        assert_equal(right_short.mismatch_count, 2)
+
+    it "refuses a multiset comparison whose item counts differ before hashing":
+        step("Evaluate multiset_equal with no elements and differing item counts")
+        val cell = evaluate_relation(relation_input(
+            "l", "r", CounterpartRelation.multiset_equal, ConversionLoss.identity,
+            an_artifact("h1", 9), an_artifact("h1", 4)))
+        assert_false(cell.matched)
+        assert_equal(cell.mismatch_count, 5)
+
+    it "falls back to hash projection for multiset_equal when counts agree":
+        step("Evaluate multiset_equal with no elements and equal item counts")
+        val cell = evaluate_relation(relation_input(
+            "l", "r", CounterpartRelation.multiset_equal, ConversionLoss.identity,
+            an_artifact("h1", 4), an_artifact("h1", 4)))
+        assert_true(cell.matched)
+
+    it "sorts multiset elements bytewise so shared prefixes order correctly":
+        step("Evaluate multiset_equal over the same elements in different orders")
+        val base = relation_input(
+            "l", "r", CounterpartRelation.multiset_equal, ConversionLoss.identity,
+            an_artifact("h1", 2), an_artifact("h2", 2))
+        val cell = evaluate_relation(relation_input_with_elements(base, ["ab", "aa"], ["aa", "ab"]))
+        assert_true(cell.matched)
+
+    it "refuses a negative failure count for a counted relation":
+        step("Evaluate cross_decode with facts claiming failed=-1")
+        val base = relation_input(
+            "l", "r", CounterpartRelation.cross_decode, ConversionLoss.identity,
+            an_artifact("h1", 3), an_artifact("h1", 3))
+        val cell = evaluate_relation(relation_input_with_facts(base, relation_facts(3, -1)))
+        assert_false(cell.matched)
+        assert_true(cell.detail.contains("negative failure count"))
+
+    it "concatenates every precondition failure into the refusal detail":
+        step("Trip two preconditions at once: lossy route on an exact relation, tolerance with no reason")
+        val base = relation_input(
+            "l", "r", CounterpartRelation.byte_exact, ConversionLoss.semantic_projection,
+            an_artifact("h1", 3), an_artifact("h1", 3))
+        val cell = evaluate_relation(relation_input_with_tolerance(base, 5, ""))
+        assert_false(cell.matched)
+        assert_equal(cell.mismatch_count, 2)
+        assert_true(cell.detail.contains("; "))
+
+describe "Counterpart matrix projected facts and tolerances":
+    it "projects counted facts over the smaller item count when hashes agree":
+        step("Compare a counted relation between sources with unequal item counts")
+        val plan = a_plan([plan_comparison("simple_cpu", "chrome", CounterpartRelation.cross_decode)])
+        val run = evaluate_matrix(plan, [
+            a_source_items("simple_cpu", "simple", "h1", 16),
+            a_source_items("chrome", "chromium", "h1", 4)
+        ])
+        assert_true(run.matrix[0].matched)
+        assert_true(matrix_run_accepted(run))
+
+    it "applies a stated tolerance carried on the plan comparison":
+        step("Compare numeric_bound metrics 16 vs 4 under a reasoned tolerance of 20")
+        val plan = a_plan([plan_comparison_with_tolerance(
+            "simple_cpu", "chrome", CounterpartRelation.numeric_bound, 20, "layout rounding")])
+        val run = evaluate_matrix(plan, [
+            a_source_items("simple_cpu", "simple", "h1", 16),
+            a_source_items("chrome", "chromium", "h2", 4)
+        ])
+        assert_true(run.matrix[0].matched)

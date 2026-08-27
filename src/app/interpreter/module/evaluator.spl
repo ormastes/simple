@@ -8,7 +8,6 @@
 from ..core import {Interpreter, Value, InterpreterError}
 from ..expr import {evaluate}
 from ..call import {evaluate_call, exec_function}
-use compiler.core.cfg_platform.{cfg_eval_key_value}
 
 export evaluate_module, ModuleState
 
@@ -67,10 +66,7 @@ fn evaluate_module(interp: Interpreter, items: [Node]) -> Result<i32, Interprete
     for item in items:
         match item:
             case Node.Function(f):
-                # #45: skip @cfg-gated variants whose condition is false so
-                # the matching variant wins regardless of declaration order.
-                if cfg_decorators_active(f):
-                    state.functions[f.name] = f
+                state.functions[f.name] = f
             case _:
                 pass
 
@@ -81,17 +77,13 @@ fn evaluate_module(interp: Interpreter, items: [Node]) -> Result<i32, Interprete
         match item:
             # Functions (may have decorators)
             case Node.Function(f):
-                # #45: a definition gated by a false @cfg condition must never
-                # register, so a true-condition same-named definition wins no
-                # matter which one is declared first.
-                if cfg_decorators_active(f):
-                    if f.decorators.len() > 0:
-                        val decorated = apply_decorators(interp, f, state)?
-                        interp.env.define(f.name, decorated)
-                    else:
-                        # Register non-decorated functions in environment
-                        val func_value = Value.function(f.name, f, interp.env.clone())
-                        interp.env.define(f.name, func_value)
+                if f.decorators.len() > 0:
+                    val decorated = apply_decorators(interp, f, state)?
+                    interp.env.define(f.name, decorated)
+                else:
+                    # Register non-decorated functions in environment
+                    val func_value = Value.function(f.name, f, interp.env.clone())
+                    interp.env.define(f.name, func_value)
 
             # Structs
             case Node.Struct(s):
@@ -266,82 +258,6 @@ fn evaluate_module(interp: Interpreter, items: [Node]) -> Result<i32, Interprete
         Ok(main_val.as_int() ?? 0)
 
 # ================================================================
-# @cfg Condition Evaluation (issue #45)
-# ================================================================
-# Same-named functions may be declared multiple times behind arch/os
-# @cfg gates (e.g. @cfg(x86_64) / @cfg(arm64), as in byte_utils.spl or
-# process_image.spl). Registration must keep only the variant whose
-# condition matches the current host, regardless of declaration order.
-# Conditions are resolved syntactically at registration time using the
-# compiler's cfg platform evaluator (compiler.core.cfg_platform).
-
-# Extract a plain token from a decorator argument expression.
-# Handles bare identifiers (@cfg(x86_64)) and string literals
-# (@cfg("target_arch", "riscv32")). Returns "" when not extractable.
-fn cfg_arg_token(expr: Expr) -> text:
-    match expr:
-        case Expr.Identifier(name):
-            name
-        case Expr.Literal(lit):
-            match lit:
-                case Literal.String(s): s
-                case _: ""
-        case _:
-            ""
-
-# Evaluate a single bare cfg token ("x86_64", "linux", "key=value", ...)
-# against the current host. Unknown tokens evaluate to false, matching
-# the compiler preprocessor's behavior.
-fn cfg_bare_token_active(token: text) -> bool:
-    if token.contains("="):
-        val sep = if token.contains("=="):
-            "=="
-        else:
-            "="
-        val parts = token.split(sep)
-        if parts.len() >= 2:
-            return cfg_eval_key_value(parts[0], parts[1])
-        return false
-    val os_match = cfg_eval_key_value("os", token)
-    val arch_match = cfg_eval_key_value("arch", token)
-    val cpu_match = cfg_eval_key_value("cpu", token)
-    os_match or arch_match or cpu_match
-
-# Whether all @cfg gates on a function match the current host.
-# Functions without @cfg decorators are always active. Unparseable
-# conditions are treated as active (preserves pre-#45 behavior).
-fn cfg_decorators_active(func: FunctionDef) -> bool:
-    for decorator in func.decorators:
-        if decorator.name != "cfg":
-            continue
-        if not decorator.args.?:
-            continue
-        val args = decorator.args.unwrap()
-        if args.len() >= 2:
-            # Key/value form: @cfg("target_arch", "riscv32")
-            val key = cfg_arg_token(args[0].value)
-            val value = cfg_arg_token(args[1].value)
-            if key != "" and value != "":
-                if not cfg_eval_key_value(key, value):
-                    return false
-            continue
-        if args.len() == 1:
-            match args[0].value:
-                case Expr.Call(callee, inner):
-                    # Negation form: @cfg(not(x86_64))
-                    val callee_name = cfg_arg_token(callee)
-                    if callee_name == "not" and inner.len() == 1:
-                        val inner_token = cfg_arg_token(inner[0])
-                        if inner_token != "" and cfg_bare_token_active(inner_token):
-                            return false
-                case _:
-                    # Bare token form: @cfg(x86_64), @cfg("linux")
-                    val token = cfg_arg_token(args[0].value)
-                    if token != "" and not cfg_bare_token_active(token):
-                        return false
-    true
-
-# ================================================================
 # Decorator Application
 # ================================================================
 
@@ -351,9 +267,8 @@ fn apply_decorators(interp: Interpreter, func: FunctionDef,
 
     # Apply decorators in reverse order (outermost last)
     for decorator in func.decorators.reversed():
-        # Skip compiler directives (@cfg is evaluated at registration time,
-        # see cfg_decorators_active — it is not a runtime decorator fn)
-        if decorator.name == "extern" or decorator.name == "deprecated" or decorator.name == "cfg":
+        # Skip compiler directives
+        if decorator.name == "extern" or decorator.name == "deprecated":
             continue
 
         val decorator_fn = evaluate(interp, decorator.name_expr)?
@@ -383,15 +298,8 @@ fn register_impl(interp: Interpreter, impl_block: ImplBlock,
     # Add methods to impl_methods registry
     if not state.impl_methods.has(type_name):
         state.impl_methods[type_name] = []
-    # Fix owner: every impl member must be registered independently. Do not
-    # hoist static registration out of this loop or retain only a first/last
-    # method: PersistentVec.from_array/of and GcConfig.with_heap_size exposed
-    # that failure shape (2026-07-20).
     for method in impl_block.methods:
-        # ADR-004: dict-index mutation needs write-back.
-        var bucket = state.impl_methods[type_name]
-        bucket.push(method)
-        state.impl_methods[type_name] = bucket
+        state.impl_methods[type_name].push(method)
 
         # Register static methods as module-level callable functions
         # so Type.method() can be dispatched via "Type.method" key
@@ -427,9 +335,7 @@ fn register_impl(interp: Interpreter, impl_block: ImplBlock,
             for trait_method in trait_def.methods:
                 if not trait_method.is_abstract and not impl_method_names.contains(trait_method.name):
                     combined.push(trait_method)
-                    var bucket = state.impl_methods[type_name]
-                    bucket.push(trait_method)
-                    state.impl_methods[type_name] = bucket
+                    state.impl_methods[type_name].push(trait_method)
 
             state.trait_impls[(trait_name, type_name)] = combined
 

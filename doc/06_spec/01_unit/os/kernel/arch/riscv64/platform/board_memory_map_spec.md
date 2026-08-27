@@ -357,7 +357,7 @@ expect(litex_uart).to_equal(4026535936)
 
 ## Related Documentation
 
-- **Requirements:** `REQ-5`
+- **Requirements:** [REQ-5](REQ-5)
 
 
 </details>

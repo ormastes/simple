@@ -1,0 +1,359 @@
+# Pure provisional-to-final MIR coverage probe planning.
+#
+# This module deliberately does not add MIR opcodes or backend behavior. It
+# resolves lowering-owned site keys and boolean operands against one finalized
+# closure catalog, then emits deterministic numeric payloads for a later MIR
+# integration change.
+
+use std.common.encoding.sha256_contract.{sha256_lower_hex_valid}
+use compiler.mir.mir_coverage.{MirCoverageModeV1, MirCoverageCatalogV1,
+    MirCoverageDecisionRecordV1, MirCoverageConditionRecordV1,
+    MirCoverageSiteKeyV1, MirCoverageSiteKindV1,
+    mir_coverage_site_canonical_text_v1, mir_coverage_site_id_v1,
+    mir_coverage_condition_id_v1,
+    mir_coverage_catalog_snapshot_diagnostic_v1}
+
+pub enum MirCoverageBooleanOperandV1:
+    Local(local_id: i64)
+    Literal(value: bool)
+
+pub struct MirCoverageProvisionalDecisionProbeV1:
+    site: MirCoverageSiteKeyV1
+    operand: MirCoverageBooleanOperandV1
+
+pub struct MirCoverageProvisionalConditionProbeV1:
+    decision: MirCoverageSiteKeyV1
+    site: MirCoverageSiteKeyV1
+    operand: MirCoverageBooleanOperandV1
+
+pub struct MirCoverageDecisionProbePayloadV1:
+    semantic_id: text
+    runtime_id: i64
+    operand: MirCoverageBooleanOperandV1
+
+pub struct MirCoverageConditionProbePayloadV1:
+    decision_semantic_id: text
+    decision_runtime_id: i64
+    semantic_id: text
+    runtime_id: i64
+    operand: MirCoverageBooleanOperandV1
+
+pub struct MirCoverageProbePlanV1:
+    decisions: [MirCoverageDecisionProbePayloadV1]
+    conditions: [MirCoverageConditionProbePayloadV1]
+    canonical_text: text
+
+fn mir_coverage_probe_decision_kind_v1(kind: MirCoverageSiteKindV1) -> bool:
+    kind == MirCoverageSiteKindV1.IfDecision or
+        kind == MirCoverageSiteKindV1.WhileDecision
+
+fn mir_coverage_probe_condition_kind_v1(kind: MirCoverageSiteKindV1) -> bool:
+    kind == MirCoverageSiteKindV1.AndCondition or
+        kind == MirCoverageSiteKindV1.OrCondition
+
+fn mir_coverage_probe_frame_v1(value: text) -> text:
+    value.len().to_string() + ":" + value
+
+fn mir_coverage_boolean_operand_diagnostic_v1(
+    operand: MirCoverageBooleanOperandV1
+) -> text:
+    match operand:
+        case Local(local_id):
+            if local_id < 0:
+                "MIRCOV-P-E-OPERAND: boolean local ID must be nonnegative"
+            else:
+                ""
+        case Literal(_): ""
+
+fn mir_coverage_boolean_operand_canonical_text_v1(
+    operand: MirCoverageBooleanOperandV1
+) -> text:
+    match operand:
+        case Local(local_id):
+            "local" + mir_coverage_probe_frame_v1(local_id.to_string())
+        case Literal(value):
+            if value: "literal-true" else: "literal-false"
+
+fn mir_coverage_decision_record_index_v1(
+    records: [MirCoverageDecisionRecordV1],
+    semantic_id: text
+) -> i64:
+    var found = -1
+    var index = 0
+    while index < records.len():
+        if records[index].semantic_id == semantic_id:
+            if found >= 0: return -2
+            found = index
+        index = index + 1
+    found
+
+fn mir_coverage_condition_record_index_v1(
+    records: [MirCoverageConditionRecordV1],
+    semantic_id: text
+) -> i64:
+    var found = -1
+    var index = 0
+    while index < records.len():
+        if records[index].semantic_id == semantic_id:
+            if found >= 0: return -2
+            found = index
+        index = index + 1
+    found
+
+fn mir_coverage_probe_sdn_atom_valid_v1(value: text) -> bool:
+    value != "" and value == value.trim() and
+        not value.contains(",") and not value.contains("|") and
+        not value.contains("\n") and not value.contains("\r") and
+        not value.contains("\t")
+
+fn mir_coverage_probe_authored_path_valid_v1(path: text) -> bool:
+    if not mir_coverage_probe_sdn_atom_valid_v1(path): return false
+    if path.starts_with("/") or path.contains("\\") or path.contains(":"):
+        return false
+    for component in path.split("/"):
+        if component == "" or component == "." or component == "..":
+            return false
+    true
+
+fn mir_coverage_catalog_source_binding_count_v1(
+    catalog: MirCoverageCatalogV1,
+    authored_path: text,
+    source_sha256: text
+) -> i64:
+    var count = 0
+    for source in catalog.sources:
+        if (source.authored_path == authored_path and
+                source.source_sha256 == source_sha256):
+            count = count + 1
+    count
+
+fn mir_coverage_catalog_probe_diagnostic_v1(
+    catalog: MirCoverageCatalogV1
+) -> text:
+    if catalog.mode == MirCoverageModeV1.Disabled:
+        if (catalog.sources.len() != 0 or catalog.decisions.len() != 0 or
+                catalog.conditions.len() != 0 or catalog.zero_count_sdn != ""):
+            return "MIRCOV-P-E-CATALOG-MODE: disabled catalog must be empty"
+    elif catalog.mode == MirCoverageModeV1.Decisions:
+        if catalog.decisions.len() == 0 or catalog.conditions.len() != 0:
+            return "MIRCOV-P-E-CATALOG-MODE: decision-only catalog requires decisions and no conditions"
+    elif catalog.decisions.len() == 0:
+        return "MIRCOV-P-E-CATALOG-MODE: enabled catalog requires at least one decision"
+
+    var previous_source_path = ""
+    var source_index = 0
+    for source in catalog.sources:
+        if (not mir_coverage_probe_authored_path_valid_v1(
+                source.authored_path) or
+                not sha256_lower_hex_valid(source.source_sha256)):
+            return "MIRCOV-P-E-CATALOG-SOURCE: source identity is not canonical"
+        if source_index > 0 and source.authored_path == previous_source_path:
+            return "MIRCOV-P-E-CATALOG-SOURCE: source path appears more than once"
+        if source_index > 0 and source.authored_path < previous_source_path:
+            return "MIRCOV-P-E-CATALOG-SOURCE-ORDER: sources are not in canonical path order"
+        previous_source_path = source.authored_path
+        source_index = source_index + 1
+
+    var decision_semantic_ids: [text] = []
+    var decision_runtime_ids: [i64] = []
+    var previous_decision_key = ""
+    var decision_index = 0
+    for record in catalog.decisions:
+        if mir_coverage_catalog_source_binding_count_v1(
+                catalog, record.site.authored_path,
+                record.site.source_sha256) != 1:
+            return "MIRCOV-P-E-CATALOG-SOURCE: decision site has no exact catalog source binding"
+        if not mir_coverage_probe_decision_kind_v1(record.site.kind):
+            return "MIRCOV-P-E-CATALOG-KIND: decision record has a condition site"
+        if record.semantic_id != mir_coverage_site_id_v1(record.site):
+            return "MIRCOV-P-E-CATALOG-IDENTITY: decision semantic ID differs from its site"
+        if record.runtime_id <= 0:
+            return "MIRCOV-P-E-ZERO-MAPPING: decision runtime ID must be nonzero"
+        if record.runtime_id > 4294967295:
+            return "MIRCOV-P-E-CATALOG-RUNTIME-ID: decision runtime ID exceeds u32"
+        if record.runtime_id != decision_index + 1:
+            return "MIRCOV-P-E-CATALOG-RUNTIME-ID: decision runtime IDs must be the canonical sequence 1..N"
+        val decision_key = mir_coverage_site_canonical_text_v1(record.site)
+        if decision_index > 0 and decision_key < previous_decision_key:
+            return "MIRCOV-P-E-CATALOG-ORDER: decision records are not in canonical site order"
+        if decision_semantic_ids.contains(record.semantic_id) or
+                decision_runtime_ids.contains(record.runtime_id):
+            return "MIRCOV-P-E-CATALOG-DUPLICATE: decision mapping is not bijective"
+        decision_semantic_ids.push(record.semantic_id)
+        decision_runtime_ids.push(record.runtime_id)
+        previous_decision_key = decision_key
+        decision_index = decision_index + 1
+
+    var condition_semantic_ids: [text] = []
+    var condition_runtime_ids: [i64] = []
+    var previous_condition_key = ""
+    var condition_index = 0
+    for record in catalog.conditions:
+        if mir_coverage_catalog_source_binding_count_v1(
+                catalog, record.site.authored_path,
+                record.site.source_sha256) != 1:
+            return "MIRCOV-P-E-CATALOG-SOURCE: condition site has no exact catalog source binding"
+        if not mir_coverage_probe_condition_kind_v1(record.site.kind):
+            return "MIRCOV-P-E-CATALOG-KIND: condition record has a decision site"
+        if record.runtime_id <= 0 or record.decision_runtime_id <= 0:
+            return "MIRCOV-P-E-ZERO-MAPPING: condition and parent runtime IDs must be nonzero"
+        if record.runtime_id > 4294967295 or
+                record.decision_runtime_id > 4294967295:
+            return "MIRCOV-P-E-CATALOG-RUNTIME-ID: condition or parent runtime ID exceeds u32"
+        if record.runtime_id != condition_index + 1:
+            return "MIRCOV-P-E-CATALOG-RUNTIME-ID: condition runtime IDs must be the canonical sequence 1..N"
+        if condition_semantic_ids.contains(record.semantic_id) or
+                condition_runtime_ids.contains(record.runtime_id):
+            return "MIRCOV-P-E-CATALOG-DUPLICATE: condition mapping is not bijective"
+        val parent_index = mir_coverage_decision_record_index_v1(
+            catalog.decisions, record.decision_semantic_id)
+        if parent_index < 0:
+            return "MIRCOV-P-E-CATALOG-PARENT: condition parent decision is missing or duplicated"
+        if catalog.decisions[parent_index].runtime_id != record.decision_runtime_id:
+            return "MIRCOV-P-E-CATALOG-PARENT: condition parent runtime ID does not match its decision"
+        val parent_site = catalog.decisions[parent_index].site
+        if record.semantic_id != mir_coverage_condition_id_v1(
+                parent_site, record.site):
+            return "MIRCOV-P-E-CATALOG-IDENTITY: condition semantic ID differs from its parent-bound site"
+        if record.site.authored_path != parent_site.authored_path or
+                record.site.source_sha256 != parent_site.source_sha256 or
+                record.site.canonical_function_name !=
+                    parent_site.canonical_function_name:
+            return "MIRCOV-P-E-CATALOG-OWNER: condition must share its parent source and canonical function"
+        if record.site.byte_start < parent_site.byte_start or
+                record.site.byte_end > parent_site.byte_end:
+            return "MIRCOV-P-E-CATALOG-SPAN: condition span must lie within its parent decision span"
+        val condition_key =
+            mir_coverage_site_canonical_text_v1(parent_site) +
+            mir_coverage_site_canonical_text_v1(record.site)
+        if condition_index > 0 and condition_key < previous_condition_key:
+            return "MIRCOV-P-E-CATALOG-ORDER: condition records are not in canonical parent/site order"
+        condition_semantic_ids.push(record.semantic_id)
+        condition_runtime_ids.push(record.runtime_id)
+        previous_condition_key = condition_key
+        condition_index = condition_index + 1
+    mir_coverage_catalog_snapshot_diagnostic_v1(catalog)
+
+fn mir_coverage_sort_decision_payloads_v1(
+    values: [MirCoverageDecisionProbePayloadV1]
+) -> [MirCoverageDecisionProbePayloadV1]:
+    var result = values
+    var i = 0
+    while i < result.len():
+        var j = i + 1
+        while j < result.len():
+            if result[j].runtime_id < result[i].runtime_id:
+                val temporary = result[i]
+                result[i] = result[j]
+                result[j] = temporary
+            j = j + 1
+        i = i + 1
+    result
+
+fn mir_coverage_sort_condition_payloads_v1(
+    values: [MirCoverageConditionProbePayloadV1]
+) -> [MirCoverageConditionProbePayloadV1]:
+    var result = values
+    var i = 0
+    while i < result.len():
+        var j = i + 1
+        while j < result.len():
+            if result[j].runtime_id < result[i].runtime_id:
+                val temporary = result[i]
+                result[i] = result[j]
+                result[j] = temporary
+            j = j + 1
+        i = i + 1
+    result
+
+pub fn mir_coverage_probe_plan_canonical_text_v1(
+    decisions: [MirCoverageDecisionProbePayloadV1],
+    conditions: [MirCoverageConditionProbePayloadV1]
+) -> text:
+    var parts: [text] = ["MirCoverageProbePlan-v1"]
+    for probe in decisions:
+        parts.push(mir_coverage_probe_frame_v1("decision"))
+        parts.push(mir_coverage_probe_frame_v1(probe.semantic_id))
+        parts.push(mir_coverage_probe_frame_v1(probe.runtime_id.to_string()))
+        parts.push(mir_coverage_probe_frame_v1(
+            mir_coverage_boolean_operand_canonical_text_v1(probe.operand)))
+    for probe in conditions:
+        parts.push(mir_coverage_probe_frame_v1("condition"))
+        parts.push(mir_coverage_probe_frame_v1(probe.decision_semantic_id))
+        parts.push(mir_coverage_probe_frame_v1(
+            probe.decision_runtime_id.to_string()))
+        parts.push(mir_coverage_probe_frame_v1(probe.semantic_id))
+        parts.push(mir_coverage_probe_frame_v1(probe.runtime_id.to_string()))
+        parts.push(mir_coverage_probe_frame_v1(
+            mir_coverage_boolean_operand_canonical_text_v1(probe.operand)))
+    parts.join("")
+
+pub fn mir_coverage_resolve_probe_plan_v1(
+    catalog: MirCoverageCatalogV1,
+    provisional_decisions: [MirCoverageProvisionalDecisionProbeV1],
+    provisional_conditions: [MirCoverageProvisionalConditionProbeV1]
+) -> Result<MirCoverageProbePlanV1, text>:
+    val catalog_error = mir_coverage_catalog_probe_diagnostic_v1(catalog)
+    if catalog_error != "": return Err(catalog_error)
+    if provisional_decisions.len() != catalog.decisions.len() or
+            provisional_conditions.len() != catalog.conditions.len():
+        return Err("MIRCOV-P-E-BIJECTION: provisional probes and catalog mappings differ in cardinality")
+
+    var decision_ids: [text] = []
+    var decisions: [MirCoverageDecisionProbePayloadV1] = []
+    for provisional in provisional_decisions:
+        if not mir_coverage_probe_decision_kind_v1(provisional.site.kind):
+            return Err("MIRCOV-P-E-PROVISIONAL-KIND: decision probe has a condition site")
+        val operand_error = mir_coverage_boolean_operand_diagnostic_v1(
+            provisional.operand)
+        if operand_error != "": return Err(operand_error)
+        val semantic_id = mir_coverage_site_id_v1(provisional.site)
+        if decision_ids.contains(semantic_id):
+            return Err("MIRCOV-P-E-PROVISIONAL-DUPLICATE: decision probe appears more than once")
+        val record_index = mir_coverage_decision_record_index_v1(
+            catalog.decisions, semantic_id)
+        if record_index < 0:
+            return Err("MIRCOV-P-E-DECISION-MAPPING: decision site has no unique catalog mapping")
+        val record = catalog.decisions[record_index]
+        if mir_coverage_site_canonical_text_v1(record.site) !=
+                mir_coverage_site_canonical_text_v1(provisional.site):
+            return Err("MIRCOV-P-E-DECISION-MAPPING: decision site differs from its catalog mapping")
+        decision_ids.push(semantic_id)
+        decisions.push(MirCoverageDecisionProbePayloadV1(
+            semantic_id, record.runtime_id, provisional.operand))
+
+    var condition_ids: [text] = []
+    var conditions: [MirCoverageConditionProbePayloadV1] = []
+    for provisional in provisional_conditions:
+        if not mir_coverage_probe_decision_kind_v1(provisional.decision.kind) or
+                not mir_coverage_probe_condition_kind_v1(provisional.site.kind):
+            return Err("MIRCOV-P-E-PROVISIONAL-KIND: condition probe has an invalid site or parent kind")
+        val operand_error = mir_coverage_boolean_operand_diagnostic_v1(
+            provisional.operand)
+        if operand_error != "": return Err(operand_error)
+        val decision_semantic_id = mir_coverage_site_id_v1(
+            provisional.decision)
+        val semantic_id = mir_coverage_condition_id_v1(
+            provisional.decision, provisional.site)
+        if condition_ids.contains(semantic_id):
+            return Err("MIRCOV-P-E-PROVISIONAL-DUPLICATE: condition probe appears more than once")
+        val record_index = mir_coverage_condition_record_index_v1(
+            catalog.conditions, semantic_id)
+        if record_index < 0:
+            return Err("MIRCOV-P-E-CONDITION-MAPPING: condition site has no unique catalog mapping")
+        val record = catalog.conditions[record_index]
+        if record.decision_semantic_id != decision_semantic_id or
+                mir_coverage_site_canonical_text_v1(record.site) !=
+                    mir_coverage_site_canonical_text_v1(provisional.site):
+            return Err("MIRCOV-P-E-CONDITION-MAPPING: condition site or parent differs from its catalog mapping")
+        condition_ids.push(semantic_id)
+        conditions.push(MirCoverageConditionProbePayloadV1(
+            record.decision_semantic_id, record.decision_runtime_id,
+            semantic_id, record.runtime_id, provisional.operand))
+
+    val sorted_decisions = mir_coverage_sort_decision_payloads_v1(decisions)
+    val sorted_conditions = mir_coverage_sort_condition_payloads_v1(conditions)
+    val canonical = mir_coverage_probe_plan_canonical_text_v1(
+        sorted_decisions, sorted_conditions)
+    Ok(MirCoverageProbePlanV1(
+        sorted_decisions, sorted_conditions, canonical))

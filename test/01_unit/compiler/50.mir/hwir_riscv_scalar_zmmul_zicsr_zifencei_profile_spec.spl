@@ -1,0 +1,47 @@
+use std.spec.*
+use compiler.mir.hwir.types.{CoreConfig}
+use lib.hardware.riscv_common.isa.scalar_database.{riscv_scalar_decoder_plan,
+    riscv_scalar_elaborate_provider, riscv_scalar_entries_for_isa_profile,
+    riscv_scalar_lookup_profile}
+
+describe "combined Zmmul Zicsr Zifencei scalar profile":
+    it "freezes the exact RV32 and RV64 extension rows without DIV or REM":
+        val rv32 = riscv_scalar_entries_for_isa_profile("rv32i_zmmul_zicsr_zifencei").unwrap()
+        val rv64 = riscv_scalar_entries_for_isa_profile("rv64i_zmmul_zicsr_zifencei").unwrap()
+        expect(rv32.len()).to_equal(51)
+        expect(rv64.len()).to_equal(64)
+        for rows in [rv32, rv64]:
+            expect(rows.any(_.id == "rv.m.mul")).to_equal(true)
+            expect(rows.any(_.id == "rv.m.mulh")).to_equal(true)
+            expect(rows.any(_.id == "rv.zicsr.csrrw")).to_equal(true)
+            expect(rows.any(_.id == "rv.zicsr.csrrci")).to_equal(true)
+            expect(rows.any(_.id == "rv.i.fence_i")).to_equal(true)
+            expect(rows.any(_.id == "rv.m.div")).to_equal(false)
+            expect(rows.any(_.id == "rv.m.divu")).to_equal(false)
+            expect(rows.any(_.id == "rv.m.rem")).to_equal(false)
+            expect(rows.any(_.id == "rv.m.remu")).to_equal(false)
+        expect(rv64.any(_.id == "rv64.m.mulw")).to_equal(true)
+
+    it "binds exact XLEN, static multiply provider, and deterministic decoder plans":
+        val rv32_config = CoreConfig.rv32_zmmul_zicsr_zifencei()
+        val rv64_config = CoreConfig.rv64_zmmul_zicsr_zifencei()
+        expect(rv32_config.diagnostic()).to_equal("")
+        expect(rv64_config.diagnostic()).to_equal("")
+        expect(rv32_config.xlen).to_equal(32)
+        expect(rv64_config.xlen).to_equal(64)
+        val first = riscv_scalar_decoder_plan(rv64_config.isa_profile).unwrap()
+        val second = riscv_scalar_decoder_plan(rv64_config.isa_profile).unwrap()
+        expect(first.diagnostic()).to_equal("")
+        expect(first.structural_sha256()).to_equal(second.structural_sha256())
+        expect(first.xlen).to_equal(64)
+        val provider = riscv_scalar_elaborate_provider(rv32_config.isa_profile, "iterative").unwrap()
+        expect(provider.muldiv_provider).to_equal("iterative")
+        expect(provider.provider_for(riscv_scalar_lookup_profile(0x02000033,
+            rv32_config.isa_profile).unwrap()).unwrap()).to_equal("iterative")
+        expect(riscv_scalar_lookup_profile(0x02004033,
+            rv32_config.isa_profile).is_err()).to_equal(true)
+        expect(riscv_scalar_elaborate_provider(rv32_config.isa_profile, "none").is_err()).to_equal(true)
+        val wrong_xlen = CoreConfig(xlen: 64, physical_address_bits: 56, register_count: 32,
+            profile: "bad-combined", isa_profile: "rv32i_zmmul_zicsr_zifencei",
+            compressed_decode_profile: "none")
+        expect(wrong_xlen.diagnostic()).to_contain("RV32")

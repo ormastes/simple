@@ -2,8 +2,7 @@
 
 - **ID:** BUG-2026-08-01-match-fallthrough
 - **Date:** 2026-08-01
-- Status: OPEN (P2)
-- Status re-verified 2026-08-17 by source inspection (triage shard 02).
+- **Status:** diagnostic landed WARN-ONLY; full enforcement deferred (cost enumerated below)
 - **Severity:** high — silent wrong answer, no diagnostic on any lane
 
 ## Summary

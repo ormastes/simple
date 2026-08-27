@@ -3,7 +3,7 @@ extern fn rt_text_to_bytes(s: text) -> [u8]
 
 # Basic string operations
 fn str_len(s: text) -> i64:
-    rt_string_len(s)
+    s.len()
 
 fn str_concat(a: text, b: text) -> text:
     a + b
@@ -12,24 +12,16 @@ fn str_eq(a: text, b: text) -> bool:
     a == b
 
 # Slicing
-#
-# These use the language's own `s[a:b]` slice expression rather than the
-# `rt_slice` / `rt_string_char_at` externs. Both externs are declared for the
-# LLVM/C backends but NEITHER is registered in the interpreter's extern table,
-# so every interpreted call died with "unknown extern function: rt_slice" /
-# "... rt_string_char_at". `s[a:b]` is lowered natively by all three engines,
-# and this module already indexes natively elsewhere (str_trim_left,
-# str_replace_all), so this removes an inconsistency rather than adding one.
 fn str_slice(s: text, start: i64, end: i64) -> text:
     if start >= end:
         return ""
-    val slen = rt_string_len(s)
+    val slen = s.len()
     if start >= slen:
         return ""
-    s[start:end]
+    rt_slice(s, start, end, 1)
 
 fn str_safe_slice(s: text, start: i64, end: i64) -> text:
-    val slen = rt_string_len(s)
+    val slen = s.len()
     var s2 = start
     var e2 = end
     if s2 < 0:
@@ -38,67 +30,43 @@ fn str_safe_slice(s: text, start: i64, end: i64) -> text:
         e2 = slen
     if s2 >= e2:
         return ""
-    s[s2:e2]
+    rt_slice(s, s2, e2, 1)
 
 fn str_char_at(s: text, idx: i64) -> text:
-    # Character access is a Unicode-scalar ordinal, matching text.char_at and
-    # rt_string_char_at. A one-byte slice can split a multibyte scalar and
-    # manufacture malformed `text`, so byte access must use a byte API.
-    # Keep the legacy negative-index behavior of this free helper.
-    if idx < 0:
+    if idx < 0 or idx >= s.len():
         return ""
-    s.char_at(idx)
+    rt_string_char_at(s, idx)
 
 # Search
-#
-# These are implemented with the language's own slice expression rather than the
-# `rt_string_contains` / `rt_string_starts_with` / `rt_string_ends_with` /
-# `rt_string_find` / `rt_string_rfind` externs, for exactly the reason recorded
-# above `str_slice`: those five externs are declared for the LLVM/C backends but
-# NONE of them is registered in the interpreter's extern table. Unlike `rt_slice`
-# that did not raise "unknown extern function" — it silently yielded the return
-# type's zero value, so `str_index_of` / `str_last_index_of` answered -1 for
-# every input and `str_contains` / `str_starts_with` / `str_ends_with` answered
-# false for every input, including inputs that plainly match. -1 is the
-# "not found" sentinel, so callers quietly took the absent branch instead of
-# failing. `s[a:b]` is lowered natively by all three engines.
+fn str_contains(s: text, sub: text) -> bool:
+    s.contains(sub)
+
 fn str_starts_with(s: text, prefix: text) -> bool:
-    val plen = prefix.len()
-    if plen == 0:
-        return true
-    if plen > s.len():
-        return false
-    s[0:plen] == prefix
+    rt_string_starts_with(s, prefix)
 
 fn str_ends_with(s: text, suffix: text) -> bool:
-    val slen = s.len()
-    val flen = suffix.len()
-    if flen == 0:
-        return true
-    if flen > slen:
-        return false
-    s[slen - flen:slen] == suffix
+    rt_string_ends_with(s, suffix)
 
 fn str_index_of(s: text, sub: text) -> i64:
     val slen = s.len()
-    val sublen = sub.len()
-    if sublen == 0:
+    val plen = sub.len()
+    if plen == 0:
         return 0
-    if sublen > slen:
+    if plen > slen:
         return -1
     var i = 0
-    while i <= slen - sublen:
-        if s[i:i + sublen] == sub:
+    while i <= slen - plen:
+        if str_slice(s, i, i + plen) == sub:
             return i
         i = i + 1
     -1
 
 fn str_last_index_of(s: text, sub: text) -> i64:
     val slen = s.len()
-    val sublen = sub.len()
-    if sublen == 0:
+    val plen = sub.len()
+    if plen == 0:
         return slen
-    if sublen > slen:
+    if plen > slen:
         return -1
     var i = slen - sublen
     while i >= 0:
@@ -112,19 +80,19 @@ fn str_contains(s: text, sub: text) -> bool:
 
 # Whitespace helpers
 fn is_whitespace_char(c: text) -> bool:
-    c == " " or c == "\t" or c == "\n" or c == "\u000B" or c == "\u000C" or c == "\r"
+    c == " " or c == "\t" or c == "\n" or c == "\r"
 
 fn str_trim_left(s: text) -> text:
     val slen = s.len()
     var i = 0
-    while i < slen and is_whitespace_char(s[i:i + 1]):
+    while i < slen and is_whitespace_char(s[i]):
         i = i + 1
     str_slice(s, i, slen)
 
 fn str_trim_right(s: text) -> text:
     val slen = s.len()
     var i = slen - 1
-    while i >= 0 and is_whitespace_char(s[i:i + 1]):
+    while i >= 0 and is_whitespace_char(s[i]):
         i = i - 1
     str_slice(s, 0, i + 1)
 
@@ -159,7 +127,7 @@ fn str_replace_all(s: text, old: text, new_s: text) -> text:
             result.push(new_s)
             i = i + olen
         else:
-            result.push(s[i:i + 1])
+            result.push(s[i])
             i = i + 1
     result.join("")
 
@@ -197,10 +165,9 @@ fn str_join(parts: [text], sep: text) -> text:
 
 # Inline char code lookup (ASCII-based)
 fn char_code_inline(c: text) -> i64:
-    val bytes = rt_text_to_bytes(c)
-    if bytes.len() == 0:
+    if c.len() == 0:
         return 0
-    val code = bytes[0] as i64
+    val code = c.char_code_at(0)
     if code >= 0 and code <= 127:
         return code
     0
@@ -210,10 +177,6 @@ fn char_from_code_inline(code: i64) -> text:
         return "\t"
     elif code == 10:
         return "\n"
-    elif code == 11:
-        return "\u000B"
-    elif code == 12:
-        return "\u000C"
     elif code == 13:
         return "\r"
     elif code >= 32 and code <= 126:
@@ -252,9 +215,9 @@ fn char_from_code_inline(code: i64) -> text:
 #     compile` fails with "Undefined symbol: bytes_to_string".
 #   - `rt_char_from_code(code: i64) -> text` (the canonical scalar ABI
 #     backing `.chr()`/`.to_char()`, src/runtime/simple_core/core_string.spl)
-#     is a real native/C runtime symbol. Current compiler source registers a
-#     Rust-interpreter handler; retained binaries need rebuilding before
-#     `bin/simple run` and `bin/simple test` can use it.
+#     is a real native/C runtime symbol but has no Rust-interpreter handler
+#     in this seed binary -- both `bin/simple run` and `bin/simple test`
+#     fail with "unknown extern function: rt_char_from_code".
 # rt_bytes_to_text is the one that is both a real runtime symbol AND has an
 # interpreter handler, so it is the only one of the three that runs under
 # `bin/simple run` today (verified: correct output for every UTF-8 length
@@ -318,7 +281,7 @@ fn str_to_lower(s: text) -> text:
     var result: [text] = []
     var i = 0
     while i < slen:
-        val ch = s[i:i + 1]
+        val ch = s[i]
         val code = char_code_inline(ch)
         if code >= 65 and code <= 90:
             result.push(char_from_code_inline(code + 32))
@@ -332,7 +295,7 @@ fn str_to_upper(s: text) -> text:
     var result: [text] = []
     var i = 0
     while i < slen:
-        val ch = s[i:i + 1]
+        val ch = s[i]
         val code = char_code_inline(ch)
         if code >= 97 and code <= 122:
             result.push(char_from_code_inline(code - 32))
@@ -352,7 +315,7 @@ fn str_reverse(s: text) -> text:
     var result: [text] = []
     var i = slen - 1
     while i >= 0:
-        result.push(s[i:i + 1])
+        result.push(s[i])
         i = i - 1
     result.join("")
 
@@ -417,14 +380,3 @@ export str_to_lower, str_to_upper, str_capitalize
 export str_reverse, str_repeat, str_truncate
 export str_pad_left, str_pad_right, str_center
 export char_code, char_from_code
-
-# Provider wrappers for the raw text<->bytes boundary (binary_runtime_hardening:
-# product code must not call rt_* directly; this module is the sanctioned
-# provider). Thin passthroughs — identical signatures to the externs above.
-pub fn text_to_bytes(s: text) -> [u8]:
-    rt_text_to_bytes(s)
-
-pub fn bytes_to_text(bytes: [u8]) -> text:
-    rt_bytes_to_text(bytes)
-
-export text_to_bytes, bytes_to_text

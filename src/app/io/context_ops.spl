@@ -2,9 +2,9 @@
 # can run without loading broad CLI/compiler exports.
 
 extern fn sys_get_args() -> [text]
-use std.io_runtime.{get_args}
+extern fn rt_cli_get_args() -> [text]
 use std.io_runtime.{file_exists, file_read, file_write}
-use app.io.sqlite_sffi.{SqliteRow, sqlite_open, sqlite_open_memory, sqlite_close, sqlite_execute, sqlite_query_all, sqlite_insert, sqlite_row_get}
+use app.io.sqlite_sffi.{sqlite_open, sqlite_open_memory, sqlite_close, sqlite_execute, sqlite_query_all, sqlite_insert, sqlite_row_get}
 
 fn _context_file_exists_impl(path: text) -> bool:
     file_exists(path)
@@ -16,7 +16,7 @@ fn context_file_write(path: text, content: text) -> bool:
     file_write(path, content)
 
 fn context_get_args() -> [text]:
-    val raw_args = get_args()
+    val raw_args = rt_cli_get_args()
     if raw_args != nil and raw_args.len() > 0:
         return raw_args
 
@@ -74,11 +74,7 @@ fn _context_line_count(content: text) -> i64:
     if content == "":
         0
     else:
-        var count = 1
-        for ch in content:
-            if ch == "\n":
-                count = count + 1
-        count
+        content.split("\n").len()
 
 fn context_generate(path: text, target: text, format: text) -> text:
     val normalized_target = _context_normalize_target(path, target)
@@ -183,7 +179,7 @@ fn context_query_index(index_text: text, query: text, format: text) -> text:
         return "# Simple Context Query\n\n- status: " + status + "\n- query: `" + trimmed_query + "`\n- matches: " + str(match_count) + "\n\n```text\n" + body + "\n```"
     "Simple context query\nstatus: " + status + "\nquery: " + trimmed_query + "\nmatches: " + str(match_count) + "\n\n" + body
 
-fn _context_sql_open(db_path: text):
+fn _context_sql_open(db_path: text) -> SqliteConnection:
     if db_path.trim() == "":
         sqlite_open_memory()
     else:
@@ -192,7 +188,7 @@ fn _context_sql_open(db_path: text):
 fn _context_sql_schema() -> text:
     "CREATE TABLE IF NOT EXISTS context_packs (id INTEGER PRIMARY KEY, source TEXT, target TEXT, status TEXT, lines INTEGER, token_estimate INTEGER, content TEXT)"
 
-fn _context_sql_render_rows_filtered(rows: [SqliteRow], query: text, source_filter: text, format: text) -> text:
+fn _context_sql_render_rows_filtered(rows, query: text, source_filter: text, format: text) -> text:
     val trimmed_filter = source_filter.trim()
     var match_count: i64 = 0
     var status = "ready"
@@ -200,18 +196,15 @@ fn _context_sql_render_rows_filtered(rows: [SqliteRow], query: text, source_filt
 
     for row in rows:
         val source = sqlite_row_get(row, "source")
-        val target = sqlite_row_get(row, "target")
-        val content = sqlite_row_get(row, "content")
-        val literal_query_match = query == "" or source.contains(query) or target.contains(query) or content.contains(query)
-        if literal_query_match and (trimmed_filter == "" or source == trimmed_filter or source.ends_with("/" + trimmed_filter)):
+        if trimmed_filter == "" or source == trimmed_filter or source.ends_with("/" + trimmed_filter):
             match_count = match_count + 1
             body_parts.push("source: " + source)
-            body_parts.push("target: " + target)
+            body_parts.push("target: " + sqlite_row_get(row, "target"))
             body_parts.push("status: " + sqlite_row_get(row, "status"))
             body_parts.push("lines: " + sqlite_row_get(row, "lines"))
             body_parts.push("token_estimate: " + sqlite_row_get(row, "token_estimate"))
             body_parts.push("content:")
-            body_parts.push(content)
+            body_parts.push(sqlite_row_get(row, "content"))
             body_parts.push("---")
 
     if match_count == 0:
@@ -231,7 +224,7 @@ fn _context_sql_render_rows_filtered(rows: [SqliteRow], query: text, source_filt
         return "Simple context SQL query\nstatus: " + status + "\nbackend: sqlite\nquery: " + query + "\nsource_filter: " + trimmed_filter + "\nmatches: " + str(match_count) + "\n\n" + body
     "Simple context SQL query\nstatus: " + status + "\nbackend: sqlite\nquery: " + query + "\nmatches: " + str(match_count) + "\n\n" + body
 
-fn _context_sql_render_rows(rows: [SqliteRow], query: text, format: text) -> text:
+fn _context_sql_render_rows(rows, query: text, format: text) -> text:
     _context_sql_render_rows_filtered(rows, query, "", format)
 
 fn context_sql_index_packs(paths: [text], target: text, db_path: text, format: text) -> text:

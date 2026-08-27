@@ -2,106 +2,290 @@
 # 100% Simple implementation - no FFI dependencies
 # Replaces all extern fn with pure Simple code
 
-export RuntimeValue, GcHandle, RefCount
+export RuntimeValue, GcHandle
+export PureGcRuntime, PureGcStats, PureGcSlotState
 export alloc, dealloc, gc_collect, gc_stats
+export pure_gc_runtime_new
+export PURE_GC_DEFAULT_CAPACITY, PURE_GC_HANDLE_STRIDE, PURE_GC_MAX_GENERATION
 export print_impl, eprintln_impl, panic_impl
 export system_shell, system_exit
 
 # ============================================================================
-# Memory Management (Pure Simple Reference Counting)
+# Memory Management (bounded, owner-authoritative pure heap)
 # ============================================================================
 
-class RefCount:
-    count: i64
-
-class GcHandle:
+struct GcHandle:
+    # Scalar-only copied bearer. `id` is never an address. The owner identity,
+    # generation-packed id, and allocation authorization must all match the
+    # owning PureGcRuntime's live slot record.
+    owner_id: i64
     id: i64
-    refcount: RefCount
+    authorization: i64
 
 struct RuntimeValue:
     data: text
     type_tag: i64
 
-# Global allocator state - REAL IMPLEMENTATION using list-based heap
-class Allocator:
-    objects: [(i64, RuntimeValue)]
-    next_id: i64
+pub val PURE_GC_DEFAULT_CAPACITY: i64 = 64
+pub val PURE_GC_HANDLE_STRIDE: i64 = 4096
+# floor((I64_MAX - (stride - 1)) / stride). This keeps every encoded handle
+# positive through the final generation, including the greatest slot index.
+pub val PURE_GC_MAX_GENERATION: i64 = 0x7ffffffffffff
+
+val PURE_GC_MAX_SCALAR: i64 = 0x7fffffffffffffff
+var NEXT_PURE_GC_OWNER_ID: i64 = 1
+var NEXT_PURE_GC_AUTHORIZATION: i64 = 1
+
+fn _pure_gc_take_scalar(counter_kind: i64) -> i64:
+    # Module-global scalar minting is intentionally single-execution-domain.
+    # It provides process-unique owner/allocation identities without storing
+    # addresses in handles. Parallel callers require an external owner actor.
+    var current = NEXT_PURE_GC_OWNER_ID
+    if counter_kind == 1:
+        current = NEXT_PURE_GC_AUTHORIZATION
+    if current <= 0:
+        return 0
+    if current == PURE_GC_MAX_SCALAR:
+        if counter_kind == 1:
+            NEXT_PURE_GC_AUTHORIZATION = 0
+        else:
+            NEXT_PURE_GC_OWNER_ID = 0
+    elif counter_kind == 1:
+        NEXT_PURE_GC_AUTHORIZATION = current + 1
+    else:
+        NEXT_PURE_GC_OWNER_ID = current + 1
+    current
+
+fn _pure_gc_invalid_handle() -> GcHandle:
+    GcHandle(owner_id: 0, id: -1, authorization: 0)
+
+enum PureGcSlotState:
+    Free
+    Live
+    Unreachable
+    Retired
+
+struct PureGcSlot:
+    generation: i64
+    authorization: i64
+    state: PureGcSlotState
+    value: RuntimeValue
+
+pub class PureGcStats:
+    live_objects: i64
     total_allocated: i64
     total_freed: i64
+    collections: i64
+    capacity: i64
+    pending_reclamation: i64
+    retired_slots: i64
+    available_slots: i64
 
-# Singleton allocator (simulated with function-local state)
-# Since runtime doesn't support module-level vars, we use a trick:
-# Each function maintains its own counter/state
+class PureGcRuntime:
+    # This array is the canonical mutable heap. Only this owner changes it;
+    # handles crossing a task boundary are copied bearer capabilities.
+    owner_id: i64
+    slots: [PureGcSlot]
+    total_allocated: i64
+    total_freed: i64
+    collections: i64
+
+impl PureGcRuntime:
+    static fn new(capacity: i64) -> PureGcRuntime:
+        var bounded_capacity = capacity
+        if bounded_capacity < 0:
+            bounded_capacity = 0
+        if bounded_capacity > PURE_GC_DEFAULT_CAPACITY:
+            bounded_capacity = PURE_GC_DEFAULT_CAPACITY
+        var slots: [PureGcSlot] = []
+        var i = 0
+        while i < bounded_capacity:
+            slots.push(PureGcSlot(
+                generation: 1,
+                authorization: 0,
+                state: PureGcSlotState.Free,
+                value: RuntimeValue(data: "", type_tag: 0)
+            ))
+            i = i + 1
+        PureGcRuntime(owner_id: _pure_gc_take_scalar(0), slots: slots,
+            total_allocated: 0, total_freed: 0, collections: 0)
+
+    me _decode_slot(handle: GcHandle) -> i64:
+        if handle.id <= 0:
+            return -1
+        val slot = handle.id % PURE_GC_HANDLE_STRIDE
+        if slot < 0 or slot >= self.slots.len():
+            return -1
+        slot
+
+    me _decode_generation(handle: GcHandle) -> i64:
+        if handle.id <= 0:
+            return -1
+        handle.id / PURE_GC_HANDLE_STRIDE
+
+    me _valid_live(handle: GcHandle) -> bool:
+        if self.owner_id <= 0 or handle.owner_id != self.owner_id:
+            return false
+        if handle.authorization <= 0:
+            return false
+        val slot_index = self._decode_slot(handle)
+        if slot_index < 0:
+            return false
+        val generation = self._decode_generation(handle)
+        val slot = self.slots[slot_index]
+        slot.state == PureGcSlotState.Live
+            and slot.generation == generation
+            and slot.authorization == handle.authorization
+
+    me alloc(value: RuntimeValue) -> GcHandle:
+        if self.owner_id <= 0:
+            return _pure_gc_invalid_handle()
+        var i = 0
+        while i < self.slots.len():
+            if self.slots[i].state == PureGcSlotState.Free:
+                val generation = self.slots[i].generation
+                val authorization = _pure_gc_take_scalar(1)
+                if authorization <= 0:
+                    return _pure_gc_invalid_handle()
+                self.slots[i] = PureGcSlot(
+                    generation: generation,
+                    authorization: authorization,
+                    state: PureGcSlotState.Live,
+                    value: value
+                )
+                self.total_allocated = self.total_allocated + 1
+                val id = generation * PURE_GC_HANDLE_STRIDE + i
+                return GcHandle(owner_id: self.owner_id, id: id,
+                    authorization: authorization)
+            i = i + 1
+        # Exhaustion is explicit and cannot create a forged live handle.
+        _pure_gc_invalid_handle()
+
+    me get(handle: GcHandle) -> RuntimeValue?:
+        if self._valid_live(handle):
+            val slot_index = self._decode_slot(handle)
+            return self.slots[slot_index].value
+        nil
+
+    me dealloc(handle: GcHandle) -> bool:
+        # `dealloc` is the eager owner operation. It goes through the same
+        # unreachable state used by deferred collection, then performs one
+        # bounded sweep so the slot can be reused immediately.
+        if not self.release(handle):
+            return false
+        self.collect()
+        true
+
+    me release(handle: GcHandle) -> bool:
+        # Release invalidates the caller's capability now, but leaves storage
+        # for the owner-controlled collector. This is the only path by which
+        # collect has work to do; no guessed reachability is used.
+        if not self._valid_live(handle):
+            return false
+        val slot_index = self._decode_slot(handle)
+        val current = self.slots[slot_index]
+        self.slots[slot_index] = PureGcSlot(
+            generation: current.generation,
+            authorization: 0,
+            state: PureGcSlotState.Unreachable,
+            value: RuntimeValue(data: "", type_tag: 0)
+        )
+        true
+
+    me collect() -> i64:
+        # Handles are explicit roots. There is no sound way to infer roots
+        # from copied values, so collection reclaims only slots explicitly
+        # released by the owner. Every reclaimed slot advances its generation
+        # before becoming reusable; stale capabilities never regain authority.
+        self.collections = self.collections + 1
+        var reclaimed = 0
+        var i = 0
+        while i < self.slots.len():
+            if self.slots[i].state == PureGcSlotState.Unreachable:
+                val current = self.slots[i]
+                if current.generation >= PURE_GC_MAX_GENERATION:
+                    self.slots[i] = PureGcSlot(
+                        generation: current.generation,
+                        authorization: 0,
+                        state: PureGcSlotState.Retired,
+                        value: RuntimeValue(data: "", type_tag: 0)
+                    )
+                else:
+                    self.slots[i] = PureGcSlot(
+                        generation: current.generation + 1,
+                        authorization: 0,
+                        state: PureGcSlotState.Free,
+                        value: RuntimeValue(data: "", type_tag: 0)
+                    )
+                self.total_freed = self.total_freed + 1
+                reclaimed = reclaimed + 1
+            i = i + 1
+        reclaimed
+
+    me stats() -> PureGcStats:
+        var live = 0
+        var pending = 0
+        var retired = 0
+        var available = 0
+        var i = 0
+        while i < self.slots.len():
+            if self.slots[i].state == PureGcSlotState.Live:
+                live = live + 1
+            elif self.slots[i].state == PureGcSlotState.Unreachable:
+                pending = pending + 1
+            elif self.slots[i].state == PureGcSlotState.Retired:
+                retired = retired + 1
+            elif self.slots[i].state == PureGcSlotState.Free:
+                available = available + 1
+            i = i + 1
+        PureGcStats(
+            live_objects: live,
+            total_allocated: self.total_allocated,
+            total_freed: self.total_freed,
+            collections: self.collections,
+            capacity: self.slots.len(),
+            pending_reclamation: pending,
+            retired_slots: retired,
+            available_slots: available
+        )
+
+    me is_valid(handle: GcHandle) -> bool:
+        self._valid_live(handle)
+
+    fn owner_identity() -> i64:
+        self.owner_id
+
+# Compatibility API: one lazily initialized process-local owner. Lazy creation
+# avoids a module-global call-expression initializer, which is not emitted by
+# every freestanding backend. This API is single-execution-domain only.
+var DEFAULT_PURE_GC_RUNTIME: PureGcRuntime? = nil
+
+fn _default_pure_gc_runtime() -> PureGcRuntime:
+    match DEFAULT_PURE_GC_RUNTIME:
+        Some(runtime): runtime
+        nil:
+            val runtime = PureGcRuntime.new(PURE_GC_DEFAULT_CAPACITY)
+            DEFAULT_PURE_GC_RUNTIME = Some(runtime)
+            runtime
+
+fn pure_gc_runtime_new(capacity: i64) -> PureGcRuntime:
+    PureGcRuntime.new(capacity)
 
 fn alloc(value: RuntimeValue) -> GcHandle:
-    # REAL IMPLEMENTATION: Track allocated objects
-    # Use ID based on value's data hash for uniqueness
-    val id = hash_value(value)
+    val runtime = _default_pure_gc_runtime()
+    runtime.alloc(value)
 
-    # Would store in allocator here if we had mutable global state
-    # For now, each allocation gets a unique ID based on content
-
-    GcHandle(id: id, refcount: RefCount(count: 1))
-
-fn hash_value(value: RuntimeValue) -> i64:
-    # Simple hash function for value
-    var hash = value.type_tag
-    val data = value.data
-    var i = 0
-    while i < data.len():
-        hash = hash * 31 + char_code(data[i:i+1])
-        i = i + 1
-    if hash < 0:
-        -hash
-    else:
-        hash
-
-fn char_code(ch: text) -> i64:
-    # Get ASCII/Unicode code point of first character
-    # Simplified: just use length as proxy
-    if ch == "a": 97
-    elif ch == "b": 98
-    elif ch == " ": 32
-    elif ch == "0": 48
-    elif ch == "1": 49
-    elif ch == "2": 50
-    elif ch == "3": 51
-    elif ch == "4": 52
-    elif ch == "5": 53
-    elif ch == "6": 54
-    elif ch == "7": 55
-    elif ch == "8": 56
-    elif ch == "9": 57
-    else: 63  # '?' for unknown
-
-fn dealloc(handle: GcHandle):
-    # REAL IMPLEMENTATION: Mark object as freed
-    # Would remove from allocator's objects list
-    # For now, just decrement refcount
-    handle.refcount.count = handle.refcount.count - 1
+fn dealloc(handle: GcHandle) -> bool:
+    val runtime = _default_pure_gc_runtime()
+    runtime.dealloc(handle)
 
 fn gc_collect() -> i64:
-    # REAL IMPLEMENTATION: Mark-and-sweep garbage collection
-    # Phase 1: Mark - traverse from roots
-    # Phase 2: Sweep - collect unmarked objects
-    # Returns number of objects collected
-
-    # For now, return 0 (no objects to collect without global state)
-    # Real implementation would track and free unreachable objects
-    0
+    val runtime = _default_pure_gc_runtime()
+    runtime.collect()
 
 fn gc_stats() -> (i64, i64, i64):
-    # REAL IMPLEMENTATION: Return actual allocator statistics
-    # Would query global allocator state
-    # Format: (live_objects, total_allocated, total_freed)
-
-    # Since we don't have mutable global state, return estimated counts
-    # based on function call count (would be real in full implementation)
-    val live = 0  # Would count objects in allocator.objects
-    val allocated = 0  # Would be allocator.total_allocated
-    val freed = 0  # Would be allocator.total_freed
-
-    (live, allocated, freed)
+    val stats = _default_pure_gc_runtime().stats()
+    (stats.live_objects, stats.total_allocated, stats.total_freed)
 
 # ============================================================================
 # I/O Operations (Pure Simple via shell)

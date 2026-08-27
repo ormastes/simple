@@ -8,7 +8,7 @@
 # llc -O3 in the LLVM backend provides additional low-level optimization.
 
 use compiler.mir.mir_instructions.{MirModule, MirFunction}
-use compiler.mir_opt.mod.{optimize_module, optimize_module_for_backend, optimize_module_with_caps, OptLevel, optimizationpipeline_inventory_lines}
+use compiler.mir_opt.mod.{optimize_module, optimize_module_with_caps, OptLevel, optimizationpipeline_inventory_lines}
 use compiler.backend.feature_caps.{X86Caps}
 
 # ============================================================================
@@ -73,15 +73,17 @@ fn optimizationconfig_aggressive() -> OptimizationConfig:
 
 fn _config_to_opt_level(config: OptimizationConfig) -> OptLevel:
     """Convert OptimizationConfig to the pass manager's OptLevel."""
-    match config:
-        case OptimizationConfig.Disabled:
-            OptLevel.NoOpt
-        case OptimizationConfig.Enabled(level):
-            match level:
-                case 0: OptLevel.NoOpt
-                case 1: OptLevel.Size
-                case 2: OptLevel.Speed
-                case _: OptLevel.Aggressive
+    val disabled_disc = rt_enum_discriminant(OptimizationConfig.Disabled)
+    if rt_enum_discriminant(config) == disabled_disc:
+        return OptLevel.NoOpt
+    val level: i64 = rt_enum_payload(config)
+    if level <= 0:
+        return OptLevel.NoOpt
+    if level == 1:
+        return OptLevel.Size
+    if level == 2:
+        return OptLevel.Speed
+    OptLevel.Aggressive
 
 fn optimize_mir_module(
     mir: MirModule,
@@ -99,28 +101,6 @@ fn optimize_mir_module(
             mir
         case _:
             optimize_module(mir, opt_level)
-
-fn optimize_mir_module_for_backend(
-    mir: MirModule,
-    config: OptimizationConfig,
-    backend_name: text
-) -> MirModule:
-    """Optimize MIR module according to configuration, for a specific backend.
-
-    Like optimize_mir_module, but routes through the backend-aware pipeline
-    (optimize_module_for_backend / optimizationpipeline_for_backend) so
-    passes the target backend already runs itself are skipped instead of
-    duplicated -- e.g. LLVM builds skip `inline_functions` because llc's own
-    -O3 inliner pipeline already covers it (mir_pass_backend_skip_reason_fast,
-    reason "llvm_runs_inliner_pipeline"). Non-LLVM backend names see no
-    filtering, so behavior is identical to optimize_mir_module for them.
-    """
-    val opt_level = _config_to_opt_level(config)
-    match opt_level:
-        case OptLevel.NoOpt:
-            mir
-        case _:
-            optimize_module_for_backend(mir, opt_level, backend_name)
 
 fn optimize_mir_module_with_stats(
     mir: MirModule,

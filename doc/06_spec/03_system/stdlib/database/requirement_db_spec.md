@@ -1,6 +1,29 @@
 # Requirement Db Specification
 
-> Tests covering RequirementDatabase creation, RequirementDatabase next_id, RequirementDatabase all_requirements, RequirementDatabase requirements_by_status, RequirementDatabase requirements_by_category, RequirementDatabase descriptions, RequirementDatabase save.
+> 1. cleanup
+
+<!-- sdn-diagram:id=requirement_db_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=requirement_db_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+requirement_db_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=requirement_db_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -17,23 +40,18 @@
 
 #### creates a new database
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- creates a new database
+1. cleanup
+2. var db = RequirementDatabase create
    - Expected: 1 equals `1`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("creates a new database")
 val db_path = "/tmp/test_reqdb_create.sdn"
 cleanup(db_path)
 var db = RequirementDatabase.create()
@@ -44,7 +62,9 @@ expect(1).to_equal(1)
 
 #### adds a requirement and retrieves it
 
-- adds a requirement and retrieves it
+1. cleanup
+2. var db = RequirementDatabase create
+3. db add requirement
    - Expected: retrieved.id equals `REQ-001`
    - Expected: retrieved.title equals `Test requirement`
    - Expected: retrieved.category equals `feature`
@@ -62,12 +82,10 @@ expect(1).to_equal(1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 36 lines folded for reproduction.
+Runnable source: 34 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("adds a requirement and retrieves it")
 val db_path = "/tmp/test_reqdb_add.sdn"
 cleanup(db_path)
 var db = RequirementDatabase.create()
@@ -108,7 +126,7 @@ expect(retrieved.valid).to_equal(true)
 
 #### returns empty requirement for unknown ID
 
-- returns empty requirement for unknown ID
+1. var db = RequirementDatabase create
    - Expected: retrieved.id equals ``
    - Expected: retrieved.valid is false
 
@@ -116,12 +134,10 @@ expect(retrieved.valid).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns empty requirement for unknown ID")
 var db = RequirementDatabase.create()
 val retrieved = db.get_requirement("REQ-NONEXISTENT")
 expect(retrieved.id).to_equal("")
@@ -134,19 +150,17 @@ expect(retrieved.valid).to_equal(false)
 
 #### generates REQ-001 for empty database
 
-- generates REQ-001 for empty database
+1. var db = RequirementDatabase create
    - Expected: id equals `REQ-001`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("generates REQ-001 for empty database")
 var db = RequirementDatabase.create()
 val id = db.next_id()
 expect(id).to_equal("REQ-001")
@@ -156,19 +170,18 @@ expect(id).to_equal("REQ-001")
 
 #### generates sequential IDs
 
-- generates sequential IDs
+1. var db = RequirementDatabase create
+2. db add requirement
    - Expected: next equals `REQ-002`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("generates sequential IDs")
 var db = RequirementDatabase.create()
 
 val req1 = Requirement(
@@ -195,19 +208,19 @@ expect(next).to_equal("REQ-002")
 
 #### generates REQ-003 after two entries
 
-- generates REQ-003 after two entries
+1. var db = RequirementDatabase create
+2. db add requirement
+3. db add requirement
    - Expected: next equals `REQ-003`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 37 lines folded for reproduction.
+Runnable source: 35 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("generates REQ-003 after two entries")
 var db = RequirementDatabase.create()
 
 val req1 = Requirement(
@@ -251,19 +264,19 @@ expect(next).to_equal("REQ-003")
 
 #### returns all valid requirements
 
-- returns all valid requirements
+1. var db = RequirementDatabase create
+2. db add requirement
+3. db add requirement
    - Expected: all.len() equals `2`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 37 lines folded for reproduction.
+Runnable source: 35 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns all valid requirements")
 var db = RequirementDatabase.create()
 
 val req1 = Requirement(
@@ -307,7 +320,10 @@ expect(all.len()).to_equal(2)
 
 #### filters requirements by status
 
-- filters requirements by status
+1. var db = RequirementDatabase create
+2. db add requirement
+3. db add requirement
+4. db add requirement
    - Expected: drafts.len() equals `1`
    - Expected: drafts[0].id equals `REQ-001`
    - Expected: approved.len() equals `1`
@@ -320,12 +336,10 @@ expect(all.len()).to_equal(2)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 65 lines folded for reproduction.
+Runnable source: 63 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("filters requirements by status")
 var db = RequirementDatabase.create()
 
 val draft_req = Requirement(
@@ -397,7 +411,10 @@ expect(verified.len()).to_equal(0)
 
 #### filters requirements by category
 
-- filters requirements by category
+1. var db = RequirementDatabase create
+2. db add requirement
+3. db add requirement
+4. db add requirement
    - Expected: features.len() equals `1`
    - Expected: features[0].id equals `REQ-001`
    - Expected: bugfixes.len() equals `1`
@@ -410,12 +427,10 @@ expect(verified.len()).to_equal(0)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 65 lines folded for reproduction.
+Runnable source: 63 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("filters requirements by category")
 var db = RequirementDatabase.create()
 
 val feat_req = Requirement(
@@ -487,18 +502,18 @@ expect(improvements.len()).to_equal(0)
 
 #### stores and retrieves multiline description
 
-- stores and retrieves multiline description
+1. var db = RequirementDatabase create
+2. db add requirement
+3. db add description
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 27 lines folded for reproduction.
+Runnable source: 25 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("stores and retrieves multiline description")
 var db = RequirementDatabase.create()
 
 val req = Requirement(
@@ -530,19 +545,17 @@ expect(retrieved).to_contain("line three")
 
 #### returns empty string for unknown req_id
 
-- returns empty string for unknown req_id
+1. var db = RequirementDatabase create
    - Expected: desc equals ``
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("returns empty string for unknown req_id")
 var db = RequirementDatabase.create()
 val desc = db.get_description("REQ-NONEXISTENT")
 expect(desc).to_equal("")
@@ -554,7 +567,9 @@ expect(desc).to_equal("")
 
 #### persists data to disk
 
-- persists data to disk
+1. cleanup
+2. var db = RequirementDatabase create
+3. db add requirement
    - Expected: saved is true
    - Expected: rt_file_exists(db_path) is true
 
@@ -562,12 +577,10 @@ expect(desc).to_equal("")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 25 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("persists data to disk")
 val db_path = "/tmp/test_reqdb_save.sdn"
 cleanup(db_path)
 var db = RequirementDatabase.create()
@@ -602,12 +615,12 @@ expect(rt_file_exists(db_path)).to_equal(true)
 | Category | Other |
 | Status | Active |
 | Source | `test/03_system/stdlib/database/requirement_db_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering RequirementDatabase creation, RequirementDatabase next_id, RequirementDatabase all_requirements, RequirementDatabase requirements_by_status, RequirementDatabase requirements_by_category, RequirementDatabase descriptions, RequirementDatabase save.
+Tests covering:
 - RequirementDatabase creation
 - RequirementDatabase next_id
 - RequirementDatabase all_requirements
@@ -628,61 +641,3 @@ Tests covering RequirementDatabase creation, RequirementDatabase next_id, Requir
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-- `REQ-DB`
-- `REQ-001`
-- `REQ-003`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `b3cbf0b7ccaafe341841c51603ec7b6a2b42ec8ce3de34efa05df68c95fd84b1`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `b3cbf0b7ccaafe341841c51603ec7b6a2b42ec8ce3de34efa05df68c95fd84b1`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `b3cbf0b7ccaafe341841c51603ec7b6a2b42ec8ce3de34efa05df68c95fd84b1`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **80/100**; effective score: **49/100**; blockers: **1**.
-
-SSpec documentization score: 49/100
-source: test/03_system/stdlib/database/requirement_db_spec.spl
-mirror: doc/06_spec/03_system/stdlib/database/requirement_db_spec.md (current)
-findings: 7 blockers: 1
-  narrative=100 structure=100 oracle=70
-  traceability=60 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-  raw=80; blocker cap makes effective=49
-doc/06_spec/03_system/stdlib/database/requirement_db_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/stdlib/database/requirement_db_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/stdlib/database/requirement_db_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 10 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/03_system/stdlib/database/requirement_db_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 1 declared requirement(s) have no scenario binding
-  why: A requirement list without scenario evidence is inventory, not traceability.
-  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
-test/03_system/stdlib/database/requirement_db_spec.spl:32:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates a new database' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/stdlib/database/requirement_db_spec.spl:40:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'adds a requirement and retrieves it' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/stdlib/database/requirement_db_spec.spl:78:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'returns empty requirement for unknown ID' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

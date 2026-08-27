@@ -1,4 +1,24 @@
 """
+## Purpose and audience
+Purpose: Verify module namespace retained surface ownership.
+Audience: compiler and tooling engineers who maintain this spec.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines;
+a failing scenario pinpoints the behavior that regressed.
+## Compatibility and limitations
+Covers the pinned behavior only; fixture data is local to this spec.
+Troubleshooting: a red scenario here means the pinned contract changed —
+check verification guidance in the linked design docs before editing oracles.
+# @manual: primary
+REQ-COMPILER-HIR-001
+doc/01_research/local/REQ-COMPILER-HIR-001.md
+doc/03_plan/sys_test/REQ-COMPILER-HIR-001.md
+doc/04_architecture/REQ-COMPILER-HIR-001.md
+doc/05_design/REQ-COMPILER-HIR-001.md
+"""
+# @req: REQ-COMPILER-HIR-001
+
+"""
 # Module Namespace Retained-Surface Unit Spec
 
 Module-only imports may resolve through a canonical alias whose key differs
@@ -7,9 +27,12 @@ imported callables must share the retained owner so qualified calls lower
 before MIR rather than escaping as LoadGlobal.
 """
 
+use std.spec.step
+
 use compiler.hir.hir_lowering.types.{hirlowering_for_module}
 use compiler.hir.hir_lowering.items.*
-use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName, module_surfaces_from_modules}
+use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName}
+use test.helpers.module_surface_owner_fixture.{module_surfaces_from_test_modules}
 use compiler.hir.hir_definitions.*
 use compiler.frontend.frontend.{parse_full_frontend}
 use compiler.frontend.parser_types.{Module}
@@ -72,7 +95,7 @@ fn namespace_owner_surfaces(reverse: bool, tier: text) -> Result<ModuleSurfacesB
         [platform_std, platform_lib, path_std, path_lib, variables_std, variables_lib]
     else:
         [variables_lib, variables_std, path_lib, path_std, platform_lib, platform_std]
-    module_surfaces_from_modules(modules, sources)
+    module_surfaces_from_test_modules(modules, sources)
 
 fn namespace_owner_expected(reverse: bool, lib_name: text, std_name: text) -> text:
     if reverse: std_name else: lib_name
@@ -95,7 +118,7 @@ fn verify_namespace_owner_lowering(reverse: bool, tier: text):
         consumer_source, "alias/consumer.spl", "alias.consumer", Logger(level: 0))
     var lowering = hirlowering_for_module("alias.consumer", surfaces)
     val hir = lowering.lower_module(consumer)
-    expect(lowering.errors.len()).to_equal(0)
+    expect(lowering.errors.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
     val expected_variables = namespace_owner_expected(
         reverse, "lib." + tier + ".env.variables", "std." + tier + ".env.variables")
@@ -144,67 +167,34 @@ fn verify_namespace_owner_lowering(reverse: bool, tier: text):
                                     pass
                         case _:
                             pass
-    expect(load_global_count).to_equal(0)
+    expect(load_global_count).to_equal(0)  # oracle: 0 — named expected value from the requirement
     expect(direct_env_get).to_equal(true)
     expect(direct_join2).to_equal(true)
     expect(direct_detect_os).to_equal(true)
 
-fn verify_selective_env_import_lowering(alias_env_get: bool):
-    """Exercise the exact env/paths import topology.  Unlike the namespace
-    cases above, paths.spl selectively imports env_get from the variables
-    module; the module tail must never escape as a `variables` GlobalLoad."""
-    val surfaces_result = namespace_owner_surfaces(false, "nogc_async_mut")
-    expect(surfaces_result.is_ok()).to_equal(true)
-    if surfaces_result.is_err():
-        return
-    val imported_name = if alias_env_get: "read_env" else: "env_get"
-    val import_item = if alias_env_get: "env_get as read_env" else: "env_get"
-    val consumer_source = "use std.env.variables.{" + import_item + "}\n" +
-        "fn main() -> text:\n" +
-        "    " + imported_name + "(\"PATH\")"
-    val consumer = parse_full_frontend(
-        consumer_source, "src/lib/nogc_async_mut/env/paths_probe.spl",
-        "lib.nogc_async_mut.env.paths_probe", Logger(level: 0))
-    var lowering = hirlowering_for_module(
-        "lib.nogc_async_mut.env.paths_probe", surfaces_result.unwrap())
-    val hir = lowering.lower_module(consumer)
-    expect(lowering.errors.len()).to_equal(0)
-
-    val mir = MirLowering.new(hir.symbols).lower_module(hir)
-    var load_global_variables = false
-    var direct_env_get = false
-    for function in mir.functions.values():
-        if function.name == "main":
-            for block in function.blocks:
-                for instruction in block.instructions:
-                    match instruction.kind:
-                        case MirInstKind.LoadGlobal(name, _):
-                            if name == "variables" or name.ends_with(".variables"):
-                                load_global_variables = true
-                        case MirInstKind.Call(_, operand, _):
-                            match operand.kind:
-                                case MirOperandKind.Const(MirConstValue.Str(name), _):
-                                    if name.ends_with(".env_get") or name == "env_get":
-                                        direct_env_get = true
-                                case _:
-                                    pass
-                        case _:
-                            pass
-    expect(load_global_variables).to_equal(false)
-    expect(direct_env_get).to_equal(true)
-
 describe "module namespace retained surface ownership":
+    # @manual scenario evidence
     it "lowers async env path namespaces through retained lib owners":
+        # @req: REQ-COMPILER-HIR-001
+        step("Verify: lowers async env path namespaces through retained lib owners")
         verify_namespace_owner_lowering(false, "nogc_async_mut")
 
     it "lowers the same namespaces after reverse overlay discovery":
+        # @req: REQ-COMPILER-HIR-001
+        step("Verify: lowers the same namespaces after reverse overlay discovery")
         verify_namespace_owner_lowering(true, "nogc_async_mut")
 
     it "keeps sync env path namespaces on their retained owners":
+        # @req: REQ-COMPILER-HIR-001
+        step("Verify: keeps sync env path namespaces on their retained owners")
         verify_namespace_owner_lowering(false, "nogc_sync_mut")
 
     it "lowers the env paths selective import without a variables global":
+        # @req: REQ-COMPILER-HIR-001
+        step("Verify: lowers the env paths selective import without a variables global")
         verify_selective_env_import_lowering(false)
 
     it "keeps the adjacent aliased selective import on the env_get owner":
+        # @req: REQ-COMPILER-HIR-001
+        step("Verify: keeps the adjacent aliased selective import on the env_get owner")
         verify_selective_env_import_lowering(true)

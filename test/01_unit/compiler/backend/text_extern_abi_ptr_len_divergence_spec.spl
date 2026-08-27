@@ -1,0 +1,172 @@
+# RED-by-design regression probe: does the pure-Simple LLVM backend
+# (`compiler.backend.MirToLlvm`, `src/compiler/70.backend/backend/_MirToLlvm/`)
+# pass a `text` argument to an extern call as the (ptr, len) TWO-WORD pair
+# established as the extern-ABI convention (see
+# doc/08_tracking/bug/pure_simple_text_extern_abi_audit_2026-07-30.md), or as
+# a SINGLE collapsed `ptr`?
+#
+# HIR->MIR lowers `text` to `MirTypeKind.Tuple([Ptr(U8), U64])` (fat pointer:
+# see `_MirLowering/function_lowering.spl`'s `case Str:` arm). But
+# `llvm_type_text` (`_MirToLlvm/class_def.spl`) maps EVERY aggregate kind,
+# `Tuple(_)` included, straight to the opaque LLVM `"ptr"` type -- the same
+# bucket as `Struct`/`Enum`/`Array`. There is no special case that expands a
+# `Tuple([Ptr(U8), U64])` operand into two call arguments at the `Call`
+# translation site (`core_codegen.spl`'s `translate_call`: `while arg_i <
+# args.len(): ... arg_parts.push(...)` emits exactly one LLVM value per MIR
+# operand, never two for one operand).
+#
+# This spec builds a two-function MIR module -- a caller passing ONE `text`
+# (Tuple fat-pointer) operand to an unresolved extern call -- and inspects the
+# actual LLVM IR text `MirToLlvm.translate_module` emits, to prove (by
+# running the real production code path, not by reading source) whether the
+# call site carries one argument or two.
+
+use compiler.backend.{MirToLlvm}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+use compiler.common.attributes.{vhdl_hardware_metadata_default}
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir_data.*
+use compiler.mir.mir_instructions.*
+
+fn i64t() -> MirType:
+    MirType.i64()
+
+fn text_t() -> MirType:
+    # Mirrors _MirLowering/function_lowering.spl's `case Str:` arm exactly:
+    # "String is a fat pointer (ptr, len)".
+    MirType(kind: MirTypeKind.Tuple([
+        MirType(kind: MirTypeKind.Ptr(MirType(kind: MirTypeKind.U8), false)),
+        MirType(kind: MirTypeKind.U64)
+    ]))
+
+fn mk_fn(sym: i64, name: text, params: [MirType], locals: [MirLocal], insts: [MirInst]) -> MirFunction:
+    MirFunction(
+        symbol: SymbolId(id: sym),
+        name: name,
+        signature: MirSignature(params: params, return_type: i64t(), is_variadic: false),
+        locals: locals,
+        blocks: [MirBlock(id: BlockId.entry(), label: Some("entry"), instructions: insts, terminator: MirTerminator.Ret(nil))],
+        entry_block: BlockId.entry(),
+        span: Span.empty(),
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {},
+        layout_phase: nil,
+        is_kernel: false,
+        gpu_target: "",
+        gpu_backend_order: "",
+        is_export_c: false,
+        export_name: "",
+        has_driver_manifest_attr: false,
+        driver_manifest_attr: nil,
+        has_vhdl_metadata: false,
+        vhdl_metadata: vhdl_hardware_metadata_default(),
+        has_fast_math: false
+    )
+
+fn text_const_arg(v: text) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Const(MirConstValue.Str(v), text_t()))
+
+fn extern_func_ref(name: text) -> MirOperand:
+    # Unresolved extern reference: not present in module.functions (matching
+    # real extern lowering -- module_lowering.spl explicitly skips lowering
+    # extern function bodies), so the callee's declared param count is
+    # unknown to the backend and it must fall back to the OPERAND's own
+    # `text` type when deciding how many/what-typed arguments to emit.
+    MirOperand(kind: MirOperandKind.Const(
+        MirConstValue.Str(name),
+        MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [text_t()], return_type: i64t(), is_variadic: false)))
+    ))
+
+fn caller_fn() -> MirFunction:
+    val call = MirInst(
+        kind: MirInstKind.Call(Some(LocalId(id: 10)), extern_func_ref("rt_probe_text_len"), [text_const_arg("hello world")]),
+        span: nil
+    )
+    mk_fn(1, "text_abi_caller", [], [MirLocal(id: LocalId(id: 10), name: Some("r"), type_: i64t(), kind: LocalKind.Temp, is_ghost: false)], [call])
+
+fn module_with_caller() -> MirModule:
+    var functions: Dict<SymbolId, MirFunction> = {}
+    val c = caller_fn()
+    functions[c.symbol] = c
+    MirModule(name: "test.llvm.text_abi", functions: functions, statics: {}, constants: {}, types: {})
+
+fn find_call_line(output: text) -> text:
+    for line in output.split("\n"):
+        if line.contains("rt_probe_text_len("):
+            return line
+    ""
+
+fn top_level_call_arg_count(call_line: text) -> i64:
+    """Count the call's OWN top-level arguments (depth-1 commas, where depth
+    increments on `(` and decrements on `)`), ignoring commas nested inside a
+    constant sub-expression like a GEP (`getelementptr inbounds ([12 x i8],
+    ptr @.str.0, i64 0, i64 0)`), which is itself ONE argument value, not
+    several. A naive substring search over the whole line (e.g. looking for
+    ", i64 ") false-positives on exactly that nested GEP index list."""
+    val marker = "rt_probe_text_len("
+    val start_idx = call_line.find(marker)
+    if start_idx < 0:
+        return -1
+    val body = call_line.substring(start_idx + marker.len())
+    var depth = 1  # already inside the call's own opening paren
+    var comma_count = 0
+    var saw_content = false
+    var i = 0
+    while i < body.len():
+        val ch = body[i]
+        if ch == "(":
+            depth = depth + 1
+            saw_content = true
+        elif ch == ")":
+            depth = depth - 1
+            if depth == 0:
+                if not saw_content:
+                    return 0
+                return comma_count + 1
+        elif ch == "," and depth == 1:
+            comma_count = comma_count + 1
+        elif ch != " ":
+            saw_content = true
+        i = i + 1
+    -1  # unterminated -- parsing failure, not a valid measurement
+
+describe "pure-Simple LLVM backend text-extern-arg ABI":
+    it "RED (known bug): emits the (ptr, len) two-word pair for a text extern arg":
+        # This assertion states the EXPECTED extern-ABI convention (a `text`
+        # argument becomes two machine words: ptr then len) -- the same
+        # convention whose absence caused rt_mem_attr_set_owner, rt_panic,
+        # rt_cuda_launch_kernel/module_load(_data), and rt_profiler_record_call
+        # to silently corrupt on the interpreter/JIT side (see
+        # doc/08_tracking/bug/pure_simple_text_extern_abi_audit_2026-07-30.md).
+        # It is EXPECTED TO FAIL today: `llvm_type_text` in
+        # `_MirToLlvm/class_def.spl` collapses `MirTypeKind.Tuple(_)`
+        # (the `text` fat-pointer shape) to a single opaque `ptr`, and
+        # `translate_call` in `_MirToLlvm/core_codegen.spl` emits exactly one
+        # LLVM value per MIR-level Call operand -- so a `text` argument
+        # reaches an extern call site as ONE `ptr` word, never a `(ptr, i64)`
+        # pair. A future ABI fix should flip this spec from red to green.
+        val translator = MirToLlvm.create("test.llvm.text_abi", CodegenTarget.X86_64, nil)
+        val output = translator.translate_module(module_with_caller())
+        val call_line = find_call_line(output)
+
+        # Evidence line for the audit doc: whatever the backend actually
+        # emitted for the call site.
+        print("[text_extern_abi] call_line = " + call_line)
+
+        assert_true(call_line != "", "expected a call to rt_probe_text_len in the emitted LLVM IR")
+
+        # Depth-aware count of the call's OWN top-level arguments -- must not
+        # be confused with commas nested inside a constant sub-expression
+        # (e.g. a GEP's index list), which are part of ONE argument value.
+        val arg_count = top_level_call_arg_count(call_line)
+        print("[text_extern_abi] top_level_call_arg_count = " + arg_count.to_text())
+
+        assert_true(arg_count >= 0, "failed to parse the call's argument list (line: " + call_line + ")")
+
+        # THE assertion under audit: one source-level `text` argument should
+        # reach the extern call site as the (ptr, len) TWO-WORD pair per the
+        # extern-ABI convention. Expected to FAIL today (arg_count == 1).
+        assert_equal(2, arg_count, "DIVERGENCE: pure-Simple LLVM backend emitted " + arg_count.to_text() + " call argument(s) for a `text` extern argument (line: " + call_line + "), not the (ptr, len) two-word pair the extern ABI convention requires -- see doc/08_tracking/bug/pure_simple_text_extern_abi_audit_2026-07-30.md")

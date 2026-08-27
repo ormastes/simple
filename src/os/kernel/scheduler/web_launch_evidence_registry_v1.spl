@@ -1,0 +1,213 @@
+"""Scheduler-owned one-shot evidence for sealed `/WEB.ELF` startup.
+
+This registry is intentionally separate from server-data/DBFS receipts.  Its
+opaque receipt never carries a filesystem or network capability; consumers
+receive only the configured endpoint projection after one successful consume.
+"""
+
+use std.thread_sffi.{mutex_raw_create, mutex_raw_lock, mutex_raw_unlock}
+use std.common.contracts.execution.simpleos_executable_admission_v1.{
+    ExecutableImageHandleV1, executable_image_handle_validate
+}
+use os.kernel.loader.web_launch_grants.{
+    SIMPLEOS_WEB_EXECUTABLE_V1, SIMPLEOS_WEB_HTTP_PORT_V1,
+    simpleos_web_configured_bind_ipv4_v1, web_launch_caps_exact_for_owner_v1
+}
+use os.kernel.types.capability_types.{CapabilitySet}
+use os.kernel.scheduler.scheduler_types.{Scheduler}
+
+pub struct WebLaunchEvidenceReceiptV1:
+    slot: i64
+    generation: u64
+    nonce: u64
+    task_id: u64
+    lifecycle_generation: u64
+    exec_generation: u64
+
+pub struct WebLaunchEndpointProjectionV1:
+    bind_ipv4_address: u32
+    port: u16
+
+pub struct WebLaunchEvidenceInstallV1:
+    receipt: WebLaunchEvidenceReceiptV1?
+    endpoint: WebLaunchEndpointProjectionV1?
+
+pub struct WebLaunchPublicationV1:
+    """Request publication only from the effective child pouch.
+
+    The scheduler adds the sealed image and allocated owner; callers cannot
+    supply an endpoint, digest, or independently chosen policy identity.
+    """
+    effective_caps: CapabilitySet
+
+enum WebLaunchEvidenceStateV1:
+    Empty
+    Installed
+    Consumed
+    Quarantined
+    Retired
+
+struct WebLaunchEvidenceSlotV1:
+    state: WebLaunchEvidenceStateV1
+    generation: u64
+    nonce: u64
+    task_id: u64
+    lifecycle_generation: u64
+    exec_generation: u64
+    image_hash: text
+    bind_ipv4_address: u32
+    policy_fingerprint: text
+
+val _WEB_EVIDENCE_LIMIT_V1: i64 = 32
+val _web_evidence_mutex_v1: i64 = mutex_raw_create()
+var _web_evidence_nonce_v1: u64 = 0x5745424556494445u64
+var _web_evidence_quarantined_v1: bool = false
+var _web_evidence_slots_v1: [WebLaunchEvidenceSlotV1] = []
+
+fn _web_empty_slot_v1(generation: u64) -> WebLaunchEvidenceSlotV1:
+    WebLaunchEvidenceSlotV1(state: WebLaunchEvidenceStateV1.Empty,
+        generation: generation, nonce: 0u64, task_id: 0u64,
+        lifecycle_generation: 0u64, exec_generation: 0u64, image_hash: "",
+        bind_ipv4_address: 0u32, policy_fingerprint: "")
+
+fn _web_lock_v1() -> bool:
+    not _web_evidence_quarantined_v1 and _web_evidence_mutex_v1 > 0 and
+        mutex_raw_lock(_web_evidence_mutex_v1)
+
+fn _web_unlock_v1() -> bool:
+    if mutex_raw_unlock(_web_evidence_mutex_v1): return true
+    _web_evidence_quarantined_v1 = true
+    false
+
+fn _web_image_valid_v1(image: ExecutableImageHandleV1) -> bool:
+    val checked = executable_image_handle_validate(image)
+    checked.ok and image.canonical_source_path == SIMPLEOS_WEB_EXECUTABLE_V1 and
+        image.target.os == "simpleos" and image.target.abi == "simpleos" and
+        (image.target.arch == "x86_64" or image.target.arch == "aarch64" or
+            image.target.arch == "riscv64")
+
+pub fn web_launch_evidence_install_before_publication_v1(
+    task_id: u64, lifecycle_generation: u64, exec_generation: u64,
+    image: ExecutableImageHandleV1, effective_caps: CapabilitySet
+) -> WebLaunchEvidenceInstallV1:
+    val bind_ipv4_address = simpleos_web_configured_bind_ipv4_v1()
+    if task_id == 0u64 or lifecycle_generation == 0u64 or exec_generation == 0u64 or
+       bind_ipv4_address == 0u32 or not _web_image_valid_v1(image) or
+       not web_launch_caps_exact_for_owner_v1(effective_caps, bind_ipv4_address, task_id):
+        return WebLaunchEvidenceInstallV1(receipt: nil, endpoint: nil)
+    if not _web_lock_v1(): return WebLaunchEvidenceInstallV1(receipt: nil, endpoint: nil)
+    var index: i64 = -1
+    var i: i64 = 0
+    while i < _web_evidence_slots_v1.len():
+        val slot = _web_evidence_slots_v1[i]
+        if slot.state == WebLaunchEvidenceStateV1.Empty or
+           slot.state == WebLaunchEvidenceStateV1.Retired:
+            index = i
+            break
+        i = i + 1
+    if index < 0 and _web_evidence_slots_v1.len() >= _WEB_EVIDENCE_LIMIT_V1:
+        _ = _web_unlock_v1()
+        return WebLaunchEvidenceInstallV1(receipt: nil, endpoint: nil)
+    if _web_evidence_nonce_v1 == 0xffffffffffffffffu64:
+        _web_evidence_quarantined_v1 = true
+        _ = _web_unlock_v1()
+        return WebLaunchEvidenceInstallV1(receipt: nil, endpoint: nil)
+    _web_evidence_nonce_v1 = _web_evidence_nonce_v1 + 1u64
+    val generation = if index < 0: 1u64 else: _web_evidence_slots_v1[index].generation + 1u64
+    val slot = WebLaunchEvidenceSlotV1(state: WebLaunchEvidenceStateV1.Installed,
+        generation: generation, nonce: _web_evidence_nonce_v1, task_id: task_id,
+        lifecycle_generation: lifecycle_generation, exec_generation: exec_generation,
+        image_hash: image.content_sha256, bind_ipv4_address: bind_ipv4_address,
+        policy_fingerprint: "web-launch-policy-v1:{bind_ipv4_address}:{SIMPLEOS_WEB_HTTP_PORT_V1}:{image.content_sha256}")
+    if index < 0: _web_evidence_slots_v1.push(slot) else: _web_evidence_slots_v1[index] = slot
+    if not _web_unlock_v1(): return WebLaunchEvidenceInstallV1(receipt: nil, endpoint: nil)
+    WebLaunchEvidenceInstallV1(receipt: WebLaunchEvidenceReceiptV1(slot: if index < 0: _web_evidence_slots_v1.len() - 1 else: index,
+        generation: generation, nonce: slot.nonce, task_id: task_id,
+        lifecycle_generation: lifecycle_generation, exec_generation: exec_generation),
+        endpoint: WebLaunchEndpointProjectionV1(bind_ipv4_address: bind_ipv4_address,
+            port: SIMPLEOS_WEB_HTTP_PORT_V1))
+
+pub fn web_launch_evidence_consume_once_v1(
+    receipt: WebLaunchEvidenceReceiptV1
+) -> WebLaunchEndpointProjectionV1?:
+    if not _web_lock_v1() or receipt.slot < 0 or receipt.slot >= _web_evidence_slots_v1.len(): return nil
+    var slot = _web_evidence_slots_v1[receipt.slot]
+    if slot.state != WebLaunchEvidenceStateV1.Installed or
+       slot.generation != receipt.generation or slot.nonce != receipt.nonce or
+       slot.task_id != receipt.task_id or slot.lifecycle_generation != receipt.lifecycle_generation or
+       slot.exec_generation != receipt.exec_generation:
+        _ = _web_unlock_v1()
+        return nil
+    slot.state = WebLaunchEvidenceStateV1.Consumed
+    _web_evidence_slots_v1[receipt.slot] = slot
+    if not _web_unlock_v1(): return nil
+    Some(WebLaunchEndpointProjectionV1(bind_ipv4_address: slot.bind_ipv4_address,
+        port: SIMPLEOS_WEB_HTTP_PORT_V1))
+
+fn _web_launch_evidence_receipt_for_task_v1(
+    task_id: u64, lifecycle_generation: u64, exec_generation: u64
+) -> WebLaunchEvidenceReceiptV1?:
+    """Resolve only the current scheduler execution to an opaque receipt."""
+    if task_id == 0u64 or lifecycle_generation == 0u64 or
+       exec_generation == 0u64 or not _web_lock_v1():
+        return nil
+    var receipt: WebLaunchEvidenceReceiptV1? = nil
+    var i: i64 = 0
+    while i < _web_evidence_slots_v1.len():
+        val slot = _web_evidence_slots_v1[i]
+        if slot.state == WebLaunchEvidenceStateV1.Installed and
+           slot.task_id == task_id and
+           slot.lifecycle_generation == lifecycle_generation and
+           slot.exec_generation == exec_generation:
+            receipt = Some(WebLaunchEvidenceReceiptV1(slot: i,
+                generation: slot.generation, nonce: slot.nonce,
+                task_id: task_id, lifecycle_generation: lifecycle_generation,
+                exec_generation: exec_generation))
+            break
+        i = i + 1
+    if not _web_unlock_v1(): return nil
+    receipt
+
+impl Scheduler:
+    pub(package) me consume_current_web_startup_evidence_v1(
+    ) -> WebLaunchEndpointProjectionV1?:
+        """Consume only a receipt bound to the live current TCB coordinates."""
+        val index = self.current_slot
+        if index < 0 or index >= self.tasks.len(): return nil
+        val maybe_task = self.tasks[index]
+        if maybe_task == nil: return nil
+        val task = maybe_task.unwrap()
+        if task.id.id != self.current.id: return nil
+        val receipt = _web_launch_evidence_receipt_for_task_v1(
+            task.id.id, task.lifecycle_generation, task.exec_generation)
+        if receipt == nil: return nil
+        web_launch_evidence_consume_once_v1(receipt.unwrap())
+
+pub fn web_launch_evidence_revoke_v1(receipt: WebLaunchEvidenceReceiptV1) -> bool:
+    if not _web_lock_v1() or receipt.slot < 0 or receipt.slot >= _web_evidence_slots_v1.len(): return false
+    var slot = _web_evidence_slots_v1[receipt.slot]
+    if slot.generation != receipt.generation or slot.nonce != receipt.nonce:
+        _ = _web_unlock_v1()
+        return false
+    _web_evidence_slots_v1[receipt.slot] = _web_empty_slot_v1(slot.generation)
+    _web_unlock_v1()
+
+pub fn web_launch_evidence_retire_reaped_v1(
+    task_id: u64, lifecycle_generation: u64, exec_generation: u64
+) -> bool:
+    """Retire only the exact published generation; stale reaps cannot reclaim a reuse."""
+    if not _web_lock_v1(): return false
+    var i: i64 = 0
+    while i < _web_evidence_slots_v1.len():
+        val slot = _web_evidence_slots_v1[i]
+        if (slot.state == WebLaunchEvidenceStateV1.Installed or
+            slot.state == WebLaunchEvidenceStateV1.Consumed) and
+            slot.task_id == task_id and
+            slot.lifecycle_generation == lifecycle_generation and
+            slot.exec_generation == exec_generation:
+            var retired = slot
+            retired.state = WebLaunchEvidenceStateV1.Retired
+            _web_evidence_slots_v1[i] = retired
+            return _web_unlock_v1()
+        i = i + 1
+    _web_unlock_v1()

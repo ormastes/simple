@@ -1,6 +1,29 @@
 # Test Db Integrity Specification
 
-> Tests covering Test Database Integrity Validation, Stale Run Detection, Dead Process Detection, Timestamp Validation, Count Consistency, Status Consistency, Multiple Violations, Auto-Fixable Detection.
+> <details>
+
+<!-- sdn-diagram:id=test_db_integrity_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=test_db_integrity_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+test_db_integrity_spec -> app
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=test_db_integrity_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -19,18 +42,13 @@
 
 #### detects run running for >2 hours
 
-- detects run running for >2 hours
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("detects run running for >2 hours")
 val run = create_stale_run("stale_run_1")
 val report = validate_run(run)
 
@@ -46,18 +64,13 @@ expect(report.auto_fixable).to_be(true)
 
 #### ignores recent runs (<2 hours)
 
-- ignores recent runs (<2 hours)
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("ignores recent runs (<2 hours)")
 val run = create_valid_run("recent_run_1")
 val report = validate_run(run)
 
@@ -69,18 +82,18 @@ expect(stale_violations.len()).to_be(0)
 
 #### ignores completed runs
 
-- ignores completed runs
+1. hours ago
+2. hours ago
+3. getpid
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("ignores completed runs")
 val run = create_test_run(
     "completed_run_1",
     "Completed",
@@ -105,18 +118,13 @@ expect(stale_violations.len()).to_be(0)
 
 #### detects dead process with running status
 
-- detects dead process with running status
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("detects dead process with running status")
 val run = create_dead_process_run("dead_proc_1")
 val report = validate_run(run)
 
@@ -131,18 +139,17 @@ expect(report.auto_fixable).to_be(true)
 
 #### ignores completed runs with dead process
 
-- ignores completed runs with dead process
+1. hours ago
+2. hours ago
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("ignores completed runs with dead process")
 val run = create_test_run(
     "completed_dead_1",
     "Completed",
@@ -167,18 +174,16 @@ expect(dead_violations.len()).to_be(0)
 
 #### detects end_time before start_time
 
-- detects end_time before start_time
+1. getpid
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("detects end_time before start_time")
 val run = create_test_run(
     "bad_timestamp_1",
     "Completed",
@@ -203,18 +208,17 @@ expect(ts_found.len() > 0).to_be(true)
 
 #### detects future start_time
 
-- detects future start_time
+1. future time
+2. getpid
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("detects future start_time")
 val run = create_test_run(
     "future_start_1",
     "Running",
@@ -239,18 +243,18 @@ expect(future_found.len() > 0).to_be(true)
 
 #### accepts valid timestamp ordering
 
-- accepts valid timestamp ordering
+1. hours ago
+2. hours ago
+3. getpid
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("accepts valid timestamp ordering")
 val run = create_test_run(
     "valid_timestamps_1",
     "Completed",
@@ -275,18 +279,17 @@ expect(timestamp_violations.len()).to_be(0)
 
 #### detects invalid timestamp format
 
-- detects invalid timestamp format
+1. hours ago
+2. getpid
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("detects invalid timestamp format")
 val run = create_test_run(
     "bad_format_1",
     "Completed",
@@ -313,18 +316,19 @@ expect(invalid_found.len() > 0).to_be(true)
 
 #### detects count sum exceeding test_count
 
-- detects count sum exceeding test_count
+1. hours ago
+2. hours ago
+3. getpid
+4. 3,   # failed
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("detects count sum exceeding test_count")
 val run = create_test_run(
     "count_overflow_1",
     "Completed",
@@ -349,18 +353,18 @@ expect(count_found.len() > 0).to_be(true)
 
 #### accepts valid count distribution
 
-- accepts valid count distribution
+1. hours ago
+2. hours ago
+3. getpid
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("accepts valid count distribution")
 val run = create_test_run(
     "valid_counts_1",
     "Completed",
@@ -383,18 +387,19 @@ expect(count_violations.len()).to_be(0)
 
 #### accepts partial counts (some tests skipped)
 
-- accepts partial counts (some tests skipped)
+1. hours ago
+2. hours ago
+3. getpid
+4. 1  # 10 + 3 + 2 + 1 = 16 < 20
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("accepts partial counts (some tests skipped)")
 val run = create_test_run(
     "partial_counts_1",
     "Completed",
@@ -419,18 +424,17 @@ expect(count_violations.len()).to_be(0)
 
 #### detects missing end_time for completed status
 
-- detects missing end_time for completed status
+1. hours ago
+2. getpid
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("detects missing end_time for completed status")
 val run = create_test_run(
     "missing_end_1",
     "Completed",
@@ -455,18 +459,18 @@ expect(status_found.len() > 0).to_be(true)
 
 #### detects unexpected end_time for running status
 
-- detects unexpected end_time for running status
+1. hours ago
+2. hours ago
+3. getpid
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("detects unexpected end_time for running status")
 val run = create_test_run(
     "unexpected_end_1",
     "Running",
@@ -491,18 +495,20 @@ expect(status_found2.len() > 0).to_be(true)
 
 #### accepts valid status/timestamp combinations
 
-- accepts valid status/timestamp combinations
+1. hours ago
+2. getpid
+3. hours ago
+4. hours ago
+5. getpid
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 35 lines folded for reproduction.
+Runnable source: 33 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("accepts valid status/timestamp combinations")
 # Running with no end_time
 val running = create_test_run(
     "valid_running_1",
@@ -544,18 +550,17 @@ expect(status_violations2.len()).to_be(0)
 
 #### reports multiple violations for single record
 
-- reports multiple violations for single record
+1. hours ago
+2. hours ago
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("reports multiple violations for single record")
 val run = create_test_run(
     "multi_bad_1",
     "Running",
@@ -578,18 +583,16 @@ expect(report.violations.len()).to_be_greater_than(2)
 
 #### calculates max severity correctly
 
-- calculates max severity correctly
+1. future time
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("calculates max severity correctly")
 val run = create_test_run(
     "severity_test_1",
     "Running",
@@ -613,18 +616,13 @@ expect(report.max_severity()).to_be("Critical")
 
 #### marks stale/dead runs as auto-fixable
 
-- marks stale/dead runs as auto-fixable
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("marks stale/dead runs as auto-fixable")
 val stale = create_stale_run("stale_1")
 val report1 = validate_run(stale)
 expect(report1.auto_fixable).to_be(true)
@@ -638,18 +636,16 @@ expect(report2.auto_fixable).to_be(true)
 
 #### does not mark timestamp errors as auto-fixable
 
-- does not mark timestamp errors as auto-fixable
+1. getpid
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("does not mark timestamp errors as auto-fixable")
 val bad_timestamp = create_test_run(
     "bad_ts_1",
     "Completed",
@@ -677,12 +673,12 @@ expect(report.auto_fixable).to_be(false)
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/tooling/test_db_integrity_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering Test Database Integrity Validation, Stale Run Detection, Dead Process Detection, Timestamp Validation, Count Consistency, Status Consistency, Multiple Violations, Auto-Fixable Detection.
+Tests covering:
 - Test Database Integrity Validation
 - Stale Run Detection
 - Dead Process Detection
@@ -704,51 +700,3 @@ Tests covering Test Database Integrity Validation, Stale Run Detection, Dead Pro
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-UNIT`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `8a54eb5d246a1656be57164b66baf05fda6e7a3b5c27122cc5a01e3a5186e2d2`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `8a54eb5d246a1656be57164b66baf05fda6e7a3b5c27122cc5a01e3a5186e2d2`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `8a54eb5d246a1656be57164b66baf05fda6e7a3b5c27122cc5a01e3a5186e2d2`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/01_unit/app/tooling/test_db_integrity_spec.spl
-mirror: doc/06_spec/01_unit/app/tooling/test_db_integrity_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/app/tooling/test_db_integrity_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/app/tooling/test_db_integrity_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/app/tooling/test_db_integrity_spec.spl:115:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'detects run running for >2 hours' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/tooling/test_db_integrity_spec.spl:128:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'ignores recent runs (<2 hours)' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/tooling/test_db_integrity_spec.spl:137:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'ignores completed runs' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

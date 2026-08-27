@@ -1,0 +1,150 @@
+# Strict VHDL renderer for a closed typed combinational composition.
+
+use compiler.mir.hwir.types.{HwPort, hwir_vhdl_identifier}
+use compiler.mir.hwir.combinational_composition.{HwCombBinding,
+    HwCombCompositionDef}
+use compiler.backend.backend.hwir_to_vhdl.{HwirStrictVhdlResult,
+    render_strict_hwir_vhdl}
+
+fn composition_route() -> text:
+    "hwir-gen2-combinational-composition-v1"
+
+fn composition_rejected(diagnostic: text) -> HwirStrictVhdlResult:
+    HwirStrictVhdlResult(success: false, vhdl: "", diagnostic: diagnostic,
+        route: composition_route(), module_node_id: "", config_xlen: 0,
+        config_profile: "", hwir_graph_sha256: "")
+
+fn composition_vhdl_type(width: i32) -> text:
+    if width == 1: return "std_logic"
+    "std_logic_vector(" + (width - 1).to_text() + " downto 0)"
+
+fn composition_source(owner: text, port: text) -> text:
+    "source_o" + owner.len().to_text() + "_" + owner + "_p" +
+        port.len().to_text() + "_" + port
+
+fn composition_wire(owner: text, port: text) -> text:
+    "wire_o" + owner.len().to_text() + "_" + owner + "_p" +
+        port.len().to_text() + "_" + port
+
+fn composition_input_actual(composition: HwCombCompositionDef,
+    owner: text, port: HwPort) -> text:
+    for binding in composition.bindings:
+        if binding.destination_owner == owner and binding.destination_port == port.name:
+            return composition_wire(owner, port.name)
+    port.name
+
+fn composition_output_actual(composition: HwCombCompositionDef,
+    owner: text, port: HwPort) -> text:
+    for binding in composition.bindings:
+        if binding.source_owner == owner and binding.source_port == port.name:
+            return composition_source(owner, port.name)
+    "open"
+
+fn composition_child_map(composition: HwCombCompositionDef,
+    owner: text, ports: [HwPort]) -> text:
+    var result = ""
+    var index = 0
+    for port in ports:
+        if index > 0: result = result + ","
+        result = result + port.name + "=>" +
+            (if port.direction == "in":
+                composition_input_actual(composition, owner, port)
+            else: composition_output_actual(composition, owner, port))
+        index = index + 1
+    result
+
+fn composition_render_ports(ports: [HwPort]) -> text:
+    var result = ""
+    var index = 0
+    for port in ports:
+        result = result + "        " + port.name + " : " + port.direction + " " +
+            composition_vhdl_type(port.bit_width)
+        if index + 1 < ports.len(): result = result + ";"
+        result = result + "\n"
+        index = index + 1
+    result
+
+fn composition_render_wires(composition: HwCombCompositionDef) -> text:
+    var result = ""
+    var destinations: [text] = []
+    var sources: [text] = []
+    for binding in composition.bindings:
+        if binding.destination_owner != "composition":
+            val wire = composition_wire(binding.destination_owner,
+                binding.destination_port)
+            if not destinations.contains(wire.lower()):
+                result = result + "    signal " + wire + " : " +
+                    composition_vhdl_type(binding.bit_width) + ";\n"
+                destinations.push(wire.lower())
+        if binding.source_owner != "composition":
+            val source = composition_source(binding.source_owner, binding.source_port)
+            if not sources.contains(source.lower()):
+                result = result + "    signal " + source + " : " +
+                    composition_vhdl_type(binding.bit_width) + ";\n"
+                sources.push(source.lower())
+    result
+
+fn composition_render_assignments(composition: HwCombCompositionDef) -> text:
+    var result = ""
+    for binding in composition.bindings:
+        val destination = if binding.destination_owner == "composition":
+            binding.destination_port
+        else: composition_wire(binding.destination_owner, binding.destination_port)
+        val source = if binding.source_owner == "composition": binding.source_port
+        else: composition_source(binding.source_owner, binding.source_port)
+        result = result + "    " + destination + " <= " + source + ";\n"
+    result
+
+pub fn render_strict_comb_composition_vhdl(
+    composition: HwCombCompositionDef) -> HwirStrictVhdlResult:
+    val diagnostic = composition.diagnostic()
+    if diagnostic != "": return composition_rejected(diagnostic)
+    if not hwir_vhdl_identifier(composition.entity_name):
+        return composition_rejected(
+            "HWIR-E-COMB-COMPOSITION-VHDL-ENTITY: composition requires a legal VHDL entity name")
+    var entity_names: [text] = []
+    var entity_hashes: [text] = []
+    var child_vhdl = ""
+    var child_headers = ""
+    for child in composition.children:
+        if not hwir_vhdl_identifier(child.owner):
+            return composition_rejected(
+                "HWIR-E-COMB-COMPOSITION-VHDL-OWNER: child owner requires a legal VHDL identifier")
+        val name = child.module.summary.name.lower()
+        val graph = child.module.structural_sha256()
+        if entity_names.contains(name):
+            var index = 0
+            while entity_names[index] != name: index = index + 1
+            if entity_hashes[index] != graph:
+                return composition_rejected(
+                    "HWIR-E-COMB-COMPOSITION-VHDL-ENTITY-COLLISION: one child entity name requires one exact graph")
+        else:
+            val rendered = render_strict_hwir_vhdl(child.module)
+            if not rendered.is_success(): return composition_rejected(rendered.diagnostic)
+            entity_names.push(name)
+            entity_hashes.push(graph)
+            child_vhdl = child_vhdl + rendered.vhdl + "\n"
+        child_headers = child_headers + "-- simple-hwir child-" + child.owner + "=" + graph + "\n"
+    var instances = ""
+    for child in composition.children:
+        instances = instances + "    " + child.owner + ": entity work." +
+            child.module.summary.name +
+            (if child.module.ports.len() == 0: ";\n"
+            else: " port map(" + composition_child_map(composition, child.owner,
+                child.module.ports) + ");\n")
+    val graph = composition.structural_sha256()
+    val top = "library ieee;\nuse ieee.std_logic_1164.all;\nuse ieee.numeric_std.all;\n\n" +
+        "-- simple-hwir route=" + composition_route() + " profile=" +
+        composition.config.profile + " graph=" + graph + "\n" + child_headers +
+        "entity " + composition.entity_name + " is" +
+        (if composition.top_ports.len() == 0: " end entity;\n"
+        else: " port(\n" + composition_render_ports(composition.top_ports) +
+            "    ); end entity;\n") +
+        "architecture rtl of " + composition.entity_name + " is\n" +
+        composition_render_wires(composition) + "begin\n" +
+        composition_render_assignments(composition) + instances +
+        "end architecture rtl;\n"
+    HwirStrictVhdlResult(success: true, vhdl: child_vhdl + top, diagnostic: "",
+        route: composition_route(), module_node_id: composition.node_id.value,
+        config_xlen: composition.config.xlen,
+        config_profile: composition.config.profile, hwir_graph_sha256: graph)

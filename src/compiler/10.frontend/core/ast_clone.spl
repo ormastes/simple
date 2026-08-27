@@ -6,26 +6,47 @@
 # Each clone gets new indices in the arena pools but preserves structure.
 
 use compiler.core.ast.{expr_count, expr_alloc, expr_get}
-use compiler.core.ast.{stmt_count, stmt_alloc, stmt_get, stmt_if_val_decl, stmt_is_if_val_decl}
+use compiler.core.ast.{stmt_count, stmt_alloc, stmt_get}
 use compiler.core.ast.{decl_count, decl_alloc, decl_get}
 use compiler.core.ast_types.{CoreExpr, CoreStmt, CoreDecl}
 use compiler.core.ast.{EXPR_INT_LIT, EXPR_FLOAT_LIT, EXPR_STRING_LIT, EXPR_BOOL_LIT}
 use compiler.core.ast.{EXPR_NIL_LIT, EXPR_IDENT, EXPR_BINARY, EXPR_UNARY, EXPR_CALL}
 use compiler.core.ast.{EXPR_INDEX, EXPR_FIELD_ACCESS, EXPR_METHOD_CALL, EXPR_ARRAY_LIT}
-use compiler.core.ast.{EXPR_IF, EXPR_MATCH, EXPR_FOR, EXPR_WHILE, EXPR_BLOCK}
+use compiler.core.ast.{EXPR_IF, EXPR_IF_CHAIN, EXPR_MATCH, EXPR_FOR, EXPR_WHILE, EXPR_BLOCK}
 use compiler.core.ast.{EXPR_RETURN, EXPR_BREAK, EXPR_CONTINUE, EXPR_RANGE}
 use compiler.core.ast.{EXPR_ASSIGN, EXPR_COMPOUND_ASSIGN, EXPR_DICT_LIT, EXPR_LAMBDA}
 use compiler.core.ast.{EXPR_STRUCT_LIT, EXPR_TUPLE, EXPR_SLICE, EXPR_NULL_COALESCE}
 use compiler.core.ast.{EXPR_OPTIONAL_CHAIN, EXPR_CAST, EXPR_UNIT, EXPR_INTERPOLATED_STRING}
 use compiler.core.ast.{EXPR_PASS, EXPR_PASS_TODO, EXPR_PASS_DO_NOTHING, EXPR_PASS_DN}
-use compiler.core.ast.{EXPR_SUFFIXED_LIT, EXPR_AWAIT, EXPR_YIELD, EXPR_SPAWN}
+use compiler.core.ast.{EXPR_SUFFIXED_LIT, EXPR_AWAIT, EXPR_YIELD, EXPR_SPAWN, EXPR_ASYNC_BLOCK}
 use compiler.core.ast.{STMT_EXPR, STMT_ASSIGN}
-use compiler.core.ast.{STMT_COMPOUND_ASSIGN, STMT_FOR, STMT_WHILE, STMT_IF}
+use compiler.core.ast.{STMT_COMPOUND_ASSIGN, STMT_FOR, STMT_WHILE, STMT_IF, STMT_IF_CHAIN}
+use compiler.core.ast.{expr_if_chain_expr, stmt_if_chain_stmt}
+use compiler.frontend.core.if_chain_nodes.*
 use compiler.core.ast.{STMT_MATCH, STMT_RETURN, STMT_BREAK, STMT_CONTINUE}
 use compiler.core.ast.{DECL_FN, DECL_EXTERN_FN, DECL_STRUCT, DECL_ENUM}
-use compiler.core.ast.{DECL_USE, DECL_EXPORT}
+use compiler.core.ast.{DECL_VAL_BINDING, DECL_VAR_BINDING, DECL_USE, DECL_EXPORT}
 
 # ===== Expression Cloning =====
+
+fn ast_clone_expr_if_chain(source_chain: i64, span_id: i64) -> i64:
+    val chain_id = flat_if_expr_chain_new(span_id)
+    var arm_id = flat_if_chain_first_arm_get(source_chain)
+    var remaining = flat_if_chain_arm_count_get(source_chain)
+    while arm_id >= 0 and remaining > 0:
+        val cloned_arm = flat_if_expr_arm_append(
+            chain_id,
+            flat_if_arm_kind_get(arm_id),
+            ast_clone_expr(flat_if_arm_head_get(arm_id)),
+            ast_clone_expr(flat_if_arm_init_get(arm_id)),
+            ast_clone_expr(flat_if_arm_then_expr_get(arm_id)),
+            flat_if_arm_span_get(arm_id)
+        )
+        flat_if_arm_rationale_set(cloned_arm, flat_if_arm_rationale_get(arm_id))
+        arm_id = flat_if_arm_next_get(arm_id)
+        remaining = remaining - 1
+    flat_if_expr_else_set(chain_id, ast_clone_expr(flat_if_chain_else_expr_get(source_chain)))
+    expr_if_chain_expr(chain_id, span_id)
 
 fn ast_clone_expr(source_eid: i64) -> i64:
     """Clone an expression node recursively
@@ -38,6 +59,8 @@ fn ast_clone_expr(source_eid: i64) -> i64:
 
     val src = expr_get(source_eid)
     val tag = src.tag
+    if tag == EXPR_IF_CHAIN:
+        return ast_clone_expr_if_chain(src.extra, src.span)
     val new_eid = expr_alloc(tag, src.span)
 
     # Get mutable access to set fields
@@ -74,6 +97,43 @@ fn ast_clone_expr_list(source_eids: [i64]) -> [i64]:
 
 # ===== Statement Cloning =====
 
+fn ast_clone_stmt_if_chain(source_chain: i64, span_id: i64) -> i64:
+    val chain_id = flat_if_stmt_chain_new(span_id)
+    var arm_id = flat_if_chain_first_arm_get(source_chain)
+    var remaining = flat_if_chain_arm_count_get(source_chain)
+    while arm_id >= 0 and remaining > 0:
+        val cloned_head = ast_clone_expr(flat_if_arm_head_get(arm_id))
+        val cloned_init = ast_clone_expr(flat_if_arm_init_get(arm_id))
+        var cloned_body: [i64] = []
+        var bi = 0
+        while bi < flat_if_arm_body_count_get(arm_id):
+            cloned_body.push(ast_clone_stmt(flat_if_arm_body_at(arm_id, bi)))
+            bi = bi + 1
+        val cloned_arm = flat_if_stmt_arm_append(
+            chain_id,
+            flat_if_arm_kind_get(arm_id),
+            cloned_head,
+            cloned_init,
+            flat_if_arm_span_get(arm_id)
+        )
+        flat_if_arm_rationale_set(cloned_arm, flat_if_arm_rationale_get(arm_id))
+        bi = 0
+        while bi < cloned_body.len():
+            flat_if_stmt_arm_body_append(cloned_arm, cloned_body[bi])
+            bi = bi + 1
+        arm_id = flat_if_arm_next_get(arm_id)
+        remaining = remaining - 1
+    var cloned_else: [i64] = []
+    var ei = 0
+    while ei < flat_if_chain_else_stmt_count_get(source_chain):
+        cloned_else.push(ast_clone_stmt(flat_if_chain_else_stmt_at(source_chain, ei)))
+        ei = ei + 1
+    ei = 0
+    while ei < cloned_else.len():
+        flat_if_stmt_else_append(chain_id, cloned_else[ei])
+        ei = ei + 1
+    stmt_if_chain_stmt(chain_id, span_id)
+
 fn ast_clone_stmt(source_sid: i64) -> i64:
     """Clone a statement node recursively
 
@@ -85,10 +145,7 @@ fn ast_clone_stmt(source_sid: i64) -> i64:
 
     val src = stmt_get(source_sid)
     val tag = src.tag
-    val new_sid = if stmt_is_if_val_decl(source_sid):
-        stmt_if_val_decl("", -1, src.span)
-    else:
-        stmt_alloc(tag, src.span)
+    val new_sid = stmt_alloc(tag, src.span)
 
     val dst = stmt_get(new_sid)
     dst.name = src.name

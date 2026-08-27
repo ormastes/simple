@@ -1,27 +1,12 @@
 # Browser Session Node Host Specification
 
-> Tests covering BrowserSession deterministic Node host surface.
-
-| Tests | Active | Skipped | Pending |
-|-------|--------|---------|--------:|
-| 7 | 7 | 0 | 0 |
-
-<details>
-<summary>Full Scenario Manual</summary>
-
-# Browser Session Node Host Specification
-
 ## Scenarios
 
 ### BrowserSession deterministic Node host surface
 
 #### builds deterministic process and Buffer globals without host state
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- builds deterministic process and Buffer globals without host state
+1. var interp =  new interpreter
    - Expected: _display_js(process_platform([])) equals `linux`
    - Expected: _display_js(os_platform([])) equals `linux`
    - Expected: _display_js(process_versions_node([])) equals `0.0.0-simple`
@@ -31,14 +16,12 @@
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("builds deterministic process and Buffer globals without host state")
 var interp = _new_interpreter()
 
 expect(_display_js(process_platform([]))).to_equal("linux")
@@ -53,25 +36,31 @@ expect(_display_js(interp._native_node_require_function())).to_equal("[Function]
 
 #### loads deterministic path and Buffer modules through require dispatch
 
-- loads deterministic path and Buffer modules through require dispatch
+1. var interp =  new interpreter
    - Expected: _display_js(interp._dispatch_native_with_receiver(-106, JsValue.Undefined, [JsValue.String(v: "/usr"), JsValue.String(v: "local"), JsValue.String(v: ".."), JsValue.String(v: "bin")], 0)) equals `/usr/bin`
    - Expected: _display_js(interp._dispatch_native_with_receiver(-102, JsValue.Undefined, [JsValue.String(v: "/tmp/demo.txt")], 0)) equals `demo.txt`
    - Expected: _object_property_text(interp, path, "join") equals `[Function]`
    - Expected: _object_property_text(interp, buffer_module, "Buffer") equals `[object Object]`
    - Expected: _display_js(interp._dispatch_native_with_receiver(-110, JsValue.Undefined, [JsValue.String(v: "68656c6c6f"), JsValue.String(v: "hex")], 0)) equals `5`
+
+2. JsValue Object
+
+3. JsValue Object
    - Expected: _display_js(interp.get_object_property(buffer_id, "concat")) equals `[Function]`
+
+4.  : expect
+
+5.  : expect
    - Expected: _display_js(interp._native_node_buffer_to_string(buffer, [JsValue.String(v: "hex")])) equals `68656c6c6f`
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("loads deterministic path and Buffer modules through require dispatch")
 var interp = _new_interpreter()
 
 val path = interp._native_node_require([JsValue.String(v: "node:path")])
@@ -97,7 +86,7 @@ expect(_display_js(interp._native_node_buffer_to_string(buffer, [JsValue.String(
 
 #### loads deterministic os modules through require dispatch
 
-- loads deterministic os modules through require dispatch
+1. var interp =  new interpreter
    - Expected: _object_property_text(interp, os, "platform") equals `[Function]`
    - Expected: _display_js(interp._dispatch_native_with_receiver(-132, JsValue.Undefined, [], 0)) equals `linux`
    - Expected: _display_js(interp._dispatch_native_with_receiver(-133, JsValue.Undefined, [], 0)) equals `x64`
@@ -107,14 +96,12 @@ expect(_display_js(interp._native_node_buffer_to_string(buffer, [JsValue.String(
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("loads deterministic os modules through require dispatch")
 var interp = _new_interpreter()
 
 val os = interp._native_node_require([JsValue.String(v: "node:os")])
@@ -130,23 +117,23 @@ expect(_display_js(interp._dispatch_native_with_receiver(-136, JsValue.Undefined
 
 #### denies host filesystem module access through require
 
-- denies host filesystem module access through require
+1. var interp =  new interpreter
    - Expected: _object_property_text(interp, fs, "readFileSync") equals `[Function]`
    - Expected: _object_property_text(interp, fs, "writeFileSync") equals `[Function]`
+
+2. JsValue Object
    - Expected: _object_property_text(interp, denied, "status") equals `denied`
    - Expected: _object_property_text(interp, denied, "error") equals `file-denied`
    - Expected: "missing fs module" equals `object`
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("denies host filesystem module access through require")
 var interp = _new_interpreter()
 
 val fs = interp._native_node_require([JsValue.String(v: "fs")])
@@ -163,90 +150,61 @@ match fs:
 
 </details>
 
-#### does not install Node globals on BrowserSession page runtimes
-
-- does not install Node globals on BrowserSession page runtimes
-   - Expected: _display_js(state.runtime.get_host_property(state.window_id, "require")) equals `undefined`
-   - Expected: _display_js(state.runtime.get_host_property(state.window_id, "process")) equals `undefined`
-   - Expected: _display_js(state.runtime.get_host_property(state.window_id, "Buffer")) equals `undefined`
-   - Expected: _display_js(value) equals `undefined:undefined:undefined`
-
+#### installs deterministic process argv on BrowserSession runtime globals
 
 <details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 12 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-UNIT
-step("does not install Node globals on BrowserSession page runtimes")
-val state = BrowserRuntimeState.create("https://example.test/", "T", "", [], [], "")
-expect(_display_js(state.runtime.get_host_property(state.window_id, "require"))).to_equal("undefined")
-expect(_display_js(state.runtime.get_host_property(state.window_id, "process"))).to_equal("undefined")
-expect(_display_js(state.runtime.get_host_property(state.window_id, "Buffer"))).to_equal("undefined")
-var runtime = state.runtime
-match runtime.eval("typeof require + ':' + typeof process + ':' + typeof Buffer"):
-    Ok(value):
-        expect(_display_js(value)).to_equal("undefined:undefined:undefined")
-    Err(e):
-        fail("Expected browser Node globals to be absent: {e.message}")
-```
-
-</details>
-
-#### keeps Node support available only through explicit JS engine APIs
-
-- keeps Node support available only through explicit JS engine APIs
-   - Expected: _display_js(interp._native_node_require_function()) equals `[Function]`
-   - Expected: _object_property_text(interp, process, "exit") equals `[Function]`
-
-
-<details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("keeps Node support available only through explicit JS engine APIs")
-var interp = _new_interpreter()
-expect(_display_js(interp._native_node_require_function())).to_equal("[Function]")
-val process = interp._native_node_require([JsValue.String(v: "process")])
-expect(_object_property_text(interp, process, "exit")).to_equal("[Function]")
+val state = BrowserRuntimeState.create("https://example.test/", "T", "", [], [], "")
+val process = state.runtime.get_host_property(state.window_id, "process")
+expect(_object_child_property_text(state.runtime.interpreter, process, "argv", "length")).to_equal("2")
+expect(_object_child_property_text(state.runtime.interpreter, process, "argv", "0")).to_equal("simple")
+expect(_object_property_text(state.runtime.interpreter, process, "exit")).to_equal("[Function]")
+expect(_display_js(state.runtime.interpreter._dispatch_native_with_receiver(NATIVE_NODE_PROCESS_EXIT, JsValue.Undefined, [JsValue.Number(v: 7.0)], 0))).to_equal("7")
 ```
 
 </details>
 
-#### denies direct Node host syntax in browser mode
+#### executes embedded process exit intent in BrowserSession runtime scripts
 
-- denies direct Node host syntax in browser mode
-   - Expected: _browser_eval_is_error("process.cwd()") is true
-   - Expected: _browser_eval_is_error("process.env.PATH") is true
-   - Expected: _browser_eval_is_error("process.argv[0]") is true
-   - Expected: _browser_eval_is_error("process.versions.node") is true
-   - Expected: _browser_eval_is_error("globalThis.Buffer.byteLength('secret')") is true
-   - Expected: _browser_eval_is_error("require('fs').readFileSync('/etc/passwd')") is true
-   - Expected: _browser_eval_is_error("process.send('secret')") is true
+1. var state = BrowserRuntimeState create
+
+2. Ok
+   - Expected: _display_js(value) equals `7`
+
+3. Err
+   - Expected: err.message equals `ok`
+
+4. Ok
+   - Expected: _display_js(value) equals `7`
+
+5. Err
+   - Expected: err.message equals `ok`
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("denies direct Node host syntax in browser mode")
-expect(_browser_eval_is_error("process.cwd()")).to_equal(true)
-expect(_browser_eval_is_error("process.env.PATH")).to_equal(true)
-expect(_browser_eval_is_error("process.argv[0]")).to_equal(true)
-expect(_browser_eval_is_error("process.versions.node")).to_equal(true)
-expect(_browser_eval_is_error("globalThis.Buffer.byteLength('secret')")).to_equal(true)
-expect(_browser_eval_is_error("require('fs').readFileSync('/etc/passwd')")).to_equal(true)
-expect(_browser_eval_is_error("process.send('secret')")).to_equal(true)
+var state = BrowserRuntimeState.create("about:node-process", "Node", "", [], [], "")
+
+match state.runtime.eval("process.exit(7)"):
+    Ok(value):
+        expect(_display_js(value)).to_equal("7")
+    Err(err):
+        expect(err.message).to_equal("ok")
+match state.runtime.eval("require('process').exit(7)"):
+    Ok(value):
+        expect(_display_js(value)).to_equal("7")
+    Err(err):
+        expect(err.message).to_equal("ok")
 ```
 
 </details>
@@ -257,72 +215,22 @@ expect(_browser_eval_is_error("process.send('secret')")).to_equal(true)
 |-------|-------|
 | Category | Standard Library |
 | Status | Active |
-| Source | `test/unit/lib/common/web/browser_session_node_host_spec.spl` |
-| Updated | 2026-08-26 |
+| Source | `test/01_unit/lib/common/web/browser_session_node_host_spec.spl` |
+| Updated | 2026-05-31 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering BrowserSession deterministic Node host surface.
+Tests covering:
 - BrowserSession deterministic Node host surface
 
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 7 |
-| Active scenarios | 7 |
+| Total scenarios | 6 |
+| Active scenarios | 6 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
 
-
-</details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-UNIT`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `bce247ce085d757e69f037031b126844e053a21a6153c6b967bad059949dd14c`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `bce247ce085d757e69f037031b126844e053a21a6153c6b967bad059949dd14c`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `bce247ce085d757e69f037031b126844e053a21a6153c6b967bad059949dd14c`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/unit/lib/common/web/browser_session_node_host_spec.spl
-mirror: doc/06_spec/unit/lib/common/web/browser_session_node_host_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/unit/lib/common/web/browser_session_node_host_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/unit/lib/common/web/browser_session_node_host_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/unit/lib/common/web/browser_session_node_host_spec.spl:60:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'builds deterministic process and Buffer globals without host state' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/unit/lib/common/web/browser_session_node_host_spec.spl:72:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'loads deterministic path and Buffer modules through require dispatch' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/unit/lib/common/web/browser_session_node_host_spec.spl:95:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'loads deterministic os modules through require dispatch' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

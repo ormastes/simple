@@ -12,11 +12,35 @@
 #   OUT: no borders, no text/glyph rendering, no transparent-background skip
 #        (alpha=0 rects are still emitted), no z-order/stacking sort (the
 #        block-flow lane is already a flat document-order list), and no
-#        `PaintChunks`/`RenderRevisions` staleness wiring (an orthogonal
-#        damage-tracking optimization layered on top of this rect list).
+#        retained staleness wiring.  The additive paired producer below emits
+#        one background-only PaintChunk row per rect for the canonical DrawIR
+#        lowerer; it does not alter this isolated-frame raster path.
 
 use std.blink.layout.style_bridge.{StyledLayout}
 use std.common.ui.render_opt.paint_chunk_rasterizer.{PaintChunkRects}
+use std.common.ui.render_opt.property_trees.{PaintChunks}
+
+# Background-only producer rows for the canonical PaintChunk -> DrawIR
+# lowerer.  They are intentionally separate from `paint_chunks_from_styled_layout`:
+# that function is the existing direct pixel oracle, whereas these rows carry
+# retained-only owner/property/order data and stable command identities.
+struct StyledLayoutPaintChunkRows:
+    valid: bool
+    reason: text
+    chunks: PaintChunks
+    rects: PaintChunkRects
+    stable_command_ids: [text]
+
+fn _styled_layout_paint_chunk_rows_invalid(reason: text) -> StyledLayoutPaintChunkRows:
+    StyledLayoutPaintChunkRows(
+        valid: false, reason: reason, chunks: PaintChunks.create(),
+        rects: PaintChunkRects.create(), stable_command_ids: [])
+
+fn _styled_layout_paint_chunk_i32(value: i64) -> bool:
+    value >= -2147483648 and value <= 2147483647
+
+fn _styled_layout_paint_chunk_owner(node_id: i64) -> bool:
+    node_id >= 0 and node_id <= 4294967295
 
 # Walk `layout.node_ids`/`layout.styles` in index-parallel order (the index
 # `i` is a POSITION, not a node id) and emit one rect per box that actually
@@ -43,4 +67,52 @@ pub fn paint_chunks_from_styled_layout(layout: StyledLayout) -> PaintChunkRects:
         i = i + 1
     rects
 
-export paint_chunks_from_styled_layout
+# Produces one canonical retained row per background rect in the same document
+# order as the direct pixel producer.  The producer-owned ID is semantic and
+# durable (`node-id + paint role`), not geometry, color, or a global loop
+# index.  Future borders/shadows/glyphs need their own per-owner role/ordinal
+# rows in the real layer order before they may use this API.
+pub fn paint_chunk_rows_from_styled_layout(layout: StyledLayout) -> StyledLayoutPaintChunkRows:
+    var chunks = PaintChunks.create()
+    var rects = PaintChunkRects.create()
+    var stable_command_ids: [text] = []
+    var seen: Dict<text, bool> = {}
+    var i: i64 = 0
+    while i < layout.node_ids.len():
+        val node_id = layout.node_ids[i as i32]
+        val style = layout.styles[i as i32]
+        match layout.rect_for(node_id):
+            Some(r):
+                val left = r.0.to_i64()
+                val top = r.1.to_i64()
+                val width = (r.2 - r.0).to_i64()
+                val height = (r.3 - r.1).to_i64()
+                if not _styled_layout_paint_chunk_owner(node_id) or
+                   i > 4294967295 or
+                   not _styled_layout_paint_chunk_i32(left) or
+                   not _styled_layout_paint_chunk_i32(top) or
+                   not _styled_layout_paint_chunk_i32(width) or
+                   not _styled_layout_paint_chunk_i32(height) or
+                   width <= 0 or height <= 0:
+                    return _styled_layout_paint_chunk_rows_invalid(
+                        "blink-background-paint-chunk-unrepresentable-geometry")
+                val stable_id = "blink-bg:{node_id}:0"
+                if seen.has(stable_id):
+                    return _styled_layout_paint_chunk_rows_invalid(
+                        "blink-background-paint-chunk-duplicate-stable-id")
+                seen[stable_id] = true
+                val paint_order = i.to_u32()
+                chunks.add_chunk_sized(
+                    node_id.to_u32(), 0, 0, 0, 0, 0, paint_order,
+                    width * height)
+                rects.add_rect(left, top, width, height, style.background_color.to_sk_color())
+                stable_command_ids.push(stable_id)
+            None:
+                pass_do_nothing()
+        i = i + 1
+    StyledLayoutPaintChunkRows(
+        valid: true, reason: "", chunks: chunks, rects: rects,
+        stable_command_ids: stable_command_ids)
+
+export StyledLayoutPaintChunkRows, paint_chunks_from_styled_layout,
+       paint_chunk_rows_from_styled_layout

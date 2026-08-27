@@ -1,12 +1,9 @@
 # Module-level `var` write silently reverted on frame pop (interpreted lane)
 
-> **CLAIMED-OFFHOST 2026-08-17** — do not work locally; assigned to a second host. See doc/03_plan/infra/priority_bug.md
-
 - **Id:** module_global_write_lost_on_frame_pop_2026-07-28
 - **Found:** 2026-07-28, while root-causing `bin/simple lint` reporting
   "all files clean" on files that do not parse (fixed in `f4adc39bf39d`).
-- Status: OPEN (P1)
-- Status re-verified 2026-08-17 by source inspection (triage shard 02).
+- **Status:** FIX IMPLEMENTED 2026-07-28 — Stage-4 admission pending Retry 11.
   JIT (cranelift) was already correct.
 - **Sibling:** `module_global_write_invisible_to_callee_2026-07-27.md` is the
   *downward* half of the same place-model defect (a write is invisible to a

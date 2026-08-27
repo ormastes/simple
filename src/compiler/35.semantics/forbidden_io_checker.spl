@@ -20,15 +20,16 @@
 # `apk_loader_is_operational_sealed` in `src/lib/common/aspect_pack.spl` and
 # the E-APACK008 check inside `_apk_acquire_facet`.
 #
-# Surface-level gap, stated rather than hidden: there are zero `facet<T>()`
-# call sites anywhere in the tree today -- the language sugar from design
-# §6.7 does not exist yet. This checker therefore analyses the LOADER-LEVEL
-# acquisition entry points that DO exist in `aspect_pack.spl`
-# (`FORBIDDEN_IO_ACQUIRE_FNS` below). When `facet<T>()` sugar lands, it will
-# desugar to one of these entry points (almost certainly `apk_load_facet`,
-# design's "may load" path) and this checker keeps working unchanged; a
-# sugar-level convenience wrapper (e.g. resolving the desugared callee name
-# automatically) awaits that landing -- design §6.7.
+# Both semantic surfaces are covered: direct loader-level calls and the HIR
+# marker emitted for dynamic `facet<T>()`. The resident `try_facet<T>()` marker
+# stays deliberately outside the forbidden set because it cannot perform I/O.
+
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.frontend.aspect_registry.{
+    aspect_claim_key,
+    aspect_registry_noalloc_of_key
+}
 
 # ============================================================================
 # Violation Kind
@@ -77,7 +78,8 @@ pub struct ForbiddenIoViolation:
 # `apk_try_facet` would be flagging a call that provably cannot violate the
 # rule, which is exactly the kind of false positive the noalloc checker's
 # own `Unknown`-vs-`None` split was built to avoid on the allocation axis.
-pub val FORBIDDEN_IO_ACQUIRE_FNS: [text] = [
+val FORBIDDEN_IO_ACQUIRE_FNS: [text] = [
+    "facet_lookup_lazy",
     "apk_load_facet",
     "apk_load_aspect_manual",
     "apk_activate_startup",
@@ -100,11 +102,26 @@ pub fn is_forbidden_io_acquire_fn(callee: text) -> bool:
     an unrelated symbol with the same final component is not an acquisition
     authority and must not produce a false E-APACK008."""
     for f in FORBIDDEN_IO_ACQUIRE_FNS:
-        if callee == f or callee == FORBIDDEN_IO_ACQUIRE_SOURCE_PATH + "::" + f:
+        # Bare names are retained for unresolved/external calls and for the
+        # manifest API.  Qualified names are deliberately restricted to the
+        # owners that publish these entry points: suffix matching every module
+        # made an unrelated `tenant.cache.apk_load_facet` look like the loader.
+        if (callee == f or callee == "runtime::" + f or callee == "runtime." + f or
+            callee == "std.aspect_pack." + f or callee == "std.aspect_pack::" + f or
+            callee == "lib.common.aspect_pack." + f or callee == "lib.common.aspect_pack::" + f or
+            callee == "lib.common.aspect_pack_lifecycle." + f or
+            callee == "lib.common.aspect_pack_lifecycle::" + f):
             return true
-        for module_name in FORBIDDEN_IO_ACQUIRE_MODULES:
-            if callee == module_name + "." + f or callee == module_name + "::" + f:
-                return true
+    # The facet expression lowerer gives the real lazy lookup this defining
+    # module provenance.  Match only the canonical owners: suffix matching
+    # would let `tenant.common.facet_runtime.facet_lookup_lazy` impersonate it.
+    if (callee == "common.facet_runtime.facet_lookup_lazy" or
+        callee == "common.facet_runtime::facet_lookup_lazy" or
+        callee == "std.common.facet_runtime.facet_lookup_lazy" or
+        callee == "std.common.facet_runtime::facet_lookup_lazy" or
+        callee == "lib.common.facet_runtime.facet_lookup_lazy" or
+        callee == "lib.common.facet_runtime::facet_lookup_lazy"):
+        return true
     false
 
 # ============================================================================
@@ -150,6 +167,15 @@ impl ForbiddenIoContextManifest:
 
     me register(name: text, is_realtime: bool, is_interrupt: bool, is_noalloc: bool):
         """Register a function's context tags."""
+        if self.index.has(name):
+            val existing_idx = self.index[name]
+            self.entries[existing_idx] = ForbiddenIoFnEntry(
+                name: name,
+                is_realtime: is_realtime,
+                is_interrupt: is_interrupt,
+                is_noalloc: is_noalloc
+            )
+            return
         val idx = self.entries.len()
         self.entries.push(ForbiddenIoFnEntry(
             name: name, is_realtime: is_realtime, is_interrupt: is_interrupt, is_noalloc: is_noalloc
@@ -261,15 +287,73 @@ fn _build_forbidden_io_reachability(manifest: ForbiddenIoContextManifest) -> For
 # Checker -- Main Entry Point
 # ============================================================================
 
-fn _check_forbidden_io_violations_indexed(
+fn forbidden_io_reachable_worklist(manifest: ForbiddenIoContextManifest) -> {text: text}:
+    """Memoize every graph node that can reach lazy acquisition.
+
+    This is a reverse-graph worklist rather than recursive DFS: each reachable
+    node enters the queue once, cycles terminate by dictionary membership, and
+    a valid chain longer than 256 nodes is never silently accepted."""
+    var reverse_edges: {text: [text]} = {}
+    var reachable: {text: text} = {}
+    var worklist: [text] = []
+
+    for caller in manifest.callees.keys():
+        for callee in manifest.direct_callees(caller):
+            var parents: [text] = []
+            if reverse_edges.has(callee):
+                parents = reverse_edges[callee]
+            if not parents.contains(caller):
+                parents.push(caller)
+                reverse_edges[callee] = parents
+            if is_forbidden_io_acquire_fn(callee) and not reachable.has(callee):
+                reachable[callee] = callee
+                worklist.push(callee)
+
+    var cursor = 0
+    while cursor < worklist.len():
+        val reached = worklist[cursor]
+        cursor = cursor + 1
+        if not reverse_edges.has(reached):
+            continue
+        for parent in reverse_edges[reached]:
+            if not reachable.has(parent):
+                reachable[parent] = reachable[reached]
+                worklist.push(parent)
+    reachable
+
+fn check_forbidden_io_violations_with_reachable(
     fn_name: text,
     manifest: ForbiddenIoContextManifest,
-    reachability: ForbiddenIoReachabilityIndex
+    reachable: {text: text}
 ) -> [ForbiddenIoViolation]:
     var violations: [ForbiddenIoViolation] = []
     val entry = manifest.lookup(fn_name)
     if not entry.is_forbidden_context():
         return violations
+
+    # At most one diagnostic per context function. Repeated syntax edges and
+    # diamond-shaped paths are one semantic violation, not N copies of it.
+    for callee in manifest.direct_callees(fn_name):
+        if is_forbidden_io_acquire_fn(callee):
+            violations.push(ForbiddenIoViolation(
+                fn_name: fn_name,
+                kind: ForbiddenIoViolationKind.DirectAcquire,
+                detail: "call to lazy facet acquisition '{callee}' from a forbidden execution context",
+                line: 0
+            ))
+            return violations
+
+    for callee in manifest.direct_callees(fn_name):
+        if reachable.has(callee):
+            val found = reachable[callee]
+            violations.push(ForbiddenIoViolation(
+                fn_name: fn_name,
+                kind: ForbiddenIoViolationKind.TransitiveAcquire,
+                detail: "call to '{callee}' transitively reaches lazy facet acquisition '{found}' from a forbidden execution context",
+                line: 0
+            ))
+            return violations
+    violations
 
     for callee in manifest.direct_callees(fn_name):
         if is_forbidden_io_acquire_fn(callee):
@@ -310,20 +394,521 @@ pub fn check_forbidden_io_violations(fn_name: text, manifest: ForbiddenIoContext
         m2.set_callees("isr_tick", ["apk_try_facet"])
         expect(check_forbidden_io_violations("isr_tick", m2).len()).to_equal(0)
     """
-    val reachability = _build_forbidden_io_reachability(manifest)
-    _check_forbidden_io_violations_indexed(fn_name, manifest, reachability)
+    val reachable = forbidden_io_reachable_worklist(manifest)
+    check_forbidden_io_violations_with_reachable(fn_name, manifest, reachable)
 
-pub fn check_all_forbidden_io_fns(manifest: ForbiddenIoContextManifest) -> [ForbiddenIoViolation]:
+fn check_all_forbidden_io_fns(manifest: ForbiddenIoContextManifest) -> [ForbiddenIoViolation]:
     """Check every real-time/interrupt/noalloc-tagged function in a
     compilation unit. The reachability index is built once and shared across
     every tagged root, so bulk checking is O(V + E), not O(tagged * (V + E)).
     Returns all violations across all tagged functions."""
     var all_violations: [ForbiddenIoViolation] = []
-    val reachability = _build_forbidden_io_reachability(manifest)
+    val reachable = forbidden_io_reachable_worklist(manifest)
     for fn_name in manifest.get_context_fns():
-        for v in _check_forbidden_io_violations_indexed(fn_name, manifest, reachability):
+        for v in check_forbidden_io_violations_with_reachable(fn_name, manifest, reachable):
             all_violations.push(v)
     all_violations
+
+# ============================================================================
+# Real HIR integration
+# ============================================================================
+
+fn forbidden_io_hir_fn_key(module_identity: text, symbol_id: i64, fn_name: text) -> text:
+    # `#` is intentionally not one of the separators accepted by
+    # is_forbidden_io_acquire_fn.  A user-defined function whose short name is
+    # `apk_load_facet` remains an ordinary graph node instead of impersonating
+    # the loader solely because of its spelling.
+    "{module_identity}#{symbol_id}:{fn_name}"
+
+fn forbidden_io_module_identity(module_key: text, module: HirModule) -> text:
+    if module.path != "":
+        return module.path
+    if module.name != "":
+        return module.name
+    module_key
+
+fn forbidden_io_is_aspect_pack_owner(module: HirModule) -> bool:
+    val name = module.name
+    (name == "std.aspect_pack" or name == "lib.common.aspect_pack" or
+        name == "std.aspect_pack_lifecycle" or
+        name == "lib.common.aspect_pack_lifecycle")
+
+fn forbidden_io_is_facet_runtime_owner(module: HirModule) -> bool:
+    val name = module.name
+    (name == "common.facet_runtime" or name == "std.common.facet_runtime" or
+        name == "lib.common.facet_runtime")
+
+fn forbidden_io_definition_key(module_identity: text, module: HirModule, func: HirFunction) -> text:
+    if forbidden_io_is_facet_runtime_owner(module) and func.name == "facet_lookup_lazy":
+        return "common.facet_runtime.facet_lookup_lazy"
+    if forbidden_io_is_aspect_pack_owner(module) and is_forbidden_io_acquire_fn(func.name):
+        return func.name
+    forbidden_io_hir_fn_key(module_identity, func.symbol.id, func.name)
+
+fn forbidden_io_record_alias(aliases: Dict<text, text>, alias: text, key: text):
+    if alias != "":
+        if aliases.has(alias) and aliases[alias] != key:
+            # Empty is an ambiguity sentinel. Same-named overloads/methods must
+            # resolve through their SymbolId, never last-write-wins text lookup.
+            aliases[alias] = ""
+        else:
+            aliases[alias] = key
+
+fn forbidden_io_alias_target(aliases: Dict<text, text>, alias: text) -> text:
+    if aliases.has(alias) and aliases[alias] != "":
+        return aliases[alias]
+    ""
+
+fn forbidden_io_imported_symbol_target(
+    symbol: HirSymbol,
+    source_name: text,
+    qualified_fn_names: Dict<text, text>
+) -> text:
+    val direct = forbidden_io_alias_target(qualified_fn_names, symbol.name)
+    if direct != "":
+        return direct
+    if val owner = symbol.defining_module:
+        val owner_dot = forbidden_io_alias_target(
+            qualified_fn_names, owner + "." + source_name)
+        if owner_dot != "":
+            return owner_dot
+        val owner_colon = forbidden_io_alias_target(
+            qualified_fn_names, owner + "::" + source_name)
+        if owner_colon != "":
+            return owner_colon
+        val qualified_display = forbidden_io_alias_target(
+            qualified_fn_names, owner + "." + symbol.name)
+        if qualified_display != "":
+            return qualified_display
+    ""
+
+fn forbidden_io_resolution_callee(
+    resolution: MethodResolution,
+    local_fn_names: Dict<i64, text>
+) -> text:
+    var raw_id = -1
+    match resolution:
+        case MethodResolution.InstanceMethod(_, method_id): raw_id = method_id.id
+        case MethodResolution.TraitMethod(_, method_id): raw_id = method_id.id
+        case MethodResolution.FreeFunction(func_id): raw_id = func_id.id
+        case MethodResolution.StaticMethod(_, method_id): raw_id = method_id.id
+        case MethodResolution.Unresolved: ()
+    if raw_id >= 0 and local_fn_names.has(raw_id):
+        return local_fn_names[raw_id]
+    ""
+
+fn forbidden_io_callee_name(
+    callee: HirExpr,
+    local_fn_names: Dict<i64, text>,
+    qualified_fn_names: Dict<text, text>
+) -> text:
+    match callee.kind:
+        case HirExprKind.Var(symbol):
+            if local_fn_names.contains_key(symbol.id):
+                return local_fn_names[symbol.id]
+            ""
+        case HirExprKind.NamedVar(symbol, name):
+            # Symbol ids are local to their owning HIR symbol table.  Resolve
+            # only against this module's definitions before consulting the
+            # qualified display name; a compilation-wide Dict<i64, text>
+            # silently cross-wired equal ids from sibling modules.
+            if local_fn_names.contains_key(symbol.id):
+                return local_fn_names[symbol.id]
+            if qualified_fn_names.contains_key(name):
+                return qualified_fn_names[name]
+            name
+        case _: ""
+
+fn forbidden_io_block_callees(
+    block: HirBlock,
+    local_fn_names: Dict<i64, text>,
+    qualified_fn_names: Dict<text, text>
+) -> [text]:
+    var out: [text] = []
+    for statement in block.stmts:
+        val stmt: HirStmt = statement
+        match stmt.kind:
+            case HirStmtKind.Expr(expr):
+                for name in forbidden_io_expr_callees(expr, local_fn_names, qualified_fn_names):
+                    out.push(name)
+            case HirStmtKind.Let(_, _, init):
+                for name in forbidden_io_expr_callees(init, local_fn_names, qualified_fn_names):
+                    out.push(name)
+            case HirStmtKind.Assign(target, _, value):
+                for name in forbidden_io_expr_callees(target, local_fn_names, qualified_fn_names):
+                    out.push(name)
+                for name in forbidden_io_expr_callees(value, local_fn_names, qualified_fn_names):
+                    out.push(name)
+            case HirStmtKind.Block(inner):
+                for name in forbidden_io_block_callees(inner, local_fn_names, qualified_fn_names):
+                    out.push(name)
+            case _: ()
+    if block.has:
+        for name in forbidden_io_expr_callees(block.value, local_fn_names, qualified_fn_names):
+            out.push(name)
+    out
+
+fn forbidden_io_expr_callees(
+    expr: HirExpr,
+    local_fn_names: Dict<i64, text>,
+    qualified_fn_names: Dict<text, text>
+) -> [text]:
+    var out: [text] = []
+    match expr.kind:
+        case HirExprKind.StringLit(_, interpolations):
+            match interpolations:
+                Some(values):
+                    for interpolation in values:
+                        for nested in forbidden_io_expr_callees(
+                            interpolation.expr, local_fn_names, qualified_fn_names):
+                            out.push(nested)
+                nil: ()
+        case HirExprKind.Call(callee, args, _):
+            val name = forbidden_io_callee_name(callee, local_fn_names, qualified_fn_names)
+            if name != "" and not out.contains(name):
+                out.push(name)
+            for nested in forbidden_io_expr_callees(callee, local_fn_names, qualified_fn_names):
+                if not out.contains(nested): out.push(nested)
+            for arg in args:
+                for nested in forbidden_io_expr_callees(arg.value, local_fn_names, qualified_fn_names):
+                    out.push(nested)
+        case HirExprKind.MethodCall(receiver, method, args, resolution):
+            # Parser/HIR keep resident and lazy acquisition distinct.  This
+            # pass observes that semantic marker instead of scanning source.
+            if method.starts_with("__facet_load$"):
+                out.push("facet_lookup_lazy")
+            val resolved_name = forbidden_io_resolution_callee(
+                resolution, local_fn_names)
+            if resolved_name != "" and not out.contains(resolved_name):
+                out.push(resolved_name)
+            for nested in forbidden_io_expr_callees(receiver, local_fn_names, qualified_fn_names):
+                out.push(nested)
+            for arg in args:
+                for nested in forbidden_io_expr_callees(arg.value, local_fn_names, qualified_fn_names):
+                    out.push(nested)
+        case HirExprKind.StaticCall(_, _, args, resolution):
+            val resolved_name = forbidden_io_resolution_callee(
+                resolution, local_fn_names)
+            if resolved_name != "" and not out.contains(resolved_name):
+                out.push(resolved_name)
+            for arg in args:
+                for nested in forbidden_io_expr_callees(arg.value, local_fn_names, qualified_fn_names):
+                    out.push(nested)
+        case HirExprKind.If(cond, then_, else_):
+            for nested in forbidden_io_expr_callees(cond, local_fn_names, qualified_fn_names): out.push(nested)
+            for nested in forbidden_io_block_callees(then_, local_fn_names, qualified_fn_names): out.push(nested)
+            match else_:
+                Some(block):
+                    for nested in forbidden_io_block_callees(block, local_fn_names, qualified_fn_names): out.push(nested)
+                nil: ()
+        case HirExprKind.IfChain(arms, else_):
+            for arm in arms:
+                for nested in forbidden_io_expr_callees(arm.cond, local_fn_names, qualified_fn_names): out.push(nested)
+                for nested in forbidden_io_block_callees(arm.then_, local_fn_names, qualified_fn_names): out.push(nested)
+            match else_:
+                Some(block):
+                    for nested in forbidden_io_block_callees(block, local_fn_names, qualified_fn_names): out.push(nested)
+                nil: ()
+        case HirExprKind.MatchCase(scrutinee, arms):
+            for nested in forbidden_io_expr_callees(scrutinee, local_fn_names, qualified_fn_names): out.push(nested)
+            for arm in arms:
+                if arm.has_guard:
+                    for nested in forbidden_io_expr_callees(arm.guard, local_fn_names, qualified_fn_names): out.push(nested)
+                for nested in forbidden_io_block_callees(arm.body, local_fn_names, qualified_fn_names): out.push(nested)
+        case HirExprKind.Loop(body, _):
+            for nested in forbidden_io_block_callees(body, local_fn_names, qualified_fn_names): out.push(nested)
+        case HirExprKind.While(cond, body, _):
+            for nested in forbidden_io_expr_callees(cond, local_fn_names, qualified_fn_names): out.push(nested)
+            for nested in forbidden_io_block_callees(body, local_fn_names, qualified_fn_names): out.push(nested)
+        case HirExprKind.For(_, iter, body, _):
+            for nested in forbidden_io_expr_callees(iter, local_fn_names, qualified_fn_names): out.push(nested)
+            for nested in forbidden_io_block_callees(body, local_fn_names, qualified_fn_names): out.push(nested)
+        case HirExprKind.With(items, body):
+            for item in items:
+                for nested in forbidden_io_expr_callees(item.context_expr, local_fn_names, qualified_fn_names): out.push(nested)
+            for nested in forbidden_io_block_callees(body, local_fn_names, qualified_fn_names): out.push(nested)
+        case HirExprKind.Lambda(_, body, _):
+            for nested in forbidden_io_expr_callees(body, local_fn_names, qualified_fn_names): out.push(nested)
+        case HirExprKind.Block(inner):
+            for nested in forbidden_io_block_callees(inner, local_fn_names, qualified_fn_names): out.push(nested)
+        case HirExprKind.HostGpuLane(_, _, marker, body):
+            for nested in forbidden_io_expr_callees(marker, local_fn_names, qualified_fn_names): out.push(nested)
+            for nested in forbidden_io_block_callees(body, local_fn_names, qualified_fn_names): out.push(nested)
+        case HirExprKind.UnsafeBlock(inner):
+            for nested in forbidden_io_block_callees(inner, local_fn_names, qualified_fn_names): out.push(nested)
+        case HirExprKind.LossBlock(inner):
+            for nested in forbidden_io_block_callees(inner, local_fn_names, qualified_fn_names): out.push(nested)
+        case HirExprKind.NogradBlock(inner):
+            for nested in forbidden_io_block_callees(inner, local_fn_names, qualified_fn_names): out.push(nested)
+        case HirExprKind.InlineAsm(asm_node):
+            for constraint in asm_node.constraints:
+                for nested in forbidden_io_expr_callees(
+                    constraint.value, local_fn_names, qualified_fn_names): out.push(nested)
+                if val output = constraint.output_value:
+                    for nested in forbidden_io_expr_callees(
+                        output, local_fn_names, qualified_fn_names): out.push(nested)
+        case HirExprKind.InlineAsmMatch(arms):
+            for arm in arms:
+                if arm.has_asm_body:
+                    for constraint in arm.asm_body.constraints:
+                        for nested in forbidden_io_expr_callees(
+                            constraint.value, local_fn_names, qualified_fn_names): out.push(nested)
+                        if val output = constraint.output_value:
+                            for nested in forbidden_io_expr_callees(
+                                output, local_fn_names, qualified_fn_names): out.push(nested)
+        case HirExprKind.Binary(_, left, right):
+            for nested in forbidden_io_expr_callees(left, local_fn_names, qualified_fn_names): out.push(nested)
+            for nested in forbidden_io_expr_callees(right, local_fn_names, qualified_fn_names): out.push(nested)
+        case HirExprKind.Unary(_, operand):
+            for nested in forbidden_io_expr_callees(operand, local_fn_names, qualified_fn_names): out.push(nested)
+        case HirExprKind.Field(base, _, _):
+            for nested in forbidden_io_expr_callees(base, local_fn_names, qualified_fn_names): out.push(nested)
+        case HirExprKind.Index(base, index):
+            for nested in forbidden_io_expr_callees(base, local_fn_names, qualified_fn_names): out.push(nested)
+            for nested in forbidden_io_expr_callees(index, local_fn_names, qualified_fn_names): out.push(nested)
+        case HirExprKind.TupleIndex(base, _):
+            for nested in forbidden_io_expr_callees(base, local_fn_names, qualified_fn_names): out.push(nested)
+        case HirExprKind.OptionalChain(base, _):
+            for nested in forbidden_io_expr_callees(base, local_fn_names, qualified_fn_names): out.push(nested)
+        case HirExprKind.NullCoalesce(left, right):
+            for nested in forbidden_io_expr_callees(left, local_fn_names, qualified_fn_names): out.push(nested)
+            for nested in forbidden_io_expr_callees(right, local_fn_names, qualified_fn_names): out.push(nested)
+        case HirExprKind.ExistsCheck(base):
+            for nested in forbidden_io_expr_callees(base, local_fn_names, qualified_fn_names): out.push(nested)
+        case HirExprKind.Unwrap(base):
+            for nested in forbidden_io_expr_callees(base, local_fn_names, qualified_fn_names): out.push(nested)
+        case HirExprKind.Return(value):
+            match value:
+                Some(inner):
+                    for nested in forbidden_io_expr_callees(inner, local_fn_names, qualified_fn_names): out.push(nested)
+                nil: ()
+        case HirExprKind.Break(_, value):
+            match value:
+                Some(inner):
+                    for nested in forbidden_io_expr_callees(inner, local_fn_names, qualified_fn_names): out.push(nested)
+                nil: ()
+        case HirExprKind.Throw(value):
+            for nested in forbidden_io_expr_callees(value, local_fn_names, qualified_fn_names): out.push(nested)
+        case HirExprKind.Try(value):
+            for nested in forbidden_io_expr_callees(value, local_fn_names, qualified_fn_names): out.push(nested)
+        case HirExprKind.Await(value):
+            for nested in forbidden_io_expr_callees(value, local_fn_names, qualified_fn_names): out.push(nested)
+        case HirExprKind.Yield(value):
+            match value:
+                Some(inner):
+                    for nested in forbidden_io_expr_callees(inner, local_fn_names, qualified_fn_names): out.push(nested)
+                nil: ()
+        case HirExprKind.ArrayLit(elements, _):
+            for element in elements:
+                for nested in forbidden_io_expr_callees(element, local_fn_names, qualified_fn_names): out.push(nested)
+        case HirExprKind.ArrayRepeat(value, count, _):
+            for nested in forbidden_io_expr_callees(value, local_fn_names, qualified_fn_names): out.push(nested)
+            for nested in forbidden_io_expr_callees(count, local_fn_names, qualified_fn_names): out.push(nested)
+        case HirExprKind.TupleLit(elements):
+            for element in elements:
+                for nested in forbidden_io_expr_callees(element, local_fn_names, qualified_fn_names): out.push(nested)
+        case HirExprKind.DictLit(entries, _, _):
+            for entry in entries:
+                for nested in forbidden_io_expr_callees(entry[0], local_fn_names, qualified_fn_names): out.push(nested)
+                for nested in forbidden_io_expr_callees(entry[1], local_fn_names, qualified_fn_names): out.push(nested)
+        case HirExprKind.SetLit(elements, _):
+            for element in elements:
+                for nested in forbidden_io_expr_callees(element, local_fn_names, qualified_fn_names): out.push(nested)
+        case HirExprKind.StructLit(_, fields):
+            for field in fields:
+                for nested in forbidden_io_expr_callees(field[1], local_fn_names, qualified_fn_names): out.push(nested)
+        case HirExprKind.EnumLit(_, _, payload):
+            match payload:
+                Some(value):
+                    match value:
+                        HirEnumPayload.Tuple(values):
+                            for item in values:
+                                for nested in forbidden_io_expr_callees(item, local_fn_names, qualified_fn_names): out.push(nested)
+                        HirEnumPayload.Struct(fields):
+                            for field in fields:
+                                for nested in forbidden_io_expr_callees(field[1], local_fn_names, qualified_fn_names): out.push(nested)
+                nil: ()
+        case HirExprKind.Cast(value, _):
+            for nested in forbidden_io_expr_callees(value, local_fn_names, qualified_fn_names): out.push(nested)
+        case HirExprKind.As(value, _):
+            for nested in forbidden_io_expr_callees(value, local_fn_names, qualified_fn_names): out.push(nested)
+        case HirExprKind.Range(start, end_, _, step):
+            for nested in forbidden_io_expr_callees(start, local_fn_names, qualified_fn_names): out.push(nested)
+            for nested in forbidden_io_expr_callees(end_, local_fn_names, qualified_fn_names): out.push(nested)
+            match step:
+                Some(value):
+                    for nested in forbidden_io_expr_callees(value, local_fn_names, qualified_fn_names): out.push(nested)
+                nil: ()
+        case HirExprKind.Comprehension(_, value, clauses):
+            for nested in forbidden_io_expr_callees(value, local_fn_names, qualified_fn_names): out.push(nested)
+            for clause in clauses:
+                match clause.kind:
+                    HirCompClauseKind.For(_, iter):
+                        for nested in forbidden_io_expr_callees(iter, local_fn_names, qualified_fn_names): out.push(nested)
+                    HirCompClauseKind.If(cond):
+                        for nested in forbidden_io_expr_callees(cond, local_fn_names, qualified_fn_names): out.push(nested)
+        case _: ()
+    out
+
+fn forbidden_io_aspect_noalloc(module_key: text, module: HirModule, fn_name: text) -> bool:
+    # `@noalloc` is also one of the mandatory aspect-advice obligations.  That
+    # fact lives in the frontend aspect registry rather than FunctionAttr, so
+    # consult every identity used by the registry/driver instead of silently
+    # treating advice as an ordinary allocation-capable function.
+    if module.path != "" and aspect_registry_noalloc_of_key(aspect_claim_key(module.path, fn_name)):
+        return true
+    if module.name != "" and aspect_registry_noalloc_of_key(aspect_claim_key(module.name, fn_name)):
+        return true
+    aspect_registry_noalloc_of_key(aspect_claim_key(module_key, fn_name))
+
+fn forbidden_io_source_text(
+    source_texts: Dict<text, text>, module_key: text, module: HirModule
+) -> text:
+    if module.path != "" and source_texts.has(module.path):
+        return source_texts[module.path]
+    if module.name != "" and source_texts.has(module.name):
+        return source_texts[module.name]
+    if source_texts.has(module_key):
+        return source_texts[module_key]
+    ""
+
+fn forbidden_io_line_declares_fn(line: text, fn_name: text) -> bool:
+    val trimmed = line.trim()
+    trimmed.contains("fn " + fn_name + "(") or
+        trimmed.starts_with("me " + fn_name + "(")
+
+fn forbidden_io_source_realtime(
+    source_texts: Dict<text, text>, module_key: text,
+    module: HirModule, func: HirFunction
+) -> bool:
+    """Recover `@realtime` at the HIR boundary from the already-loaded source.
+
+    FunctionAttr has no realtime bit today. Span-anchoring the immediately
+    preceding decorator stack keeps same-named methods distinct and avoids a
+    compilation-time filesystem read."""
+    val source = forbidden_io_source_text(source_texts, module_key, module)
+    if source == "" or func.span.line <= 0:
+        return false
+    val lines = source.split("\n")
+    var decl_index = func.span.line - 1
+    if decl_index < 0 or decl_index >= lines.len():
+        return false
+    var probe_limit = decl_index + 8
+    if probe_limit >= lines.len():
+        probe_limit = lines.len() - 1
+    while decl_index <= probe_limit and not forbidden_io_line_declares_fn(
+            lines[decl_index], func.name):
+        decl_index = decl_index + 1
+    if decl_index > probe_limit:
+        return false
+    var prior = decl_index - 1
+    while prior >= 0:
+        val trimmed = lines[prior].trim()
+        if trimmed.starts_with("@realtime"):
+            return true
+        if trimmed == "" or trimmed.starts_with("#") or trimmed.starts_with("@"):
+            prior = prior - 1
+            continue
+        break
+    false
+
+fn check_hir_modules_forbidden_io_impl(
+    modules: Dict<text, HirModule>, source_texts: Dict<text, text>
+) -> [ForbiddenIoViolation]:
+    """Build a module-qualified call graph from lowered HIR and enforce
+    E-APACK008 without trusting compilation-wide numeric SymbolId uniqueness."""
+    var manifest = ForbiddenIoContextManifest.new()
+    var qualified_fn_names: Dict<text, text> = {}
+
+    # First publish only QUALIFIED aliases.  Bare names are intentionally not
+    # global: two modules may both contain `helper`, and the caller's local
+    # SymbolId table below is the only sound way to choose between them.
+    for module_key in modules.keys():
+        val module: HirModule = modules[module_key]
+        val module_identity = forbidden_io_module_identity(module_key, module)
+        for func in module.functions.values():
+            val fn_key = forbidden_io_definition_key(module_identity, module, func)
+            forbidden_io_record_alias(qualified_fn_names, module_key + "." + func.name, fn_key)
+            forbidden_io_record_alias(qualified_fn_names, module_key + "::" + func.name, fn_key)
+            if module.name != "":
+                forbidden_io_record_alias(qualified_fn_names, module.name + "." + func.name, fn_key)
+                forbidden_io_record_alias(qualified_fn_names, module.name + "::" + func.name, fn_key)
+            if module.path != "":
+                forbidden_io_record_alias(qualified_fn_names, module.path + "." + func.name, fn_key)
+                forbidden_io_record_alias(qualified_fn_names, module.path + "::" + func.name, fn_key)
+            if module.symbols.symbols.has(func.symbol.id):
+                val definition_symbol = module.symbols.symbols[func.symbol.id]
+                if (definition_symbol.name.contains(".") or
+                    definition_symbol.name.contains("::")):
+                    forbidden_io_record_alias(
+                        qualified_fn_names, definition_symbol.name, fn_key)
+                if module.name != "":
+                    forbidden_io_record_alias(qualified_fn_names,
+                        module.name + "." + definition_symbol.name, fn_key)
+                if val owner = definition_symbol.defining_module:
+                    forbidden_io_record_alias(qualified_fn_names,
+                        owner + "." + func.name, fn_key)
+                    forbidden_io_record_alias(qualified_fn_names,
+                        owner + "::" + func.name, fn_key)
+                    forbidden_io_record_alias(qualified_fn_names,
+                        owner + "." + definition_symbol.name, fn_key)
+
+    for module_key in modules.keys():
+        val module: HirModule = modules[module_key]
+        val module_identity = forbidden_io_module_identity(module_key, module)
+        var local_fn_names: Dict<i64, text> = {}
+        for func in module.functions.values():
+            local_fn_names[func.symbol.id] = forbidden_io_definition_key(
+                module_identity, module, func)
+
+        # Resolved method/static calls carry a module-local SymbolId. Imported
+        # symbols must be projected through HirSymbol.defining_module before
+        # that id can name a definition in another module.
+        for raw_id in module.symbols.symbols.keys():
+            if local_fn_names.has(raw_id):
+                continue
+            val symbol = module.symbols.symbols[raw_id]
+            var is_callable = false
+            match symbol.kind:
+                case SymbolKind.Function | SymbolKind.Method: is_callable = true
+                case _: ()
+            if is_callable:
+                val target = forbidden_io_imported_symbol_target(
+                    symbol, symbol.name, qualified_fn_names)
+                if target != "":
+                    local_fn_names[raw_id] = target
+        for imp in module.imports:
+            for item in imp.items:
+                var local_name = item.name
+                if val alias = item.alias:
+                    local_name = alias
+                val imported_id = module.symbols.lookup_or_invalid(local_name)
+                if imported_id.is_valid() and module.symbols.symbols.has(imported_id.id):
+                    val symbol = module.symbols.symbols[imported_id.id]
+                    val target = forbidden_io_imported_symbol_target(
+                        symbol, item.name, qualified_fn_names)
+                    if target != "":
+                        local_fn_names[imported_id.id] = target
+        for func in module.functions.values():
+            val fn_key = forbidden_io_definition_key(module_identity, module, func)
+            val is_realtime = forbidden_io_source_realtime(
+                source_texts, module_key, module, func)
+            val is_noalloc = (func.func_attr.is_no_alloc or
+                forbidden_io_aspect_noalloc(module_key, module, func.name))
+            manifest.register(fn_key, is_realtime, func.func_attr.is_interrupt, is_noalloc)
+            manifest.set_callees(fn_key, forbidden_io_block_callees(
+                func.body, local_fn_names, qualified_fn_names))
+    check_all_forbidden_io_fns(manifest)
+
+fn check_hir_modules_forbidden_io(modules: Dict<text, HirModule>) -> [ForbiddenIoViolation]:
+    check_hir_modules_forbidden_io_impl(modules, {})
+
+fn check_hir_modules_forbidden_io_with_sources(
+    modules: Dict<text, HirModule>, source_texts: Dict<text, text>
+) -> [ForbiddenIoViolation]:
+    """Product-driver entry: HIR graph plus its already-loaded source texts,
+    used only to recover the `@realtime` bit missing from FunctionAttr."""
+    check_hir_modules_forbidden_io_impl(modules, source_texts)
 
 # ============================================================================
 # Formatting

@@ -9,6 +9,7 @@ use compiler.semantics.boundary_transfer.{
     classify_hir_boundary_transfer
 }
 use compiler.semantics.safety_checker.{SafetyChecker, SafetyError}
+use compiler.hir.hir_types.{HirModule}  # explicit: a glob is not an import-origin for surface projection
 
 # ============================================================================
 # E1049: transfer-share (lane G8, 2026-07-29)
@@ -186,7 +187,7 @@ fn safety_transfer_walk_expr(self: SafetyChecker, expr: HirExpr,
                 out2 = safety_transfer_walk_expr(self, arg.value, bindings, policy, out2)
             out2
 
-        case MethodCall(receiver, _, args, _):
+        case MethodCall(receiver, _, args, _, _):
             var out3 = safety_transfer_walk_expr(self, receiver, bindings, policy, out)
             for arg in args:
                 out3 = safety_transfer_walk_expr(self, arg.value, bindings, policy, out3)
@@ -285,8 +286,20 @@ fn safety_transfer_walk_block(self: SafetyChecker, block: HirBlock,
                 out_acc = safety_transfer_walk_block(self, inner, bindings, policy, out_acc)
             case Let(_, _, linit):
                 out_acc = safety_transfer_walk_expr(self, linit, bindings, policy, out_acc)
-            case _:
-                pass
+            case SharedVal(_, _, has_init, init):
+                if has_init:
+                    out_acc = safety_transfer_walk_expr(self, init, bindings, policy, out_acc)
+            case SharedVar(_, _, has_init, init):
+                if has_init:
+                    out_acc = safety_transfer_walk_expr(self, init, bindings, policy, out_acc)
+            case GpuLaunch(config, body):
+                for dim in config.grid:
+                    out_acc = safety_transfer_walk_expr(self, dim, bindings, policy, out_acc)
+                for dim in config.block:
+                    out_acc = safety_transfer_walk_expr(self, dim, bindings, policy, out_acc)
+                out_acc = safety_transfer_walk_block(self, body, bindings, policy, out_acc)
+            case AsmAssert(_):
+                pass_do_nothing("compile-time target guard carries no transfer payload")
     if block.has:
         out_acc = safety_transfer_walk_expr(self, block.value, bindings, policy, out_acc)
     out_acc

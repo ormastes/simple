@@ -1,11 +1,4 @@
 """
-## Purpose and audience
-Purpose: Prove that subst_hir_body over every substitution site.
-Audience: compiler and tooling engineers who maintain this spec.
-"""
-# @req: REQ-COMPILER-MONO-001 — stable requirement identity for this spec.
-
-"""
 # subst_hir_body: exhaustive type-param substitution over a HIR body (Phase 3, M3)
 
 `subst_hir_body(body, subst_map)` must rewrite EVERY typed node in a function
@@ -201,7 +194,7 @@ fn tp_expr(x: HirExpr) -> i64:
             for ta in type_args:
                 val tat: HirType = ta
                 n = n + tp_type(tat)
-        case HirExprKind.MethodCall(receiver, _, args, _): n = n + tp_expr(receiver) + tp_args(args)
+        case HirExprKind.MethodCall(receiver, _, args, _, _): n = n + tp_expr(receiver) + tp_args(args)
         case HirExprKind.StaticCall(ty, _, args, _): n = n + tp_type(ty) + tp_args(args)
         case HirExprKind.Cast(inner, target): n = n + tp_expr(inner) + tp_type(target)
         case HirExprKind.As(inner, target): n = n + tp_expr(inner) + tp_type(target)
@@ -289,7 +282,7 @@ fn fixture_body() -> HirBlock:
 
     # closure \x: T -> x, and a method call on it
     val lam = e(HirExprKind.Lambda([param(5, t)], var_(5, t), []), HirType(kind: HirTypeKind.Function([t], t, []), span: sp()))
-    val mcall = e(HirExprKind.MethodCall(lam, "call", [HirCallArg(has_name: false, name: "", value: var_(1, t), span: sp())], MethodResolution.Unresolved), t)
+    val mcall = e(HirExprKind.MethodCall(lam, "call", [HirCallArg(has_name: false, name: "", value: var_(1, t), span: sp())], MethodResolution.Unresolved, []), t)
     val s_m = stmt(HirStmtKind.Expr(mcall))
 
     # match r: case Ok(x) | Err(y) with typed bindings, struct pattern, tuple pattern
@@ -311,17 +304,13 @@ fn fixture_body() -> HirBlock:
 
 describe "subst_hir_body over every substitution site":
     it "the fixture really carries type params before substitution (control)":
-        step("Verify: the fixture really carries type params before substitution (control)")
-        # @req: REQ-COMPILER-MONO-001
         expect(tp_block(fixture_body()) > 20).to_equal(true)
 
     it "leaves no TypeParam anywhere in the body":
-        step("Verify: leaves no TypeParam anywhere in the body")
         val out = subst_hir_body(fixture_body(), subst_t_to_i64())
-        expect(tp_block(out)).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(tp_block(out)).to_equal(0)
 
     it "rewrites let annotations, Option/Result members and call type args to the concrete types":
-        step("Verify: rewrites let annotations, Option/Result members and call type args to the concrete types")
         val out = subst_hir_body(fixture_body(), subst_t_to_i64())
         val s0: HirStmt = out.stmts[0]
         match s0.kind:
@@ -330,7 +319,7 @@ describe "subst_hir_body over every substitution site":
                     case Optional(inner):
                         match inner.kind:
                             case Int(bits, signed):
-                                expect(bits).to_equal(64)  # oracle: 64 — named expected value from the requirement
+                                expect(bits).to_equal(64)
                             case _: expect("Optional<i64>").to_equal("other")
                     case _: expect("Optional").to_equal("other")
             case _: expect("Let").to_equal("other")
@@ -339,7 +328,7 @@ describe "subst_hir_body over every substitution site":
             case HirStmtKind.Let(_, ty, _):
                 match ty.kind:
                     case Result(ok, err):
-                        expect(tp_type(ok) + tp_type(err)).to_equal(0)  # oracle: 0 — named expected value from the requirement
+                        expect(tp_type(ok) + tp_type(err)).to_equal(0)
                         match err.kind:
                             case Str: expect(true).to_equal(true)
                             case _: expect("Str").to_equal("other")
@@ -350,7 +339,7 @@ describe "subst_hir_body over every substitution site":
             case HirStmtKind.Expr(x):
                 match x.kind:
                     case HirExprKind.Call(_, _, type_args):
-                        expect(type_args.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
+                        expect(type_args.len()).to_equal(1)
                         val ta0: HirType = type_args[0]
                         match ta0.kind:
                             case Int(_, _): expect(true).to_equal(true)
@@ -359,19 +348,17 @@ describe "subst_hir_body over every substitution site":
             case _: expect("Expr").to_equal("other")
 
     it "substitutes match-arm patterns including nested enum payload bindings":
-        step("Verify: substitutes match-arm patterns including nested enum payload bindings")
         val out = subst_hir_body(fixture_body(), subst_t_to_i64())
         match out.value.kind:
             case HirExprKind.MatchCase(scrutinee, arms):
-                expect(arms.len()).to_equal(3)  # oracle: 3 — named expected value from the requirement
-                expect(tp_expr(scrutinee)).to_equal(0)  # oracle: 0 — named expected value from the requirement
+                expect(arms.len()).to_equal(3)
+                expect(tp_expr(scrutinee)).to_equal(0)
                 for a in arms:
                     val at: HirMatchArm = a
-                    expect(tp_pattern(at.pattern)).to_equal(0)  # oracle: 0 — named expected value from the requirement
+                    expect(tp_pattern(at.pattern)).to_equal(0)
             case _: expect("MatchCase").to_equal("other")
 
     it "leaves unbound type params alone (outer scope may bind them)":
-        step("Verify: leaves unbound type params alone (outer scope may bind them)")
         val only_t = typesubstitution_from_params([tp("T")], [t_i64()])
         val out = subst_hir_body(fixture_body(), only_t)
         # U survives: Result<T,U> err member + Err(y) binding + tuple pattern slot
@@ -379,21 +366,18 @@ describe "subst_hir_body over every substitution site":
         expect(tp_block(out) < tp_block(fixture_body())).to_equal(true)
 
     it "reports nodes visited and zero diagnostics on a fully-covered body":
-        step("Verify: reports nodes visited and zero diagnostics on a fully-covered body")
         val report = subst_hir_body_with_report(fixture_body(), subst_t_to_i64())
-        expect(report.diagnostics.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(report.diagnostics.len()).to_equal(0)
         expect(report.nodes_visited > 30).to_equal(true)
-        expect(tp_block(report.body)).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(tp_block(report.body)).to_equal(0)
 
     it "is idempotent: substituting an already-concrete body changes nothing":
-        step("Verify: is idempotent: substituting an already-concrete body changes nothing")
         val once = subst_hir_body(fixture_body(), subst_t_to_i64())
         val twice = subst_hir_body(once, subst_t_to_i64())
-        expect(tp_block(twice)).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(tp_block(twice)).to_equal(0)
         expect(twice.stmts.len()).to_equal(once.stmts.len())
 
     it "handles an empty body and a body with no value":
-        step("Verify: handles an empty body and a body with no value")
         val empty = subst_hir_body(blk_nv([]), subst_t_to_i64())
-        expect(empty.stmts.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(empty.stmts.len()).to_equal(0)
         expect(empty.has).to_equal(false)

@@ -15,7 +15,11 @@ use os.posix.dynlib_sffi.{
 }
 use std.common.crypto.sha256.{sha256_u8_hex}
 use std.nogc_sync_mut.composition.provider_contract.{
-    SIMPLE_PROVIDER_OK, SimpleProviderQueryV1, simple_provider_query_error_v1
+    SIMPLE_PROVIDER_OK, SimpleProviderQueryV1, SimpleProviderQueryResultV1,
+    simple_provider_query_error_v1,
+    simple_provider_digest_is_canonical_v1,
+    simple_provider_digest_equal_v1,
+    simple_provider_digest_from_hex_v1
 }
 use std.nogc_sync_mut.composition.cli_command_wire.{CliCommandResultViewV1}
 
@@ -35,6 +39,7 @@ val PROVIDER_ADMISSION_INTERFACE_UNSUPPORTED: i32 = 6
 val PROVIDER_ADMISSION_LOAD_FAILED: i32 = 7
 val PROVIDER_ADMISSION_QUERY_SYMBOL_MISSING: i32 = 8
 val PROVIDER_ADMISSION_NOT_PROCESS_CALLABLE: i32 = 9
+val PROVIDER_ADMISSION_DIGEST_UNSTABLE: i32 = 10
 
 val PROVIDER_SESSION_OK: i32 = 0
 val PROVIDER_SESSION_NOT_OPEN: i32 = 1
@@ -44,6 +49,24 @@ val PROVIDER_SESSION_CLOSE_PINNED: i32 = 4
 val PROVIDER_SESSION_CLOSE_FAILED: i32 = 5
 val PROVIDER_SESSION_CLI_SYMBOL_MISSING: i32 = 6
 val PROVIDER_SESSION_CLI_CALL_FAILED: i32 = 7
+val PROVIDER_SESSION_QUERY_INCOMPATIBLE: i32 = 8
+
+// The integer status is retained for the stable v1 wire/API surface.  Loader
+// consumers must hand off this closed outcome rather than re-parsing a reason
+// string or treating a nonzero status as an admitted provider.
+enum ProviderAdmissionOutcomeV1:
+    Admitted
+    PathDenied
+    ArtifactMissing
+    DigestMismatch
+    DigestUnstable
+    CapabilityDenied
+    HostAbiUnsupported
+    InterfaceUnsupported
+    LoadFailed
+    QuerySymbolMissing
+    QuerySymbolNotProcessCallable
+    InternalError
 
 class ProviderAdmissionRequestV1:
     artifact_path: text
@@ -68,10 +91,16 @@ class ProviderCallableEvidenceV1:
 
 class ProviderAdmissionResultV1:
     status: i32
+    outcome: ProviderAdmissionOutcomeV1
     query_symbol_address: i64
     artifact_digest: text
     process_callable: bool
     reason: text
+
+    me is_admitted() -> bool:
+        self.outcome == ProviderAdmissionOutcomeV1.Admitted and
+            self.status == PROVIDER_ADMISSION_OK and self.process_callable and
+            self.query_symbol_address > 0
 
 class ProviderLoaderSessionV1:
     library: DynLibKind
@@ -98,9 +127,35 @@ class ProviderSessionCliInvokeV1:
     call: CliCommandCallV1
     reason: text
 
+fn provider_admission_outcome_v1(status: i32) -> ProviderAdmissionOutcomeV1:
+    if status == PROVIDER_ADMISSION_OK:
+        return ProviderAdmissionOutcomeV1.Admitted
+    if status == PROVIDER_ADMISSION_PATH_DENIED:
+        return ProviderAdmissionOutcomeV1.PathDenied
+    if status == PROVIDER_ADMISSION_ARTIFACT_MISSING:
+        return ProviderAdmissionOutcomeV1.ArtifactMissing
+    if status == PROVIDER_ADMISSION_DIGEST_MISMATCH:
+        return ProviderAdmissionOutcomeV1.DigestMismatch
+    if status == PROVIDER_ADMISSION_DIGEST_UNSTABLE:
+        return ProviderAdmissionOutcomeV1.DigestUnstable
+    if status == PROVIDER_ADMISSION_CAPABILITY_DENIED:
+        return ProviderAdmissionOutcomeV1.CapabilityDenied
+    if status == PROVIDER_ADMISSION_HOST_ABI_UNSUPPORTED:
+        return ProviderAdmissionOutcomeV1.HostAbiUnsupported
+    if status == PROVIDER_ADMISSION_INTERFACE_UNSUPPORTED:
+        return ProviderAdmissionOutcomeV1.InterfaceUnsupported
+    if status == PROVIDER_ADMISSION_LOAD_FAILED:
+        return ProviderAdmissionOutcomeV1.LoadFailed
+    if status == PROVIDER_ADMISSION_QUERY_SYMBOL_MISSING:
+        return ProviderAdmissionOutcomeV1.QuerySymbolMissing
+    if status == PROVIDER_ADMISSION_NOT_PROCESS_CALLABLE:
+        return ProviderAdmissionOutcomeV1.QuerySymbolNotProcessCallable
+    ProviderAdmissionOutcomeV1.InternalError
+
 fn _provider_admission_result(status: i32, address: i64, digest: text, callable: bool, reason: text) -> ProviderAdmissionResultV1:
     ProviderAdmissionResultV1(
         status: status,
+        outcome: provider_admission_outcome_v1(status),
         query_symbol_address: address,
         artifact_digest: digest,
         process_callable: callable,
@@ -153,6 +208,19 @@ fn provider_admit_dynamic_v1(request: ProviderAdmissionRequestV1) -> ProviderDyn
         val missing = provider_admit_evidence_v1(request, ProviderCallableEvidenceV1(artifact_exists: false, artifact_digest: "", loader_valid: false, query_symbol_address: 0, query_symbol_process_callable: false))
         return ProviderDynamicAdmissionV1(admission: missing, session: _closed_provider_session(missing))
     val library = dynlib_open(request.artifact_path, 2)
+    // This is deliberately cold admission work.  Re-read after opening so a
+    // path replacement cannot publish a callable library under a digest from
+    // an earlier path image.  The opened image remains retained in `library`
+    // after this check; session calls never re-read or re-hash the artifact.
+    val loaded_digest = provider_artifact_digest_v1(rt_file_read_bytes(request.artifact_path))
+    if loaded_digest != digest:
+        val unstable = _provider_admission_result(
+            PROVIDER_ADMISSION_DIGEST_UNSTABLE, 0, loaded_digest, false,
+            "artifact-digest-unstable"
+        )
+        if dynlib_is_valid(library):
+            dynlib_close(library)
+        return ProviderDynamicAdmissionV1(admission: unstable, session: _closed_provider_session(unstable))
     val address = dynlib_symbol(library, SIMPLE_PROVIDER_QUERY_V1_SYMBOL)
     val cli_address = dynlib_symbol(library, SIMPLE_CLI_COMMAND_INVOKE_V1_SYMBOL)
     val admission = provider_admit_evidence_v1(request, ProviderCallableEvidenceV1(
@@ -203,7 +271,18 @@ fn _provider_session_query_error(status: i32, reason: text) -> ProviderSessionQu
         reason: reason
     )
 
-fn provider_session_query_v1(session: ProviderLoaderSessionV1, request: SimpleProviderQueryV1) -> ProviderSessionQueryV1:
+fn provider_query_abi_validate_v1(expected_interface_abi_digest: text,
+        result: SimpleProviderQueryResultV1) -> text:
+    if not simple_provider_digest_is_canonical_v1(expected_interface_abi_digest):
+        return "interface-abi-digest-invalid"
+    val expected = simple_provider_digest_from_hex_v1(expected_interface_abi_digest)
+    if not simple_provider_digest_equal_v1(expected, result.abi_digest):
+        return "provider-query-abi-digest-mismatch"
+    ""
+
+fn provider_session_query_v1(session: ProviderLoaderSessionV1,
+        request: SimpleProviderQueryV1,
+        expected_interface_abi_digest: text) -> ProviderSessionQueryV1:
     if not session.open or session.admission.status != PROVIDER_ADMISSION_OK:
         return _provider_session_query_error(PROVIDER_SESSION_NOT_OPEN, "provider-session-not-open")
     val call = call_provider_query_v1(session.admission.query_symbol_address, request)
@@ -211,6 +290,16 @@ fn provider_session_query_v1(session: ProviderLoaderSessionV1, request: SimplePr
         return ProviderSessionQueryV1(status: PROVIDER_SESSION_QUERY_FAILED, pin_id: 0, call: call, reason: call.diagnostic)
     if call.result.status != SIMPLE_PROVIDER_OK:
         return ProviderSessionQueryV1(status: PROVIDER_SESSION_QUERY_FAILED, pin_id: 0, call: call, reason: "provider-query-rejected")
+    val abi_diagnostic = provider_query_abi_validate_v1(
+        expected_interface_abi_digest, call.result,
+    )
+    if abi_diagnostic != "":
+        return ProviderSessionQueryV1(
+            status: PROVIDER_SESSION_QUERY_INCOMPATIBLE,
+            pin_id: 0,
+            call: call,
+            reason: abi_diagnostic,
+        )
     val pin_id = session.next_pin_id
     session.next_pin_id = pin_id + 1
     session.live_pins.push(pin_id)
@@ -293,11 +382,12 @@ export PROVIDER_ADMISSION_OK, PROVIDER_ADMISSION_PATH_DENIED, PROVIDER_ADMISSION
 export PROVIDER_ADMISSION_DIGEST_MISMATCH, PROVIDER_ADMISSION_CAPABILITY_DENIED
 export PROVIDER_ADMISSION_HOST_ABI_UNSUPPORTED, PROVIDER_ADMISSION_INTERFACE_UNSUPPORTED
 export PROVIDER_ADMISSION_LOAD_FAILED, PROVIDER_ADMISSION_QUERY_SYMBOL_MISSING, PROVIDER_ADMISSION_NOT_PROCESS_CALLABLE
+export PROVIDER_ADMISSION_DIGEST_UNSTABLE
 export PROVIDER_SESSION_OK, PROVIDER_SESSION_NOT_OPEN, PROVIDER_SESSION_QUERY_FAILED
 export PROVIDER_SESSION_PIN_UNKNOWN, PROVIDER_SESSION_CLOSE_PINNED, PROVIDER_SESSION_CLOSE_FAILED
 export PROVIDER_SESSION_CLI_SYMBOL_MISSING, PROVIDER_SESSION_CLI_CALL_FAILED
-export ProviderAdmissionRequestV1, ProviderCallableEvidenceV1, ProviderAdmissionResultV1
+export ProviderAdmissionOutcomeV1, ProviderAdmissionRequestV1, ProviderCallableEvidenceV1, ProviderAdmissionResultV1
 export ProviderLoaderSessionV1, ProviderDynamicAdmissionV1, ProviderSessionQueryV1, ProviderSessionCliInvokeV1
-export provider_artifact_digest_v1, provider_artifact_path_allowed_v1, provider_admit_evidence_v1, provider_admit_dynamic_v1
+export provider_admission_outcome_v1, provider_artifact_digest_v1, provider_artifact_path_allowed_v1, provider_admit_evidence_v1, provider_admit_dynamic_v1
 export provider_session_query_v1, provider_session_release_v1, provider_session_close_v1
 export provider_session_invoke_cli_v1

@@ -1,6 +1,29 @@
 # Installer Specification
 
-> Tests covering InstallerPlatform, InstallerConfig, ToolAvailability, InstallerResult.
+> <details>
+
+<!-- sdn-diagram:id=installer_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=installer_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+installer_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=installer_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -19,19 +42,13 @@
 
 #### has all 5 platforms
 
-- has all 5 platforms
-   - Expected: platforms.len() equals `5`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("has all 5 platforms")
 val platforms = InstallerPlatform.all()
 expect(platforms.len()).to_equal(5)
 ```
@@ -40,23 +57,13 @@ expect(platforms.len()).to_equal(5)
 
 #### converts to string
 
-- converts to string
-   - Expected: InstallerPlatform.Deb.to_string() equals `deb`
-   - Expected: InstallerPlatform.Rpm.to_string() equals `rpm`
-   - Expected: InstallerPlatform.MacosPkg.to_string() equals `macos`
-   - Expected: InstallerPlatform.FreeBsd.to_string() equals `freebsd`
-   - Expected: InstallerPlatform.WindowsExe.to_string() equals `windows`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("converts to string")
 expect(InstallerPlatform.Deb.to_string()).to_equal("deb")
 expect(InstallerPlatform.Rpm.to_string()).to_equal("rpm")
 expect(InstallerPlatform.MacosPkg.to_string()).to_equal("macos")
@@ -68,25 +75,18 @@ expect(InstallerPlatform.WindowsExe.to_string()).to_equal("windows")
 
 #### parses from string
 
-- parses from string
-   - Expected: deb == nil is false
-   - Expected: unknown == nil is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("parses from string")
 val deb = InstallerPlatform.from_string("deb")
-expect(deb == nil).to_equal(false)
+expect(deb.?).to_equal(true)
 
 val unknown = InstallerPlatform.from_string("invalid")
-expect(unknown == nil).to_equal(true)
+expect(unknown.?).to_equal(false)
 ```
 
 </details>
@@ -95,23 +95,13 @@ expect(unknown == nil).to_equal(true)
 
 #### returns correct extensions
 
-- returns correct extensions
-   - Expected: InstallerPlatform.Deb.file_extension() equals `.deb`
-   - Expected: InstallerPlatform.Rpm.file_extension() equals `.rpm`
-   - Expected: InstallerPlatform.MacosPkg.file_extension() equals `.pkg`
-   - Expected: InstallerPlatform.FreeBsd.file_extension() equals `.txz`
-   - Expected: InstallerPlatform.WindowsExe.file_extension() equals `.exe`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("returns correct extensions")
 expect(InstallerPlatform.Deb.file_extension()).to_equal(".deb")
 expect(InstallerPlatform.Rpm.file_extension()).to_equal(".rpm")
 expect(InstallerPlatform.MacosPkg.file_extension()).to_equal(".pkg")
@@ -125,46 +115,31 @@ expect(InstallerPlatform.WindowsExe.file_extension()).to_equal(".exe")
 
 #### returns FPM types for supported platforms
 
-- returns FPM types for supported platforms
-   - Expected: InstallerPlatform.Deb.fpm_type() == nil is false
-   - Expected: InstallerPlatform.Rpm.fpm_type() == nil is false
-   - Expected: InstallerPlatform.MacosPkg.fpm_type() == nil is false
-   - Expected: InstallerPlatform.FreeBsd.fpm_type() == nil is false
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("returns FPM types for supported platforms")
-expect(InstallerPlatform.Deb.fpm_type() == nil).to_equal(false)
-expect(InstallerPlatform.Rpm.fpm_type() == nil).to_equal(false)
-expect(InstallerPlatform.MacosPkg.fpm_type() == nil).to_equal(false)
-expect(InstallerPlatform.FreeBsd.fpm_type() == nil).to_equal(false)
+expect(InstallerPlatform.Deb.fpm_type().?).to_equal(true)
+expect(InstallerPlatform.Rpm.fpm_type().?).to_equal(true)
+expect(InstallerPlatform.MacosPkg.fpm_type().?).to_equal(true)
+expect(InstallerPlatform.FreeBsd.fpm_type().?).to_equal(true)
 ```
 
 </details>
 
 #### returns nil for Windows (uses NSIS)
 
-- returns nil for Windows (uses NSIS)
-   - Expected: InstallerPlatform.WindowsExe.fpm_type() == nil is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("returns nil for Windows (uses NSIS)")
-expect(InstallerPlatform.WindowsExe.fpm_type() == nil).to_equal(true)
+expect(InstallerPlatform.WindowsExe.fpm_type().?).to_equal(false)
 ```
 
 </details>
@@ -173,18 +148,13 @@ expect(InstallerPlatform.WindowsExe.fpm_type() == nil).to_equal(true)
 
 #### provides human-readable descriptions
 
-- provides human-readable descriptions
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("provides human-readable descriptions")
 expect(InstallerPlatform.Deb.description()).to_contain("Debian")
 expect(InstallerPlatform.WindowsExe.description()).to_contain("Windows")
 ```
@@ -197,22 +167,13 @@ expect(InstallerPlatform.WindowsExe.description()).to_contain("Windows")
 
 #### creates config with sensible defaults
 
-- creates config with sensible defaults
-   - Expected: config.package_name equals `simple-lang`
-   - Expected: config.output_dir equals `build/installers`
-   - Expected: config.architecture equals `amd64`
-   - Expected: config.license equals `MIT`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("creates config with sensible defaults")
 val config = default_config()
 expect(config.package_name).to_equal("simple-lang")
 expect(config.output_dir).to_equal("build/installers")
@@ -224,18 +185,13 @@ expect(config.license).to_equal("MIT")
 
 #### has valid homepage URL
 
-- has valid homepage URL
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("has valid homepage URL")
 val config = default_config()
 expect(config.homepage).to_start_with("https://")
 ```
@@ -248,21 +204,13 @@ expect(config.homepage).to_start_with("https://")
 
 #### detects tools without crashing
 
-- detects tools without crashing
-   - Expected: tools.fpm_available == true or tools.fpm_available == false is true
-   - Expected: tools.makensis_available == true or tools.makensis_available == false is true
-   - Expected: tools.dpkg_deb_available == true or tools.dpkg_deb_available == false is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("detects tools without crashing")
 val tools = detect_all_tools()
 # Just verify the struct is populated (tools may or may not be installed)
 expect(tools.fpm_available == true or tools.fpm_available == false).to_equal(true)
@@ -276,19 +224,13 @@ expect(tools.dpkg_deb_available == true or tools.dpkg_deb_available == false).to
 
 #### requires FPM or dpkg-deb for Debian
 
-- requires FPM or dpkg-deb for Debian
-   - Expected: result.is_ok() is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("requires FPM or dpkg-deb for Debian")
 val tools = ToolAvailability(
     fpm_available: false, makensis_available: false, dpkg_deb_available: true,
     fpm_path: "", makensis_path: "", dpkg_deb_path: "/usr/bin/dpkg-deb"
@@ -301,19 +243,13 @@ expect(result.is_ok()).to_equal(true)
 
 #### requires FPM for RPM
 
-- requires FPM for RPM
-   - Expected: result.is_err() is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("requires FPM for RPM")
 val tools = ToolAvailability(
     fpm_available: false, makensis_available: false, dpkg_deb_available: false,
     fpm_path: "", makensis_path: "", dpkg_deb_path: ""
@@ -326,19 +262,13 @@ expect(result.is_err()).to_equal(true)
 
 #### requires makensis for Windows
 
-- requires makensis for Windows
-   - Expected: result.is_err() is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("requires makensis for Windows")
 val tools = ToolAvailability(
     fpm_available: true, makensis_available: false, dpkg_deb_available: false,
     fpm_path: "/usr/bin/fpm", makensis_path: "", dpkg_deb_path: ""
@@ -351,19 +281,13 @@ expect(result.is_err()).to_equal(true)
 
 #### accepts makensis for Windows
 
-- accepts makensis for Windows
-   - Expected: result.is_ok() is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("accepts makensis for Windows")
 val tools = ToolAvailability(
     fpm_available: false, makensis_available: true, dpkg_deb_available: false,
     fpm_path: "", makensis_path: "/usr/bin/makensis", dpkg_deb_path: ""
@@ -380,19 +304,13 @@ expect(result.is_ok()).to_equal(true)
 
 #### creates success result
 
-- creates success result
-   - Expected: result.success is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("creates success result")
 val result = InstallerResult(
     platform: InstallerPlatform.Deb,
     success: true,
@@ -407,19 +325,13 @@ expect(result.output_path).to_contain(".deb")
 
 #### creates failure result
 
-- creates failure result
-   - Expected: result.success is false
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("creates failure result")
 val result = InstallerResult(
     platform: InstallerPlatform.WindowsExe,
     success: false,
@@ -439,12 +351,12 @@ expect(result.message).to_contain("makensis")
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/01_unit/lib/package/installer/installer_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering InstallerPlatform, InstallerConfig, ToolAvailability, InstallerResult.
+Tests covering:
 - InstallerPlatform
 - InstallerConfig
 - ToolAvailability
@@ -462,54 +374,3 @@ Tests covering InstallerPlatform, InstallerConfig, ToolAvailability, InstallerRe
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-LIB`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `173c0d2f41f01f296ccbc18dd866f83b94fe9508d444d0771884423c506c3157`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `173c0d2f41f01f296ccbc18dd866f83b94fe9508d444d0771884423c506c3157`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `173c0d2f41f01f296ccbc18dd866f83b94fe9508d444d0771884423c506c3157`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **90/100**; effective score: **90/100**; blockers: **0**.
-
-SSpec documentization score: 90/100
-source: test/01_unit/lib/package/installer/installer_spec.spl
-mirror: doc/06_spec/01_unit/lib/package/installer/installer_spec.md (current)
-findings: 6 blockers: 0
-  narrative=100 structure=100 oracle=90
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/lib/package/installer/installer_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/lib/package/installer/installer_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/lib/package/installer/installer_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-10): 1 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/01_unit/lib/package/installer/installer_spec.spl:28:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'has all 5 platforms' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/lib/package/installer/installer_spec.spl:34:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'converts to string' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/lib/package/installer/installer_spec.spl:43:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'parses from string' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

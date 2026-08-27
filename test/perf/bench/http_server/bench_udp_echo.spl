@@ -9,14 +9,10 @@ Or with socat (faster):
   dd if=/dev/zero bs=64 count=100000 | socat - UDP:localhost:9092
 """
 
-@unsafe(reason: "raw UDP descriptor; negative sentinel means bind failed", capabilities: [ffi])
 extern fn rt_io_udp_bind(addr: text) -> i64
-@unsafe(reason: "raw UDP receive writes one bounded runtime buffer; nil means provider failure or no datagram", capabilities: [ffi])
-extern fn rt_io_udp_recv(fd: i64, size: i64) -> [u8]?
-@unsafe(reason: "raw UDP descriptor close consumes one live descriptor; false means close failed", capabilities: [ffi])
-extern fn rt_io_udp_close(fd: i64) -> bool
-@unsafe(reason: "raw UDP descriptor option mutation; false means nonblocking update failed", capabilities: [ffi])
-extern fn rt_io_udp_set_nonblocking(fd: i64, enabled: bool) -> bool
+extern fn rt_io_udp_recv_from(fd: i64, size: i64) -> [u8]
+extern fn rt_io_udp_close(fd: i64) -> i64
+extern fn rt_io_udp_set_nonblocking(fd: i64, enabled: i64) -> i64
 extern fn rt_event_loop_create() -> i64
 extern fn rt_event_loop_register(epfd: i64, fd: i64, mode: i64) -> i64
 extern fn rt_event_loop_poll(epfd: i64, max_events: i64, timeout_ms: i64) -> i64
@@ -25,21 +21,14 @@ extern fn rt_time_now_micros() -> i64
 
 fn main():
     print "UDP Throughput Sink"
-    val fd = unsafe(capabilities: [ffi]):
-        rt_io_udp_bind("0.0.0.0:9092")
+    val fd = rt_io_udp_bind("0.0.0.0:9092")
     print "  Bound fd: {fd}"
 
     if fd < 0:
         print "  ERROR: bind failed"
         return
 
-    val nonblocking = unsafe(capabilities: [ffi]):
-        rt_io_udp_set_nonblocking(fd, true)
-    if not nonblocking:
-        unsafe(capabilities: [ffi]):
-            rt_io_udp_close(fd)
-        print "  ERROR: nonblocking setup failed"
-        return
+    rt_io_udp_set_nonblocking(fd, 1)
 
     print "  Listening on udp://0.0.0.0:9092 (nonblocking)"
     print ""
@@ -62,10 +51,8 @@ fn main():
             val efd = rt_event_loop_poll_get_fd(i)
             var batch: i64 = 0
             while batch < 64:
-                val received = unsafe(capabilities: [ffi]):
-                    rt_io_udp_recv(efd, 65535)
-                if received != nil:
-                    val data = received.unwrap()
+                val data = rt_io_udp_recv_from(efd, 65536)
+                if data.len() > 0:
                     count = count + 1
                     bytes = bytes + data.len()
                 else:

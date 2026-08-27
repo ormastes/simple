@@ -1,6 +1,29 @@
 # Backend Order Specification
 
-> Tests covering Engine2D backend preference order.
+> <details>
+
+<!-- sdn-diagram:id=backend_order_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=backend_order_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+backend_order_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=backend_order_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -17,36 +40,13 @@
 
 #### keeps platform native and GPU backends ahead of CPU fallbacks
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- keeps platform native and GPU backends ahead of CPU fallbacks
-   - Expected: order.len() equals `13`
-   - Expected: order[0] equals `metal`
-   - Expected: order[1] equals `cuda`
-   - Expected: order[2] equals `rocm`
-   - Expected: order[3] equals `qualcomm`
-   - Expected: order[4] equals `vulkan`
-   - Expected: order[5] equals `directx`
-   - Expected: order[6] equals `opencl`
-   - Expected: order[7] equals `opengl`
-   - Expected: order[8] equals `intel`
-   - Expected: order[9] equals `webgpu`
-   - Expected: order[10] equals `cpu_simd`
-   - Expected: order[11] equals `software`
-   - Expected: order[12] equals `cpu`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("keeps platform native and GPU backends ahead of CPU fallbacks")
 val order = backend_default_priority_order()
 
 expect(order.len()).to_equal(13)
@@ -69,19 +69,13 @@ expect(order[12]).to_equal("cpu")
 
 #### keeps the summary aligned with the executable order
 
-- keeps the summary aligned with the executable order
-   - Expected: backend_preference_summary() equals `explicit native (baremetal/virtio_gpu) > metal > cuda > rocm/hip > qualcomm >... (full value in folded executable source)`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("keeps the summary aligned with the executable order")
 expect(backend_preference_summary()).to_equal("explicit native (baremetal/virtio_gpu) > metal > cuda > rocm/hip > qualcomm > vulkan > directx > opencl > opengl > intel > webgpu > cpu_simd > software > cpu")
 ```
 
@@ -89,30 +83,13 @@ expect(backend_preference_summary()).to_equal("explicit native (baremetal/virtio
 
 #### normalizes UI aliases before backend probing
 
-- normalizes UI aliases before backend probing
-   - Expected: backend_canonical_name("hip") equals `rocm`
-   - Expected: backend_canonical_name("amd_hip") equals `rocm`
-   - Expected: backend_canonical_name("amd-hip") equals `rocm`
-   - Expected: backend_canonical_name("amd_rocm") equals `rocm`
-   - Expected: backend_canonical_name("amd-rocm") equals `rocm`
-   - Expected: backend_canonical_name("d3d11") equals `directx`
-   - Expected: backend_canonical_name("d3d12") equals `directx`
-   - Expected: backend_canonical_name("dx11") equals `directx`
-   - Expected: backend_canonical_name("dx12") equals `directx`
-   - Expected: backend_canonical_name("simd_cpu") equals `cpu_simd`
-   - Expected: backend_canonical_name("cpu-simd") equals `cpu_simd`
-   - Expected: backend_canonical_name("simd-cpu") equals `cpu_simd`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("normalizes UI aliases before backend probing")
 expect(backend_canonical_name("hip")).to_equal("rocm")
 expect(backend_canonical_name("amd_hip")).to_equal("rocm")
 expect(backend_canonical_name("amd-hip")).to_equal("rocm")
@@ -131,18 +108,13 @@ expect(backend_canonical_name("simd-cpu")).to_equal("cpu_simd")
 
 #### keeps backend priority numeric order consistent with auto selection
 
-- keeps backend priority numeric order consistent with auto selection
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("keeps backend priority numeric order consistent with auto selection")
 expect(backend_priority("metal")).to_be_less_than(backend_priority("cuda"))
 expect(backend_priority("cuda")).to_be_less_than(backend_priority("rocm"))
 expect(backend_priority("rocm")).to_be_less_than(backend_priority("vulkan"))
@@ -168,12 +140,12 @@ expect(backend_priority("software")).to_be_less_than(backend_priority("cpu"))
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_order_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering Engine2D backend preference order.
+Tests covering:
 - Engine2D backend preference order
 
 ## Scenario Summary
@@ -188,54 +160,3 @@ Tests covering Engine2D backend preference order.
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-LIB`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `7d6b3412d4f8b46dec21e721c84c229eb4463c5d77549ed264840d6c467c650d`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `7d6b3412d4f8b46dec21e721c84c229eb4463c5d77549ed264840d6c467c650d`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `7d6b3412d4f8b46dec21e721c84c229eb4463c5d77549ed264840d6c467c650d`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **90/100**; effective score: **90/100**; blockers: **0**.
-
-SSpec documentization score: 90/100
-source: test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_order_spec.spl
-mirror: doc/06_spec/01_unit/lib/gc_async_mut/gpu/engine2d/backend_order_spec.md (current)
-findings: 6 blockers: 0
-  narrative=100 structure=100 oracle=90
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/lib/gc_async_mut/gpu/engine2d/backend_order_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/lib/gc_async_mut/gpu/engine2d/backend_order_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_order_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-10): 1 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_order_spec.spl:25:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'keeps platform native and GPU backends ahead of CPU fallbacks' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_order_spec.spl:45:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'keeps the summary aligned with the executable order' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_order_spec.spl:50:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'normalizes UI aliases before backend probing' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

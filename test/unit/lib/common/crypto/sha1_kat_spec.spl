@@ -1,0 +1,65 @@
+# SHA-1 RFC 3174 / FIPS 180-4 Known-Answer Test Vectors
+#
+# As a stdlib user I want SHA-1 digests to match the canonical FIPS 180-4
+# vectors exactly, so that legacy-protocol interop (git, SCRAM, WS handshake)
+# cannot be corrupted by the untyped-`list` boxing defect family that broke
+# sha256 (abf967a7516) and sha3 (9d70a002cd6).
+#
+# Vectors (FIPS 180-4 / RFC 3174):
+#   SHA-1("")    -> da39a3ee5e6b4b0d3255bfef95601890afd80709
+#   SHA-1("abc") -> a9993e364706816aba3e25717850c26c9cd0d89d
+#
+# Streaming-API check: build "abc" in two updates ("a" then "bc") and verify
+# the digest matches the one-shot path — exercises the absorb-buffer flow.
+#
+# @req crypto.sha1.kat
+
+use std.spipe.*
+use std.crypto.sha1.{sha1_hex, sha1_bytes, sha1_init, sha1_update, sha1_finalize}
+use std.crypto.types.{bytes_to_hex}
+
+# ============================================================================
+# Helpers — build inputs in module-level fns so it-block var mutation
+# (feedback_it_block_var_mutation.md) doesn't drop list pushes.
+# ============================================================================
+
+# "abc" as bytes
+fn _abc() -> [i64]:
+    [0x61, 0x62, 0x63]
+
+# Empty byte list (helper kept symmetric with _abc).
+fn _empty() -> [i64]:
+    []
+
+# ============================================================================
+# SHA-1 — FIPS 180-4 KAT
+# ============================================================================
+
+describe "SHA-1 — FIPS 180-4 known-answer vectors":
+
+    it "SHA-1(\"\") = da39a3ee...":
+        step("compute SHA-1 of the empty byte list")
+        expect(bytes_to_hex(sha1_bytes(_empty()))).to_equal(
+            "da39a3ee5e6b4b0d3255bfef95601890afd80709"
+        )
+
+    it "SHA-1(\"abc\") = a9993e36...":
+        step("compute SHA-1 of the three-byte message abc")
+        expect(bytes_to_hex(sha1_bytes(_abc()))).to_equal(
+            "a9993e364706816aba3e25717850c26c9cd0d89d"
+        )
+
+    it "sha1_hex text API agrees with the byte API":
+        step("hash the text form of abc via sha1_hex")
+        expect(sha1_hex("abc")).to_equal(
+            "a9993e364706816aba3e25717850c26c9cd0d89d"
+        )
+
+    it "Streaming SHA-1(\"a\" then \"bc\") matches one-shot":
+        step("absorb the message across two updates and finalize")
+        var ctx = sha1_init()
+        ctx = sha1_update(ctx, [0x61])
+        ctx = sha1_update(ctx, [0x62, 0x63])
+        expect(bytes_to_hex(sha1_finalize(ctx))).to_equal(
+            "a9993e364706816aba3e25717850c26c9cd0d89d"
+        )

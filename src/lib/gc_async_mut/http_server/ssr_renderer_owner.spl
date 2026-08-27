@@ -1,0 +1,196 @@
+"""Bounded server-side renderer admission owner.
+
+This module is an ownership boundary only.  ``SsrRenderJob`` is an immutable
+copy of the bounded request/config data; ``SsrRendererOwner`` retains no job,
+HTML, pixel buffer, Draw IR, GPU object, or callback.  It serializes admission
+and keeps only queue/counter/lease metadata.  A later adapter may render the
+job and return the admission receipt to ``complete``.
+
+GPU is an optional admission target, never an implicit capability.  If it is
+not advertised, ``auto``/``gpu`` requests select CPU with an explicit reason.
+Busy or malformed requests fail closed instead of silently claiming a render.
+"""
+
+val SSR_RENDER_MAX_METHOD_BYTES: i64 = 16
+val SSR_RENDER_MAX_BODY_BYTES: i64 = 1048576
+val SSR_RENDER_MAX_QUEUE_DEPTH: i64 = 64
+val SSR_RENDER_MAX_VIEWPORT_WIDTH: i64 = 16384
+val SSR_RENDER_MAX_VIEWPORT_HEIGHT: i64 = 16384
+val SSR_RENDER_MAX_PIXELS: i64 = 67108864
+
+struct SsrRenderJob:
+    """Immutable, bounded request/config value moved to a renderer adapter."""
+    job_id: i64
+    method: text
+    body: text
+    width: i64
+    height: i64
+    max_body_bytes: i64
+    requested_backend: text
+    config_revision: i64
+
+struct SsrRenderReceipt:
+    """Job-bound admission/completion evidence returned by the owner."""
+    job_id: i64
+    lease_id: i64
+    accepted: bool
+    completed: bool
+    rendered: bool
+    selected_backend: text
+    fallback_reason: text
+
+fn ssr_render_backend_known(backend: text) -> bool:
+    backend == "auto" or backend == "cpu" or backend == "gpu"
+
+fn ssr_render_job_well_formed(job: SsrRenderJob) -> bool:
+    if job.job_id <= 0:
+        return false
+    if job.method != "POST" or job.method.len() > SSR_RENDER_MAX_METHOD_BYTES:
+        return false
+    if job.max_body_bytes <= 0 or job.max_body_bytes > SSR_RENDER_MAX_BODY_BYTES:
+        return false
+    if job.body.len() <= 0 or job.body.len() > job.max_body_bytes:
+        return false
+    if job.width <= 0 or job.width > SSR_RENDER_MAX_VIEWPORT_WIDTH:
+        return false
+    if job.height <= 0 or job.height > SSR_RENDER_MAX_VIEWPORT_HEIGHT:
+        return false
+    if job.width > SSR_RENDER_MAX_PIXELS / job.height:
+        return false
+    if not ssr_render_backend_known(job.requested_backend):
+        return false
+    job.config_revision > 0
+
+impl SsrRenderJob:
+    static fn create(job_id: i64, method: text, body: text,
+                     width: i64, height: i64, max_body_bytes: i64,
+                     requested_backend: text,
+                     config_revision: i64) -> SsrRenderJob?:
+        val job = SsrRenderJob(job_id: job_id, method: method, body: body,
+            width: width, height: height, max_body_bytes: max_body_bytes,
+            requested_backend: requested_backend,
+            config_revision: config_revision)
+        if not ssr_render_job_well_formed(job):
+            return nil
+        Some(job)
+
+struct SsrRendererOwner:
+    """Single admission owner; no request/render state is retained."""
+    queue_limit: i64
+    queue_depth: i64
+    gpu_available: bool
+    active_job_id: i64
+    active_lease_id: i64
+    next_lease_id: i64
+    accepted_count: i64
+    completed_count: i64
+    rejected_count: i64
+    gpu_admission_count: i64
+    cpu_fallback_count: i64
+
+fn ssr_render_rejected(job_id: i64, reason: text) -> SsrRenderReceipt:
+    SsrRenderReceipt(job_id: job_id, lease_id: 0, accepted: false,
+        completed: false, rendered: false, selected_backend: "none",
+        fallback_reason: reason)
+
+impl SsrRendererOwner:
+    static fn create(queue_limit: i64, gpu_available: bool) -> SsrRendererOwner?:
+        if queue_limit <= 0 or queue_limit > SSR_RENDER_MAX_QUEUE_DEPTH:
+            return nil
+        Some(SsrRendererOwner(queue_limit: queue_limit, queue_depth: 0,
+            gpu_available: gpu_available, active_job_id: 0,
+            active_lease_id: 0, next_lease_id: 1, accepted_count: 0,
+            completed_count: 0, rejected_count: 0, gpu_admission_count: 0,
+            cpu_fallback_count: 0))
+
+    fn pending_count() -> i64:
+        self.queue_depth
+
+    fn in_flight() -> bool:
+        self.active_lease_id > 0
+
+    fn accepted_total() -> i64:
+        self.accepted_count
+
+    fn completed_total() -> i64:
+        self.completed_count
+
+    fn rejected_total() -> i64:
+        self.rejected_count
+
+    fn gpu_admissions() -> i64:
+        self.gpu_admission_count
+
+    fn cpu_fallbacks() -> i64:
+        self.cpu_fallback_count
+
+    me admit(job: SsrRenderJob) -> SsrRenderReceipt:
+        """Reserve the one serialized renderer lease for a bounded job."""
+        if not ssr_render_job_well_formed(job):
+            self.rejected_count = self.rejected_count + 1
+            return ssr_render_rejected(job.job_id, "invalid-bounded-render-job")
+        if self.active_lease_id > 0 or self.queue_depth >= self.queue_limit:
+            self.rejected_count = self.rejected_count + 1
+            return ssr_render_rejected(job.job_id,
+                "renderer-admission-busy-fail-closed")
+        if self.next_lease_id <= 0:
+            self.rejected_count = self.rejected_count + 1
+            return ssr_render_rejected(job.job_id, "lease-id-exhausted")
+
+        var selected_backend = "cpu"
+        var fallback_reason = ""
+        if job.requested_backend == "gpu":
+            if self.gpu_available:
+                selected_backend = "gpu"
+            else:
+                fallback_reason = "gpu-unavailable-cpu-fallback"
+        elif job.requested_backend == "auto":
+            if self.gpu_available:
+                selected_backend = "gpu"
+            else:
+                fallback_reason = "gpu-unavailable-cpu-fallback"
+
+        val lease_id = self.next_lease_id
+        self.next_lease_id = self.next_lease_id + 1
+        self.active_job_id = job.job_id
+        self.active_lease_id = lease_id
+        self.queue_depth = self.queue_depth + 1
+        self.accepted_count = self.accepted_count + 1
+        if selected_backend == "gpu":
+            self.gpu_admission_count = self.gpu_admission_count + 1
+        elif fallback_reason != "":
+            self.cpu_fallback_count = self.cpu_fallback_count + 1
+        SsrRenderReceipt(job_id: job.job_id, lease_id: lease_id,
+            accepted: true, completed: false, rendered: false,
+            selected_backend: selected_backend,
+            fallback_reason: fallback_reason)
+
+    me complete(admission: SsrRenderReceipt,
+                render_succeeded: bool) -> SsrRenderReceipt:
+        """Consume exactly one owner lease and return job-bound evidence."""
+        if not admission.accepted or admission.completed:
+            return ssr_render_rejected(admission.job_id,
+                "invalid-or-reused-render-receipt")
+        if self.active_job_id != admission.job_id
+                or self.active_lease_id != admission.lease_id:
+            return ssr_render_rejected(admission.job_id,
+                "render-receipt-owner-mismatch")
+        self.active_job_id = 0
+        self.active_lease_id = 0
+        if self.queue_depth > 0:
+            self.queue_depth = self.queue_depth - 1
+        self.completed_count = self.completed_count + 1
+        SsrRenderReceipt(job_id: admission.job_id, lease_id: admission.lease_id,
+            accepted: true, completed: true, rendered: render_succeeded,
+            selected_backend: admission.selected_backend,
+            fallback_reason: admission.fallback_reason)
+
+    me cancel(admission: SsrRenderReceipt) -> SsrRenderReceipt:
+        """Release a lease after a failed/cancelled adapter operation."""
+        self.complete(admission, false)
+
+export SSR_RENDER_MAX_METHOD_BYTES, SSR_RENDER_MAX_BODY_BYTES
+export SSR_RENDER_MAX_QUEUE_DEPTH, SSR_RENDER_MAX_VIEWPORT_WIDTH
+export SSR_RENDER_MAX_VIEWPORT_HEIGHT, SSR_RENDER_MAX_PIXELS
+export SsrRenderJob, SsrRenderReceipt, SsrRendererOwner
+export ssr_render_backend_known, ssr_render_job_well_formed

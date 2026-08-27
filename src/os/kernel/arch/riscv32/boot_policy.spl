@@ -1,0 +1,37 @@
+# RV32 direct-M-mode boot policy.
+#
+# This owner is deliberately scalar-only.  The C bridge acquires hardware state
+# (UART and the linker-owned hart counter); memory policy and mutable boot state
+# stay in Simple through the existing noalloc owners.
+
+use os.kernel.boot.riscv_noalloc_handoff.{riscv_noalloc_handoff_with_layout}
+use os.kernel.boot.riscv_noalloc_pmm.{riscv_noalloc_pmm_init}
+use os.kernel.boot.riscv_noalloc_heap.{riscv_noalloc_heap_init}
+use os.kernel.boot.riscv_noalloc_services.{riscv_noalloc_services_init}
+use os.kernel.arch.riscv32.boot_layout.{
+    rv32_boot_layout_valid,
+    rv32_direct_ram_base,
+    rv32_direct_ram_size,
+    rv32_direct_reserved_end,
+    rv32_direct_heap_start,
+    rv32_direct_heap_size
+}
+
+fn rv32_direct_boot_initialize(hart_id: u64, dtb_addr: u64) -> bool:
+    val ram_base = rv32_direct_ram_base()
+    val ram_size = rv32_direct_ram_size()
+    val reserved_end = rv32_direct_reserved_end()
+    val heap_start = rv32_direct_heap_start()
+    val heap_size = rv32_direct_heap_size()
+
+    if not rv32_boot_layout_valid(ram_base, ram_size, reserved_end, heap_start, heap_size):
+        return false
+
+    riscv_noalloc_handoff_with_layout(
+        hart_id, dtb_addr, ram_base, ram_size, heap_start, heap_size)
+    if not riscv_noalloc_pmm_init(ram_base, ram_size, reserved_end, heap_start):
+        return false
+    if not riscv_noalloc_heap_init(heap_start, heap_size):
+        return false
+    riscv_noalloc_services_init(true)
+    true

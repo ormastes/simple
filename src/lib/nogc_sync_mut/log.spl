@@ -40,41 +40,28 @@ extern fn rt_stderr_write(s: text)
 extern fn rt_stderr_flush()
 use std.io_runtime.{file_append_text}
 
-# Phase 5 back-compat shim (log-lib-drivers AC-4): _emit and the legacy
-# fatal/error/warn/info/debug/trace/verbose entry points dispatch through
-# the std.log facade so backends registered via log_register_backend
-# observe these emissions. Public function signatures unchanged.
-use lib.log.{
-    log_dispatch_text, subsys_from_scope,
-    SUBSYS_DRIVER_BLOCK,
-    LogContextSnapshot, log_context_set, log_context_clear, log_context_active,
-    log_context_snapshot, log_context_restore, log_context_set_actor,
-    SyslogKv, SyslogRecord, syslog_format, syslog_parse, syslog_record_with_kv
-}
+# One-way compatibility adapter (log-lib-drivers AC-4): _emit and the legacy
+# fatal/error/warn/info/debug/trace/verbose entry points dispatch through the
+# canonical std.log owner so backends registered there observe emissions.
+# std.log deliberately does not re-export this module: doing so creates a
+# loader cycle and splits the facade's mutable backend state.
+use std.log as canonical_log
 
-# Facade's canonical Phase 3 §A level numbering (0=TRACE..5=FATAL,6=OFF),
-# duplicated here as literals rather than imported as aliased `val`s from
-# lib.log. Reason: lib.log (the std.log facade) now re-exports this module's
-# scope-level API (`export use lib.nogc_sync_mut.log.{...}` — see
-# doc/08_tracking/bug/std_facade_shadows_tier_module_family_2026-08-08.md,
-# "OPEN 1"), which makes this a genuine circular module dependency. `val`
-# imports across a live cycle bind to an empty pre-completion snapshot of the
-# still-loading module ("variable `_F_DEBUG` not found" at runtime) whereas
-# plain function/class imports (log_dispatch_text, LogContextSnapshot, etc.,
-# used below) resolve fine because they're bound lazily at call time, after
-# both modules have finished loading. These six values are fixed enum
-# constants (lib.log's LOG_TRACE..LOG_FATAL) that are not expected to change;
-# keep them in sync with lib.log's constants if that numbering ever changes.
+# Facade's canonical Phase 3 §A level numbering (0=TRACE..5=FATAL,6=OFF).
+# These local adapter literals avoid colliding with this module's documented
+# legacy LOG_* names (0=OFF..6=TRACE); the dependency is strictly one-way.
 val _F_TRACE: i64 = 0
 val _F_DEBUG: i64 = 1
 val _F_INFO: i64 = 2
 val _F_WARN: i64 = 3
 val _F_ERROR: i64 = 4
 val _F_FATAL: i64 = 5
+val _F_SUBSYS_USER_BASE: i64 = 32
 
-# Map legacy nogc_sync_mut numeric level (1=FATAL..6=TRACE..7=VERBOSE)
+# Map legacy nogc_sync_mut numeric level (0=OFF..6=TRACE..7=VERBOSE)
 # to canonical Phase 3 §A (0=TRACE..5=FATAL,6=OFF).
 fn _legacy_to_canonical(legacy: i64) -> i64:
+    if legacy == 0: return 6
     if legacy == 1: return _F_FATAL
     if legacy == 2: return _F_ERROR
     if legacy == 3: return _F_WARN
@@ -82,18 +69,42 @@ fn _legacy_to_canonical(legacy: i64) -> i64:
     if legacy == 5: return _F_DEBUG
     if legacy == 6: return _F_TRACE
     if legacy == 7: return _F_TRACE   # VERBOSE -> TRACE
+    if legacy == 10: return _F_TRACE  # ALL -> TRACE
     _F_INFO
 
+fn _canonical_to_legacy(canonical: i64) -> i64:
+    if canonical == 0: return 6
+    if canonical == 1: return 5
+    if canonical == 2: return 4
+    if canonical == 3: return 3
+    if canonical == 4: return 2
+    if canonical == 5: return 1
+    if canonical == 6: return 0
+    _LEGACY_LOG_INFO
+
 # Level constants
-val LOG_OFF: i64 = 0
-val LOG_FATAL: i64 = 1
-val LOG_ERROR: i64 = 2
-val LOG_WARN: i64 = 3
-val LOG_INFO: i64 = 4
-val LOG_DEBUG: i64 = 5
-val LOG_TRACE: i64 = 6
-val LOG_VERBOSE: i64 = 7
-val LOG_ALL: i64 = 10
+val _LEGACY_LOG_OFF: i64 = 0
+val _LEGACY_LOG_FATAL: i64 = 1
+val _LEGACY_LOG_ERROR: i64 = 2
+val _LEGACY_LOG_WARN: i64 = 3
+val _LEGACY_LOG_INFO: i64 = 4
+val _LEGACY_LOG_DEBUG: i64 = 5
+val _LEGACY_LOG_TRACE: i64 = 6
+val _LEGACY_LOG_VERBOSE: i64 = 7
+val _LEGACY_LOG_ALL: i64 = 10
+
+# The public LOG_* names intentionally overlap std.log with the historic
+# inverse scale.  Implementation code uses only unique internal names so a
+# co-compiled program cannot bind an unqualified level to the other facade.
+val LOG_OFF: i64 = _LEGACY_LOG_OFF
+val LOG_FATAL: i64 = _LEGACY_LOG_FATAL
+val LOG_ERROR: i64 = _LEGACY_LOG_ERROR
+val LOG_WARN: i64 = _LEGACY_LOG_WARN
+val LOG_INFO: i64 = _LEGACY_LOG_INFO
+val LOG_DEBUG: i64 = _LEGACY_LOG_DEBUG
+val LOG_TRACE: i64 = _LEGACY_LOG_TRACE
+val LOG_VERBOSE: i64 = _LEGACY_LOG_VERBOSE
+val LOG_ALL: i64 = _LEGACY_LOG_ALL
 
 # Floor that SIMPLE_LOG cannot lower except by an explicit "off"/"fatal".
 #
@@ -116,7 +127,7 @@ fn _parse_log_level() -> i64:
     val env = unsafe(capabilities: [ffi]):
         rt_env_get("SIMPLE_LOG") ?? ""
     if env == "off":
-        return LOG_OFF
+        return _LEGACY_LOG_OFF
     if env == "all":
         return 10
     if env == "verbose":
@@ -147,8 +158,7 @@ var _LOG_FILE_PATH: text = ""   # Empty = no file logging; set via SIMPLE_LOG_FI
 fn _ensure_initialized():
     if GLOBAL_LOG_LEVEL == -1:
         GLOBAL_LOG_LEVEL = _parse_log_level()
-        val file_env = unsafe(capabilities: [ffi]):
-            rt_env_get("SIMPLE_LOG_FILE_PATH") ?? ""
+        val file_env = rt_env_get("SIMPLE_LOG_FILE_PATH") ?? ""
         if file_env.len() > 0:
             _LOG_FILE_PATH = file_env
         else:
@@ -174,18 +184,23 @@ fn _emit(line: text):
     unsafe(capabilities: [ffi]):
         rt_stderr_flush()
     if _LOG_FILE_PATH.len() > 0:
-        file_append_text(_LOG_FILE_PATH, line + "\n")
+        rt_file_append_text(_LOG_FILE_PATH, line + "\n")
 
 # Compatibility: Keep LOG_LEVEL for existing code (lazy evaluated)
-fn get_log_level() -> i64:
+fn legacy_compat_get_log_level() -> i64:
     _ensure_initialized()
+    val exact_legacy_level = canonical_log.log_compat_get_legacy_level()
+    if exact_legacy_level >= 0:
+        GLOBAL_LOG_LEVEL = exact_legacy_level
+    else:
+        GLOBAL_LOG_LEVEL = _canonical_to_legacy(canonical_log.log_get_level())
     GLOBAL_LOG_LEVEL
 
 # ============================================================================
 # Level Management Functions
 # ============================================================================
 
-fn level_name(level: i64) -> text:
+fn legacy_compat_level_name(level: i64) -> text:
     if level == 0:
         return "off"
     if level == 1:
@@ -206,134 +221,238 @@ fn level_name(level: i64) -> text:
         return "all"
     "unknown"
 
-fn parse_level(name: text) -> i64:
+fn legacy_compat_parse_level(name: text) -> i64:
     if name == "off":
-        return LOG_OFF
+        return _LEGACY_LOG_OFF
     if name == "fatal":
-        return LOG_FATAL
+        return _LEGACY_LOG_FATAL
     if name == "error":
-        return LOG_ERROR
+        return _LEGACY_LOG_ERROR
     if name == "warn":
-        return LOG_WARN
+        return _LEGACY_LOG_WARN
     if name == "info":
-        return LOG_INFO
+        return _LEGACY_LOG_INFO
     if name == "debug":
-        return LOG_DEBUG
+        return _LEGACY_LOG_DEBUG
     if name == "trace":
-        return LOG_TRACE
+        return _LEGACY_LOG_TRACE
     if name == "verbose":
-        return LOG_VERBOSE
+        return _LEGACY_LOG_VERBOSE
     if name == "all":
-        return LOG_ALL
-    LOG_INFO  # Default to INFO for unknown
+        return _LEGACY_LOG_ALL
+    _LEGACY_LOG_INFO  # Default to INFO for unknown
 
-fn set_level(level: i64):
+fn legacy_compat_set_level(level: i64):
     _ensure_initialized()
+    canonical_log.log_compat_set_legacy_level(level, _legacy_to_canonical(level))
     GLOBAL_LOG_LEVEL = level
 
-fn get_global_level() -> i64:
-    _ensure_initialized()
-    GLOBAL_LOG_LEVEL
+fn legacy_compat_get_global_level() -> i64:
+    legacy_compat_get_log_level()
 
-fn set_scope_level(scope: text, level: i64):
+fn legacy_compat_set_scope_level(scope: text, level: i64):
+    _ensure_initialized()
     SCOPE_LEVELS[scope] = level
+    canonical_log.log_compat_set_legacy_subsys_level(
+        canonical_log.subsys_from_scope(scope),
+        level,
+        _legacy_to_canonical(level)
+    )
 
-fn get_level(scope: text) -> i64:
+fn legacy_compat_get_level(scope: text) -> i64:
     _ensure_initialized()
-    if SCOPE_LEVELS.has(scope):
-        SCOPE_LEVELS[scope]
-    else:
-        GLOBAL_LOG_LEVEL
+    val subsys = canonical_log.subsys_from_scope(scope)
+    val exact_legacy_level = canonical_log.log_compat_get_legacy_effective_level(subsys)
+    if exact_legacy_level >= 0 and SCOPE_LEVELS.has(scope):
+        # The old facade keys overrides by the complete scope string.  Several
+        # arbitrary names map to canonical SUBSYS_USER_BASE, so the dictionary
+        # remains the exact legacy authority while the receipt distinguishes a
+        # later direct canonical override (which clears it).
+        return SCOPE_LEVELS[scope]
+    if subsys == _F_SUBSYS_USER_BASE:
+        # An unrelated arbitrary name also maps to USER_BASE, but it must not
+        # inherit another name's exact legacy override.
+        return legacy_compat_get_log_level()
+    if exact_legacy_level >= 0:
+        return exact_legacy_level
+    _canonical_to_legacy(canonical_log.effective_level(subsys))
 
-fn clear_scopes():
+fn legacy_compat_clear_scopes():
     SCOPE_LEVELS = {}
+    canonical_log.log_init_from_config("")
 
-fn is_enabled(level: i64, scope: text) -> bool:
-    val current_level = get_level(scope: scope)
-    level <= current_level
+fn legacy_compat_is_enabled(level: i64, scope: text) -> bool:
+    _ensure_initialized()
+    if level == _LEGACY_LOG_OFF:
+        return false
+    level <= legacy_compat_get_level(scope)
 
 # ============================================================================
 # Logging Functions (with scope parameter)
 # ============================================================================
 
-fn fatal(scope: text, msg: text):
+fn legacy_compat_fatal(scope: text, msg: text):
     _ensure_initialized()
-    log_dispatch_text(level: _F_FATAL, subsys: subsys_from_scope(scope), msg: msg)
-    if 1 <= GLOBAL_LOG_LEVEL:
-        _emit("[FATAL] [{scope}] {msg}")
+    if not legacy_compat_is_enabled(_LEGACY_LOG_FATAL, scope):
+        return
+    canonical_log.log_compat_dispatch_text(level: _F_FATAL, subsys: canonical_log.subsys_from_scope(scope), msg: msg)
+    _emit("[FATAL] [{scope}] {msg}")
 
-fn error(scope: text, msg: text):
+fn legacy_compat_error(scope: text, msg: text):
     _ensure_initialized()
-    log_dispatch_text(level: _F_ERROR, subsys: subsys_from_scope(scope), msg: msg)
-    if 2 <= GLOBAL_LOG_LEVEL:
-        _emit("[ERROR] [{scope}] {msg}")
+    if not legacy_compat_is_enabled(_LEGACY_LOG_ERROR, scope):
+        return
+    canonical_log.log_compat_dispatch_text(level: _F_ERROR, subsys: canonical_log.subsys_from_scope(scope), msg: msg)
+    _emit("[ERROR] [{scope}] {msg}")
 
-fn warn(scope: text, msg: text):
+fn legacy_compat_warn(scope: text, msg: text):
     _ensure_initialized()
-    log_dispatch_text(level: _F_WARN, subsys: subsys_from_scope(scope), msg: msg)
-    if 3 <= GLOBAL_LOG_LEVEL:
-        _emit("[WARN] [{scope}] {msg}")
+    if not legacy_compat_is_enabled(_LEGACY_LOG_WARN, scope):
+        return
+    canonical_log.log_compat_dispatch_text(level: _F_WARN, subsys: canonical_log.subsys_from_scope(scope), msg: msg)
+    _emit("[WARN] [{scope}] {msg}")
 
-fn info(scope: text, msg: text):
+fn legacy_compat_info(scope: text, msg: text):
     _ensure_initialized()
-    log_dispatch_text(level: _F_INFO, subsys: subsys_from_scope(scope), msg: msg)
-    if 4 <= GLOBAL_LOG_LEVEL:
-        _emit("[INFO] [{scope}] {msg}")
+    if not legacy_compat_is_enabled(_LEGACY_LOG_INFO, scope):
+        return
+    canonical_log.log_compat_dispatch_text(level: _F_INFO, subsys: canonical_log.subsys_from_scope(scope), msg: msg)
+    _emit("[INFO] [{scope}] {msg}")
 
-fn debug(scope: text, msg: text):
+fn legacy_compat_debug(scope: text, msg: text):
     _ensure_initialized()
-    log_dispatch_text(level: _F_DEBUG, subsys: subsys_from_scope(scope), msg: msg)
-    if 5 <= GLOBAL_LOG_LEVEL:
-        _emit("[DEBUG] [{scope}] {msg}")
+    if not legacy_compat_is_enabled(_LEGACY_LOG_DEBUG, scope):
+        return
+    canonical_log.log_compat_dispatch_text(level: _F_DEBUG, subsys: canonical_log.subsys_from_scope(scope), msg: msg)
+    _emit("[DEBUG] [{scope}] {msg}")
 
-fn trace(scope: text, msg: text):
+fn legacy_compat_trace(scope: text, msg: text):
     _ensure_initialized()
-    log_dispatch_text(level: _F_TRACE, subsys: subsys_from_scope(scope), msg: msg)
-    if 6 <= GLOBAL_LOG_LEVEL:
-        _emit("[TRACE] [{scope}] {msg}")
+    if not legacy_compat_is_enabled(_LEGACY_LOG_TRACE, scope):
+        return
+    canonical_log.log_compat_dispatch_text(level: _F_TRACE, subsys: canonical_log.subsys_from_scope(scope), msg: msg)
+    _emit("[TRACE] [{scope}] {msg}")
 
-fn verbose(scope: text, msg: text):
+fn legacy_compat_verbose(scope: text, msg: text):
     _ensure_initialized()
-    log_dispatch_text(level: _F_TRACE, subsys: subsys_from_scope(scope), msg: msg)
-    if 7 <= GLOBAL_LOG_LEVEL:
-        _emit("[VERBOSE] [{scope}] {msg}")
+    if not legacy_compat_is_enabled(_LEGACY_LOG_VERBOSE, scope):
+        return
+    canonical_log.log_compat_dispatch_text(level: _F_TRACE, subsys: canonical_log.subsys_from_scope(scope), msg: msg)
+    _emit("[VERBOSE] [{scope}] {msg}")
 
 # ============================================================================
 # Convenience Functions (without scope - use "default" scope)
 # ============================================================================
 
-fn log_info(msg: text):
-    info(scope: "default", msg: msg)
+fn legacy_compat_log_info(msg: text):
+    legacy_compat_info(scope: "default", msg: msg)
 
-fn log_error(msg: text):
-    error(scope: "default", msg: msg)
+fn legacy_compat_log_error(msg: text):
+    legacy_compat_error(scope: "default", msg: msg)
 
-fn log_debug(msg: text):
-    debug(scope: "default", msg: msg)
+fn legacy_compat_log_debug(msg: text):
+    legacy_compat_debug(scope: "default", msg: msg)
 
-fn log_verbose(msg: text):
-    verbose(scope: "default", msg: msg)
+fn legacy_compat_log_verbose(msg: text):
+    legacy_compat_verbose(scope: "default", msg: msg)
 
-# General log function with explicit level
-fn log(level: i64, scope: text, msg: text):
-    if level <= get_level(scope: scope):
-        var prefix = level_name(level: level)
-        _emit("[{prefix.upper()}] [{scope}] {msg}")
+# General log function with explicit level.  Keep the implementation symbol
+# unique: the interpreter co-compiles this module with std.log, whose public
+# `log(i64, text, text)` has the same signature.  The public wrapper below
+# delegates to this uniquely named implementation.
+fn legacy_compat_log(level: i64, scope: text, msg: text):
+    _ensure_initialized()
+    if not legacy_compat_is_enabled(level, scope):
+        return
+    canonical_log.log_compat_dispatch_text(
+        level: _legacy_to_canonical(level),
+        subsys: canonical_log.subsys_from_scope(scope),
+        msg: msg
+    )
+    val prefix = legacy_compat_level_name(level: level)
+    _emit("[{prefix.upper()}] [{scope}] {msg}")
 
 # ============================================================================
 # Exports
 # ============================================================================
 
+# Native callers require real callable symbols for every exported name.  The
+# qualified module namespace keeps these wrappers distinct from std.log while
+# the uniquely named implementations remain unambiguous in co-compiled code.
+fn log(level: i64, scope: text, msg: text):
+    legacy_compat_log(level, scope, msg)
+
+fn log_dispatch_text(level: i64, subsys: i64, msg: text):
+    canonical_log.log_dispatch_text(level, subsys, msg)
+
+fn fatal(scope: text, msg: text):
+    legacy_compat_fatal(scope, msg)
+
+fn error(scope: text, msg: text):
+    legacy_compat_error(scope, msg)
+
+fn warn(scope: text, msg: text):
+    legacy_compat_warn(scope, msg)
+
+fn info(scope: text, msg: text):
+    legacy_compat_info(scope, msg)
+
+fn debug(scope: text, msg: text):
+    legacy_compat_debug(scope, msg)
+
+fn trace(scope: text, msg: text):
+    legacy_compat_trace(scope, msg)
+
+fn verbose(scope: text, msg: text):
+    legacy_compat_verbose(scope, msg)
+
+fn log_info(msg: text):
+    legacy_compat_log_info(msg)
+
+fn log_error(msg: text):
+    legacy_compat_log_error(msg)
+
+fn log_debug(msg: text):
+    legacy_compat_log_debug(msg)
+
+fn log_verbose(msg: text):
+    legacy_compat_log_verbose(msg)
+
+fn get_log_level() -> i64:
+    legacy_compat_get_log_level()
+
+fn set_level(level: i64):
+    legacy_compat_set_level(level)
+
+fn get_global_level() -> i64:
+    legacy_compat_get_global_level()
+
+fn set_scope_level(scope: text, level: i64):
+    legacy_compat_set_scope_level(scope, level)
+
+fn get_level(scope: text) -> i64:
+    legacy_compat_get_level(scope)
+
+fn clear_scopes():
+    legacy_compat_clear_scopes()
+
+fn is_enabled(level: i64, scope: text) -> bool:
+    legacy_compat_is_enabled(level, scope)
+
+fn parse_level(name: text) -> i64:
+    legacy_compat_parse_level(name)
+
+fn level_name(level: i64) -> text:
+    legacy_compat_level_name(level)
 export log
 export log_dispatch_text
 export fatal, error, warn, info, debug, trace, verbose
+export legacy_compat_log, legacy_compat_fatal, legacy_compat_error
+export legacy_compat_warn, legacy_compat_info, legacy_compat_debug
+export legacy_compat_trace, legacy_compat_verbose, legacy_compat_is_enabled
 export log_info, log_error, log_debug, log_verbose
 export get_log_level, set_level, get_global_level, set_scope_level, get_level, clear_scopes, is_enabled
 export parse_level, level_name
-export SUBSYS_DRIVER_BLOCK
-export subsys_from_scope
+export canonical_log.SUBSYS_DRIVER_BLOCK
+export canonical_log.subsys_from_scope
 export LOG_TRACE, LOG_DEBUG, LOG_INFO, LOG_WARN, LOG_ERROR, LOG_FATAL, LOG_OFF, LOG_VERBOSE, LOG_ALL
-# Lane OBS1 — current-context correlation-id API, passed through from lib.log
-export LogContextSnapshot, log_context_set, log_context_clear, log_context_active
-export log_context_snapshot, log_context_restore, log_context_set_actor
-export SyslogKv, SyslogRecord, syslog_format, syslog_parse, syslog_record_with_kv

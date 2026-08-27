@@ -8,8 +8,9 @@ use compiler.core.cfg_platform.{cfg_strip_quotes, cfg_detect_os, cfg_detect_arch
 
 # ===== Preprocessor State =====
 
-var _pp_tokens: [text] = []
-var _pp_pos: i64 = 0
+struct PpConditionParser:
+    tokens: [text]
+    pos: i64
 
 fn _pp_eval_atom(token: text) -> bool:
     val t = cfg_strip_quotes(token).trim()
@@ -80,7 +81,9 @@ fn _pp_tokenize_condition(condition: text) -> [text]:
     var current: [text] = []
     var i: i64 = 0
 
-    while i < condition.len():
+    for _ in condition:
+        if i >= condition.len():
+            break
         val ch = condition[i]
 
         val is_ws = ch == " " or ch == "\t" or ch == "\r"
@@ -132,20 +135,18 @@ fn _pp_tokenize_condition(condition: text) -> [text]:
 
     tokens
 
-fn _pp_peek() -> text:
-    if _pp_pos >= _pp_tokens.len():
-        return ""
-    _pp_tokens[_pp_pos]
+impl PpConditionParser:
+    static fn new(tokens: [text]) -> PpConditionParser:
+        PpConditionParser(tokens: tokens, pos: 0)
 
-fn _pp_take() -> text:
-    val token = _pp_peek()
-    if token != "":
-        _pp_pos = _pp_pos + 1
-    token
+    fn peek() -> text:
+        if self.pos >= self.tokens.len():
+            return ""
+        self.tokens[self.pos]
 
 fn _pp_parse_or() -> bool:
     var left = _pp_parse_and()
-    while true:
+    for _ in 0..1024:
         val tok = _pp_peek()
         val is_or = tok == "or" or tok == "||"
         if not is_or:
@@ -157,7 +158,7 @@ fn _pp_parse_or() -> bool:
 
 fn _pp_parse_and() -> bool:
     var left = _pp_parse_not()
-    while true:
+    for _ in 0..1024:
         val tok = _pp_peek()
         val is_and = tok == "and" or tok == "&&"
         if not is_and:
@@ -167,58 +168,42 @@ fn _pp_parse_and() -> bool:
         left = left and right
     left
 
-fn _pp_parse_not() -> bool:
-    val tok = _pp_peek()
-    val is_not = tok == "not" or tok == "!"
-    if is_not:
-        _pp_take()
-        return not _pp_parse_not()
-    _pp_parse_primary()
+    me parse_and() -> bool:
+        var left = self.parse_not()
+        for _pp_and_step in 0..1024:
+            val tok = self.peek()
+            val is_and = tok == "and" or tok == "&&"
+            if not is_and:
+                break
+            self.take()
+            val right = self.parse_not()
+            left = left and right
+        left
 
-fn _pp_parse_primary() -> bool:
-    val tok = _pp_peek()
-    if tok == "(":
-        _pp_take()
-        val value = _pp_parse_or()
-        if _pp_peek() == ")":
-            _pp_take()
-        return value
+    me parse_not() -> bool:
+        val tok = self.peek()
+        val is_not = tok == "not" or tok == "!"
+        if is_not:
+            self.take()
+            return not self.parse_not()
+        self.parse_primary()
 
     val atom = _pp_take()
-    # Task #105: the tokenizer splits a SPACED key/value @cfg condition
-    # (`@cfg(arch = "x86_64")`) into separate whitespace-delimited tokens
-    # (["arch", "=", "\"x86_64\""] or, for `==`, two single "=" tokens).
-    # Without reassembly only `atom` ("arch") reaches `_pp_eval_atom`, which
-    # falls through every known-keyword case to `false` regardless of the
-    # real value -- so BOTH a matching and a non-matching `@cfg(key = ...)`
-    # variant were silently dropped (or, depending on source order, an
-    # inactive variant's declaration could survive the false-negative
-    # filter untouched), producing wrong/ambiguous @cfg-arch dispatch.
-    # Reassemble one or more adjacent "=" tokens plus the following value
-    # token into a single `key=value`/`key==value` atom so the existing
-    # `cfg_eval_key_value` path in `_pp_eval_atom` (line 67-74) is reached.
-    var eq_op: [text] = []
-    while _pp_peek() == "=":
-        eq_op.push(_pp_take())
-    if eq_op.len() > 0:
-        val value_tok = _pp_take()
-        val joined_eq = eq_op.join("")
-        return _pp_eval_atom("{atom}{joined_eq}{value_tok}")
     _pp_eval_atom(atom)
 
 fn _pp_eval_condition(condition: text) -> bool:
-    _pp_tokens = _pp_tokenize_condition(condition)
-    _pp_pos = 0
-    if _pp_tokens.len() == 0:
+    val tokens = _pp_tokenize_condition(condition)
+    if tokens.len() == 0:
         return false
-    _pp_parse_or()
+    var parser = PpConditionParser.new(tokens)
+    parser.parse_or()
 
 fn _pp_extract_paren_condition(line: text) -> text:
     # Extract condition from @when(condition): or @cfg(condition) etc.
     # Finds '(' and reads until matching ')'.
     var start: i64 = -1
     var i: i64 = 0
-    for _ in line:
+    for _pp_paren_scan in line:
         if i >= line.len(): break
         if line[i] == "(":
             start = i + 1
@@ -229,7 +214,7 @@ fn _pp_extract_paren_condition(line: text) -> text:
     var depth: i64 = 1
     var chars: [text] = []
     var j: i64 = start
-    for _ in line:
+    for _pp_paren_body_scan in line:
         if j >= line.len(): break
         val ch = line[j]
         if ch == "(":
@@ -257,7 +242,7 @@ fn _pp_split_lines(source: text) -> [text]:
     var lines: [text] = []
     var line_chars: [text] = []
     var i: i64 = 0
-    for _ in source:
+    for _pp_line_scan in source:
         if i >= source.len():
             break
         val ch = source[i]
@@ -270,17 +255,7 @@ fn _pp_split_lines(source: text) -> [text]:
     lines.push(line_chars.join(""))
     lines
 
-fn _pp_may_have_conditionals(source: text) -> bool:
-    (source.contains("@when(") or source.contains("@elif(") or
-        source.contains("@else") or source.contains("@end") or
-        source.contains("@cfg("))
-
 fn _pp_preprocess_conditionals(source: text) -> text:
-    # The compiler closure is overwhelmingly ordinary source. Avoid building
-    # three full line arrays when none of the recognized directives can occur.
-    if not _pp_may_have_conditionals(source):
-        return source
-
     val lines = _pp_split_lines(source)
     var out_lines: [text] = []
 
@@ -365,37 +340,11 @@ fn _pp_preprocess_conditionals(source: text) -> text:
     var final_lines: [text] = []
     var skip_until_dedent: bool = false
     var skip_indent: i64 = -1
-    var skip_until_close_brace: bool = false
-    var brace_depth: i64 = 0
     var i: i64 = 0
-    for _ in out_lines:
+    for _pp_output_scan in out_lines:
         if i >= out_lines.len(): break
         val ol = out_lines[i]
         val ot = ol.trim()
-
-        if skip_until_close_brace:
-            # Multi-line brace-delimited declaration (e.g. a multi-line
-            # `use module.{...}` import) gated by a false @cfg — blank every
-            # continuation line until the braces opened by the declaration
-            # line close back to depth 0.
-            var opens: i64 = 0
-            var closes: i64 = 0
-            var bi: i64 = 0
-            for _ in ol:
-                if bi >= ol.len(): break
-                val bc = ol[bi]
-                if bc == "{":
-                    opens = opens + 1
-                elif bc == "}":
-                    closes = closes + 1
-                bi = bi + 1
-            brace_depth = brace_depth + opens - closes
-            final_lines.push("")
-            i = i + 1
-            if brace_depth <= 0:
-                skip_until_close_brace = false
-                brace_depth = 0
-            continue
 
         if skip_until_dedent:
             if ot == "":
@@ -406,7 +355,7 @@ fn _pp_preprocess_conditionals(source: text) -> text:
                 continue
             var cur_indent: i64 = 0
             var ci: i64 = 0
-            for _ in ol:
+            for _pp_indent_scan in ol:
                 if ci >= ol.len(): break
                 val c = ol[ci]
                 if c == " ":
@@ -439,7 +388,7 @@ fn _pp_preprocess_conditionals(source: text) -> text:
                     val next_trimmed = next_line.trim()
                     var next_indent: i64 = 0
                     var ni: i64 = 0
-                    for _ in next_line:
+                    for _pp_next_indent_scan in next_line:
                         if ni >= next_line.len(): break
                         val nc = next_line[ni]
                         if nc == " ":
@@ -456,29 +405,6 @@ fn _pp_preprocess_conditionals(source: text) -> text:
                     if next_trimmed.ends_with(":"):
                         skip_until_dedent = true
                         skip_indent = next_indent
-                    elif next_trimmed.ends_with("{") and not next_trimmed.ends_with("}"):
-                        # Multi-line brace-delimited declaration (e.g. a
-                        # multi-line `use module.{ a, b, c }` import spanning
-                        # several lines). @cfg does not otherwise gate `use`
-                        # statements at all — the import-closure walker would
-                        # still see the (now-syntactically-broken) dangling
-                        # continuation lines as unconditional imports. Track
-                        # brace depth and blank through the matching close.
-                        var opens0: i64 = 0
-                        var closes0: i64 = 0
-                        var oi: i64 = 0
-                        for _ in next_line:
-                            if oi >= next_line.len(): break
-                            val oc = next_line[oi]
-                            if oc == "{":
-                                opens0 = opens0 + 1
-                            elif oc == "}":
-                                closes0 = closes0 + 1
-                            oi = oi + 1
-                        val depth0 = opens0 - closes0
-                        if depth0 > 0:
-                            skip_until_close_brace = true
-                            brace_depth = depth0
             i = i + 1
             continue
 
@@ -494,4 +420,3 @@ fn preprocess_conditionals(source: text) -> text:
 
 # ===== Exports =====
 
-export _pp_preprocess_conditionals, preprocess_conditionals

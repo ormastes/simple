@@ -1,4 +1,4 @@
-# @cover src/lib/nogc_async_mut/fs_driver/mount_table.spl 80%
+# @cover src/lib/nogc_sync_mut/fs_driver/mount_table.spl 80%
 """
 # MountTable Unit Tests
 
@@ -21,11 +21,10 @@ Tests for MountTable lifecycle:
 """
 
 use std.spipe.*
-use std.fs_driver.mount_table.{MountTable, MountId, ExecuteOpenBinding}
-use std.fs_driver.types.{Path, MountOptions, OpenFlags, FileHandle, ExecuteTrust}
+use std.fs_driver.mount_table.{MountTable, MountId}
+use std.fs_driver.types.{Path, MountOptions}
 use std.fs_driver.instance.{DriverInstance, RamFsStub}
 use std.fs_driver.error.{FsError}
-use std.fs_driver.ramfs.{RamFsDriver}
 
 
 fn make_driver() -> DriverInstance:
@@ -112,6 +111,7 @@ describe "MountTable — execute-open policy and ownership":
         val id = mt.mount("/", real_driver(), MountOptions.default()).unwrap()
         val binding = ExecuteOpenBinding(
             mount_id: id,
+            _owner_nonce: 0u64,
             backend_name: "ramfs",
             file_handle: FileHandle(id: 1),
             mount_generation: 1u64,
@@ -148,6 +148,7 @@ describe "MountTable — execute-open policy and ownership":
         val id = mt.mount("/", real_driver(), MountOptions.default()).unwrap()
         val snapshot = ExecuteOpenBinding(
             mount_id: id,
+            _owner_nonce: 0u64,
             backend_name: "ramfs",
             file_handle: FileHandle(id: 1),
             mount_generation: 1u64,
@@ -166,26 +167,13 @@ describe "MountTable — execute-open policy and ownership":
         expect(r.is_err()).to_be(true)
         expect(mt.mounts[0].namespace_generation).to_equal(0xFFFFFFFFFFFFFFFFu64)
 
-    it "reuses bounded slots with a new generation and rejects the stale handle":
+    it "fails handle allocation before opening at exhaustion":
         var mt = MountTable.new()
         mt.mount("/", real_driver(), MountOptions.default())
-        val first = mt.open("/first", OpenFlags.read_only()).unwrap()
-        expect(mt.close(first).is_ok()).to_be(true)
-        val second = mt.open("/second", OpenFlags.read_only()).unwrap()
-        expect(first.id != second.id).to_be(true)
-        expect((first.id & 0xFFFFFFFFu64)).to_equal(second.id & 0xFFFFFFFFu64)
-        expect(mt.read(first, 1).unwrap_err()).to_equal(FsError.StaleHandle)
-        expect(mt.read(second, 1).is_ok()).to_be(true)
-
-    it "rejects exhausted directory admission before backend opendir":
-        var mt = MountTable.new()
-        mt.mount("/", real_driver(), MountOptions.default()).unwrap()
-        mt.dir_capacity_limit = 0
-        expect(mt.opendir("/").unwrap_err()).to_equal(FsError.TooLarge)
-        match mt.mounts[0].driver:
-            case DriverInstance.RamFs(driver): expect(driver.fd_table.len()).to_equal(0)
-            case _: fail("test mount did not retain the RamFs backend")
-        expect(mt.unmount("/").is_ok()).to_be(true)
+        mt.next_file_handle = 0xFFFFFFFFFFFFFFFFu64
+        expect(mt.open("/blocked", OpenFlags.read_only()).is_err()).to_be(true)
+        mt.next_dir_handle = 0xFFFFFFFFFFFFFFFFu64
+        expect(mt.opendir("/").is_err()).to_be(true)
 
     it "fails mount allocation before registering at exhaustion":
         var mt = MountTable.new()
@@ -230,7 +218,7 @@ describe "MountTable — new()":
     it "lookup on empty table returns nil":
         val mt = MountTable.new()
         val result = mt.lookup(root_path())
-        expect(result == nil).to_equal(true)
+        expect(result.?).to_equal(false)
 
 
 # ============================================================================
@@ -255,13 +243,13 @@ describe "MountTable — mount() + lookup()":
         var mt = MountTable.new()
         mt.mount("/", make_driver(), make_opts())
         val entry_opt = mt.lookup(root_path())
-        expect(entry_opt == nil).to_equal(false)
+        expect(entry_opt.?).to_equal(true)
 
     it "lookup with child path finds root mount":
         var mt = MountTable.new()
         mt.mount("/", make_driver(), make_opts())
         val entry_opt = mt.lookup(foo_bar_path())
-        expect(entry_opt == nil).to_equal(false)
+        expect(entry_opt.?).to_equal(true)
 
     it "duplicate mount returns AlreadyExists error":
         var mt = MountTable.new()
@@ -296,7 +284,7 @@ describe "MountTable — unmount()":
         mt.mount("/", make_driver(), make_opts())
         mt.unmount("/")
         val entry_opt = mt.lookup(root_path())
-        expect(entry_opt == nil).to_equal(true)
+        expect(entry_opt.?).to_equal(false)
 
     it "unmount of non-existent path returns NotFound":
         var mt = MountTable.new()

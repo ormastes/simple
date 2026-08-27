@@ -1,6 +1,29 @@
 # Actor Heap Specification
 
-> Tests covering ActorHeap - Configuration, ActorHeap - Allocation, ActorHeap - Garbage Collection, ActorHeap - Statistics, ActorHeap - Display, ActorHeap - Region Management.
+> <details>
+
+<!-- sdn-diagram:id=actor_heap_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=actor_heap_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+actor_heap_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=actor_heap_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -17,22 +40,18 @@
 
 #### creates with default config
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- creates with default config
+- check
+- check
+- check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates with default config")
 val heap = ActorHeap.new(HeapConfig.default())
 val config = heap.config
 
@@ -45,18 +64,20 @@ check(config.generational)
 
 #### creates with custom config
 
-- creates with custom config
+- initial size: ByteSize
+- max size: ByteSize
+- check
+- check
+- check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates with custom config")
 val config = HeapConfig(
     initial_size: ByteSize(value: 1024),
     max_size: ByteSize(value: 4096),
@@ -75,18 +96,16 @@ check(not heap.config.generational)
 
 #### creates small heap
 
-- creates small heap
+- check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates small heap")
 val heap = ActorHeap.new(HeapConfig.small())
 check(heap.config.initial_size.value == 512)
 ```
@@ -95,18 +114,16 @@ check(heap.config.initial_size.value == 512)
 
 #### creates large heap
 
-- creates large heap
+- check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates large heap")
 val heap = ActorHeap.new(HeapConfig.large())
 check(heap.config.initial_size.value == 65536)
 ```
@@ -117,18 +134,17 @@ check(heap.config.initial_size.value == 65536)
 
 #### allocates memory
 
-- allocates memory
+- var heap = ActorHeap new
+- check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("allocates memory")
 var heap = ActorHeap.new(HeapConfig.default())
 val result = heap.allocate(100)
 
@@ -139,18 +155,20 @@ check(result.is_success())
 
 #### tracks allocation stats
 
-- tracks allocation stats
+- var heap = ActorHeap new
+- heap allocate
+- heap allocate
+- check
+- check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("tracks allocation stats")
 var heap = ActorHeap.new(HeapConfig.default())
 heap.allocate(100)
 heap.allocate(200)
@@ -164,18 +182,20 @@ check(stats.object_count.value == 2)
 
 #### fails when heap exhausted
 
-- fails when heap exhausted
+- initial size: ByteSize
+- max size: ByteSize
+- var heap = ActorHeap new
+- heap allocate
+- check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("fails when heap exhausted")
 val config = HeapConfig(
     initial_size: ByteSize(value: 100),
     max_size: ByteSize(value: 100),
@@ -197,18 +217,17 @@ check(not result.is_success())
 
 #### handles zero-size allocation
 
-- handles zero-size allocation
+- var heap = ActorHeap new
+- check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("handles zero-size allocation")
 var heap = ActorHeap.new(HeapConfig.default())
 val result = heap.allocate(0)
 
@@ -221,18 +240,18 @@ check(result.is_success())
 
 #### triggers GC when threshold reached
 
-- triggers GC when threshold reached
+- var heap = ActorHeap new
+- heap allocate
+- check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("triggers GC when threshold reached")
 val config = HeapConfig.default()
 var heap = ActorHeap.new(config)
 
@@ -246,18 +265,19 @@ check(stats.allocated_bytes.value >= 0)
 
 #### collects garbage manually
 
-- collects garbage manually
+- var heap = ActorHeap new
+- heap allocate
+- heap collect garbage
+- check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("collects garbage manually")
 var heap = ActorHeap.new(HeapConfig.default())
 heap.allocate(1000)
 
@@ -271,18 +291,19 @@ check(stats.gc_count.value >= 1)
 
 #### collects young generation only
 
-- collects young generation only
+- var heap = ActorHeap new
+- heap allocate
+- heap collect young generation
+- check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("collects young generation only")
 var heap = ActorHeap.new(HeapConfig.default())
 heap.allocate(500)
 
@@ -296,18 +317,20 @@ check(stats.young_gen_size.value >= 0)
 
 #### respects gc_enabled flag
 
-- respects gc_enabled flag
+- initial size: ByteSize
+- max size: ByteSize
+- var heap = ActorHeap new
+- heap collect garbage
+- check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("respects gc_enabled flag")
 val config = HeapConfig(
     initial_size: ByteSize(value: 1024),
     max_size: ByteSize(value: 4096),
@@ -329,18 +352,19 @@ check(stats.gc_count.value == 0)
 
 #### tracks peak usage
 
-- tracks peak usage
+- var heap = ActorHeap new
+- heap allocate
+- heap allocate
+- check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("tracks peak usage")
 var heap = ActorHeap.new(HeapConfig.default())
 
 heap.allocate(100)
@@ -354,18 +378,19 @@ check(stats.peak_used_bytes.value >= 300)
 
 #### reports usage percent
 
-- reports usage percent
+- var heap = ActorHeap new
+- heap allocate
+- check
+- check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("reports usage percent")
 var heap = ActorHeap.new(HeapConfig.default())
 heap.allocate(100)
 
@@ -378,18 +403,18 @@ check(usage <= 100)
 
 #### checks heap health
 
-- checks heap health
+- var heap = ActorHeap new
+- heap allocate
+- check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("checks heap health")
 var heap = ActorHeap.new(HeapConfig.default())
 heap.allocate(1000)
 
@@ -402,18 +427,16 @@ check(heap.is_healthy())
 
 #### formats heap for display
 
-- formats heap for display
+- check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("formats heap for display")
 val heap = ActorHeap.new(HeapConfig.default())
 val s = heap.fmt()
 
@@ -424,18 +447,16 @@ check(s.contains("ActorHeap"))
 
 #### formats stats for display
 
-- formats stats for display
+- check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("formats stats for display")
 val stats = HeapStats.new()
 val s = stats.fmt()
 
@@ -448,18 +469,18 @@ check(s.contains("HeapStats"))
 
 #### tracks young generation
 
-- tracks young generation
+- var heap = ActorHeap new
+- heap allocate
+- check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("tracks young generation")
 var heap = ActorHeap.new(HeapConfig.default())
 heap.allocate(100)
 
@@ -470,18 +491,18 @@ check(heap.young_generation.used.value >= 100)
 
 #### handles non-generational heap
 
-- handles non-generational heap
+- var heap = ActorHeap new
+- heap allocate
+- check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("handles non-generational heap")
 val config = HeapConfig.no_gc(1024)
 var heap = ActorHeap.new(config)
 
@@ -499,12 +520,12 @@ check(not heap.has_old_generation)
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/interpreter/actor_heap_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering ActorHeap - Configuration, ActorHeap - Allocation, ActorHeap - Garbage Collection, ActorHeap - Statistics, ActorHeap - Display, ActorHeap - Region Management.
+Tests covering:
 - ActorHeap - Configuration
 - ActorHeap - Allocation
 - ActorHeap - Garbage Collection
@@ -524,51 +545,3 @@ Tests covering ActorHeap - Configuration, ActorHeap - Allocation, ActorHeap - Ga
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-UNIT`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `c9e40c07c591f5cbc9e61216bb559fa85058d6148b297f7e137613d152674146`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `c9e40c07c591f5cbc9e61216bb559fa85058d6148b297f7e137613d152674146`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `c9e40c07c591f5cbc9e61216bb559fa85058d6148b297f7e137613d152674146`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/01_unit/app/interpreter/actor_heap_spec.spl
-mirror: doc/06_spec/01_unit/app/interpreter/actor_heap_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/app/interpreter/actor_heap_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/app/interpreter/actor_heap_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/app/interpreter/actor_heap_spec.spl:35:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates with default config' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/interpreter/actor_heap_spec.spl:45:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates with custom config' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/interpreter/actor_heap_spec.spl:61:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates small heap' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

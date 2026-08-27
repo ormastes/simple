@@ -254,11 +254,16 @@ fn llvm_stage4_build_runtime_native_archive(runtime_objects: [text], target_os_n
         case Ok(format): format
         case Err(err): return Err(err)
     var matches: [text] = []
+    var coverage_matches: [text] = []
     for object in runtime_objects:
         if stage4_runtime_provider_object_matches(object, "runtime_native", object_ext, windows_paths):
             matches = matches.push(object)
+        if stage4_runtime_provider_object_matches(object, "runtime_coverage_core", object_ext, windows_paths):
+            coverage_matches = coverage_matches.push(object)
     if matches.len() != 1:
         return Err("Stage4 runtime-native core requires exactly one fresh runtime_native" + object_ext + " object")
+    if coverage_matches.len() != 1:
+        return Err("Stage4 runtime-native core requires exactly one fresh runtime_coverage_core" + object_ext + " object")
 
     val archiver = find_archive_portable()
     val objcopy = find_objcopy_portable()
@@ -308,17 +313,23 @@ fn llvm_stage4_build_runtime_native_archive(runtime_objects: [text], target_os_n
         if not file_delete(archive_path):
             dir_remove_all(stage_dir)
             return Err("Stage4 runtime-native stale archive cleanup failed")
-    val (_, archive_err, archive_code) = process_run(archiver, ["rcsD", archive_path, localized_object])
+    # Coverage is a separate state owner but part of the mandatory hosted core
+    # provider. Keep it as its own archive member: this avoids a partial-link
+    # copy, lets the linker extract it only when probes are requested, and adds
+    # zero code/RSS overhead to statically disabled programs.
+    val (_, archive_err, archive_code) = process_run(archiver, ["rcsD", archive_path, localized_object, coverage_matches[0]])
     if archive_code != 0:
         dir_remove_all(stage_dir)
         file_delete(archive_path)
         return Err("Stage4 runtime-native archive creation failed: " + archive_err.trim())
     val (members_out, members_err, members_code) = process_run(archiver, ["t", archive_path])
     val members = members_out.replace("\r", "").trim()
-    if members_code != 0 or members != "runtime_native" + object_ext:
+    val runtime_target = env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? "host"
+    val expected_members = "runtime_native" + object_ext + "\nsimple_rt_{pid}_{runtime_target}_runtime_coverage_core" + object_ext
+    if members_code != 0 or members != expected_members:
         dir_remove_all(stage_dir)
         file_delete(archive_path)
-        return Err("Stage4 runtime-native archive must contain exactly 'runtime_native" + object_ext + "': " + members_err.trim())
+        return Err("Stage4 runtime-native archive member contract failed: " + members_err.trim())
     if not dir_remove_all(stage_dir):
         file_delete(archive_path)
         return Err("Stage4 runtime-native staging cleanup failed")

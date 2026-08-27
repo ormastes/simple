@@ -1,0 +1,60 @@
+# Typed matcher — prerequisite 2 of the AOP split.
+#
+# Evaluates a normalized PointcutQuery against a stable JoinPointDescriptor.
+# Every read goes through a named descriptor field, so the matcher's read set
+# is exactly `pointcut_query_read_set(query)` — that equality is what makes
+# field-precise invalidation sound.
+
+use compiler.mdsoc.aop_index.join_point_descriptor.{JoinPointDescriptor}
+use compiler.mdsoc.aop_index.pointcut_query.{
+    PointcutLiteral, PointcutQuery,
+    POINTCUT_KIND_ALL, POINTCUT_KIND_DNF, POINTCUT_KIND_NONE, POINTCUT_KIND_UNPARSED,
+    SELECTOR_ATTR, SELECTOR_EFFECT, SELECTOR_EXECUTION, SELECTOR_SIGNATURE, SELECTOR_WITHIN
+}
+use compiler.mdsoc.aop_index.pointcut_text.{pointcut_glob_matches}
+
+fn pointcut_atom_matches(lit: PointcutLiteral, desc: JoinPointDescriptor) -> bool:
+    """Evaluate a single literal against the descriptor."""
+    val sel = lit.atom.selector
+    val arg = lit.atom.argument
+    var hit = false
+    if sel == SELECTOR_EXECUTION:
+        hit = pointcut_glob_matches(arg, desc.qualified_name)
+    if sel == SELECTOR_WITHIN:
+        hit = pointcut_glob_matches(arg, desc.owning_scope)
+    if sel == SELECTOR_SIGNATURE:
+        hit = pointcut_glob_matches(arg, desc.signature)
+    if sel == SELECTOR_ATTR:
+        for a in desc.attributes:
+            if pointcut_glob_matches(arg, a):
+                hit = true
+    if sel == SELECTOR_EFFECT:
+        for e in desc.effects:
+            if pointcut_glob_matches(arg, e):
+                hit = true
+    if lit.negated:
+        return not hit
+    hit
+
+fn pointcut_query_matches(query: PointcutQuery, desc: JoinPointDescriptor) -> bool:
+    """True when `desc` satisfies `query`.
+
+    An `unparsed` query matches EVERYTHING — the conservative direction. We do
+    not know what it meant, so we must never narrow the candidate set with it.
+    """
+    if query.kind == POINTCUT_KIND_ALL:
+        return true
+    if query.kind == POINTCUT_KIND_NONE:
+        return false
+    if query.kind == POINTCUT_KIND_UNPARSED:
+        return true
+    if query.kind != POINTCUT_KIND_DNF:
+        return true
+    for clause in query.clauses:
+        var all_hit = true
+        for lit in clause.literals:
+            if not pointcut_atom_matches(lit, desc):
+                all_hit = false
+        if all_hit:
+            return true
+    false

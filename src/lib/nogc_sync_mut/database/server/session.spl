@@ -17,8 +17,6 @@
 use std.database.server.capability.{ DbCapability, empty_capability }
 use std.database.server.txn.{ TxnState, closed_txn }
 
-val MAX_SESSION_ID: i64 = 9223372036854775807
-
 # ============================================================================
 # Components
 # ============================================================================
@@ -44,10 +42,6 @@ class SessionRegistry:
     # -- lifecycle -----------------------------------------------------------
 
     me open_session(principal: text, capability: DbCapability) -> i64:
-        # Zero is the protocol's invalid-session sentinel.  Never wrap the
-        # allocator and alias a live (or formerly issued) session identity.
-        if self.next_id <= 0 or self.next_id == MAX_SESSION_ID:
-            return 0
         val id = self.next_id
         # NOTE: `self.next_id += 1` is silently wrong on the JIT (loads 0).
         self.next_id = self.next_id + 1
@@ -66,10 +60,8 @@ class SessionRegistry:
 
         id
 
-    # Closing discards any open transaction and retires every component.  The
-    # registry is bounded by live sessions, not by the lifetime count of OPEN
-    # requests, and a closed capability can never be recovered through a stale
-    # session id.
+    # Closing discards any open transaction — an abandoned connection must not
+    # leak uncommitted state into the store.
     me close_session(id: i64) -> bool:
         if not self.identities.contains_key(id):
             return false
@@ -78,15 +70,15 @@ class SessionRegistry:
             return false
 
         var identities = self.identities
-        identities.remove(id)
+        identities[id] = SessionIdentity(
+            session_id: current.session_id,
+            principal: current.principal,
+            open: false
+        )
         self.identities = identities
 
-        var capabilities = self.capabilities
-        capabilities.remove(id)
-        self.capabilities = capabilities
-
         var txns = self.txns
-        txns.remove(id)
+        txns[id] = closed_txn()
         self.txns = txns
         true
 

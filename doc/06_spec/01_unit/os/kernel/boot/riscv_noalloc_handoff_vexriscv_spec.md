@@ -51,7 +51,7 @@ Covers:
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -72,7 +72,7 @@ expect(layout.uart_base).to_equal(268435456)
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -93,7 +93,7 @@ expect(layout.ram_base).to_equal(2147483648)
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -114,7 +114,7 @@ expect(layout.heap_start).to_equal(2264924160)
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -137,7 +137,7 @@ expect(layout.heap_size).to_equal(16777216)
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -158,7 +158,7 @@ expect(layout.uart_base).to_equal(4026535936)
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -179,7 +179,7 @@ expect(layout.ram_base).to_equal(1073741824)
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -201,7 +201,7 @@ expect(layout.heap_start).to_equal(1325400064)
 
 
 <details>
-<summary>Executable SSpec</summary>
+<summary>Executable SPipe</summary>
 
 Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
@@ -230,7 +230,7 @@ expect(litex.uart_base).to_equal(4026535936)
 
 ## Related Documentation
 
-- **Requirements:** `REQ-6`
+- **Requirements:** [REQ-6](REQ-6)
 
 
 </details>

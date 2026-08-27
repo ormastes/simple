@@ -19,6 +19,9 @@ use std.common.processing.processing_ir.{
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
 use std.gc_async_mut.gpu.engine2d.draw_ir_target.{DrawIrRenderTarget}
 use std.gc_async_mut.gpu.engine2d.sffi_vulkan.{
+    vulkan_sffi_runtime_acquire, vulkan_sffi_runtime_release,
+    vulkan_sffi_device_count, vulkan_sffi_select_device,
+    vulkan_sffi_device_type, vulkan_sffi_selected_device_is_physical,
     vulkan_sffi_selected_device_driver_identity_hash
 }
 use std.gc_async_mut.processing.vulkan_fill_u32.{
@@ -31,12 +34,31 @@ use std.gc_async_mut.processing.cuda_fill_u32.{
 use std.nogc_sync_mut.gpu.engine2d.sffi_directx.{
     directx_hardware_adapter_identity
 }
+use app.io.time_ops.{time_now_nanos}
+
+struct VulkanDiscoveryLease:
+    active: bool
+    available: bool
+    device_type: text
+    device_identity: i64
+    startup_elapsed_us: i64
+
+fn vulkan_discovery_lease(active: bool, available: bool, device_type: text, device_identity: i64, startup_elapsed_us: i64) -> VulkanDiscoveryLease:
+    VulkanDiscoveryLease(
+        active: active,
+        available: available,
+        device_type: device_type,
+        device_identity: device_identity,
+        startup_elapsed_us: startup_elapsed_us)
 
 class SimpleOsGpuHostAllPlatform:
     cuda_executor: ProcessingCudaExecutor
+    vulkan_discovery: VulkanDiscoveryLease
 
     static fn create() -> SimpleOsGpuHostAllPlatform:
-        SimpleOsGpuHostAllPlatform(cuda_executor: ProcessingCudaExecutor.create())
+        SimpleOsGpuHostAllPlatform(
+            cuda_executor: ProcessingCudaExecutor.create(),
+            vulkan_discovery: _acquire_linux_vulkan_discovery_lease())
 
 fn _processing_selector_mask(requested: i64, selector: text, auto_mask: i64) -> i64:
     if selector == "cuda":
@@ -96,11 +118,89 @@ fn _all_render_device_identity(backend: text) -> i64:
     0
 
 @cfg(linux)
-fn _all_processing_backend_mask(cuda_executor: ProcessingCudaExecutor, requested: i64, selector: text) -> i64:
+fn _acquire_linux_vulkan_discovery_lease() -> VulkanDiscoveryLease:
+    val started = time_now_nanos()
+    if not vulkan_sffi_runtime_acquire():
+        val elapsed = time_now_nanos() - started
+        val elapsed_us = if elapsed > 0: (elapsed + 999) / 1000 else: 1
+        print("HOST_GPU_DAEMON_VULKAN_STARTUP available=false device_type=unavailable device_identity=0 elapsed_us=" + elapsed_us.to_text() + "\n")
+        return vulkan_discovery_lease(false, false, "unavailable", 0, elapsed_us)
+    var available = false
+    var device_type = "unavailable"
+    var identity: i64 = 0
+    if vulkan_sffi_device_count() > 0 and vulkan_sffi_select_device(0):
+        val physical_device = vulkan_sffi_selected_device_is_physical()
+        val probed_device_type = vulkan_sffi_device_type(0)
+        device_type = if probed_device_type == "discrete": "discrete" elif probed_device_type == "integrated": "integrated" else: "unsupported"
+        identity = vulkan_sffi_selected_device_driver_identity_hash()
+        available = physical_device and identity > 0
+    # The successful discovery lease stays active until platform shutdown. A
+    # ProcessingIR execution takes and releases its own lease, so it cannot
+    # invalidate this admission or force a second enumeration during HELLO.
+    val release_ok = if available: true else: vulkan_sffi_runtime_release()
+    val elapsed = time_now_nanos() - started
+    val startup_elapsed_us = if elapsed > 0: (elapsed + 999) / 1000 else: 1
+    val startup_available = available and release_ok
+    print("HOST_GPU_DAEMON_VULKAN_STARTUP available=" + startup_available.to_text() + " device_type=" + device_type + " device_identity=" + identity.to_text() + " elapsed_us=" + startup_elapsed_us.to_text() + "\n")
+    # A failed final release leaves its lease owned so platform shutdown can
+    # retry rather than silently orphaning a partially idle device.
+    vulkan_discovery_lease(available or not release_ok, startup_available, device_type, identity, startup_elapsed_us)
+
+@cfg(not(linux))
+fn _acquire_linux_vulkan_discovery_lease() -> VulkanDiscoveryLease:
+    print("HOST_GPU_DAEMON_VULKAN_STARTUP available=false device_type=not-linux device_identity=0 elapsed_us=1\n")
+    vulkan_discovery_lease(false, false, "not-linux", 0, 1)
+
+@cfg(linux)
+fn _all_render_backend_available(discovery: VulkanDiscoveryLease, backend: text) -> Result<bool, text>:
+    if backend != "vulkan":
+        return Err("linux-host-daemon-requires-vulkan")
+    Ok(discovery.active and discovery.available and discovery.device_identity > 0)
+
+@cfg(not(linux))
+fn _all_render_backend_available(_discovery: VulkanDiscoveryLease, backend: text) -> Result<bool, text>:
+    match _create_all_engine(1, 1, backend):
+        Err(reason): Err(reason)
+        Ok(engine):
+            val available = (
+                engine.backend_name() == backend and
+                _all_render_device_identity(backend) > 0)
+            engine.shutdown()
+            Ok(available)
+
+@cfg(linux)
+fn _render_execution_device_admitted(backend: text) -> bool:
+    backend == "vulkan" and
+        vulkan_sffi_selected_device_is_physical() and
+        vulkan_sffi_selected_device_driver_identity_hash() > 0
+
+@cfg(not(linux))
+fn _render_execution_device_admitted(backend: text) -> bool:
+    _all_render_device_identity(backend) > 0
+
+@cfg(linux)
+fn _shutdown_vulkan_discovery_once(discovery: VulkanDiscoveryLease) -> bool:
+    if not discovery.active:
+        return true
+    val shutdown_ok = vulkan_sffi_runtime_release()
+    print("HOST_GPU_DAEMON_VULKAN_SHUTDOWN owner=discovery count=1 status={shutdown_ok}\n")
+    shutdown_ok
+
+@cfg(not(linux))
+fn _shutdown_vulkan_discovery_once(_discovery: VulkanDiscoveryLease) -> bool:
+    true
+
+@cfg(linux)
+fn _all_processing_backend_mask(discovery: VulkanDiscoveryLease, requested: i64, selector: text) -> i64:
     val selected = _processing_selector_mask(
         requested, selector,
         SIMPLEOS_HOST_GPU_BACKEND_MASK_VULKAN | SIMPLEOS_HOST_GPU_BACKEND_MASK_CUDA)
-    _processing_backend_mask_supported(cuda_executor, selected)
+    # HELLO is admission-only. Full ProcessingIR execution/readback occurs at
+    # request time under its own lease; no shader work or teardown occurs in
+    # the 500 ms negotiation budget.
+    if not discovery.available:
+        return 0
+    selected & SIMPLEOS_HOST_GPU_BACKEND_MASK_VULKAN
 
 @cfg(not(linux))
 fn _all_processing_backend_mask(cuda_executor: ProcessingCudaExecutor, requested: i64, selector: text) -> i64:
@@ -111,28 +211,30 @@ impl SimpleOsGpuHostPlatform for SimpleOsGpuHostAllPlatform:
     fn create_render_target(width: i32, height: i32, backend: text) -> Result<DrawIrRenderTarget, text>:
         match _create_all_engine(width, height, backend):
             Err(reason): Err(reason)
-            Ok(engine): Ok(engine)
+            Ok(engine):
+                # Engine execution owns an additional runtime lease. Verify
+                # its selected device too: the cached discovery receipt never
+                # promotes a virtual/CPU device after a later reconfiguration.
+                if not _render_execution_device_admitted(backend):
+                    engine.shutdown()
+                    return Err("vulkan-physical-device-required")
+                Ok(engine)
 
     fn probe_render_backend(backend: text) -> Result<bool, text>:
-        match _create_all_engine(1, 1, backend):
-            Err(reason): Err(reason)
-            Ok(engine):
-                val available = (
-                    engine.backend_name() == backend and
-                    _all_render_device_identity(backend) > 0)
-                engine.shutdown()
-                Ok(available)
+        _all_render_backend_available(self.vulkan_discovery, backend)
 
     fn render_device_identity(backend: text) -> i64:
         _all_render_device_identity(backend)
 
     fn processing_backend_mask(requested: i64, selector: text) -> i64:
-        _all_processing_backend_mask(self.cuda_executor, requested, selector)
+        _all_processing_backend_mask(self.vulkan_discovery, requested, selector)
 
     fn execute_processing(ir: ProcessingIr, backend: text) -> SimpleOsGpuHostProcessingResult:
         _execute_processing(self.cuda_executor, ir, backend)
 
     fn shutdown():
+        if _shutdown_vulkan_discovery_once(self.vulkan_discovery):
+            self.vulkan_discovery.active = false
         self.cuda_executor.shutdown()
 
 export SimpleOsGpuHostAllPlatform

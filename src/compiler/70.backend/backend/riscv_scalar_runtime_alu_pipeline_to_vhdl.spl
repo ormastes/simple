@@ -1,0 +1,174 @@
+# Strict VHDL renderer for the closed runtime scalar-ALU pipeline.
+
+use compiler.mir.hwir.types.{CoreConfig, HwPort, hwir_vhdl_identifier}
+use compiler.mir.hwir.riscv_scalar_runtime_alu_pipeline.{
+    HwScalarRuntimeAluPipeline, HwScalarRuntimeAluPipelineBinding,
+    strict_riscv_scalar_runtime_alu_pipeline}
+use compiler.backend.backend.hwir_to_vhdl.{HwirStrictVhdlResult,
+    render_strict_hwir_vhdl, render_strict_sequential_hwir}
+
+fn pipeline_rejected(diagnostic: text) -> HwirStrictVhdlResult:
+    HwirStrictVhdlResult(success: false, vhdl: "", diagnostic: diagnostic,
+        route: "hwir-gen2-scalar-runtime-alu-pipeline-v2", module_node_id: "",
+        config_xlen: 0, config_profile: "", hwir_graph_sha256: "")
+
+fn pipeline_vhdl_type(width: i32) -> text:
+    if width == 1: return "std_logic"
+    "std_logic_vector(" + (width - 1).to_text() + " downto 0)"
+
+fn pipeline_wire(binding: HwScalarRuntimeAluPipelineBinding) -> text:
+    "wire_" + binding.destination_owner + "_" + binding.destination_port
+
+fn pipeline_source(owner: text, port: text) -> text:
+    "source_" + owner + "_" + port
+
+fn pipeline_input_actual(pipeline: HwScalarRuntimeAluPipeline,
+    owner: text, port: HwPort) -> text:
+    for binding in pipeline.bindings:
+        if binding.destination_owner == owner and binding.destination_port == port.name:
+            return pipeline_wire(binding)
+    port.name
+
+fn pipeline_output_actual(pipeline: HwScalarRuntimeAluPipeline,
+    owner: text, port: HwPort) -> text:
+    for binding in pipeline.bindings:
+        if binding.source_owner == owner and binding.source_port == port.name:
+            return pipeline_source(owner, port.name)
+    "open"
+
+fn pipeline_child_map(pipeline: HwScalarRuntimeAluPipeline,
+    owner: text, ports: [HwPort]) -> text:
+    var result = ""
+    var index = 0
+    for port in ports:
+        if index > 0: result = result + ","
+        result = result + port.name + "=>" +
+            (if port.direction == "in": pipeline_input_actual(pipeline, owner, port)
+                else: pipeline_output_actual(pipeline, owner, port))
+        index = index + 1
+    result
+
+fn pipeline_render_ports(ports: [HwPort]) -> text:
+    var result = ""
+    var index = 0
+    for port in ports:
+        result = result + "        " + port.name + " : " + port.direction + " " +
+            pipeline_vhdl_type(port.bit_width)
+        if index + 1 < ports.len(): result = result + ";"
+        result = result + "\n"; index = index + 1
+    result
+
+fn pipeline_render_wires(pipeline: HwScalarRuntimeAluPipeline) -> text:
+    var result = ""
+    var sources: [text] = []
+    for binding in pipeline.bindings:
+        if binding.destination_owner != "composition":
+            result = result + "    signal " + pipeline_wire(binding) + " : " +
+                pipeline_vhdl_type(binding.bit_width) + ";\n"
+        if binding.source_owner != "composition":
+            val source = pipeline_source(binding.source_owner, binding.source_port)
+            if not sources.contains(source.lower()):
+                result = result + "    signal " + source + " : " +
+                    pipeline_vhdl_type(binding.bit_width) + ";\n"
+                sources.push(source.lower())
+    result
+
+fn pipeline_render_assignments(pipeline: HwScalarRuntimeAluPipeline) -> text:
+    var result = ""
+    for binding in pipeline.bindings:
+        val destination = if binding.destination_owner == "composition":
+            binding.destination_port else: pipeline_wire(binding)
+        val source = if binding.source_owner == "composition": binding.source_port
+            else: pipeline_source(binding.source_owner, binding.source_port)
+        result = result + "    " + destination + " <= " + source + ";\n"
+    result
+
+pub fn scalar_runtime_alu_pipeline_driver_closure_diagnostic(
+    pipeline: HwScalarRuntimeAluPipeline) -> text:
+    var destinations: [text] = []
+    var source_widths: [text] = []
+    for binding in pipeline.bindings:
+        val destination = if binding.destination_owner == "composition":
+            binding.destination_port else: pipeline_wire(binding)
+        if destinations.contains(destination.lower()):
+            return "HWIR-E-RISCV-RUNTIME-PIPELINE-VHDL-DRIVER: every destination requires exactly one driver"
+        destinations.push(destination.lower())
+        if binding.source_owner != "composition":
+            val source = pipeline_source(binding.source_owner, binding.source_port).lower()
+            val width = source + "|" + binding.bit_width.to_text()
+            for known in source_widths:
+                if known.starts_with(source + "|") and known != width:
+                    return "HWIR-E-RISCV-RUNTIME-PIPELINE-VHDL-SOURCE: fanout requires one width-consistent source signal"
+            if not source_widths.contains(width): source_widths.push(width)
+    for port in pipeline.top_ports:
+        if port.direction == "out" and not destinations.contains(port.name.lower()):
+            return "HWIR-E-RISCV-RUNTIME-PIPELINE-VHDL-TOP: every top output requires one driver"
+    ""
+
+fn render_pipeline(pipeline: HwScalarRuntimeAluPipeline) -> HwirStrictVhdlResult:
+    val diagnostic = pipeline.diagnostic()
+    if diagnostic != "": return pipeline_rejected(diagnostic)
+    val closure = scalar_runtime_alu_pipeline_driver_closure_diagnostic(pipeline)
+    if closure != "": return pipeline_rejected(closure)
+    val decoder = render_strict_hwir_vhdl(pipeline.decoder)
+    val uop = render_strict_sequential_hwir(pipeline.uop_skid,
+        "hwir-gen2-scalar-decoded-uop-skid-v1")
+    val alu = render_strict_hwir_vhdl(pipeline.alu)
+    val skid = render_strict_sequential_hwir(pipeline.completion_skid,
+        "hwir-gen2-scalar-completion-skid-v1")
+    val illegal = render_strict_hwir_vhdl(pipeline.illegal_provider)
+    val selector = render_strict_hwir_vhdl(pipeline.selector)
+    val fault = render_strict_sequential_hwir(pipeline.fault_owner,
+        "hwir-gen2-scalar-runtime-fault-owner-v1")
+    val defaults = render_strict_hwir_vhdl(pipeline.defaults)
+    for child in [decoder, uop, alu, illegal, selector, skid, fault, defaults]:
+        if not child.is_success(): return pipeline_rejected(child.diagnostic)
+    if not hwir_vhdl_identifier(pipeline.module_name):
+        return pipeline_rejected(
+            "HWIR-E-RISCV-RUNTIME-PIPELINE-ENTITY: pipeline requires a legal VHDL entity name")
+    val top = "library ieee;\nuse ieee.std_logic_1164.all;\nuse ieee.numeric_std.all;\n\n" +
+        "-- simple-hwir route=hwir-gen2-scalar-runtime-alu-pipeline-v2 profile=" +
+        pipeline.config.profile + " graph=" + pipeline.structural_sha256() + "\n" +
+        "-- simple-hwir child-decoder=" + decoder.hwir_graph_sha256 + "\n" +
+        "-- simple-hwir child-uop-skid=" + uop.hwir_graph_sha256 + "\n" +
+        "-- simple-hwir child-alu=" + alu.hwir_graph_sha256 + "\n" +
+        "-- simple-hwir child-completion-skid=" + skid.hwir_graph_sha256 + "\n" +
+        "-- simple-hwir child-illegal-provider=" + illegal.hwir_graph_sha256 + "\n" +
+        "-- simple-hwir child-selector=" + selector.hwir_graph_sha256 + "\n" +
+        "-- simple-hwir child-fault-owner=" + fault.hwir_graph_sha256 + "\n" +
+        "-- simple-hwir child-defaults=" + defaults.hwir_graph_sha256 + "\n" +
+        "entity " + pipeline.module_name + " is port(\n" +
+        pipeline_render_ports(pipeline.top_ports) + "    ); end entity;\n" +
+        "architecture rtl of " + pipeline.module_name + " is\n" +
+        pipeline_render_wires(pipeline) + "begin\n" + pipeline_render_assignments(pipeline) +
+        "    decoder: entity work." + pipeline.decoder.summary.name + " port map(" +
+            pipeline_child_map(pipeline, "decoder", pipeline.decoder.ports) + ");\n" +
+        "    uop_skid: entity work." + pipeline.uop_skid.entity_name + " port map(" +
+            pipeline_child_map(pipeline, "uop_skid", pipeline.uop_skid.ports) + ");\n" +
+        "    alu: entity work." + pipeline.alu.summary.name + " port map(" +
+            pipeline_child_map(pipeline, "alu", pipeline.alu.ports) + ");\n" +
+        "    completion_skid: entity work." + pipeline.completion_skid.entity_name + " port map(" +
+            pipeline_child_map(pipeline, "completion_skid", pipeline.completion_skid.ports) + ");\n" +
+        "    illegal_provider: entity work." + pipeline.illegal_provider.summary.name + " port map(" +
+            pipeline_child_map(pipeline, "illegal_provider", pipeline.illegal_provider.ports) + ");\n" +
+        "    selector: entity work." + pipeline.selector.summary.name + " port map(" +
+            pipeline_child_map(pipeline, "selector", pipeline.selector.ports) + ");\n" +
+        "    fault_owner: entity work." + pipeline.fault_owner.entity_name + " port map(" +
+            pipeline_child_map(pipeline, "fault_owner", pipeline.fault_owner.ports) + ");\n" +
+        "    defaults: entity work." + pipeline.defaults.summary.name + " port map(" +
+            pipeline_child_map(pipeline, "defaults", pipeline.defaults.ports) + ");\n" +
+        "end architecture rtl;\n"
+    HwirStrictVhdlResult(success: true,
+        vhdl: decoder.vhdl + "\n" + uop.vhdl + "\n" + alu.vhdl + "\n" + skid.vhdl +
+            "\n" + illegal.vhdl + "\n" + selector.vhdl + "\n" + fault.vhdl + "\n" +
+            defaults.vhdl + "\n" + top,
+        diagnostic: "", route: "hwir-gen2-scalar-runtime-alu-pipeline-v2",
+        module_node_id: pipeline.node_id.value, config_xlen: pipeline.config.xlen,
+        config_profile: pipeline.config.profile,
+        hwir_graph_sha256: pipeline.structural_sha256())
+
+pub fn compile_strict_riscv_scalar_runtime_alu_pipeline(module_name: text,
+    config: CoreConfig) -> HwirStrictVhdlResult:
+    val rebuilt = strict_riscv_scalar_runtime_alu_pipeline(module_name, config)
+    if rebuilt.is_err(): return pipeline_rejected(rebuilt.err().unwrap())
+    render_pipeline(rebuilt.ok().unwrap())

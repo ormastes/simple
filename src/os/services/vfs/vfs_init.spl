@@ -23,8 +23,7 @@ use os.services.vfs.vfs_boot_init.{
     g_root_fat32, g_root_nvfs_hosted, g_vfs_initialized, g_mount_table, g_vfs,
     g_c_adapter,
     VfsFileSize,
-    vfs_boot_init, vfs_boot_init_production, vfs_boot_init_virtio_fat32, vfs_boot_init_riscv64_virtio_fat32,
-    vfs_boot_probe_pure_simple_nvme_adapter,
+    vfs_boot_init, vfs_boot_init_production,
     vfs_boot_storage_provider, vfs_boot_storage_is_pure_simple,
     vfs_boot_storage_acceptance_ready,
     vfs_boot_read_pure_nvme_fat32_path_bytes,
@@ -32,9 +31,7 @@ use os.services.vfs.vfs_boot_init.{
     vfs_is_ready, vfs_get_manager,
     vfs_ambient_allows, vfs_ambient_in_container, vfs_ambient_enforce,
     vfs_ambient_enter_container, vfs_ambient_enter_container_view,
-    vfs_ambient_enter_rootless_container, vfs_ambient_leave_container,
-    vfs_state_reset_rootfs, vfs_state_commit_root_nvfs, vfs_state_mount,
-    vfs_state_mark_rootfs_ready
+    vfs_ambient_enter_rootless_container, vfs_ambient_leave_container
 }
 use os.services.vfs.vfs_dispatch.{
     g_vfs_dispatch_read_file_text, g_vfs_dispatch_read_file_bytes,
@@ -42,15 +39,10 @@ use os.services.vfs.vfs_dispatch.{
     g_vfs_dispatch_write_file_text, g_vfs_dispatch_write_file_bytes,
     g_vfs_dispatch_delete_file
 }
-use os.services.vfs.dbfs_mount_capability.{
-    dbfs_vfs_mount_capability_clear_v1,
-    dbfs_vfs_mount_capability_publish_driver_v1
-}
 use os.services.vfs.vfs_write_ops.{
     g_vfs_select_file, g_vfs_get_selected_file, g_vfs_clear_selected_file,
     g_vfs_write_file_text, g_vfs_write_file_bytes,
     g_vfs_delete_file, g_vfs_readdir, g_vfs_file_exists,
-    g_vfs_abs_path, g_vfs_root_path,
     vfs_mount_removable, vfs_unmount_removable
 }
 use os.services.vfs.nvme_filesystem_mounts.{vfs_nvme_driver_instance_for_lease_checked}
@@ -71,39 +63,42 @@ use os.kernel.loader.app_registry.{
 use os.kernel.boot.mmio.{mmio_read32, mmio_write32, mmio_read64, mmio_read16, mmio_read8, mmio_write8}
 extern fn serial_println(msg: text)
 extern fn rt_text_to_bytes(s: text) -> [u8]
-extern fn simpleos_fat32_path_read_buffer_addr() -> u64
-extern fn simpleos_fat32_read_path(path: text) -> i64
-extern fn simpleos_fat32_read_path_size(path: text) -> i64
-extern fn simpleos_fat32_read_path_array(path: text) -> [u8]
 
 # Largest pinned font is 25,125,512 bytes; keep pure-Simple reads bounded.
 val FAT32_PATH_READ_BUFFER_MAX: u64 = 33554432
 val C_FAT32_PATH_READ_BUFFER_MAX: u64 = 33554432
-# Keep the hosted NVFS root fast path aligned with vfs_dispatch's whole-file
-# ceiling.  This path runs before mount-table dispatch, so corrupt metadata
-# must not be able to request an unbounded kernel allocation here.
-val HOSTED_NVFS_ROOT_MAX_FILE_BYTES: i64 = 536870912
 
 # ============================================================================
 # Private helpers
 # ============================================================================
 
 fn _vfs_c_fat32_bridge_allowed() -> bool:
-    g_vfs_initialized and not vfs_boot_storage_is_pure_simple()
+    # RV64 has no simpleos_fat32_* ABI provider. Its actual provider is the
+    # mounted VirtIO block device, so this bridge must be rejected before a
+    # compatibility read is considered.
+    g_vfs_initialized and not vfs_boot_storage_is_pure_simple() and c_fat32_bridge_backed()
 
-# `g_vfs_abs_path` / `g_vfs_root_path` / `_vfs_text_to_bytes` used to be
-# duplicated verbatim here. Deleted by lane VFSBYPASS — the path helpers are
-# imported from vfs_write_ops (one owner), and `_vfs_text_to_bytes` had no
-# caller in this module at all.
+fn g_vfs_abs_path(name: text) -> Path:
+    """Return an absolute Path for name, prepending '/' if bare."""
+    if name.starts_with("/"):
+        Path(raw: name)
+    else:
+        Path(raw: "/" + name)
+
+fn g_vfs_root_path(name: text) -> text:
+    if name.starts_with("/"):
+        name
+    else:
+        "/" + name
+
+fn _vfs_text_to_bytes(text_value: text) -> [u8]:
+    rt_text_to_bytes(text_value)
 
 fn _vfs_bytes_to_text(buf: [u8], count: i64) -> text:
     var result: text = ""
     var i: i64 = 0
     while i < count and i < buf.len():
-        # `.chr()` has no native-lane lowering (empty on baremetal);
-        # char_from_code is pure Simple and kernel-proven.
-        val b: i64 = buf[i as i32] as i64
-        result = result + char_from_code(b)
+        result = result + buf[i as i32].chr()
         i = i + 1
     result
 
@@ -122,22 +117,14 @@ fn _clone_bytes(buf: [u8]) -> [u8]:
 pub fn _clear_vfs_rootfs_for_test():
     """Reset rootfs-related globals so hosted driver tests start clean."""
     vfs_state_reset_rootfs()
-    dbfs_vfs_mount_capability_clear_v1()
 
 pub fn vfs_mount_rootfs(driver: DriverInstance) -> Result<(), text>:
     """Mount an already constructed root driver; production NVMe callers should use vfs_mount_rootfs_from_nvme_lease_checked."""
-    dbfs_vfs_mount_capability_clear_v1()
     match driver:
-        case DbFs(dbfs):
-            val mount_r = vfs_state_mount("/", driver, MountOptions.default())
-            if mount_r.is_err():
-                return Err("vfs_mount_rootfs: mount failed")
-            dbfs_vfs_mount_capability_publish_driver_v1(
-                dbfs.durability_serialization_ready())
         case NvfsPosix(d):
-            vfs_state_commit_root_nvfs(d)
+            g_root_nvfs_hosted = Some(d)
         case _:
-            val mount_r = vfs_state_mount("/", driver, MountOptions.default())
+            val mount_r = g_mount_table.mount("/", driver, MountOptions.default())
             if mount_r.is_err():
                 return Err("vfs_mount_rootfs: mount failed")
     vfs_state_mark_rootfs_ready()
@@ -173,30 +160,32 @@ fn _g_vfs_root_nvfs_hosted_read_file_bytes(path: text) -> [u8]:
     val relpath = Path(raw: path)
     val stat_r = driver.stat(relpath)
     if stat_r.is_err():
-        vfs_state_commit_root_nvfs(driver)
+        g_root_nvfs_hosted = Some(driver)
         return []
     val size = stat_r.unwrap().size.to_i64()
-    if size <= 0 or size > HOSTED_NVFS_ROOT_MAX_FILE_BYTES:
+    if size <= 0:
         vfs_state_commit_root_nvfs(driver)
         return []
     val open_r = driver.open(relpath, OpenFlags.read_only())
     if open_r.is_err():
-        vfs_state_commit_root_nvfs(driver)
+        g_root_nvfs_hosted = Some(driver)
         return []
     val handle = open_r.unwrap()
     val (read_driver, read_r) = nvfs_posix_pread_bytes_owned(driver, handle, 0, size)
     driver = read_driver
     driver.close(handle)
-    vfs_state_commit_root_nvfs(driver)
+    g_root_nvfs_hosted = Some(driver)
     if read_r.is_err():
         return []
-    val buf = read_r.unwrap()
-    # A whole-file consumer must never treat a short/torn read as an
-    # executable or data file.  The byte-returning driver API preserves the
-    # data across Simple's value boundary and avoids a zero-fill plus clone.
-    if buf.len() as i64 != size:
-        return []
-    buf
+    val n = read_r.unwrap()
+    if n.to_i32() == buf.len():
+        return _clone_bytes(buf)
+    var out: [u8] = []
+    var j: i32 = 0
+    while j < n.to_i32():
+        out.push(buf[j])
+        j = j + 1
+    out
 
 fn _g_vfs_root_nvfs_hosted_read_file_text(path: text) -> text:
     val bytes = _g_vfs_root_nvfs_hosted_read_file_bytes(path)
@@ -209,7 +198,7 @@ fn _g_vfs_root_nvfs_hosted_file_size(path: text) -> i64:
         return -1
     val driver = g_root_nvfs_hosted.unwrap()
     val stat_r = driver.stat(Path(raw: path))
-    vfs_state_commit_root_nvfs(driver)
+    g_root_nvfs_hosted = Some(driver)
     if stat_r.is_err():
         return -1
     stat_r.unwrap().size.to_i64()
@@ -250,18 +239,18 @@ fn _copy_bytes_from_addr(addr: u64, size: u64) -> [u8]:
 fn _cache_c_fat32_exec_bytes(path: text) -> [u8]:
     if not _vfs_c_fat32_bridge_allowed():
         return []
-    val signed_size = simpleos_fat32_read_path_size(path)
+    val signed_size = c_fat32_read_path_size(path)
     if signed_size <= 4:
         return []
     val file_size = signed_size.to_u64()
-    if file_size > C_FAT32_PATH_READ_BUFFER_MAX:
+    if file_size > FAT32_PATH_READ_BUFFER_MAX:
         return []
-    val read_result = simpleos_fat32_read_path(path)
+    val read_result = c_fat32_read_path(path)
     if read_result != 0:
         return []
-    if not _known_app_has_elf_magic(simpleos_fat32_path_read_buffer_addr()):
+    if not _known_app_has_elf_magic(c_fat32_path_read_buffer_addr()):
         return []
-    _copy_bytes_from_addr(simpleos_fat32_path_read_buffer_addr(), file_size)
+    _copy_bytes_from_addr(c_fat32_path_read_buffer_addr(), file_size)
 
 fn _cache_lazy_exec_bytes(path: text, bytes: [u8]) -> [u8]:
     app_registry_cache_bytes(path, bytes)
@@ -273,26 +262,21 @@ fn _cache_exec_bytes_if_valid(cache_key: text, path: text, bytes: [u8]) -> [u8]:
     _cache_lazy_exec_bytes(cache_key, bytes)
 
 pub fn g_vfs_read_fat32_path_bytes(path: text) -> [u8]:
-    """Read arbitrary FAT32 bytes through the C-backed QEMU boot bridge.
-
-    AMBIENT CONTAINER GATE — see `g_vfs_write_file_text` in vfs_write_ops.spl.
-    """
-    if not vfs_ambient_allows("read", g_vfs_root_path(path)):
-        return []
+    """Read arbitrary FAT32 bytes through the C-backed QEMU boot bridge."""
     if vfs_boot_storage_is_pure_simple():
         return vfs_boot_read_pure_nvme_fat32_path_bytes(path)
     if not _vfs_c_fat32_bridge_allowed():
         return []
     if path == "":
         return []
-    val signed_size = simpleos_fat32_read_path_size(path)
+    val signed_size = c_fat32_read_path_size(path)
     if signed_size <= 0:
         return []
     val file_size = signed_size.to_u64()
-    if file_size > C_FAT32_PATH_READ_BUFFER_MAX:
+    if file_size > FAT32_PATH_READ_BUFFER_MAX:
         log_raw_println("[vfs-root] c_fat32_path_read_oversize path={path} bytes={file_size}")
         return []
-    val out = simpleos_fat32_read_path_array(path)
+    val out = c_fat32_read_path_array(path)
     if out.len() <= 0 or out.len().to_u64() != file_size:
         log_raw_println("[vfs-root] c_fat32_path_read_failed path={path} bytes={out.len()} expected={file_size}")
         return []
@@ -317,8 +301,7 @@ fn g_vfs_root_read_file_text(driver: Fat32Core, path: text) -> text:
     var result: text = ""
     var i: i32 = 0
     while i < data.len():
-        val b: i64 = data[i] as i64
-        result = result + char_from_code(b)
+        result = result + data[i].chr()
         i = i + 1
     result
 
@@ -334,7 +317,7 @@ fn _g_vfs_root_read_file_bytes_once(driver: Fat32Core, path: text) -> [u8]:
         log_raw_println("[vfs-root] open_failed path={path}")
         return []
     val handle = open_r.unwrap()
-    val read_r = driver.read(handle, FAT32_PATH_READ_BUFFER_MAX)
+    val read_r = driver.read(handle, 1048576)
     driver.close(handle)
     if read_r.is_err():
         log_raw_println("[vfs-root] read_failed path={path}")
@@ -387,14 +370,7 @@ fn _vfs_read_direct_exec_candidate(cache_key: text, path: text) -> [u8]:
     _cache_exec_bytes_if_valid(cache_key, path, bytes)
 
 pub fn g_vfs_read_executable_bytes(name: text) -> [u8]:
-    """Read seeded executable bytes, preferring the registry cache then FAT32 path bridge.
-
-    AMBIENT CONTAINER GATE, applied BEFORE the registry cache: a cache hit is
-    still a read of a path the caller may not name, and serving executable
-    bytes across a namespace boundary is the escape this lane exists to close.
-    """
-    if not vfs_ambient_allows("read", g_vfs_root_path(name)):
-        return []
+    """Read seeded executable bytes, preferring the registry cache then FAT32 path bridge."""
     # 1. Check registry cache
     val cached = app_registry_cached_bytes(name)
     if cached.len() > 0:
@@ -404,48 +380,6 @@ pub fn g_vfs_read_executable_bytes(name: text) -> [u8]:
         val root_cached = app_registry_cached_bytes(root_name)
         if root_cached.len() > 0:
             return root_cached
-    # 1b. Pure-Simple scalar/direct FAT32 reader, BEFORE the g_vfs_initialized
-    # gate below -- exactly mirroring g_vfs_read_file_bytes (which is what makes
-    # /SYS/FONTS/<short-name> readable on this same boot). Without this the
-    # executable path was the ONLY disk consumer still gated on the hosted
-    # Fat32Core mount, which x86_64 skips for the C8
-    # "blockdevice-dispatch-codegen-bug"; every process spawn then failed with a
-    # clean negative even though the disk carried /SYS/APPS/<leaf>.SMF and the
-    # direct reader resolves those paths explicitly (see
-    # vfs_boot_read_pure_nvme_fat32_path_bytes' /SYS/APPS/ branch). The direct
-    # reader never touches g_root_fat32 / the BlockDevice trait object and
-    # internally no-ops (returns []) when it is not ready, so this stays a
-    # harmless probe on virtio-blk and disk-less boots. No _clone_bytes: the
-    # reader returns a freshly-built, unaliased array.
-    val direct_exec_bytes = vfs_boot_read_pure_nvme_fat32_path_bytes(name)
-    if direct_exec_bytes.len() > 0:
-        return direct_exec_bytes
-    if root_name != name:
-        val direct_root_exec_bytes = vfs_boot_read_pure_nvme_fat32_path_bytes(root_name)
-        if direct_root_exec_bytes.len() > 0:
-            return direct_root_exec_bytes
-    # 1c. Same reader via the registry's 8.3 aliases, so a canonical logical
-    # name ("/sys/apps/browser_demo") resolves without the caller having to
-    # retry each alias itself.
-    val direct_fat32_alias = app_registry_fat32_alias(name)
-    if direct_fat32_alias != nil:
-        val direct_alias_bytes = vfs_boot_read_pure_nvme_fat32_path_bytes(direct_fat32_alias.unwrap())
-        if direct_alias_bytes.len() > 0:
-            return direct_alias_bytes
-    val direct_root_alias = app_registry_root_alias(name)
-    if direct_root_alias != nil:
-        val direct_root_alias_bytes = vfs_boot_read_pure_nvme_fat32_path_bytes(direct_root_alias.unwrap())
-        if direct_root_alias_bytes.len() > 0:
-            return direct_root_alias_bytes
-    # No root filesystem mounted (disk-less WM harness): every disk-backed
-    # candidate below dispatches through g_root_fat32.unwrap().stat(), and
-    # native-build miscompiles the `Option<SharedFat32Driver> != nil` guard so a
-    # genuinely-nil root reports non-nil, yielding a null driver whose .stat()
-    # faults cr2=0x0 (looped forever by RIP+2 recovery). Gate on the reliable
-    # g_vfs_initialized bool: the registry cache above is the only usable source,
-    # so return empty and let spawn surface a clean ENOENT/negative.
-    if not g_vfs_initialized:
-        return []
     # 2. Try VFS mounted read
     val mounted_bytes = _vfs_read_mounted_exec_candidate(name)
     if mounted_bytes.len() > 0:
@@ -515,11 +449,7 @@ pub fn g_vfs_read_file_text(name: text) -> text:
     Accepts bare FAT32 names ("HELLO.TXT") or absolute paths ("/HELLO.TXT").
     Returns empty string on any error (mirrors rt_fat32_read_file_text semantics).
     Prefer this over rt_fat32_read_file_text for all new callers.
-
-    AMBIENT CONTAINER GATE — see `g_vfs_write_file_text` in vfs_write_ops.spl.
     """
-    if not vfs_ambient_allows("read", g_vfs_root_path(name)):
-        return ""
     if g_root_fat32 != nil:
         return g_vfs_root_read_file_text(g_root_fat32.unwrap(), g_vfs_root_path(name))
     if g_root_nvfs_hosted != nil:
@@ -553,48 +483,10 @@ pub fn g_vfs_read_file_bytes(name: text) -> [u8]:
 
     Accepts bare FAT32 names ("HELLO.TXT") or absolute paths ("/HELLO.TXT").
     Returns an empty byte array on any error.
-
-    AMBIENT CONTAINER GATE, applied before the registry cache — same reasoning
-    as `g_vfs_read_executable_bytes`.
     """
-    if not vfs_ambient_allows("read", g_vfs_root_path(name)):
-        return []
     val seeded_exec = app_registry_cached_bytes(name)
     if seeded_exec.len() > 0:
         return _clone_bytes(seeded_exec)
-    # Try the pure-Simple scalar/direct FAT32 reader FIRST, before the
-    # g_vfs_initialized gate below. vfs_boot_read_pure_nvme_fat32_path_bytes
-    # never touches g_root_fat32 / the BlockDevice trait object -- it walks
-    # FAT32 directories and cluster chains via raw mmio reads into a DMA
-    # scratch buffer (see vfs_boot_init.spl) -- so it is safe to call even
-    # when the hosted Fat32Core mount was skipped for the C8
-    # "blockdevice-dispatch-codegen-bug" and g_vfs_initialized never became
-    # true. It internally no-ops (returns []) when the direct reader itself
-    # isn't ready, so this is a harmless probe on every other boot path
-    # (virtio-blk, disk-less harness, etc). This is what unblocks reading
-    # /SYS/FONTS/<short-name> for the pinned taskbar-clock font when the
-    # hosted mount is degraded but the disk and direct reader are healthy.
-    # NO _clone_bytes on these: the direct reader returns a freshly-built,
-    # unaliased array, and on the SimpleOS bump heap (no free) cloning a
-    # 1.7MB font blob would permanently burn another ~2-3.5MB per read.
-    val direct_scalar_bytes = vfs_boot_read_pure_nvme_fat32_path_bytes(name)
-    if direct_scalar_bytes.len() > 0:
-        return direct_scalar_bytes
-    val root_name_direct = g_vfs_root_path(name)
-    if root_name_direct != name:
-        val direct_scalar_root_bytes = vfs_boot_read_pure_nvme_fat32_path_bytes(root_name_direct)
-        if direct_scalar_root_bytes.len() > 0:
-            return direct_scalar_root_bytes
-    # No root filesystem mounted (e.g. the disk-less WM harness where the NVMe
-    # exec probe failed): the trait-device FAT32 read machinery below dispatches
-    # through g_root_fat32.unwrap().stat(), and native-build miscompiles the
-    # `Option<SharedFat32Driver> != nil` guard on the line below — a genuinely-nil
-    # g_root_fat32 reports non-nil, so .unwrap() yields a null driver and .stat()
-    # faults cr2=0x0, which the x86 RIP+2 fault recovery turns into an infinite
-    # loop. Gate on the reliable g_vfs_initialized bool instead: when no fs is
-    # mounted the registry cache above is the only honest source, so return empty.
-    if not g_vfs_initialized:
-        return []
     if g_root_fat32 != nil:
         val root_bytes = g_vfs_root_read_file_bytes(g_root_fat32.unwrap(), g_vfs_root_path(name))
         if root_bytes.len() > 0:
@@ -629,13 +521,7 @@ pub fn g_vfs_read_file_bytes(name: text) -> [u8]:
             return []
         val mounted_bytes = g_vfs_dispatch_read_file_bytes(driver_first_r.unwrap(), Path(raw: rel_raw_first))
         if mounted_bytes.len() > 0:
-            # Dispatch returns a fresh result buffer for every concrete driver:
-            # FAT32/NVFS/NVFS-POSIX/RAMFS allocate their read destination here,
-            # while DBFS returns a newly materialized read result. Transfer that
-            # value directly instead of cloning the whole file a second time.
-            # Cached registry bytes above still require `_clone_bytes` because
-            # those arrays remain owned by the persistent registry entry.
-            return mounted_bytes
+            return _clone_bytes(mounted_bytes)
     # Compatibility fallback for existing boot media that still expose the
     # transitional C FAT32 bridge.
     val direct_path_bytes = g_vfs_read_fat32_path_bytes(name)
@@ -679,11 +565,7 @@ pub fn g_vfs_file_size(name: text) -> Option<VfsFileSize>:
 
     Accepts bare FAT32 names or absolute paths.
     Prefer this over rt_fat32_file_size for all new callers.
-
-    AMBIENT CONTAINER GATE — size is existence plus a side channel.
     """
-    if not vfs_ambient_allows("stat", g_vfs_root_path(name)):
-        return nil
     if g_root_fat32 != nil:
         val root_size_first = g_vfs_root_file_size(g_root_fat32.unwrap(), g_vfs_root_path(name))
         if root_size_first >= 0:
@@ -725,20 +607,20 @@ pub fn g_vfs_file_size(name: text) -> Option<VfsFileSize>:
     # Compatibility fallback for transitional C FAT32 bridge readers.
     val root_name = g_vfs_root_path(name)
     if _vfs_c_fat32_bridge_allowed():
-        val direct_size = simpleos_fat32_read_path_size(name)
+        val direct_size = c_fat32_read_path_size(name)
         if direct_size > 0:
             return Some(VfsFileSize(bytes: direct_size))
-        val root_size = simpleos_fat32_read_path_size(root_name)
+        val root_size = c_fat32_read_path_size(root_name)
         if root_size > 0:
             return Some(VfsFileSize(bytes: root_size))
         val alias_name = _vfs_exec_disk_alias(name)
         if alias_name != name:
-            val alias_size = simpleos_fat32_read_path_size(alias_name)
+            val alias_size = c_fat32_read_path_size(alias_name)
             if alias_size > 0:
                 return Some(VfsFileSize(bytes: alias_size))
         val root_alias = _vfs_exec_disk_alias(root_name)
         if root_alias != root_name:
-            val root_alias_size = simpleos_fat32_read_path_size(root_alias)
+            val root_alias_size = c_fat32_read_path_size(root_alias)
             if root_alias_size > 0:
                 return Some(VfsFileSize(bytes: root_alias_size))
     val abs = g_vfs_abs_path(name)

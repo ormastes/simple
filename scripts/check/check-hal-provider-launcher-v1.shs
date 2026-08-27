@@ -1,0 +1,83 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+work=$(mktemp -d "${TMPDIR:-/tmp}/hal-launcher-v1.XXXXXX")
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+
+cc=${CC:-cc}
+common_flags='-std=c11 -O2 -Wall -Wextra -Werror -pedantic'
+"$cc" $common_flags \
+    "$repo_root/src/app/hal_provider/hal_provider_launcher_v1.c" \
+    -o "$work/hal-provider-launcher-v1"
+"$cc" $common_flags \
+    "$repo_root/src/app/hal_provider/test/hal_provider_fake_worker_v1.c" \
+    -o "$work/fake-worker-v1"
+
+request='HALREQ1|1|101|7|9|0|32|64|8'
+provider=0
+sandbox_available=1
+while [ "$provider" -le 2 ]; do
+    if ! output=$(printf '%s\n' "$request" | \
+        "$work/hal-provider-launcher-v1" 1000 512 \
+        "$work/fake-worker-v1" "$provider" ok); then
+        sandbox_available=0
+        [ -z "$output" ] || {
+            echo 'FAIL: unavailable sandbox emitted a forgeable receipt' >&2
+            exit 1
+        }
+        break
+    fi
+    first=$(printf '%s\n' "$output" | sed -n '1p')
+    second=$(printf '%s\n' "$output" | sed -n '2p')
+    case "$first" in
+        'HALISO1|7|'*'|0|0|0|1|1') ;;
+        *) echo "FAIL: malformed isolation receipt: $first" >&2; exit 1 ;;
+    esac
+    expected="HALRES1|$provider|7|0|0|10|20|30|40|32|64|8|8|0|-1|0|5"
+    [ "$second" = "$expected" ] || {
+        echo "FAIL: malformed provider result for lane $provider" >&2
+        exit 1
+    }
+    [ "$(printf '%s\n' "$output" | wc -l)" -eq 2 ] || {
+        echo 'FAIL: launcher emitted unbounded or extra protocol rows' >&2
+        exit 1
+    }
+    provider=$((provider + 1))
+done
+
+if [ "$sandbox_available" -eq 0 ]; then
+    echo 'PASS: host cannot create required namespaces; trusted HAL admission failed closed with no receipt'
+    exit 0
+fi
+
+start=$(date +%s)
+if printf '%s\n' "$request" | \
+    "$work/hal-provider-launcher-v1" 50 512 \
+    "$work/fake-worker-v1" 0 slow >"$work/slow.out" 2>"$work/slow.err"; then
+    echo 'FAIL: deadline-overrun worker was admitted' >&2
+    exit 1
+fi
+elapsed=$(( $(date +%s) - start ))
+[ "$elapsed" -lt 2 ] || { echo 'FAIL: deadline path did not terminate promptly' >&2; exit 1; }
+[ ! -s "$work/slow.out" ] || { echo 'FAIL: timed-out worker emitted a receipt' >&2; exit 1; }
+
+start=$(date +%s)
+if printf '%s\n' "$request" | \
+    "$work/hal-provider-launcher-v1" 50 512 \
+    "$work/fake-worker-v1" 0 close-then-slow \
+    >"$work/closed.out" 2>"$work/closed.err"; then
+    echo 'FAIL: worker that closed output and remained alive was admitted' >&2
+    exit 1
+fi
+elapsed=$(( $(date +%s) - start ))
+[ "$elapsed" -lt 2 ] || { echo 'FAIL: closed-output deadline did not reap promptly' >&2; exit 1; }
+
+if printf '%s\n' "$request" | \
+    "$work/hal-provider-launcher-v1" 1000 513 \
+    "$work/fake-worker-v1" 0 ok >/dev/null 2>&1; then
+    echo 'FAIL: response capacity above the fixed ABI bound was accepted' >&2
+    exit 1
+fi
+
+echo 'PASS: trusted HAL launcher isolates, bounds IPC, deadlines, and reaps Pure/C/Rust fake workers'

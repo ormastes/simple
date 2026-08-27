@@ -2,6 +2,30 @@
 
 > End-to-end system tests covering the complete VHDL backend workflow. Tests the full pipeline from type mapper through builder to output validation, plus constraint checker integration.
 
+<!-- sdn-diagram:id=vhdl_backend_system_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=vhdl_backend_system_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+vhdl_backend_system_spec -> compiler
+vhdl_backend_system_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=vhdl_backend_system_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 10 | 10 | 0 | 0 |
@@ -22,7 +46,7 @@ End-to-end system tests covering the complete VHDL backend workflow. Tests the f
 | Difficulty | 5/5 |
 | Status | In Progress |
 | Source | `test/03_system/compiler/vhdl_backend_system_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -47,18 +71,32 @@ plus constraint checker integration.
 
 #### generates entity with mapped types _(slow)_
 
-- generates entity with mapped types
+1. var builder = VhdlBuilder  create
+2. builder emit library header
+3. builder emit entity begin
+4. builder emit port begin
+5. builder emit port
+6. builder emit port
+7. builder emit port
+8. builder emit port
+9. builder emit port end
+10. builder emit entity end
+11. verify
+12. verify
+13. verify
+14. verify
+15. verify
+16. verify
+17. verify
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 30 lines folded for reproduction.
+Runnable source: 28 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("generates entity with mapped types")
 val mapper = VhdlTypeMapper__create()
 var builder = VhdlBuilder__create("alu")
 
@@ -99,18 +137,27 @@ verify(result.contains("end entity alu;"))
 
 #### generates entity with resolved types _(slow)_
 
-- generates entity with resolved types
+1. var builder = VhdlBuilder  create
+2. builder emit library header
+3. builder emit entity begin
+4. builder emit port begin
+5. builder emit port
+6. builder emit port
+7. builder emit port
+8. builder emit port
+9. builder emit port end
+10. builder emit entity end
+11. verify
+12. verify
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("generates entity with resolved types")
 val mapper = VhdlTypeMapper__create_resolved()
 var builder = VhdlBuilder__create("mux")
 
@@ -145,18 +192,30 @@ verify(result.contains("a : in unsigned(7 downto 0)"))
 
 #### builds validated module output _(slow)_
 
-- builds validated module output
+1. var builder = VhdlBuilder  create
+2. builder emit library header
+3. builder emit entity begin
+4. builder emit port begin
+5. builder emit port
+6. builder emit port
+7. builder emit port
+8. builder emit port end
+9. builder emit entity end
+10. builder emit architecture begin
+11. builder emit architecture body begin
+12. builder emit signal assign
+13. builder emit architecture end
+14. verify
+15. verify
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("builds validated module output")
 var builder = VhdlBuilder__create("validated_mod")
 builder.emit_library_header()
 builder.emit_entity_begin("validated_mod")
@@ -188,18 +247,34 @@ verify(vhdl.contains("result <= a + b;"))
 
 #### generates combinational adder _(slow)_
 
-- generates combinational adder
+1. var builder = VhdlBuilder  create
+2. builder emit library header
+3. builder emit entity begin
+4. builder emit port begin
+5. builder emit port
+6. builder emit port
+7. builder emit port
+8. builder emit port end
+9. builder emit entity end
+10. builder emit architecture begin
+11. builder emit architecture body begin
+12. builder emit signal assign
+13. builder emit architecture end
+14. verify
+15. verify
+16. verify
+17. verify
+18. verify
+19. verify
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 26 lines folded for reproduction.
+Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("generates combinational adder")
 val mapper = VhdlTypeMapper__create()
 var builder = VhdlBuilder__create("adder")
 
@@ -236,18 +311,46 @@ verify(vhdl.contains("end architecture rtl;"))
 
 #### generates clocked register _(slow)_
 
-- generates clocked register
+1. var builder = VhdlBuilder  create
+2. builder emit library header
+3. builder emit entity begin
+4. builder emit port begin
+5. builder emit port
+6. builder emit port
+7. builder emit port
+8. builder emit port
+9. builder emit port end
+10. builder emit entity end
+11. builder emit architecture begin
+12. builder emit signal decl
+13. builder emit architecture body begin
+14. builder emit clocked process begin
+15. builder emit process body begin
+16. builder emit if begin
+17. builder emit signal assign
+18. builder emit elsif
+19. builder emit signal assign
+20. builder emit if end
+21. builder emit process end
+22. builder emit signal assign
+23. builder emit architecture end
+24. verify
+25. verify
+26. verify
+27. verify
+28. verify
+29. verify
+30. verify
+31. verify
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 40 lines folded for reproduction.
+Runnable source: 38 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("generates clocked register")
 val mapper = VhdlTypeMapper__create()
 var builder = VhdlBuilder__create("reg")
 
@@ -298,18 +401,32 @@ verify(vhdl.contains("q <= q_reg;"))
 
 #### generates FSM with enum states _(slow)_
 
-- generates FSM with enum states
+1. var builder = VhdlBuilder  create
+2. builder emit library header
+3. builder emit package begin
+4. builder emit type decl
+5. builder emit package end
+6. builder emit entity begin
+7. builder emit port begin
+8. builder emit port
+9. builder emit port
+10. builder emit port
+11. builder emit port
+12. builder emit port end
+13. builder emit entity end
+14. verify
+15. verify
+16. verify
+17. verify
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 28 lines folded for reproduction.
+Runnable source: 26 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("generates FSM with enum states")
 val mapper = VhdlTypeMapper__create()
 var builder = VhdlBuilder__create("fsm")
 
@@ -348,18 +465,24 @@ verify(vhdl.contains("entity fsm is"))
 
 #### generates entity with record type _(slow)_
 
-- generates entity with record type
+1. var builder = VhdlBuilder  create
+2. builder emit library header
+3. builder emit package begin
+4. builder emit type decl
+5. builder emit package end
+6. verify
+7. verify
+8. verify
+9. verify
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("generates entity with record type")
 val mapper = VhdlTypeMapper__create()
 var builder = VhdlBuilder__create("point_module")
 
@@ -391,18 +514,17 @@ verify(vhdl.contains("end record;"))
 
 #### accepts all synthesizable integer types _(slow)_
 
-- accepts all synthesizable integer types
+1. verify
+2. verify
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("accepts all synthesizable integer types")
 val mapper = VhdlTypeMapper__create()
 val synth_types = [
     PrimitiveType.I8, PrimitiveType.I16, PrimitiveType.I32, PrimitiveType.I64,
@@ -425,18 +547,17 @@ for ty in synth_types:
 
 #### rejects all unsynthesizable float types _(slow)_
 
-- rejects all unsynthesizable float types
+1. verify
+2. verify
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("rejects all unsynthesizable float types")
 val mapper = VhdlTypeMapper__create()
 val float_types = [PrimitiveType.F16, PrimitiveType.F32, PrimitiveType.F64]
 for ty in float_types:
@@ -457,23 +578,23 @@ for ty in float_types:
 
 #### width matches mapped type for all integer types _(slow)_
 
-- width matches mapped type for all integer types
-   - Expected: mapper.width_of_type(PrimitiveType.I64) equals `64`
+1. verify
    - Expected: mapper.width_of_type(PrimitiveType.I32) equals `32`
+2. verify
    - Expected: mapper.width_of_type(PrimitiveType.U16) equals `16`
+3. verify
    - Expected: mapper.width_of_type(PrimitiveType.U8) equals `8`
+4. verify
    - Expected: mapper.width_of_type(PrimitiveType.Bool) equals `1`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("width matches mapped type for all integer types")
 val mapper = VhdlTypeMapper__create()
 # I64 -> 64 -> signed(63 downto 0)
 expect(mapper.width_of_type(PrimitiveType.I64)).to_equal(64)
@@ -512,54 +633,3 @@ expect(mapper.width_of_type(PrimitiveType.Bool)).to_equal(1)
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `11f0897b515bb119def05d69807699bfa1a96444285941327da3e6ca5cf924e6`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `11f0897b515bb119def05d69807699bfa1a96444285941327da3e6ca5cf924e6`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `11f0897b515bb119def05d69807699bfa1a96444285941327da3e6ca5cf924e6`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
-
-SSpec documentization score: 86/100
-source: test/03_system/compiler/vhdl_backend_system_spec.spl
-mirror: doc/06_spec/03_system/compiler/vhdl_backend_system_spec.md (current)
-findings: 6 blockers: 0
-  narrative=100 structure=100 oracle=70
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/compiler/vhdl_backend_system_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/compiler/vhdl_backend_system_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, evidence, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/compiler/vhdl_backend_system_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 5 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/03_system/compiler/vhdl_backend_system_spec.spl:64:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'generates entity with mapped types' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/compiler/vhdl_backend_system_spec.spl:96:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'generates entity with resolved types' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/compiler/vhdl_backend_system_spec.spl:131:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'builds validated module output' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

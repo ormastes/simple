@@ -55,89 +55,6 @@ implementation-evidence-in-progress
   WebGPU JS/WASM Simple 106/106, interpreter perf 10/10, and GTK repeat evidence
   with Simple open 243 us, GTK open 77948 us, Simple frame 1 us, GTK frame
   28 us, vector checksum 212444 deterministic true.
-- implementation: Hardened the Engine2D CPU-SIMD row path for explicit x86,
-  aarch64, and riscv64 probes. The software backend now routes clear, opaque
-  fills, text run fills, image row copies, and alpha hlines through local row
-  helpers that preserve `self.buf` mutation while using the native row ABI only
-  where it is proven safe. x86 now proves native row execution; RVV row source
-  now cross-compiles, but target-binary execution proof is still required.
-- verification: `sh scripts/check/check-cpu-simd-engine2d-evidence.shs` passed
-  on x86_64 with `feature=avx2`, `cpu_simd_x86_status=Initialized`, fill/copy/
-  alpha/scroll mismatch counts all `0`, diagram mismatch count `0`, and
-  `blur_or_tolerance_used=false`. The wrapper now keeps `bin/simple` as the
-  default invocation path because direct `release/.../simple` segfaults on this
-  evidence despite the same ELF passing when invoked through the repo launcher.
-- implementation: Added `scripts/check/check-cpu-simd-engine2d-arch-matrix.shs`
-  so x86_64, aarch64, and riscv64 Engine2D SIMD evidence are recorded as
-  separate rows with strict all-arch mode for target-binary runs.
-- verification: `BUILD_DIR=build/check/cpu-simd-engine2d-arch-matrix
-  REPORT_PATH=doc/09_report/cpu_simd_engine2d_arch_matrix_2026-07-08.md sh
-  scripts/check/check-cpu-simd-engine2d-arch-matrix.shs` reports
-  `cpu_simd_engine2d_arch_matrix_status=partial`, x86_64 `pass`,
-  aarch64/riscv64 `unavailable` with `missing-simple-bin`, and retained report
-  `doc/09_report/cpu_simd_engine2d_arch_matrix_2026-07-08.md`.
-- blocker: riscv64 native RVV row proof is tracked at
-  `doc/08_tracking/bug/cpu_simd_engine2d_rvv_native_rows_missing_2026-07-08.md`;
-  `runtime_simd_dispatch.c` now has an `rv64gcv` compile gate, but no riscv64
-  Simple target binary run has proved native RVV execution and bit-exact output.
-- implementation: Split the GUI perf harness so `simple_web_cpu_simd` runs
-  through the explicit `cpu_simd` render backend while `simple_web_software`
-  remains the scalar software row. This prevents the 4K/8K comparison from
-  silently measuring the same scalar path twice.
-- implementation: The GUI perf harness now emits
-  `gui_perf_cpu_base_compare_*` fields comparing `simple_web_cpu_simd` against
-  the first completed CPU drawing-library baseline, preferring Node Canvas/Cairo
-  and falling back to GTK/Cairo draw-only timing. Missing baselines are reported
-  as unavailable instead of passing.
-- implementation: The narrow Simple CPU render-loop exporter now records
-  300dpi retina metadata by default, accepts `--dpi` as an override, and reports
-  logical and physical pixels as the requested benchmark dimensions so DPI
-  evidence cannot hide a reduced render size.
-- verification: `scripts/check/check-cpu-simd-render-dpi-contract.shs` proves
-  the default 300dpi metadata, explicit `--dpi 220` override, unchanged 32x32
-  physical pixels, and checksum parity across the DPI metadata change.
-- implementation: Backend-executed GUI evidence now includes a focused
-  CPU-SIMD alpha quality scene that blends a semi-transparent rectangle through
-  `CpuBackend`, compares it against `SoftwareBackend` exactly, and requires a
-  positive alpha SIMD hit.
-- verification: `sh scripts/check/check-production-gui-web-backend-executed-evidence.shs`
-  passed with `production_gui_backend_cpu_simd_alpha_quality_status=pass`,
-  `production_gui_backend_cpu_simd_alpha_quality_hits=4`, matching alpha
-  checksums/pixels, exact backend parity, and `timing_budget_status=warn`
-  recorded separately for Vulkan cold-start/render scheduling follow-up.
-- implementation: Added `scripts/check/check-cpu-simd-render-scale-contract.shs`
-  as the focused 4K/8K CPU-SIMD render-loop contract. It reuses the narrow
-  software exporter and fails closed unless CPU-SIMD is selected, 300dpi retina
-  metadata is defaulted, logical/physical pixels match the requested full size,
-  `screen_size_reduced=false`, checksum/nonzero-pixel proof is present, timing
-  fields are positive, and fallback/unavailable fields are empty.
-- verification: The scale contract passes with reduced smoke dimensions
-  (`32x32` and `48x48`) but the real 4K run terminates before SDN output. The
-  native-mode smoke falls back to interpreter because HIR lowering cannot resolve
-  `web_backend_env_get` while lowering `_chromium_tmp_dir`. Tracked as
-  `doc/08_tracking/bug/cpu_simd_4k_8k_render_scale_interpreter_termination.md`.
-- implementation: Fixed the native/JIT fallback by importing `env_get` directly
-  in `web_render_backend.spl` instead of aliasing it through `mod_stub`.
-- verification: `sh scripts/check/check-cpu-simd-render-scale-contract.shs`
-  now passes in native mode at full 4K and 8K with
-  `cpu_simd_render_scale_4k_pixels=3840x2160`,
-  `cpu_simd_render_scale_4k_p50_frame_us=664780`,
-  `cpu_simd_render_scale_4k_software_checksum_parity=true`,
-  `cpu_simd_render_scale_8k_pixels=7680x4320`,
-  `cpu_simd_render_scale_8k_p50_frame_us=2219128`,
-  `cpu_simd_render_scale_8k_software_checksum_parity=true`, 300dpi default
-  metadata, `screen_size_reduced=false`, CPU-SIMD selection, checksum proof,
-  scalar software checksum parity, and no fallback/unavailable reason. Retained report:
-  `doc/09_report/cpu_simd_render_scale_contract_2026-07-08.md`.
-- implementation: Updated `tools/gui_perf_bench/run_all_benchmarks.shs` so
-  `simple_web_cpu_simd` and `simple_web_software` run with
-  `SIMPLE_WEB_CPU_MODE=native` by default, and fail closed if the Simple runner
-  reports interpreter fallback. This keeps the CPU drawing-library comparison
-  on the same compiled path proven by the scale contract.
-- verification: Small broad-runner smoke at 32x32, 1 frame, default 300dpi
-  passed with `SIMPLE_WEB_CPU_MODE=native`,
-  `gui_perf_benchmark_dpi_source=default`, no Simple CPU interpreter fallback,
-  and `gui_perf_cpu_base_compare_status=measured`.
 
 ## 8K Multi-Framework Comparison (2026-06-05)
 
@@ -161,34 +78,9 @@ Existing evidence (from GTK repeat evidence): Simple open 243 us vs GTK open 779
 Simple frame 1 us vs GTK frame 28 us — Simple already 320x faster at startup, 28x at frame.
 
 ## Remaining Work
-- AC-3 is advanced by retained framebuffer/cache, static pixel hot paths,
-  retained static-shell primitive command plans, and the CPU-SIMD row helper
-  path for fill/copy/alpha/text/image spans. Broader dynamic GUI scene
-  optimization and native RVV row enablement still need implementation and
-  evidence.
+- AC-3 is advanced by retained framebuffer/cache, static pixel hot paths, and retained static-shell primitive command plans; broader fill/copy/blit/text optimization across dynamic GUI scenes still needs implementation and evidence.
 - AC-6 now has focused vector-font unavailable fallback evidence in the repeat script and tracked report; additional GPU/native unavailable combinations can extend the same probe pattern.
-- CPU-SIMD color/transparency quality is covered by
-  `scripts/check/check-production-gui-web-backend-executed-evidence.shs`, which
-  requires exact software parity and positive alpha hits for a translucent fill
-  without adding tolerance or blur.
-- CPU-SIMD arch matrix coverage is now explicit:
-  `scripts/check/check-cpu-simd-engine2d-arch-matrix.shs` passes x86_64 on this
-  host and marks aarch64/riscv64 unavailable until target binaries are supplied.
-  The wrapper also cross-compiles the native runtime owner for x86_64, aarch64,
-  generic riscv64, and `rv64gcv` RVV when compilers are present. riscv64 native
-  RVV target proof remains tracked:
-  `doc/08_tracking/bug/cpu_simd_engine2d_rvv_native_rows_missing_2026-07-08.md`.
-- CPU-SIMD 4K/8K no-reduction evidence now has a fail-closed wrapper at
-  `scripts/check/check-cpu-simd-render-scale-contract.shs`; native full-size
-  evidence passes for 3840x2160 and 7680x4320 with no screen-size reduction and
-  scalar software checksum parity.
-- The broad multi-framework runner now uses native mode for the Simple CPU rows
-  by default, so `gui_perf_cpu_base_compare_*` does not compare Node/GTK against
-  the interpreter path.
 - Native Simple executable size/speed evidence is intentionally skipped in the fast smoke run (`SKIP_SIMPLE_NATIVE=1`); a release-grade run should capture native artifact bytes or record an explicit native-build blocker.
 - Wire unwired probes into contract: warm_startup, frame_time_p50/p95, input_to_paint.
-- Run 8K benchmark on current hardware (RTX A6000 + TITAN RTX) and capture
-  separate `simple_web_cpu_simd`, `simple_web_software`, and
-  `gui_perf_cpu_base_compare_*` baseline numbers at the default 300dpi and at
-  least one explicit `--dpi` override through the DPI contract wrapper.
+- Run 8K benchmark on current hardware (RTX A6000 + TITAN RTX) and capture baseline numbers.
 - Tauri integration: requires cargo-tauri CLI + WebKitGTK dev headers.

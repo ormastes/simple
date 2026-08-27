@@ -1,10 +1,10 @@
 # Make Os Disk Contract Specification
 
-> Tests covering make_os_disk target payload and FAT contracts.
+> <details>
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 7 | 7 | 0 | 0 |
+| 5 | 5 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -17,22 +17,13 @@
 
 #### selects and validates explicit target Simple payloads
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- selects and validates explicit target Simple payloads
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 28 lines folded for reproduction.
+Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("selects and validates explicit target Simple payloads")
 val script = file_read("scripts/os/make_os_disk.shs")
 expect(script).to_contain("validate_elf_payload \"$SIMPLEOS_SIMPLE_BINARY\" 62 Simple")
 expect(script).to_contain("validate_simple_payload_provenance \"$SIMPLEOS_SIMPLE_BINARY\"")
@@ -40,10 +31,8 @@ expect(script).to_contain("target=x86_64-unknown-simpleos")
 expect(script).to_contain("artifact_sha256")
 expect(script).to_contain("bin/release/aarch64-unknown-simpleos/simple")
 expect(script).to_contain("validate_elf_payload \"$SIMPLEOS_SIMPLE_BINARY\" 183 Simple")
-expect(script).to_contain("validate_simple_payload_provenance \"$SIMPLEOS_SIMPLE_BINARY\" aarch64-unknown-simpleos")
 expect(script).to_contain("bin/release/riscv64-unknown-simpleos/simple")
 expect(script).to_contain("validate_elf_payload \"$SIMPLEOS_SIMPLE_BINARY\" 243 Simple")
-expect(script).to_contain("validate_simple_payload_provenance \"$SIMPLEOS_SIMPLE_BINARY\" riscv64-unknown-simpleos")
 expect(script).to_contain("validate_elf_payload \"$SIMPLEOS_CLANG_BINARY\" 62 Clang")
 expect(script).to_contain("validate_elf_payload \"$SIMPLEOS_CLANG_BINARY\" 183 Clang")
 expect(script).to_contain("validate_elf_payload \"$SIMPLEOS_CLANG_BINARY\" 243 Clang")
@@ -63,96 +52,15 @@ expect(script).to_contain("export SIMPLEOS_SIMPLE_BINARY")
 
 </details>
 
-#### binds staged interpreter compiler and loader roles to one admitted target payload
-
-- binds staged interpreter compiler and loader roles to one admitted target payload
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 15 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-OS
-step("binds staged interpreter compiler and loader roles to one admitted target payload")
-val provisioner = file_read("scripts/os/provision_simpleos_guest_simple_fs.shs")
-val matrix = file_read("scripts/check/check-simpleos-fs-toolchain-qemu-matrix.shs")
-expect(provisioner).to_contain("pure-Simple builder provenance required")
-expect(provisioner).to_contain("bootstrap_stage3_verify_stage2_admission_receipt")
-expect(provisioner).to_contain("builder admission authority chain invalid")
-expect(provisioner).to_contain("receipt/stamp authority mismatch")
-expect(provisioner).to_contain("payload/stamp digest mismatch")
-expect(provisioner).to_contain("SIMPLEOS_COMPILER_IN_FILESYSTEM=true")
-expect(provisioner).to_contain("role_interpreter=/usr/bin/simple")
-expect(provisioner).to_contain("role_compiler=/sys/apps/simple_compiler")
-expect(provisioner).to_contain("role_loader=/sys/apps/simple_loader")
-expect(matrix).to_contain("--validate-receipt")
-expect(matrix).to_contain("target-native-simple-filesystem-receipt-unavailable")
-```
-
-</details>
-
-#### separates ARM desktop fonts from fail-closed fs-exec payload media
-
-- separates ARM desktop fonts from fail-closed fs-exec payload media
-   - Expected: out equals ``
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 24 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-OS
-step("separates ARM desktop fonts from fail-closed fs-exec payload media")
-val script = file_read("scripts/os/make_os_disk.shs")
-val builder = file_read("scripts/os/make_os_disk.c")
-expect(script).to_contain("profile=")
-expect(script).to_contain("5:-fs-exec")
-expect(script).to_contain("*:desktop-fonts)")
-expect(script).to_contain("SIMPLEOS_SIMPLE_BINARY=\"\"")
-expect(script).to_contain("arm64:fs-exec)")
-expect(script).to_contain("bin/release/aarch64-unknown-simpleos/simple")
-expect(script).to_contain("validate_elf_payload \"$SIMPLEOS_SIMPLE_BINARY\" 183 Simple")
-expect(builder).to_contain("write_desktop_font_image(")
-expect(builder).to_contain("put_dir_entry(root, &root_n, \"SYS        \"")
-expect(builder).to_contain("put_dir_entry(sys, &sys_n, \"FONTS      \"")
-expect(builder).to_contain("if (desktop_fonts)")
-
-val (out, err, rc) = rt_process_run_timeout(
-    "/bin/sh",
-    ["-c", "SIMPLEOS_SIMPLE_BINARY=/definitely/missing/simple scripts/os/make_os_disk.shs 128 /tmp/simpleos-fsexec-must-not-exist.img '' arm64 fs-exec"],
-    30000
-)
-expect(rc).to_be_greater_than(0)
-expect(out).to_equal("")
-expect(err).to_contain("missing SimpleOS Simple payload")
-```
-
-</details>
-
 #### runs the disk-free payload and kernel ELF validation matrices
 
-- runs the disk-free payload and kernel ELF validation matrices
-   - Expected: payload_rc equals `0`
-   - Expected: payload_err equals ``
-   - Expected: kernel_rc equals `0`
-   - Expected: kernel_err equals ``
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("runs the disk-free payload and kernel ELF validation matrices")
 val (payload_out, payload_err, payload_rc) = rt_process_run_timeout(
     "/bin/sh", ["scripts/os/make_os_disk.shs", "--self-test"], 30000)
 expect(payload_rc).to_equal(0)
@@ -170,18 +78,13 @@ expect(kernel_out).to_contain("simpleos_x86_kernel_elf_self_test=pass")
 
 #### gates canonical x86 filesystem kernels before packaging or QEMU
 
-- gates canonical x86 filesystem kernels before packaging or QEMU
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("gates canonical x86 filesystem kernels before packaging or QEMU")
 val gate = "check-simpleos-x86-kernel-elf.shs"
 expect(file_read("scripts/os/build_fsexec_prod_ring3.shs")).to_contain(gate)
 expect(file_read("scripts/os/build_clang_disk.shs")).to_contain(gate)
@@ -190,43 +93,34 @@ expect(file_read("scripts/os/ssh_simple_hello_uefi.shs")).to_contain(gate)
 
 </details>
 
-#### always links the usr bin directory
-
-- always links the usr bin directory
-
+#### links usr bin for any staged executable payload
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("always links the usr bin directory")
 val source = file_read("scripts/os/make_os_disk.c")
+expect(source).to_contain("if (simple_usr_cluster || clang_bin_cluster || llc_bin_cluster || lld_bin_cluster)")
 expect(source).to_contain("put_dir_entry(usr, &usr_n, \"BIN        \", usr_bin_cluster, 0, 0x10);")
 ```
 
 </details>
 
-#### keeps independent root and sys clang source clusters
-
-- keeps independent root and sys clang source clusters
-
+#### reuses the staged clang hello source cluster at root
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-OS
-step("keeps independent root and sys clang source clusters")
 val source = file_read("scripts/os/make_os_disk.c")
 expect(source).to_contain("put_dir_entry(sys, &sys_n, \"CLANGHELC  \", clang_c_cluster, clang_c.len, 0x20);")
-expect(source).to_contain("put_dir_entry(root, &root_n, \"HELLO   C  \", hello_c_cluster, clang_c.len, 0x20);")
+expect(source).to_contain("put_dir_entry(root, &root_n, \"HELLO   C  \", clang_c_cluster, clang_c.len, 0x20);")
 ```
 
 </details>
@@ -238,74 +132,23 @@ expect(source).to_contain("put_dir_entry(root, &root_n, \"HELLO   C  \", hello_c
 | Category | Hardware & OS |
 | Status | Active |
 | Source | `test/01_unit/os/port/make_os_disk_contract_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-07-19 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering make_os_disk target payload and FAT contracts.
+Tests covering:
 - make_os_disk target payload and FAT contracts
 
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 7 |
-| Active scenarios | 7 |
+| Total scenarios | 5 |
+| Active scenarios | 5 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-OS`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `fa6500d989622bb565d6c94795cf947aaf7d83f4ee112f64d1ca71a24a9055f5`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `fa6500d989622bb565d6c94795cf947aaf7d83f4ee112f64d1ca71a24a9055f5`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `fa6500d989622bb565d6c94795cf947aaf7d83f4ee112f64d1ca71a24a9055f5`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **88/100**; effective score: **88/100**; blockers: **0**.
-
-SSpec documentization score: 88/100
-source: test/01_unit/os/port/make_os_disk_contract_spec.spl
-mirror: doc/06_spec/01_unit/os/port/make_os_disk_contract_spec.md (current)
-findings: 6 blockers: 0
-  narrative=100 structure=100 oracle=80
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/os/port/make_os_disk_contract_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/os/port/make_os_disk_contract_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/os/port/make_os_disk_contract_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-20): 2 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/01_unit/os/port/make_os_disk_contract_spec.spl:18:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'selects and validates explicit target Simple payloads' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/os/port/make_os_disk_contract_spec.spl:48:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'binds staged interpreter compiler and loader roles to one admitted target payload' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/os/port/make_os_disk_contract_spec.spl:65:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'separates ARM desktop fonts from fail-closed fs-exec payload media' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

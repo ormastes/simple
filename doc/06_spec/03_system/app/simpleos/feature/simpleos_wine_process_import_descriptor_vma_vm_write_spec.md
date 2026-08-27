@@ -1,6 +1,29 @@
 # Simpleos Wine Process Import Descriptor Vma Vm Write Specification
 
-> Tests covering SimpleOS Wine process import descriptor VMA VM writes.
+> <details>
+
+<!-- sdn-diagram:id=simpleos_wine_process_import_descriptor_vma_vm_write_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=simpleos_wine_process_import_descriptor_vma_vm_write_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+simpleos_wine_process_import_descriptor_vma_vm_write_spec -> common
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=simpleos_wine_process_import_descriptor_vma_vm_write_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -17,29 +40,13 @@
 
 #### should block descriptor thunk VMA patching without patched image when PEB/TEB VM byte writes fail
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- should block descriptor thunk VMA patching without patched image when PEB/TEB VM byte writes fail
-   - Expected: result.ok is false
-   - Expected: result.error equals `peb-teb-vm-write:bytes:layout:write:peb-write:page-fault-unmapped`
-   - Expected: result.patched_image.len() equals `0`
-   - Expected: result.mapped_base equals `0`
-   - Expected: result.mapped_size equals `0`
-   - Expected: result.patched_count equals `0`
-   - Expected: result.status equals `rejected`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("should block descriptor thunk VMA patching without patched image when PEB/TEB VM byte writes fail")
 val plan = wine_process_session_plan(wine_process_session_request_new("game.exe", [], "C:\\Games"), _full_gates())
 val init = wine_peb_teb_init_default()
 val writes = wine_peb_teb_memory_write_gate(init, wine_vm_process_space_new(10, 30, "pid fs ipc net capability"))
@@ -64,25 +71,13 @@ expect(result.status).to_equal("rejected")
 
 #### should block descriptor thunk VMA patching without patched image when descriptor planning rejects
 
-- should block descriptor thunk VMA patching without patched image when descriptor planning rejects
-   - Expected: result.ok is false
-   - Expected: result.error equals `invalid-import-descriptor-limit`
-   - Expected: result.patched_image.len() equals `0`
-   - Expected: result.mapped_base equals `0`
-   - Expected: result.mapped_size equals `0`
-   - Expected: result.patched_count equals `0`
-   - Expected: result.status equals `blocked`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("should block descriptor thunk VMA patching without patched image when descriptor planning rejects")
 val plan = wine_process_session_plan(wine_process_session_request_new("game.exe", [], "C:\\Games"), _full_gates())
 val result = wine_process_apply_import_descriptor_thunk_patches_in_vma_with_peb_teb_vm_writes(plan, wine_known_hello_exe_fixture_bytes(), 0x400000, 0x400000, "native-module-open tls-callback", 0, 8, _ready_vm_writes())
 
@@ -108,12 +103,12 @@ expect(result.status).to_equal("blocked")
 | Category | Application |
 | Status | Active |
 | Source | `test/03_system/app/simpleos/feature/simpleos_wine_process_import_descriptor_vma_vm_write_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering SimpleOS Wine process import descriptor VMA VM writes.
+Tests covering:
 - SimpleOS Wine process import descriptor VMA VM writes
 
 ## Scenario Summary
@@ -128,57 +123,3 @@ Tests covering SimpleOS Wine process import descriptor VMA VM writes.
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `26b4557dde3fa0098f2fb17c83e934dea845dc3cd3f0684b131f854de02a3651`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `26b4557dde3fa0098f2fb17c83e934dea845dc3cd3f0684b131f854de02a3651`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `26b4557dde3fa0098f2fb17c83e934dea845dc3cd3f0684b131f854de02a3651`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
-
-SSpec documentization score: 86/100
-source: test/03_system/app/simpleos/feature/simpleos_wine_process_import_descriptor_vma_vm_write_spec.spl
-mirror: doc/06_spec/03_system/app/simpleos/feature/simpleos_wine_process_import_descriptor_vma_vm_write_spec.md (current)
-findings: 7 blockers: 0
-  narrative=100 structure=90 oracle=70
-  traceability=100 evidence=80 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/app/simpleos/feature/simpleos_wine_process_import_descriptor_vma_vm_write_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/app/simpleos/feature/simpleos_wine_process_import_descriptor_vma_vm_write_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/app/simpleos/feature/simpleos_wine_process_import_descriptor_vma_vm_write_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 8 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/03_system/app/simpleos/feature/simpleos_wine_process_import_descriptor_vma_vm_write_spec.spl:45:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should block descriptor thunk VMA patching without patched image when PEB/TEB VM byte writes fail' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/03_system/app/simpleos/feature/simpleos_wine_process_import_descriptor_vma_vm_write_spec.spl:45:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should block descriptor thunk VMA patching without patched image when PEB/TEB VM byte writes fail' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/app/simpleos/feature/simpleos_wine_process_import_descriptor_vma_vm_write_spec.spl:67:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should block descriptor thunk VMA patching without patched image when descriptor planning rejects' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/03_system/app/simpleos/feature/simpleos_wine_process_import_descriptor_vma_vm_write_spec.spl:67:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should block descriptor thunk VMA patching without patched image when descriptor planning rejects' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

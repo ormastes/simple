@@ -1,0 +1,33 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)
+rv64="$repo_root/src/compiler/70.backend/backend/native/encode_riscv64.spl"
+isel_rv32="$repo_root/src/compiler/70.backend/backend/native/isel_riscv32.spl"
+isel_rv64="$repo_root/src/compiler/70.backend/backend/native/isel_riscv64.spl"
+native_dir="$repo_root/src/compiler/70.backend/backend/native"
+
+fail() {
+    echo "FAIL: $*" >&2
+    exit 1
+}
+
+# ELF relocation tags are ABI constants. Constructing target presets and
+# capability records from a module initializer exercises aggregate transport
+# before main and made even `simple --version` trap in Stage 2.
+grep -Fq 'val R_RISCV_CALL_PLT: i64 = 19' "$rv64" ||
+    fail "RV64 CALL_PLT relocation is not a compile-time scalar"
+if grep -Fq 'val R_RISCV_CALL_PLT: i64 = rv64_encode_contract().call_plt_reloc' "$rv64"; then
+    fail "RV64 module initialization still constructs an aggregate target contract"
+fi
+grep -Fq 'val RV32_WORD_SIZE: i64 = 4' "$isel_rv32" ||
+    fail "RV32 word size is not a compile-time ISA/ABI scalar"
+grep -Fq 'val RV64_WORD_SIZE: i64 = 8' "$isel_rv64" ||
+    fail "RV64 word size is not a compile-time ISA/ABI scalar"
+if grep -REn '^val [A-Za-z_][A-Za-z0-9_]*( *: *[^=]+)? *= *[A-Za-z_][A-Za-z0-9_.]*\([^)]*\)\.[A-Za-z_]' \
+        "$native_dir" --include='*.spl' >/dev/null; then
+    fail "native backend module scalar still reads a field from a constructed aggregate"
+fi
+
+echo "bootstrap_module_init_aggregate_cases=5"
+echo "bootstrap_module_init_aggregate_status=PASS"

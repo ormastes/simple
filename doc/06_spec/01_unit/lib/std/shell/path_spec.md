@@ -2,6 +2,29 @@
 
 > Feature: Path Manipulation
 
+<!-- sdn-diagram:id=path_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=path_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+path_spec -> spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=path_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 23 | 23 | 0 | 0 |
@@ -20,7 +43,7 @@ Feature: Path Manipulation
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/01_unit/lib/std/shell/path_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 Feature: Path Manipulation
@@ -35,19 +58,13 @@ Status: Active
 
 #### should extract filename from path
 
-- should extract filename from path
-   - Expected: result equals `file.txt`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("should extract filename from path")
 val result = path_basename("/home/user/file.txt")
 expect(result).to_equal("file.txt")
 ```
@@ -56,19 +73,13 @@ expect(result).to_equal("file.txt")
 
 #### should handle path with no directory
 
-- should handle path with no directory
-   - Expected: result equals `file.txt`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("should handle path with no directory")
 val result = path_basename("file.txt")
 expect(result).to_equal("file.txt")
 ```
@@ -77,19 +88,13 @@ expect(result).to_equal("file.txt")
 
 #### should handle directory path
 
-- should handle directory path
-   - Expected: result equals `dir`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("should handle directory path")
 val result = path_basename("/home/user/dir/")
 expect(result).to_equal("dir")
 ```
@@ -98,19 +103,13 @@ expect(result).to_equal("dir")
 
 #### should handle root path
 
-- should handle root path
-   - Expected: result equals ``
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("should handle root path")
 val result = path_basename("/")
 expect(result).to_equal("")
 ```
@@ -119,19 +118,13 @@ expect(result).to_equal("")
 
 #### should handle empty path
 
-- should handle empty path
-   - Expected: result equals ``
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("should handle empty path")
 val result = path_basename("")
 expect(result).to_equal("")
 ```
@@ -142,19 +135,13 @@ expect(result).to_equal("")
 
 #### should extract directory from path
 
-- should extract directory from path
-   - Expected: result equals `/home/user`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("should extract directory from path")
 val result = path_dirname("/home/user/file.txt")
 expect(result).to_equal("/home/user")
 ```
@@ -163,19 +150,13 @@ expect(result).to_equal("/home/user")
 
 #### should handle path with single directory
 
-- should handle path with single directory
-   - Expected: result equals `/`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("should handle path with single directory")
 val result = path_dirname("/file.txt")
 expect(result).to_equal("/")
 ```
@@ -184,19 +165,13 @@ expect(result).to_equal("/")
 
 #### should handle relative path
 
-- should handle relative path
-   - Expected: result equals `dir`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("should handle relative path")
 val result = path_dirname("dir/file.txt")
 expect(result).to_equal("dir")
 ```
@@ -205,19 +180,13 @@ expect(result).to_equal("dir")
 
 #### should handle file with no directory
 
-- should handle file with no directory
-   - Expected: result equals ``
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("should handle file with no directory")
 val result = path_dirname("file.txt")
 expect(result).to_equal("")
 ```
@@ -226,19 +195,13 @@ expect(result).to_equal("")
 
 #### should handle empty path
 
-- should handle empty path
-   - Expected: result equals ``
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("should handle empty path")
 val result = path_dirname("")
 expect(result).to_equal("")
 ```
@@ -249,19 +212,13 @@ expect(result).to_equal("")
 
 #### should extract file extension
 
-- should extract file extension
-   - Expected: result equals `txt`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("should extract file extension")
 val result = path_ext("/home/user/file.txt")
 expect(result).to_equal("txt")
 ```
@@ -270,19 +227,13 @@ expect(result).to_equal("txt")
 
 #### should handle multiple dots
 
-- should handle multiple dots
-   - Expected: result equals `gz`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("should handle multiple dots")
 val result = path_ext("file.tar.gz")
 expect(result).to_equal("gz")
 ```
@@ -291,19 +242,13 @@ expect(result).to_equal("gz")
 
 #### should handle no extension
 
-- should handle no extension
-   - Expected: result equals ``
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("should handle no extension")
 val result = path_ext("/home/user/file")
 expect(result).to_equal("")
 ```
@@ -312,19 +257,13 @@ expect(result).to_equal("")
 
 #### should handle hidden file with extension
 
-- should handle hidden file with extension
-   - Expected: result equals ``
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("should handle hidden file with extension")
 val result = path_ext(".bashrc")
 expect(result).to_equal("")
 ```
@@ -333,19 +272,13 @@ expect(result).to_equal("")
 
 #### should handle hidden file with dot and extension
 
-- should handle hidden file with dot and extension
-   - Expected: result equals `json`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("should handle hidden file with dot and extension")
 val result = path_ext(".config.json")
 expect(result).to_equal("json")
 ```
@@ -356,19 +289,13 @@ expect(result).to_equal("json")
 
 #### should detect absolute path
 
-- should detect absolute path
-   - Expected: result is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("should detect absolute path")
 val result = path_is_absolute("/tmp")
 expect(result).to_equal(true)
 ```
@@ -377,19 +304,13 @@ expect(result).to_equal(true)
 
 #### should detect relative path
 
-- should detect relative path
-   - Expected: result is false
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("should detect relative path")
 val result = path_is_absolute("relative/path")
 expect(result).to_equal(false)
 ```
@@ -398,19 +319,13 @@ expect(result).to_equal(false)
 
 #### should handle current directory as relative
 
-- should handle current directory as relative
-   - Expected: result is false
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("should handle current directory as relative")
 val result = path_is_absolute(".")
 expect(result).to_equal(false)
 ```
@@ -419,19 +334,13 @@ expect(result).to_equal(false)
 
 #### should handle parent directory as relative
 
-- should handle parent directory as relative
-   - Expected: result is false
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("should handle parent directory as relative")
 val result = path_is_absolute("..")
 expect(result).to_equal(false)
 ```
@@ -442,19 +351,13 @@ expect(result).to_equal(false)
 
 #### should join path components
 
-- should join path components
-   - Expected: result equals `home/user/file.txt`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("should join path components")
 val result = path_join_many(["home", "user", "file.txt"])
 expect(result).to_equal("home/user/file.txt")
 ```
@@ -463,19 +366,13 @@ expect(result).to_equal("home/user/file.txt")
 
 #### should handle single component
 
-- should handle single component
-   - Expected: result equals `home`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("should handle single component")
 val result = path_join_many(["home"])
 expect(result).to_equal("home")
 ```
@@ -484,19 +381,13 @@ expect(result).to_equal("home")
 
 #### should handle empty list
 
-- should handle empty list
-   - Expected: result equals ``
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("should handle empty list")
 val result = path_join_many([])
 expect(result).to_equal("")
 ```
@@ -505,19 +396,13 @@ expect(result).to_equal("")
 
 #### should not add separator if already present
 
-- should not add separator if already present
-   - Expected: result equals `home/user`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-LIB
-step("should not add separator if already present")
 val result = path_join_two("home/", "user")
 expect(result).to_equal("home/user")
 ```
@@ -536,69 +421,3 @@ expect(result).to_equal("home/user")
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-LIB`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `79153bff57857499fff9038125b4141a1062a2c45328a1ab2817a6e58287fab9`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `79153bff57857499fff9038125b4141a1062a2c45328a1ab2817a6e58287fab9`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `79153bff57857499fff9038125b4141a1062a2c45328a1ab2817a6e58287fab9`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **88/100**; effective score: **88/100**; blockers: **0**.
-
-SSpec documentization score: 88/100
-source: test/01_unit/lib/std/shell/path_spec.spl
-mirror: doc/06_spec/01_unit/lib/std/shell/path_spec.md (current)
-findings: 11 blockers: 0
-  narrative=100 structure=70 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/lib/std/shell/path_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/lib/std/shell/path_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/lib/std/shell/path_spec.spl:100:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should extract filename from path' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/01_unit/lib/std/shell/path_spec.spl:100:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should extract filename from path' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/lib/std/shell/path_spec.spl:106:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should handle path with no directory' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/01_unit/lib/std/shell/path_spec.spl:106:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should handle path with no directory' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/lib/std/shell/path_spec.spl:112:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should handle directory path' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/01_unit/lib/std/shell/path_spec.spl:112:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should handle directory path' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/lib/std/shell/path_spec.spl:118:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should handle root path' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/01_unit/lib/std/shell/path_spec.spl:124:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should handle empty path' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/01_unit/lib/std/shell/path_spec.spl:131:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should extract directory from path' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-<!-- sspec-maintain:scorecard:end -->

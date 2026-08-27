@@ -1,0 +1,38 @@
+#!/bin/sh
+# Source-level fail-closed regression for native-build entry admission. This
+# intentionally avoids invoking the currently inadmissible compiler binary.
+set -eu
+
+cli=src/app/io/_CliCompile/compile_targets.spl
+closure=src/app/io/_CliCompile/native_build_closure.spl
+
+require() {
+    pattern=$1
+    file=$2
+    if ! grep -Fq "$pattern" "$file"; then
+        echo "FAIL: missing focused-entry invariant: $pattern" >&2
+        exit 1
+    fi
+}
+
+require 'val effective_entry_closure = not whole_source' "$cli"
+require 'elif a == "--whole-source":' "$cli"
+require 'if entry_closure and whole_source:' "$cli"
+require 'if effective_entry_closure and focused_inputs.len() == 0:' "$cli"
+require 'for cf in focused_inputs:' "$cli"
+require 'NATIVE_BUILD_CLOSURE_MAX_SOURCES: i64 = 8192' "$closure"
+require 'NATIVE_BUILD_CLOSURE_MAX_SOURCE_BYTES: i64 = 8 * 1024 * 1024' "$closure"
+require 'NATIVE_BUILD_CLOSURE_MAX_TOTAL_BYTES: i64 = 256 * 1024 * 1024' "$closure"
+require 'if queue.len() >= NATIVE_BUILD_CLOSURE_MAX_SOURCES:' "$closure"
+
+# A 12,000-file source root cannot enter the directory collector for the
+# default explicit-entry case: whole_source starts false, only the named flag
+# can set it true, and the sole mode selector is `not whole_source`.
+whole_source_assignments=$(grep -Fc 'whole_source = true' "$cli")
+bulk_loops=$(grep -Fc 'for source_dir in source_dirs:' "$cli")
+if [ "$whole_source_assignments" -ne 1 ] || [ "$bulk_loops" -ne 2 ]; then
+    echo "FAIL: whole-source ownership is no longer singular" >&2
+    exit 1
+fi
+
+echo "PASS: explicit --entry defaults to bounded closure; 12000 unrelated source files are not bulk-scanned"

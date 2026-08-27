@@ -2,6 +2,29 @@
 
 > Tests for generic type parameters and constraints.
 
+<!-- sdn-diagram:id=generics_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=generics_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+generics_spec
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=generics_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 28 | 28 | 0 | 0 |
@@ -21,7 +44,7 @@ Tests for generic type parameters and constraints.
 | Category | Language |
 | Status | In Progress |
 | Source | `test/03_system/feature/usage/generics_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 Tests for generic type parameters and constraints.
@@ -35,18 +58,18 @@ Verifies generic function definitions, generic struct/class types, and type boun
 
 #### defines generic identity function
 
-- defines generic identity function
+1. fn identity<T>
+2. expect identity
+3. expect identity
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("defines generic identity function")
 fn identity<T>(value: T) -> T:
     value
 expect identity(42) == 42
@@ -57,18 +80,17 @@ expect identity("hello") == "hello"
 
 #### uses generic function with inference
 
-- uses generic function with inference
+1. fn first<T>
+2. expect result == Some
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("uses generic function with inference")
 fn first<T>(items: List<T>) -> Option<T>:
     items.first
 val result = first([1, 2, 3])
@@ -79,18 +101,18 @@ expect result == Some(1)
 
 #### uses multiple type parameters
 
-- uses multiple type parameters
+1. fn pair<A, B>
+2. expect pair
+3. expect pair
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("uses multiple type parameters")
 fn pair<A, B>(a: A, b: B) -> text:
     "pair"
 expect pair(1, "string") == "pair"
@@ -103,18 +125,13 @@ expect pair(true, 3.14) == "pair"
 
 #### defines generic struct
 
-- defines generic struct
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("defines generic struct")
 struct Container<T>:
     value: T
 expect 1 == 1  # parsing test
@@ -124,18 +141,13 @@ expect 1 == 1  # parsing test
 
 #### creates instance of generic struct
 
-- creates instance of generic struct
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("creates instance of generic struct")
 struct Box<T>:
     item: T
 val b = Box { item: 42 }
@@ -146,18 +158,13 @@ expect b.item == 42
 
 #### uses nested generic types
 
-- uses nested generic types
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("uses nested generic types")
 struct Container:
     items: List<Option<i64>>
 expect 1 == 1  # parsing test
@@ -167,18 +174,16 @@ expect 1 == 1  # parsing test
 
 #### uses tuple return type
 
-- uses tuple return type
+1. fn get pair
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("uses tuple return type")
 fn get_pair() -> (i64, text):
     return (42, "hello")
 expect 1 == 1  # parsing test
@@ -190,18 +195,13 @@ expect 1 == 1  # parsing test
 
 #### defines generic class
 
-- defines generic class
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("defines generic class")
 class Stack<T>:
     items: List<T>
 expect 1 == 1  # parsing test
@@ -211,18 +211,17 @@ expect 1 == 1  # parsing test
 
 #### creates generic enum
 
-- creates generic enum
+1. Ok
+2. Err
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("creates generic enum")
 enum Result<T, E>:
     Ok(T)
     Err(E)
@@ -233,18 +232,13 @@ expect 1 == 1  # parsing test
 
 #### uses generic field type
 
-- uses generic field type
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("uses generic field type")
 struct Container:
     value: Option<text>
 expect 1 == 1  # parsing test
@@ -254,18 +248,13 @@ expect 1 == 1  # parsing test
 
 #### uses list generic type
 
-- uses list generic type
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("uses list generic type")
 struct Example:
     items: List<text>
 expect 1 == 1  # parsing test
@@ -277,18 +266,17 @@ expect 1 == 1  # parsing test
 
 #### uses where clause on function
 
-- uses where clause on function
+1. fn filled
+2. expect filled
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("uses where clause on function")
 fn filled(value: i64) -> i64 where i64: Copy:
     return value
 expect filled(42) == 42
@@ -298,18 +286,17 @@ expect filled(42) == 42
 
 #### uses impl Trait for Type
 
-- uses impl Trait for Type
+1. fn len
+2. fn len
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("uses impl Trait for Type")
 trait Len:
     fn len(self) -> i64
 
@@ -326,18 +313,18 @@ expect 1 == 1  # parsing test
 
 #### uses multiple trait bounds
 
-- uses multiple trait bounds
+1. fn clone
+2. fn default
+3. fn make<T>
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("uses multiple trait bounds")
 trait Clone:
     fn clone(self) -> Self
 
@@ -353,18 +340,16 @@ expect 1 == 1  # parsing test
 
 #### uses associated type
 
-- uses associated type
+1. fn next
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("uses associated type")
 trait Iterator:
     type Item
     fn next(self) -> Option<Self.Item>
@@ -377,18 +362,16 @@ expect 1 == 1  # parsing test
 
 #### creates generic list
 
-- creates generic list
+1. expect numbers first == Some
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("creates generic list")
 val numbers: List<i32> = [1, 2, 3]
 expect numbers.first == Some(1)
 ```
@@ -397,18 +380,13 @@ expect numbers.first == Some(1)
 
 #### creates generic dictionary
 
-- creates generic dictionary
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("creates generic dictionary")
 val mapping: Dict<text, i32> = {"a": 1}
 expect mapping["a"] == 1
 ```
@@ -417,18 +395,16 @@ expect mapping["a"] == 1
 
 #### creates generic option
 
-- creates generic option
+1. expect some value is some
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("creates generic option")
 val some_value: Option<text> = Some("hello")
 val no_value: Option<text> = nil
 expect some_value.is_some() == true
@@ -438,18 +414,17 @@ expect some_value.is_some() == true
 
 #### creates generic result
 
-- creates generic result
+1. expect ok result is ok
+2. expect err result is err
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("creates generic result")
 val ok_result: Result<i32, text> = Ok(42)
 val err_result: Result<i32, text> = Err("failed")
 expect ok_result.is_ok() == true
@@ -462,18 +437,13 @@ expect err_result.is_err() == true
 
 #### uses const generic parameter
 
-- uses const generic parameter
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("uses const generic parameter")
 struct Array<T, const N: usize>:
     data: T
 expect 1 == 1  # parsing test
@@ -483,18 +453,17 @@ expect 1 == 1  # parsing test
 
 #### uses generic impl with where
 
-- uses generic impl with where
+1. fn clone
+2. fn clone
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("uses generic impl with where")
 trait Clone:
     fn clone(self) -> Self
 
@@ -508,18 +477,18 @@ expect 1 == 1  # parsing test
 
 #### uses function type syntax
 
-- uses function type syntax
+1. fn apply
+2. fn double
+3. expect apply
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("uses function type syntax")
 fn apply(f: fn(i64) -> i64, x: i64) -> i64:
     return f(x)
 
@@ -535,18 +504,17 @@ expect apply(double, 21) == 42
 
 #### defines function returning generic type
 
-- defines function returning generic type
+1. fn make list<T>
+2. expect result first == Some
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("defines function returning generic type")
 fn make_list<T>(item: T) -> List<T>:
     [item]
 val result = make_list(42)
@@ -557,18 +525,16 @@ expect result.first == Some(42)
 
 #### uses function with generic result
 
-- uses function with generic result
+1. fn map list<T, U>
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("uses function with generic result")
 fn map_list<T, U>(f: fn(T) -> U, items: List<T>) -> List<U>:
     []
 expect 1 == 1  # parsing test
@@ -578,18 +544,16 @@ expect 1 == 1  # parsing test
 
 #### chains generic function calls
 
-- chains generic function calls
+1. fn id<T>
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("chains generic function calls")
 fn id<T>(x: T) -> T:
     x
 val result = id(id(42))
@@ -602,18 +566,17 @@ expect result == 42
 
 #### implicitly infers type parameters
 
-- implicitly infers type parameters
+1. fn wrap<T>
+2. expect result first == Some
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("implicitly infers type parameters")
 fn wrap<T>(x: T) -> List<T>:
     [x]
 val result = wrap(10)
@@ -624,18 +587,16 @@ expect result.first == Some(10)
 
 #### explicitly specifies type parameters
 
-- explicitly specifies type parameters
+1. fn create<T>
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("explicitly specifies type parameters")
 fn create<T>() -> Option<T>:
     None
 val result: Option<i32> = create()
@@ -646,18 +607,16 @@ expect result == nil
 
 #### uses generic in method
 
-- uses generic in method
+1. fn wrap<T>
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("uses generic in method")
 struct Wrapper<T>:
     value: T
 
@@ -680,51 +639,3 @@ expect 1 == 1  # parsing test
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `38ca0eb547a0a06044ffffbcdf69984ef40012575ebf765e0cc55d75645bd251`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `38ca0eb547a0a06044ffffbcdf69984ef40012575ebf765e0cc55d75645bd251`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `38ca0eb547a0a06044ffffbcdf69984ef40012575ebf765e0cc55d75645bd251`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/03_system/feature/usage/generics_spec.spl
-mirror: doc/06_spec/03_system/feature/usage/generics_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/03_system/feature/usage/generics_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/feature/usage/generics_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/feature/usage/generics_spec.spl:30:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'defines generic identity function' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/usage/generics_spec.spl:38:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'uses generic function with inference' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/feature/usage/generics_spec.spl:46:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'uses multiple type parameters' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

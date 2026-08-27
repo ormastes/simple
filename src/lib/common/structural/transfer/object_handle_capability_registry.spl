@@ -1,0 +1,226 @@
+# Owner-scoped immutable ObjectHandle authority for TransferEnvelopeV1.
+#
+# The registry is deliberately a small, fixed slot table.  A handle is only
+# the four value fields below; it never contains an address, slot pointer, or
+# dereferenceable runtime object.  The registry is the authority that makes a
+# structurally valid envelope a live capability.
+
+use std.common.structural.transfer.transfer_contracts.{
+    TransferEnvelopeV1,
+    ParallelExecutionDomain,
+    parallel_execution_domain_to_u8,
+    transfer_envelope_v1_boundary_allowed,
+    transfer_envelope_v1_immutable_capability_shape_valid
+}
+
+val OBJECT_HANDLE_CAPABILITY_DEFAULT_CAPACITY: i64 = 64
+
+struct ObjectHandleCapabilityV1:
+    region_id: i64
+    generation: i64
+    ownership_token: i64
+    owner_context: i64
+    target_domain: i64
+
+struct ObjectHandleCapabilityMintResultV1:
+    ok: bool
+    handle: ObjectHandleCapabilityV1
+
+struct ObjectHandleCapabilitySlotV1:
+    active: bool
+    slot_generation: i64
+    handle: ObjectHandleCapabilityV1
+
+fn object_handle_capability_zero() -> ObjectHandleCapabilityV1:
+    ObjectHandleCapabilityV1(region_id: 0, generation: 0,
+        ownership_token: 0, owner_context: 0, target_domain: -1)
+
+fn object_handle_capability_slot_empty(slot_generation: i64) -> ObjectHandleCapabilitySlotV1:
+    ObjectHandleCapabilitySlotV1(active: false,
+        slot_generation: slot_generation,
+        handle: object_handle_capability_zero())
+
+fn object_handle_capability_equal(a: ObjectHandleCapabilityV1,
+                                  b: ObjectHandleCapabilityV1) -> bool:
+    a.region_id == b.region_id
+        and a.generation == b.generation
+        and a.ownership_token == b.ownership_token
+        and a.owner_context == b.owner_context
+        and a.target_domain == b.target_domain
+
+class ObjectHandleCapabilityRegistryV1:
+    owner_context: i64
+    slots: [ObjectHandleCapabilitySlotV1]
+    active_count: i64
+
+    static fn create(owner_context: i64,
+                     capacity: i64) -> ObjectHandleCapabilityRegistryV1:
+        var actual_capacity = capacity
+        if actual_capacity < 0:
+            actual_capacity = 0
+        if actual_capacity > OBJECT_HANDLE_CAPABILITY_DEFAULT_CAPACITY:
+            actual_capacity = OBJECT_HANDLE_CAPABILITY_DEFAULT_CAPACITY
+        var slots: [ObjectHandleCapabilitySlotV1] = []
+        var i = 0
+        while i < actual_capacity:
+            slots.push(object_handle_capability_slot_empty(0))
+            i = i + 1
+        ObjectHandleCapabilityRegistryV1(owner_context: owner_context,
+            slots: slots, active_count: 0)
+
+    static fn default_for(owner_context: i64) -> ObjectHandleCapabilityRegistryV1:
+        ObjectHandleCapabilityRegistryV1.create(owner_context,
+            OBJECT_HANDLE_CAPABILITY_DEFAULT_CAPACITY)
+
+    fn capacity() -> i64:
+        self.slots.len()
+
+    fn live_count() -> i64:
+        self.active_count
+
+    fn is_live(handle: ObjectHandleCapabilityV1, caller_context: i64) -> bool:
+        if caller_context <= 0 or caller_context != self.owner_context:
+            return false
+        for slot in self.slots:
+            if slot.active and object_handle_capability_equal(slot.handle, handle):
+                return true
+        false
+
+    me mint(region_id: i64, generation: i64,
+            target_domain: ParallelExecutionDomain) -> ObjectHandleCapabilityMintResultV1:
+        """Mint one immutable capability in this registry's owner context.
+
+        The token encodes a per-slot generation and slot number. Reusing a
+        slot therefore never revives its stale token.
+        """
+        val zero = object_handle_capability_zero()
+        val target = parallel_execution_domain_to_u8(target_domain)
+        if self.owner_context <= 0 or region_id <= 0 or generation <= 0:
+            return ObjectHandleCapabilityMintResultV1(ok: false, handle: zero)
+        if target < 0 or target > 5:
+            return ObjectHandleCapabilityMintResultV1(ok: false, handle: zero)
+        var free_slot = -1
+        var i = 0
+        while i < self.slots.len():
+            if not self.slots[i].active:
+                free_slot = i
+                break
+            i = i + 1
+        if free_slot < 0:
+            return ObjectHandleCapabilityMintResultV1(ok: false, handle: zero)
+        val slot_generation = self.slots[free_slot].slot_generation + 1
+        if slot_generation <= 0 or slot_generation > 144115188075855871:
+            return ObjectHandleCapabilityMintResultV1(ok: false, handle: zero)
+        val handle = ObjectHandleCapabilityV1(region_id: region_id,
+            generation: generation,
+            ownership_token: slot_generation * OBJECT_HANDLE_CAPABILITY_DEFAULT_CAPACITY + free_slot,
+            owner_context: self.owner_context, target_domain: target)
+        self.slots[free_slot] = ObjectHandleCapabilitySlotV1(active: true,
+            slot_generation: slot_generation,
+            handle: handle)
+        self.active_count = self.active_count + 1
+        ObjectHandleCapabilityMintResultV1(ok: true, handle: handle)
+
+    me validate(envelope: TransferEnvelopeV1,
+                caller_context: i64) -> bool:
+        """Accept a live immutable envelope exactly once.
+
+        Structural boundary validation happens before the slot is consumed.
+        A successful validation consumes the capability, making a replay of
+        the same envelope fail even when all of its fields are unchanged.
+        """
+        if caller_context <= 0 or caller_context != self.owner_context:
+            return false
+        if not transfer_envelope_v1_immutable_capability_shape_valid(envelope):
+            return false
+        if not transfer_envelope_v1_boundary_allowed(envelope):
+            return false
+        var i = 0
+        while i < self.slots.len():
+            if self.slots[i].active:
+                val handle = self.slots[i].handle
+                if handle.region_id == envelope.region_id
+                    and handle.generation == envelope.generation
+                    and handle.ownership_token == envelope.ownership_token
+                    and handle.owner_context == caller_context
+                    and handle.target_domain == parallel_execution_domain_to_u8(envelope.target_domain):
+                    self.slots[i] = object_handle_capability_slot_empty(
+                        self.slots[i].slot_generation)
+                    self.active_count = self.active_count - 1
+                    return true
+            i = i + 1
+        false
+
+    me revoke(handle: ObjectHandleCapabilityV1, caller_context: i64) -> bool:
+        """Revoke a live capability, requiring the registry owner context."""
+        if caller_context <= 0 or caller_context != self.owner_context:
+            return false
+        var i = 0
+        while i < self.slots.len():
+            if self.slots[i].active
+                and object_handle_capability_equal(self.slots[i].handle, handle):
+                self.slots[i] = object_handle_capability_slot_empty(
+                    self.slots[i].slot_generation)
+                self.active_count = self.active_count - 1
+                return true
+            i = i + 1
+        false
+
+# Production/native facade. The scalar ABI is implemented by the Rust and C
+# runtime owners; this value-only registry remains the interpreter reference
+# model and uses the identical tuple and token construction.
+extern fn rt_object_handle_capability_mint(owner_context: i64,
+    target_domain: i64, generation: i64, region_id: i64) -> i64
+extern fn rt_object_handle_capability_consume(token: i64, owner_context: i64,
+    target_domain: i64, generation: i64, region_id: i64) -> i64
+extern fn rt_object_handle_capability_revoke(token: i64, owner_context: i64) -> i64
+extern fn rt_object_handle_owner_create() -> i64
+extern fn rt_object_handle_owner_destroy(owner_context: i64) -> i64
+
+class RuntimeObjectHandleCapabilityAuthorityV1:
+    owner_context: i64
+
+    static fn create() -> RuntimeObjectHandleCapabilityAuthorityV1:
+        RuntimeObjectHandleCapabilityAuthorityV1(
+            owner_context: rt_object_handle_owner_create())
+
+    me destroy() -> bool:
+        if self.owner_context == 0:
+            return false
+        val destroyed = rt_object_handle_owner_destroy(self.owner_context) == 1
+        if destroyed:
+            self.owner_context = 0
+        destroyed
+
+    fn mint(region_id: i64, generation: i64,
+            target_domain: ParallelExecutionDomain) -> ObjectHandleCapabilityMintResultV1:
+        val target = parallel_execution_domain_to_u8(target_domain)
+        val token = rt_object_handle_capability_mint(self.owner_context, target,
+            generation, region_id)
+        if token == 0:
+            return ObjectHandleCapabilityMintResultV1(ok: false,
+                handle: object_handle_capability_zero())
+        ObjectHandleCapabilityMintResultV1(ok: true,
+            handle: ObjectHandleCapabilityV1(region_id: region_id,
+                generation: generation, ownership_token: token,
+                owner_context: 0, target_domain: target))
+
+    fn validate(envelope: TransferEnvelopeV1) -> bool:
+        if not transfer_envelope_v1_immutable_capability_shape_valid(envelope):
+            return false
+        if not transfer_envelope_v1_boundary_allowed(envelope):
+            return false
+        rt_object_handle_capability_consume(envelope.ownership_token,
+            self.owner_context,
+            parallel_execution_domain_to_u8(envelope.target_domain),
+            envelope.generation, envelope.region_id) == 1
+
+    fn revoke(handle: ObjectHandleCapabilityV1) -> bool:
+        rt_object_handle_capability_revoke(handle.ownership_token,
+            self.owner_context) == 1
+
+export OBJECT_HANDLE_CAPABILITY_DEFAULT_CAPACITY
+export ObjectHandleCapabilityV1, ObjectHandleCapabilityMintResultV1
+export ObjectHandleCapabilityRegistryV1
+export RuntimeObjectHandleCapabilityAuthorityV1
+export object_handle_capability_zero, object_handle_capability_equal

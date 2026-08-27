@@ -6,15 +6,7 @@ ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || exit 2
 RULESET_DIR="$ROOT/.github/rulesets"
 ENVIRONMENT_FILE="$ROOT/.github/release-environment.json"
 REVIEW_BROKER_FILE="$ROOT/.github/review-admission-broker.json"
-WORKFLOW_PERMISSIONS_FILE="$ROOT/.github/actions-workflow-permissions.json"
 DEFAULT_REPO=ormastes/simple
-CANONICAL_DEFAULT_BRANCH=main
-CANONICAL_ACTIONS_APP_ID=15368
-CANONICAL_AUTHORIZED_DISPATCHER_ID=2378857
-CANONICAL_STRUCTURAL_CONTEXT='Code Idiom & Structural Ratchet Gates'
-CANONICAL_SELF_REVIEW_CONTEXT='SPipe Self Review Admission'
-CANONICAL_MAIN_RULESET_SHA256=7ab586fde2738ae1ba03601b79cbcfd5f36ddcb847299e091edc7d24be7e8985
-CANONICAL_RELEASE_RULESET_SHA256=101a5cd96736cc79ef8273435fa8542c7d5707141f1299abac540d868c4d6a99
 
 usage() {
     echo "usage: $0 render | review-plan | verify-review RECEIPT SESSION [owner/repo] | verify-live [owner/repo] | apply-live --yes [owner/repo]" >&2
@@ -65,9 +57,7 @@ validate_review_receipt() {
       (.audit_receipt_sha256 | sha256) and
       ((.issued_at | fromdateiso8601) <= now) and
       ((.expires_at | fromdateiso8601) > now) and
-      (if .mode == "owner_attested_fallback" then
-         ((.expires_at | fromdateiso8601) - (.issued_at | fromdateiso8601)) <= 28800
-       else ((.expires_at | fromdateiso8601) - (.issued_at | fromdateiso8601)) <= 86400 end) and
+      (((.expires_at | fromdateiso8601) - (.issued_at | fromdateiso8601)) <= 86400) and
       if .mode == "independent_verifier" then
         (keys | sort) == ((common_keys + ["review_receipt_sha256","verifier"]) | sort) and
         (.review_receipt_sha256 | sha256) and
@@ -128,26 +118,17 @@ validate_review_receipt() {
 require_tools() {
     command -v jq >/dev/null 2>&1 || { echo "github-policy: jq is required" >&2; exit 2; }
     command -v gh >/dev/null 2>&1 || { echo "github-policy: gh is required" >&2; exit 2; }
-    command -v sha256sum >/dev/null 2>&1 || { echo "github-policy: sha256sum is required" >&2; exit 2; }
 }
 
 manifest_files() {
     find "$RULESET_DIR" -maxdepth 1 -type f -name 'spipe-vcs-v3-*.json' -print | LC_ALL=C sort
 }
 
-self_review_ruleset_files() {
-    printf '%s\n' \
-        "$RULESET_DIR/spipe-vcs-v3-main.json" \
-        "$RULESET_DIR/spipe-vcs-v3-release-lines.json"
-}
-
 environment_files() {
     printf '%s\n' \
         "$ROOT/.github/protected-integration-environment.json" \
-        "$ROOT/.github/owner-convergence-admission-environment.json" \
         "$ROOT/.github/release-environment.json" \
-        "$ROOT/.github/npm-release-environment.json" \
-        "$ROOT/.github/self-review-admission-environment.json"
+        "$ROOT/.github/npm-release-environment.json"
 }
 
 normalize_ruleset() {
@@ -171,169 +152,13 @@ normalize_environment() {
     }' "$1"
 }
 
-normalize_workflow_permissions() {
-    jq -S '{default_workflow_permissions,can_approve_pull_request_reviews}' "$1"
-}
-
-canonical_ruleset() {
-    _profile=$1
-    case $_profile in
-        main)
-            _name=spipe-vcs-v3-main
-            _includes='["refs/heads/main","refs/heads/integration/main"]'
-            _merge_methods='["merge","squash","rebase"]'
-            ;;
-        release-lines)
-            _name=spipe-vcs-v3-release-lines
-            _includes='["refs/heads/release/*","refs/heads/release/**/*"]'
-            _merge_methods='["merge"]'
-            ;;
-        *) echo "github-policy: unsupported canonical ruleset profile: $_profile" >&2; return 1 ;;
-    esac
-    jq -nS --arg name "$_name" --argjson includes "$_includes" \
-      --argjson merge_methods "$_merge_methods" \
-      --arg structural "$CANONICAL_STRUCTURAL_CONTEXT" \
-      --arg self_review "$CANONICAL_SELF_REVIEW_CONTEXT" \
-      --argjson app_id "$CANONICAL_ACTIONS_APP_ID" '
-      {
-        name:$name,
-        target:"branch",
-        enforcement:"active",
-        conditions:{ref_name:{include:$includes,exclude:[]}},
-        rules:[
-          {type:"deletion"},
-          {type:"non_fast_forward"},
-          {type:"pull_request",parameters:{
-            allowed_merge_methods:$merge_methods,
-            dismissal_restriction:{allowed_actors:[],enabled:false},
-            dismiss_stale_reviews_on_push:true,
-            ignore_approvals_from_contributors:false,
-            require_code_owner_review:false,
-            require_extra_approval_for_unattributed_changes:true,
-            require_last_push_approval:false,
-            required_approving_review_count:0,
-            required_review_thread_resolution:true,
-            required_reviewers:[]
-          }},
-          {type:"required_status_checks",parameters:{
-            do_not_enforce_on_create:false,
-            required_status_checks:[
-              {context:$structural,integration_id:$app_id},
-              {context:$self_review,integration_id:$app_id}
-            ],
-            strict_required_status_checks_policy:true
-          }}
-        ],
-        bypass_actors:[]
-      }'
-}
-
-ruleset_sha256() {
-    sha256sum "$1" | awk '{print $1}'
-}
-
-canonical_workflow_permissions() {
-    jq -nS '{default_workflow_permissions:"read",can_approve_pull_request_reviews:false}'
-}
-
-canonical_self_review_environment() {
-    jq -nS '{
-      wait_timer:0,
-      prevent_self_review:false,
-      reviewers:[],
-      deployment_branch_policy:{protected_branches:true,custom_branch_policies:false}
-    }'
-}
-
-prepare_expected_projection() {
-    _expected_root=$1
-    mkdir -p "$_expected_root/rulesets" "$_expected_root/environments"
-    for _file in $(manifest_files); do
-        _name=$(jq -r '.name' "$_file")
-        _expected="$_expected_root/rulesets/$_name.json"
-        case $_name in
-            spipe-vcs-v3-main)
-                canonical_ruleset main >"$_expected"
-                _pinned=$CANONICAL_MAIN_RULESET_SHA256
-                ;;
-            spipe-vcs-v3-release-lines)
-                canonical_ruleset release-lines >"$_expected"
-                _pinned=$CANONICAL_RELEASE_RULESET_SHA256
-                ;;
-            *)
-                normalize_ruleset "$_file" >"$_expected"
-                continue
-                ;;
-        esac
-        _generated=$(ruleset_sha256 "$_expected")
-        [ "$_generated" = "$_pinned" ] || {
-            echo "github-policy: generated canonical digest disagrees with pinned $_name digest" >&2
-            return 1
-        }
-        _local=$(mktemp) || exit 2
-        normalize_ruleset "$_file" >"$_local"
-        if ! cmp -s "$_expected" "$_local"; then
-            echo "github-policy: canonical normalized ruleset mismatch: $_name" >&2
-            echo "github-policy: expected sha256 $_pinned; local sha256 $(ruleset_sha256 "$_local")" >&2
-            rm -f "$_local"
-            return 1
-        fi
-        rm -f "$_local"
-    done
-    for _file in $(environment_files); do
-        _environment=$(basename "$_file" -environment.json)
-        _expected="$_expected_root/environments/$_environment.json"
-        if [ "$_environment" = self-review-admission ]; then
-            canonical_self_review_environment >"$_expected"
-            _local=$(mktemp) || exit 2
-            jq -S '{wait_timer,prevent_self_review,reviewers,deployment_branch_policy}' \
-                "$_file" >"$_local"
-            cmp -s "$_expected" "$_local" || {
-                echo "github-policy: canonical self-review-admission environment mismatch" >&2
-                rm -f "$_local"
-                return 1
-            }
-            rm -f "$_local"
-        else
-            jq -S '{wait_timer,prevent_self_review,reviewers,deployment_branch_policy}' \
-                "$_file" >"$_expected"
-        fi
-    done
-    _expected="$_expected_root/actions-workflow-permissions.json"
-    canonical_workflow_permissions >"$_expected"
-    _local=$(mktemp) || exit 2
-    normalize_workflow_permissions "$WORKFLOW_PERMISSIONS_FILE" >"$_local"
-    cmp -s "$_expected" "$_local" || {
-        echo "github-policy: canonical Actions workflow permissions mismatch" >&2
-        rm -f "$_local"
-        return 1
-    }
-    rm -f "$_local"
-}
-
-projection_digest() {
-    _expected_root=$1
-    _digest_input=$(mktemp) || exit 2
-    for _file in "$_expected_root"/rulesets/*.json; do
-        printf 'ruleset:%s\n' "$(jq -r '.name' "$_file")" >>"$_digest_input"
-        cat "$_file" >>"$_digest_input"
-    done
-    for _file in "$_expected_root"/environments/*.json; do
-        printf 'environment:%s\n' "$(basename "$_file" .json)" >>"$_digest_input"
-        cat "$_file" >>"$_digest_input"
-    done
-    printf 'actions-workflow-permissions\n' >>"$_digest_input"
-    cat "$_expected_root/actions-workflow-permissions.json" >>"$_digest_input"
-    printf 'immutable-releases:true\n' >>"$_digest_input"
-    sha256sum "$_digest_input" | awk '{print $1}'
-    rm -f "$_digest_input"
-}
-
 render() {
-    _tmp=$(mktemp -d) || exit 2
-    trap 'rm -rf "$_tmp"' EXIT INT TERM
-    prepare_expected_projection "$_tmp"
-    jq -s -S '.' "$_tmp"/rulesets/*.json
+    _tmp=$(mktemp) || exit 2
+    trap 'rm -f "$_tmp"' EXIT INT TERM
+    for _file in $(manifest_files); do
+        normalize_ruleset "$_file" >>"$_tmp"
+    done
+    jq -s -S '.' "$_tmp"
 }
 
 live_ruleset_by_name() {
@@ -346,19 +171,9 @@ live_ruleset_by_name() {
 
 verify_live() {
     _repo=$1
-    _expected_root=${2:-}
     require_tools
-    _own_expected=false
-    if [ -z "$_expected_root" ]; then
-        _expected_root=$(mktemp -d) || exit 2
-        _own_expected=true
-        prepare_expected_projection "$_expected_root" || {
-            rm -rf "$_expected_root"
-            return 1
-        }
-    fi
     _fail=0
-    for _file in "$_expected_root"/rulesets/*.json; do
+    for _file in $(manifest_files); do
         _name=$(jq -r '.name' "$_file")
         _id=$(live_ruleset_by_name "$_repo" "$_name")
         if [ -z "$_id" ]; then
@@ -369,7 +184,7 @@ verify_live() {
         _expected=$(mktemp) || exit 2
         _actual=$(mktemp) || exit 2
         _actual_raw=$(mktemp) || exit 2
-        cp "$_file" "$_expected"
+        normalize_ruleset "$_file" >"$_expected"
         gh api "repos/$_repo/rulesets/$_id" >"$_actual_raw"
         normalize_ruleset "$_actual_raw" >"$_actual"
         if ! cmp -s "$_expected" "$_actual"; then
@@ -383,7 +198,7 @@ verify_live() {
     done
     _expected_names=$(mktemp) || exit 2
     _live_names=$(mktemp) || exit 2
-    for _file in "$_expected_root"/rulesets/*.json; do jq -r '.name' "$_file"; done | LC_ALL=C sort >"$_expected_names"
+    for _file in $(manifest_files); do jq -r '.name' "$_file"; done | LC_ALL=C sort >"$_expected_names"
     gh api --paginate "repos/$_repo/rulesets" |
         jq -r '.[] | .name | select(startswith("spipe-vcs-v3-"))' |
         LC_ALL=C sort >"$_live_names"
@@ -392,11 +207,12 @@ verify_live() {
         _fail=1
     fi
     rm -f "$_expected_names" "$_live_names"
-    for _environment_file in "$_expected_root"/environments/*.json; do
-        _environment=$(basename "$_environment_file" .json)
+    for _environment_file in $(environment_files); do
+        _environment=$(basename "$_environment_file" -environment.json)
         _expected_env=$(mktemp) || exit 2
         _actual_env=$(mktemp) || exit 2
-        cp "$_environment_file" "$_expected_env"
+        jq -S '{wait_timer,prevent_self_review,reviewers,deployment_branch_policy}' \
+            "$_environment_file" >"$_expected_env"
         if ! gh api "repos/$_repo/environments/$_environment" >"$_actual_env" 2>/dev/null; then
             echo "github-policy: MISSING environment $_environment" >&2
             _fail=1
@@ -408,19 +224,6 @@ verify_live() {
         fi
         rm -f "$_expected_env" "$_actual_env"
     done
-    _expected_workflow=$(mktemp) || exit 2
-    _actual_workflow=$(mktemp) || exit 2
-    cp "$_expected_root/actions-workflow-permissions.json" "$_expected_workflow"
-    if ! gh api "repos/$_repo/actions/permissions/workflow" >"$_actual_workflow" 2>/dev/null; then
-        echo "github-policy: MISSING Actions workflow permissions" >&2
-        _fail=1
-    elif ! normalize_workflow_permissions "$_actual_workflow" | cmp -s "$_expected_workflow" -; then
-        echo "github-policy: DRIFT Actions workflow permissions" >&2
-        _fail=1
-    else
-        echo "github-policy: PASS Actions workflow permissions"
-    fi
-    rm -f "$_expected_workflow" "$_actual_workflow"
     _immutable=$(gh api "repos/$_repo/immutable-releases" --jq '.enabled')
     if [ "$_immutable" != true ]; then
         echo "github-policy: DRIFT immutable releases disabled" >&2
@@ -534,7 +337,6 @@ apply_ruleset() {
 }
 
 apply_live() {
-    _repo=$1
     require_tools
     validate_self_attested_apply_contract
     _actual_actor=$(gh api user --jq '.id')

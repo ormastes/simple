@@ -1,6 +1,31 @@
 # Engine Merge Specification
 
-> Tests covering Chromium engine merge — construction, Chromium engine merge — layout pass, Chromium engine merge — render_dom_to_scene, Chromium engine merge — canonical set_style is load-bearing.
+> <details>
+
+<!-- sdn-diagram:id=engine_merge_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=engine_merge_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+engine_merge_spec -> app
+engine_merge_spec -> std
+engine_merge_spec -> common
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=engine_merge_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -17,22 +42,13 @@
 
 #### constructs a ChromiumEngine with the viewport it was given
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
-- constructs a ChromiumEngine with the viewport it was given
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("constructs a ChromiumEngine with the viewport it was given")
 val engine = ChromiumEngine.new(VIEWPORT_W, VIEWPORT_H)
 expect(engine.width() == VIEWPORT_W).to_be_true()
 expect(engine.height() == VIEWPORT_H).to_be_true()
@@ -42,18 +58,16 @@ expect(engine.height() == VIEWPORT_H).to_be_true()
 
 #### uses the canonical BeDomNode type for the shell root builder
 
-- uses the canonical BeDomNode type for the shell root builder
+1. var root: BeDomNode = engine merge root
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("uses the canonical BeDomNode type for the shell root builder")
 # If this compiles, the shell's root builder returns the same
 # BeDomNode type the canonical layout engine consumes — i.e.
 # the two engines have in fact been merged onto one import.
@@ -67,18 +81,17 @@ expect(be_dom_get_children(root).len() == 0).to_be_true()
 
 #### lays out a single-panel DOM to a non-degenerate box
 
-- lays out a single-panel DOM to a non-degenerate box
+1. var root: BeDomNode = engine merge root
+2. be dom add child
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("lays out a single-panel DOM to a non-degenerate box")
 val engine = ChromiumEngine.new(VIEWPORT_W, VIEWPORT_H)
 var root: BeDomNode = engine_merge_root("#1E1E1EFF")
 val panel = engine_merge_panel("320px", "48px", "#2D2D2DFF")
@@ -97,18 +110,17 @@ expect(layout_get_height(layout) > 0).to_be_true()
 
 #### propagates a child panel into the layout tree
 
-- propagates a child panel into the layout tree
+1. var root: BeDomNode = engine merge root
+2. be dom add child
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("propagates a child panel into the layout tree")
 val engine = ChromiumEngine.new(VIEWPORT_W, VIEWPORT_H)
 var root: BeDomNode = engine_merge_root("#000000FF")
 val panel = engine_merge_panel("120px", "24px", "#4080C0FF")
@@ -133,18 +145,17 @@ expect(lh > 0).to_be_true()
 
 #### produces a RenderScene sized to the viewport
 
-- produces a RenderScene sized to the viewport
+1. var root: BeDomNode = engine merge root
+2. be dom add child
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("produces a RenderScene sized to the viewport")
 val engine = ChromiumEngine.new(VIEWPORT_W, VIEWPORT_H)
 var root: BeDomNode = engine_merge_root("#202020FF")
 val panel = engine_merge_panel("200px", "40px", "#C04080FF")
@@ -159,18 +170,17 @@ expect(scene.height == VIEWPORT_H).to_be_true()
 
 #### emits at least one scene command for a styled panel
 
-- emits at least one scene command for a styled panel
+1. var root: BeDomNode = engine merge root
+2. be dom add child
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("emits at least one scene command for a styled panel")
 val engine = ChromiumEngine.new(VIEWPORT_W, VIEWPORT_H)
 var root: BeDomNode = engine_merge_root("#0A0A0AFF")
 val panel = engine_merge_panel("64px", "64px", "#FF8040FF")
@@ -190,29 +200,29 @@ expect(scene.commands.len() > 0).to_be_true()
 
 #### applies a width/height declared via be_dom_set_style
 
-- applies a width/height declared via be_dom_set_style
+1. var node = BeDomNode element
+2. be dom set style
+3. be dom set style
+4. be dom set style
+5. be dom set style
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("applies a width/height declared via be_dom_set_style")
 # Use the low-level canonical setter directly — this is the
 # exact code path `browser_backend.spl` uses inside the
 # compositor, and proving it works from the chromium shell's
 # own module closes M4's "single import graph" criterion.
 var node = BeDomNode.element("div")
-var style = be_dom_get_style(node)
-style.display = "block"
-style.width = 256.0
-style.height = 64.0
-style.background_color = "#336699FF"
-be_dom_set_style(node, style)
+be_dom_set_style(node, "display", "block")
+be_dom_set_style(node, "width", "256px")
+be_dom_set_style(node, "height", "64px")
+be_dom_set_style(node, "background-color", "#336699FF")
 
 val engine = ChromiumEngine.new(VIEWPORT_W, VIEWPORT_H)
 val layout: BeLayoutBox = engine.layout_dom(node)
@@ -229,12 +239,12 @@ expect(layout_get_height(layout) > 0).to_be_true()
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/ui.chromium/engine_merge_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering Chromium engine merge — construction, Chromium engine merge — layout pass, Chromium engine merge — render_dom_to_scene, Chromium engine merge — canonical set_style is load-bearing.
+Tests covering:
 - Chromium engine merge — construction
 - Chromium engine merge — layout pass
 - Chromium engine merge — render_dom_to_scene
@@ -252,51 +262,3 @@ Tests covering Chromium engine merge — construction, Chromium engine merge —
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-UNIT`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `06ffd8447a3fccd1ad64cf1f3e66210dd28de1855ebf9284f891d267814f1c57`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `06ffd8447a3fccd1ad64cf1f3e66210dd28de1855ebf9284f891d267814f1c57`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `06ffd8447a3fccd1ad64cf1f3e66210dd28de1855ebf9284f891d267814f1c57`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/01_unit/app/ui.chromium/engine_merge_spec.spl
-mirror: doc/06_spec/01_unit/app/ui.chromium/engine_merge_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/app/ui.chromium/engine_merge_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/app/ui.chromium/engine_merge_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/app/ui.chromium/engine_merge_spec.spl:52:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'constructs a ChromiumEngine with the viewport it was given' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/ui.chromium/engine_merge_spec.spl:59:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'uses the canonical BeDomNode type for the shell root builder' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/ui.chromium/engine_merge_spec.spl:74:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'lays out a single-panel DOM to a non-degenerate box' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

@@ -1,0 +1,254 @@
+# codex-impl
+# Fixed-width, authenticated external evidence for governed MC/DC exclusions.
+
+use std.common.crypto.sha256.{sha256_bytes}
+use lib.common.crypto.ed25519.{pure_ed25519_verify}
+
+val MCDC_EXCLUSION_EVIDENCE_V1_BYTES: i64 = 320
+val MCDC_EXCLUSION_EVIDENCE_SIGNED_BYTES: i64 = 256
+val MCDC_EXCLUSION_EVIDENCE_MAX_ROWS: i64 = 256
+val MCDC_EXCLUSION_EVIDENCE_MAX_AGE: i64 = 7776000
+
+enum McdcExclusionEvidenceStatusV1:
+    Accepted
+    Malformed
+    UntrustedIssuer
+    InvalidSignature
+    Stale
+    Mismatched
+    LocallyProducible
+    InvalidProof
+
+struct McdcExclusionEvidenceReceiptV1:
+    status: McdcExclusionEvidenceStatusV1
+    kind_id: i64
+    observed_epoch: i64
+    expiry_epoch: i64
+    issuer_id: u64
+    executor_id: u64
+    proof_code: i64
+    proof_a: u64
+    proof_b: u64
+    proof_c: u64
+    proof_count: i64
+
+fn _ev_u64(bytes: [u8], offset: i64) -> u64:
+    var result: u64 = 0u64
+    var i = 0
+    while i < 8:
+        result = result | ((bytes[offset + i] as u64) << ((i * 8) as u64))
+        i = i + 1
+    result
+
+fn _ev_u32(bytes: [u8], offset: i64) -> i64:
+    ((bytes[offset] as i64) | ((bytes[offset + 1] as i64) << 8)
+        | ((bytes[offset + 2] as i64) << 16)
+        | ((bytes[offset + 3] as i64) << 24))
+
+fn _ev_write_u64(bytes: [u8], offset: i64, value: u64):
+    var i = 0
+    while i < 8:
+        bytes[offset + i] = ((value >> ((i * 8) as u64)) & 255u64) as u8
+        i = i + 1
+
+fn _ev_write_u32(bytes: [u8], offset: i64, value: i64):
+    var i = 0
+    while i < 4:
+        bytes[offset + i] = (((value as u64) >> ((i * 8) as u64)) & 255u64) as u8
+        i = i + 1
+
+fn _ev_empty(status: McdcExclusionEvidenceStatusV1) -> McdcExclusionEvidenceReceiptV1:
+    McdcExclusionEvidenceReceiptV1(status: status, kind_id: 0,
+        observed_epoch: 0, expiry_epoch: 0, issuer_id: 0u64,
+        executor_id: 0u64, proof_code: 0, proof_a: 0u64,
+        proof_b: 0u64, proof_c: 0u64, proof_count: 0)
+
+fn _ev_slice(bytes: [u8], start: i64, length: i64) -> [u8]:
+    var result: [u8] = []
+    result.reserve(length)
+    var i = 0
+    while i < length:
+        result.push(bytes[start + i])
+        i = i + 1
+    result
+
+fn _ev_digest_matches(message: [u8], expected: text) -> bool:
+    if not expected.starts_with("sha256:") or expected.len() != 71:
+        return false
+    var wide: [i64] = []
+    wide.reserve(message.len())
+    for byte in message: wide.push(byte as i64)
+    val digest = sha256_bytes(wide)
+    if digest.len() != 32: return false
+    val alphabet = "0123456789abcdef"
+    var i = 0
+    while i < 32:
+        val byte = digest[i]
+        if expected[7 + i * 2] != alphabet[(byte >> 4) & 15]
+                or expected[8 + i * 2] != alphabet[byte & 15]:
+            return false
+        i = i + 1
+    true
+
+fn mcdc_exclusion_evidence_digest_v1(message: [u8]) -> text:
+    if message.len() != MCDC_EXCLUSION_EVIDENCE_SIGNED_BYTES: return ""
+    var wide: [i64] = []
+    wide.reserve(message.len())
+    for byte in message: wide.push(byte as i64)
+    val digest = sha256_bytes(wide)
+    val alphabet = "0123456789abcdef"
+    var result = "sha256:"
+    for byte in digest:
+        result = result + alphabet[(byte >> 4) & 15] + alphabet[byte & 15]
+    result
+
+fn _ev_key_id(public_key: [u8]) -> u64:
+    var wide: [i64] = []
+    wide.reserve(public_key.len())
+    for byte in public_key: wide.push(byte as i64)
+    val digest = sha256_bytes(wide)
+    var result: u64 = 0u64
+    var i = 0
+    while i < 8:
+        result = result | ((digest[i] as u64) << ((i * 8) as u64))
+        i = i + 1
+    result
+
+fn mcdc_exclusion_evidence_trust_key_id_v1(public_key: [u8]) -> u64:
+    if public_key.len() != 32: return 0u64
+    _ev_key_id(public_key)
+
+fn encode_mcdc_exclusion_evidence_unsigned_v1(
+        kind: i64, observed_epoch: i64, expiry_epoch: i64,
+        scenario: u64, code: u64, capability: u64, owner: u64,
+        issuer: u64, executor: u64, decision: u64, source: u64,
+        mask: u64, condition_count: i64, proof_code: i64,
+        proof_a: u64, proof_b: u64, proof_c: u64,
+        proof_count: i64, locally_producible: bool = false) -> [u8]:
+    var row: [u8] = [for _ in 0..MCDC_EXCLUSION_EVIDENCE_SIGNED_BYTES: 0u8]
+    row[0] = 77u8
+    row[1] = 67u8
+    row[2] = 68u8
+    row[3] = 69u8
+    row[4] = 86u8
+    row[5] = 82u8
+    row[6] = 49u8
+    _ev_write_u32(row, 8, 1)
+    _ev_write_u32(row, 12, kind)
+    _ev_write_u32(row, 16, if locally_producible: 3 else: 1)
+    _ev_write_u64(row, 24, observed_epoch as u64)
+    _ev_write_u64(row, 32, expiry_epoch as u64)
+    _ev_write_u64(row, 40, scenario)
+    _ev_write_u64(row, 48, code)
+    _ev_write_u64(row, 56, capability)
+    _ev_write_u64(row, 64, owner)
+    _ev_write_u64(row, 72, issuer)
+    _ev_write_u64(row, 80, executor)
+    _ev_write_u64(row, 88, decision)
+    _ev_write_u64(row, 96, source)
+    _ev_write_u64(row, 104, mask)
+    _ev_write_u32(row, 112, condition_count)
+    _ev_write_u32(row, 116, proof_code)
+    _ev_write_u64(row, 120, proof_a)
+    _ev_write_u64(row, 128, proof_b)
+    _ev_write_u64(row, 136, proof_c)
+    _ev_write_u32(row, 144, proof_count)
+    row
+
+fn seal_mcdc_exclusion_evidence_v1(unsigned: [u8], signature: [u8]) -> [u8]:
+    if unsigned.len() != MCDC_EXCLUSION_EVIDENCE_SIGNED_BYTES or signature.len() != 64:
+        return []
+    var row = unsigned
+    row.reserve(MCDC_EXCLUSION_EVIDENCE_V1_BYTES)
+    for byte in signature: row.push(byte)
+    row
+
+fn _ev_proof_valid(kind: i64, proof_code: i64, a: u64, b: u64,
+                   c: u64, count: i64) -> bool:
+    # Each governed cause has a distinct typed proof shape. Zero is never a
+    # wildcard: all identities/digests must be externally observed.
+    if kind == 1: # capability: capability id, probe digest, unavailable status
+        return proof_code > 0 and a != 0u64 and b != 0u64 and c == 0u64 and count == 1
+    if kind == 2: # fixture: fixture id, inventory digest, absence observations
+        return proof_code == 1 and a != 0u64 and b != 0u64 and c == 0u64 and count > 0
+    if kind == 3: # platform: required id and unequal observed platform id
+        return proof_code == 1 and a != 0u64 and b != 0u64 and a != b
+            and c != 0u64 and count == 1
+    if kind == 4: # safety: policy digest, authority id, prohibition clause
+        return proof_code > 0 and a != 0u64 and b != 0u64 and c != 0u64 and count == 1
+    if kind == 5: # nondeterminism: source, sampling digest, failed bound
+        return proof_code > 0 and a != 0u64 and b != 0u64 and c != 0u64 and count >= 2
+    false
+
+fn validate_mcdc_exclusion_evidence_v1(
+        row: [u8], trusted_public_key: [u8], expected_kind: i64,
+        expected_scenario: u64, expected_code: u64, expected_capability: u64,
+        expected_owner: u64, expected_decision: u64, expected_source: u64,
+        expected_mask: u64, expected_condition_count: i64,
+        expected_digest: text, expected_observed_epoch: i64,
+        current_epoch: i64) -> McdcExclusionEvidenceReceiptV1:
+    if row.len() != MCDC_EXCLUSION_EVIDENCE_V1_BYTES
+            or trusted_public_key.len() != 32 or current_epoch < 0:
+        return _ev_empty(McdcExclusionEvidenceStatusV1.Malformed)
+    if row[0] != 77u8 or row[1] != 67u8 or row[2] != 68u8 or row[3] != 69u8
+            or row[4] != 86u8 or row[5] != 82u8 or row[6] != 49u8 or row[7] != 0u8
+            or _ev_u32(row, 8) != 1 or _ev_u32(row, 20) != 0:
+        return _ev_empty(McdcExclusionEvidenceStatusV1.Malformed)
+    val kind = _ev_u32(row, 12)
+    val flags = _ev_u32(row, 16)
+    if (flags & 1) == 0 or (flags & ~3) != 0:
+        return _ev_empty(McdcExclusionEvidenceStatusV1.Malformed)
+    if (flags & 2) != 0:
+        return _ev_empty(McdcExclusionEvidenceStatusV1.LocallyProducible)
+    var reserved = 148
+    while reserved < MCDC_EXCLUSION_EVIDENCE_SIGNED_BYTES:
+        if row[reserved] != 0u8:
+            return _ev_empty(McdcExclusionEvidenceStatusV1.Malformed)
+        reserved = reserved + 1
+    val observed = _ev_u64(row, 24) as i64
+    val expires = _ev_u64(row, 32) as i64
+    if observed <= 0 or observed > current_epoch or expires <= current_epoch
+            or current_epoch - observed > MCDC_EXCLUSION_EVIDENCE_MAX_AGE
+            or expires - observed > MCDC_EXCLUSION_EVIDENCE_MAX_AGE:
+        return _ev_empty(McdcExclusionEvidenceStatusV1.Stale)
+    val issuer = _ev_u64(row, 72)
+    val executor = _ev_u64(row, 80)
+    if issuer == 0u64 or executor == 0u64 or issuer == executor
+            or issuer != _ev_key_id(trusted_public_key):
+        return _ev_empty(McdcExclusionEvidenceStatusV1.UntrustedIssuer)
+    val proof_code = _ev_u32(row, 116)
+    val proof_a = _ev_u64(row, 120)
+    val proof_b = _ev_u64(row, 128)
+    val proof_c = _ev_u64(row, 136)
+    val proof_count = _ev_u32(row, 144)
+    if not _ev_proof_valid(kind, proof_code, proof_a, proof_b, proof_c, proof_count):
+        return _ev_empty(McdcExclusionEvidenceStatusV1.InvalidProof)
+    if kind != expected_kind or _ev_u64(row, 40) != expected_scenario
+            or _ev_u64(row, 48) != expected_code
+            or _ev_u64(row, 56) != expected_capability
+            or _ev_u64(row, 64) != expected_owner
+            or _ev_u64(row, 88) != expected_decision
+            or _ev_u64(row, 96) != expected_source
+            or _ev_u64(row, 104) != expected_mask
+            or _ev_u32(row, 112) != expected_condition_count
+            or observed != expected_observed_epoch:
+        return _ev_empty(McdcExclusionEvidenceStatusV1.Mismatched)
+    val message = _ev_slice(row, 0, MCDC_EXCLUSION_EVIDENCE_SIGNED_BYTES)
+    if not _ev_digest_matches(message, expected_digest):
+        return _ev_empty(McdcExclusionEvidenceStatusV1.Mismatched)
+    val signature = _ev_slice(row, MCDC_EXCLUSION_EVIDENCE_SIGNED_BYTES, 64)
+    if not pure_ed25519_verify(trusted_public_key, message, signature):
+        return _ev_empty(McdcExclusionEvidenceStatusV1.InvalidSignature)
+    McdcExclusionEvidenceReceiptV1(status: McdcExclusionEvidenceStatusV1.Accepted,
+        kind_id: kind, observed_epoch: observed, expiry_epoch: expires,
+        issuer_id: issuer, executor_id: executor, proof_code: proof_code,
+        proof_a: proof_a, proof_b: proof_b, proof_c: proof_c,
+        proof_count: proof_count)
+
+export MCDC_EXCLUSION_EVIDENCE_V1_BYTES, MCDC_EXCLUSION_EVIDENCE_SIGNED_BYTES
+export MCDC_EXCLUSION_EVIDENCE_MAX_ROWS, MCDC_EXCLUSION_EVIDENCE_MAX_AGE
+export McdcExclusionEvidenceStatusV1, McdcExclusionEvidenceReceiptV1
+export validate_mcdc_exclusion_evidence_v1
+export encode_mcdc_exclusion_evidence_unsigned_v1
+export seal_mcdc_exclusion_evidence_v1, mcdc_exclusion_evidence_digest_v1
+export mcdc_exclusion_evidence_trust_key_id_v1

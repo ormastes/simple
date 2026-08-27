@@ -2,16 +2,20 @@
 
 > This offline system specification exercises the accepted Claude CLI feature map without network access. The provider cases use the production argument builder, structured-response parser, and dispatch path with a local executable fixture. Hidden command checks use production fast-mode and remote-review command gates.
 
-| Tests | Active | Skipped | Pending |
-|-------|--------|---------|--------:|
-| 8 | 8 | 0 | 0 |
+| Tests | Active | Skipped | Pending | Executed |
+|-------|--------|---------|---------|---------:|
+| 8 | 8 | 0 | 0 | 0 |
+
+> Execution status: designed and manually synchronized. The current
+> self-hosted runner cannot resolve its process-spawn boundary, so this manual
+> does not claim an executable PASS.
 
 <details>
 <summary>Full Scenario Manual</summary>
 
 # LLM Caret Claude CLI Feature Contract
 
-This offline system specification exercises the accepted Claude CLI feature map without network access. The provider cases use the production argument builder, structured-response parser, and dispatch path with a local executable fixture. Hidden command checks use production fast-mode and remote-review command gates.
+This offline system specification exercises the accepted Claude CLI feature map without network access. The provider cases use the production argument builder and structured-response parser. Hidden command checks use production fast-mode and remote-review command gates.
 
 ## At a Glance
 
@@ -24,8 +28,8 @@ This offline system specification exercises the accepted Claude CLI feature map 
 | Design | doc/05_design/llm_caret_claude_cli_full_parity.md |
 | Research | doc/01_research/local/llm_caret_claude_cli_harden.md |
 | Source | `test/03_system/tools/llm/llm_caret_claude_cli_feature_contract_spec.spl` |
-| Updated | 2026-08-26 |
-| Generator | `simple spipe-docgen` (Simple) |
+| Updated | 2026-07-24 |
+| Generator | Manual synchronization; executable docgen is runtime-blocked |
 
 ## Overview
 
@@ -190,26 +194,103 @@ the traceability, full-parity inventory, implementation, and opt-in live gates.
 ### REQ-LLM-CARET-FULL-003: accepted CLI provider features
 
 #### should map production CLI argument and response behavior
-#### should reject malformed and contract-free response envelopes
 
-- should reject malformed and contract-free response envelopes
-- Parse invalid single-shot response envelopes
-- Check typed response validation
-- Parse invalid stream envelopes
-- Check typed stream validation
-   - Expected: forged.stop_reason equals `invalid`
-   - Expected: empty_result.stop_reason equals `invalid`
+- Load the accepted Claude feature map
+   - Expected: cases.len() equals `3`
+- Invoke the caret CLI provider
+- Check the structured CLI response
+- check cli result
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 27 lines folded for reproduction.
+Runnable source: 62 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("should reject malformed and contract-free response envelopes")
+step("Load the accepted Claude feature map")
+expect(file_exists(FEATURE_MAP)).to_be(true)
+val feature_map = file_read(FEATURE_MAP)
+expect(feature_map).to_contain("\tcli\t")
+expect(feature_map).to_contain("commands/fast")
+expect(feature_map).to_contain("commands/review")
+
+val cases = setup_cli_fixture()
+expect(cases.len()).to_equal(3)
+for case in cases:
+    step("Invoke the caret CLI provider")
+    val args = build_claude_args(
+        case.prompt,
+        case.model,
+        "json",
+        case.system_prompt,
+        case.session_id,
+        case.max_turns,
+        case.max_tokens,
+        case.json_schema,
+        case.tools,
+        case.extra_args,
+        case.verbose
+    )
+    val response = run_cli_case(case)
+    step("Check the structured CLI response")
+    expect(args).to_contain("-p")
+    expect(args).to_contain(case.prompt)
+    expect(args).to_contain("--output-format")
+    expect(args).to_contain("json")
+    expect(args).to_contain("--max-turns")
+    expect(args).to_contain(case.max_turns.to_text())
+    var unsupported_count = 0
+    for arg in args:
+        if arg == "--max-tokens":
+            unsupported_count = unsupported_count + 1
+    expect(unsupported_count).to_equal(0)
+    if case.json_schema != "":
+        expect(args).to_contain("--json-schema")
+        expect(args).to_contain(case.json_schema)
+    if case.model != "":
+        expect(args).to_contain("--model")
+        expect(args).to_contain(case.model)
+    if case.system_prompt != "":
+        expect(args).to_contain("--system-prompt")
+        expect(args).to_contain(case.system_prompt)
+    if case.session_id != "":
+        expect(args).to_contain("--resume")
+        expect(args).to_contain(case.session_id)
+    for tool in case.tools:
+        expect(args).to_contain(tool)
+    if case.tools.len() > 0:
+        var allowed_tools_flags = 0
+        for arg in args:
+            if arg == "--allowedTools":
+                allowed_tools_flags = allowed_tools_flags + 1
+        expect(allowed_tools_flags).to_equal(1)
+    for arg in case.extra_args:
+        expect(args).to_contain(arg)
+    if case.verbose:
+        expect(args).to_contain("--verbose")
+    check_cli_result(case, response)
+```
+
+</details>
+
+#### should reject malformed and contract-free response envelopes
+
+- Parse invalid single-shot response envelopes
+   - Expected: malformed JSON, a missing result, and a non-string result fail.
+- Check typed response validation
+- Parse invalid stream envelopes
+   - Expected: an unsupported event and a result without content are invalid.
+- Check typed stream validation
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 25 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
 step("Parse invalid single-shot response envelopes")
 val malformed = parse_claude_json_response("not-json")
 val missing = parse_claude_json_response("{}")
@@ -241,29 +322,23 @@ expect(empty_result.content).to_contain("missing result")
 
 #### should forward schema tools and extras through production dispatch
 
-- should forward schema tools and extras through production dispatch
 - Invoke baseline Claude CLI provider dispatch
+   - Expected: success preserves content, session, and usage.
+   - Expected: failure preserves an error while redacting its secret.
 - Check baseline dispatch and redaction
-   - Expected: baseline.content equals `fixture-ok`
-   - Expected: baseline.session_id equals `resume-1`
-   - Expected: baseline.input_tokens equals `11`
-   - Expected: baseline.output_tokens equals `3`
-   - Expected: baseline_error.stop_reason equals `error`
 - Invoke advanced Claude CLI provider dispatch
 - Check advanced argument forwarding
-   - Expected: response.content equals `advanced-ok`
+   - Expected: schema, tool, and extra arguments produce `advanced-ok`.
 - Reject advanced CLI arguments for another provider
-
+   - Expected: non-Claude providers reject Claude-only arguments.
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 41 lines folded for reproduction.
+Runnable source: 39 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("should forward schema tools and extras through production dispatch")
 step("Invoke baseline Claude CLI provider dispatch")
 val baseline = dispatch_send(
     "claude_cli", "fixture-success", "sonnet", "", "", MOCK_CLAUDE,
@@ -309,63 +384,26 @@ expect(rejected.error).to_contain("require claude_cli")
 
 #### should preserve and redact a provider stream error
 
-- should preserve and redact a provider stream error
 - Build and parse valid stream envelopes
+   - Expected: stream arguments force `stream-json` and verbose output.
+   - Expected: system, assistant, result, and structured-result fields survive.
 - Check valid stream envelopes
-   - Expected: init_event.event_type equals `system`
-   - Expected: init_event.session_id equals `stream-session`
-   - Expected: assistant_event.event_type equals `assistant`
-   - Expected: assistant_event.content equals `streamed`
-   - Expected: result_event.event_type equals `result`
-   - Expected: result_event.content equals `complete`
-   - Expected: result_event.output_tokens equals `2`
-   - Expected: structured_event.event_type equals `result`
-   - Expected: structured_event.content equals `{"answer":42}`
 - Invoke complete and fail-closed stream fixtures
 - Check stream completion and fail-closed errors
-   - Expected: stream_events.len() equals `3`
-   - Expected: stream_events[0].event_type equals `system`
-   - Expected: stream_events[0].session_id equals `stream-session`
-   - Expected: stream_events[1].event_type equals `assistant`
-   - Expected: stream_events[1].content equals `streamed fixture`
-   - Expected: stream_events[2].event_type equals `result`
-   - Expected: stream_events[2].content equals `stream complete`
-   - Expected: stream_events[2].output_tokens equals `3`
-   - Expected: stream_errors.len() equals `1`
-   - Expected: stream_errors[0].event_type equals `error`
-   - Expected: empty_stream.len() equals `1`
-   - Expected: empty_stream[0].event_type equals `error`
-   - Expected: malformed_stream.len() equals `1`
-   - Expected: malformed_stream[0].event_type equals `error`
-   - Expected: malformed_stream[0].stop_reason equals `invalid`
-   - Expected: mixed_stream.len() equals `1`
-   - Expected: mixed_stream[0].stop_reason equals `invalid`
-   - Expected: duplicate_terminal.len() equals `1`
-   - Expected: duplicate_terminal[0].stop_reason equals `invalid`
-   - Expected: stop_then_result.len() equals `2`
-   - Expected: stop_then_result[0].event_type equals `message_stop`
-   - Expected: stop_then_result[1].event_type equals `result`
-   - Expected: stop_then_result[1].content equals `complete`
-   - Expected: incomplete_stream.len() equals `2`
-   - Expected: incomplete_stream[1].event_type equals `error`
-   - Expected: protocol_error.len() equals `1`
-   - Expected: protocol_error[0].stop_reason equals `error`
+   - Expected: complete streams retain all three events.
+   - Expected: malformed/mixed streams and duplicate terminals fail closed.
+   - Expected: `message_stop` followed by the final result remains valid.
 - Invoke the provider-error NDJSON fixture
 - Check the structured stream error
-   - Expected: events.len() equals `1`
-   - Expected: events[0].event_type equals `error`
-   - Expected: events[0].stop_reason equals `error`
-
+   - Expected: one provider diagnostic is preserved while its secret is redacted.
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 114 lines folded for reproduction.
+Runnable source: 112 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("should preserve and redact a provider stream error")
 step("Build and parse valid stream envelopes")
 val stream_args = build_claude_stream_args(
     "stream prompt", "sonnet", "Be concise", "", 1
@@ -484,29 +522,20 @@ expect(events[0].content.contains("sk-ant-fixture-secret")).to_be(false)
 
 #### should execute the direct Claude sender and fail closed
 
-- should execute the direct Claude sender and fail closed
 - Invoke the direct Claude CLI sender
 - Check every direct response field
-   - Expected: response.content equals `fixture-ok`
-   - Expected: response.model equals `sonnet`
-   - Expected: response.session_id equals `resume-1`
-   - Expected: response.stop_reason equals `end_turn`
-   - Expected: response.input_tokens equals `11`
-   - Expected: response.output_tokens equals `3`
+   - Expected: content, model, session, stop reason, usage, and raw response survive.
 - Reject malformed output and a missing executable
-   - Expected: missing.content equals ``
-   - Expected: missing.stop_reason equals `error`
-
+   - Expected: malformed stdout and a missing executable return structured errors.
+   - Expected: direct-sender stderr is redacted and never exposes the fixture secret.
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 39 lines folded for reproduction.
+Runnable source: 37 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("should execute the direct Claude sender and fail closed")
 step("Invoke the direct Claude CLI sender")
 val response = claude_cli_send(
     MOCK_CLAUDE, "fixture-success", "sonnet",
@@ -550,29 +579,20 @@ expect(missing.stop_reason).to_equal("error")
 
 #### should route the public API history and redact provider failures
 
-- should route the public API history and redact provider failures
 - Invoke successful public Claude CLI chat
 - Check successful public history
-   - Expected: response equals `fixture-ok`
-   - Expected: llm_history_len() equals `2`
-   - Expected: llm_history_role(0) equals `user`
-   - Expected: llm_history_content(0) equals `fixture-success`
-   - Expected: llm_history_role(1) equals `assistant`
-   - Expected: llm_history_content(1) equals `fixture-ok`
+   - Expected: the exact user prompt and assistant response remain in history.
 - Invoke failing public Claude CLI chat
 - Check redacted public failure history
-   - Expected: llm_history_len() equals `1`
-
+   - Expected: a failed assistant turn is not added and its secret is redacted.
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 29 lines folded for reproduction.
+Runnable source: 27 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("should route the public API history and redact provider failures")
 step("Invoke successful public Claude CLI chat")
 llm_clear()
 llm_init("claude_cli", "sonnet")
@@ -606,27 +626,20 @@ llm_clear()
 
 #### should isolate public initialization and failed provider sessions
 
-- should isolate public initialization and failed provider sessions
 - Reset public system prompt state on initialization
-   - Expected: llm_send("fixture-no-system") equals `no-system-ok`
-   - Expected: llm_provider() equals `claude_cli`
-   - Expected: llm_model() equals `sonnet`
+   - Expected: the new client does not inherit a stale prompt.
 - Keep an error response from poisoning the provider session
-   - Expected: llm_send("fixture-success") equals `fixture-ok`
+   - Expected: the failed session is not reused by the next success.
 - Restore public defaults
-   - Expected: llm_provider() equals `claude_cli`
-   - Expected: llm_model() equals ``
-
+   - Expected: provider and model return to their default identities.
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 27 lines folded for reproduction.
+Runnable source: 25 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("should isolate public initialization and failed provider sessions")
 step("Reset public system prompt state on initialization")
 llm_init("claude_cli", "sonnet")
 llm_set_cli_path(MOCK_CLAUDE)
@@ -660,21 +673,19 @@ llm_clear()
 
 #### should keep gated and permanently hidden commands unavailable
 
-- should keep gated and permanently hidden commands unavailable
 - Enable the hidden-feature fixture
    - Expected: fixtures.len() equals `2`
 - Check the hidden-feature gate
+- check hidden feature gate
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-SYSTEM
-step("should keep gated and permanently hidden commands unavailable")
 step("Enable the hidden-feature fixture")
 val fixtures = setup_hidden_feature_fixture()
 expect(fixtures.len()).to_equal(2)
@@ -693,6 +704,7 @@ check_hidden_feature_gate(fixtures)
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
+| Executed scenarios | 0 |
 
 
 ## Related Documentation
@@ -704,81 +716,3 @@ check_hidden_feature_gate(fixtures)
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-SYSTEM`
-- `REQ-LLM-CARET-FULL-003`
-- `REQ-LLM-CARET-FULL-006`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `932941da98f8091125c13d6b17799ab4ecd835d659c0bf6e7cc1d89811e90ac5`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `932941da98f8091125c13d6b17799ab4ecd835d659c0bf6e7cc1d89811e90ac5`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `932941da98f8091125c13d6b17799ab4ecd835d659c0bf6e7cc1d89811e90ac5`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **74/100**; effective score: **49/100**; blockers: **1**.
-
-SSpec documentization score: 49/100
-source: test/03_system/tools/llm/llm_caret_claude_cli_feature_contract_spec.spl
-mirror: doc/06_spec/03_system/tools/llm/llm_caret_claude_cli_feature_contract_spec.md (current)
-findings: 14 blockers: 1
-  narrative=100 structure=60 oracle=70
-  traceability=60 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-  raw=74; blocker cap makes effective=49
-doc/06_spec/03_system/tools/llm/llm_caret_claude_cli_feature_contract_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/tools/llm/llm_caret_claude_cli_feature_contract_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, assumptions/preconditions, primary workflow, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/tools/llm/llm_caret_claude_cli_feature_contract_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 19 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/03_system/tools/llm/llm_caret_claude_cli_feature_contract_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 2 declared requirement(s) have no scenario binding
-  why: A requirement list without scenario evidence is inventory, not traceability.
-  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
-test/03_system/tools/llm/llm_caret_claude_cli_feature_contract_spec.spl:313:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'should map production CLI argument and response behavior' has no visible step flow
-  why: Ordered visible actions make the manual operable.
-  improve: Add ordered step("...") calls for meaningful actions.
-test/03_system/tools/llm/llm_caret_claude_cli_feature_contract_spec.spl:313:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should map production CLI argument and response behavior' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/03_system/tools/llm/llm_caret_claude_cli_feature_contract_spec.spl:382:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should reject malformed and contract-free response envelopes' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/03_system/tools/llm/llm_caret_claude_cli_feature_contract_spec.spl:382:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should reject malformed and contract-free response envelopes' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/tools/llm/llm_caret_claude_cli_feature_contract_spec.spl:411:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should forward schema tools and extras through production dispatch' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/03_system/tools/llm/llm_caret_claude_cli_feature_contract_spec.spl:411:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should forward schema tools and extras through production dispatch' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/tools/llm/llm_caret_claude_cli_feature_contract_spec.spl:454:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should preserve and redact a provider stream error' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/03_system/tools/llm/llm_caret_claude_cli_feature_contract_spec.spl:454:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should preserve and redact a provider stream error' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/tools/llm/llm_caret_claude_cli_feature_contract_spec.spl:570:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should execute the direct Claude sender and fail closed' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/03_system/tools/llm/llm_caret_claude_cli_feature_contract_spec.spl:611:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should route the public API history and redact provider failures' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-<!-- sspec-maintain:scorecard:end -->

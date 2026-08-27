@@ -1,6 +1,29 @@
 # Math Utils Specification
 
-> Tests covering Math Utilities, Absolute Value, Min/Max, Clamp, Sign, Power, GCD and LCM, Factorial and Binomial, Even/Odd, Divisibility, Range, Statistics.
+> 1. expect abs i64
+
+<!-- sdn-diagram:id=math_utils_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=math_utils_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+math_utils_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=math_utils_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -19,18 +42,16 @@
 
 #### returns positive for positive
 
-- returns positive for positive
+1. expect abs i64
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("returns positive for positive")
 expect abs_i64(5) == 5
 ```
 
@@ -38,18 +59,16 @@ expect abs_i64(5) == 5
 
 #### returns positive for negative
 
-- returns positive for negative
+1. expect abs i64
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("returns positive for negative")
 expect abs_i64(-5) == 5
 ```
 
@@ -57,18 +76,16 @@ expect abs_i64(-5) == 5
 
 #### returns zero for zero
 
-- returns zero for zero
+1. expect abs i64
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("returns zero for zero")
 expect abs_i64(0) == 0
 ```
 
@@ -78,18 +95,17 @@ expect abs_i64(0) == 0
 
 #### min returns smaller
 
-- min returns smaller
+1. expect min i64
+2. expect min i64
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("min returns smaller")
 expect min_i64(a=5, b=10) == 5
 expect min_i64(a=-5, b=3) == -5
 ```
@@ -98,18 +114,17 @@ expect min_i64(a=-5, b=3) == -5
 
 #### max returns larger
 
-- max returns larger
+1. expect max i64
+2. expect max i64
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("max returns larger")
 expect max_i64(a=5, b=10) == 10
 expect max_i64(a=-5, b=3) == 3
 ```
@@ -120,18 +135,16 @@ expect max_i64(a=-5, b=3) == 3
 
 #### clamps within range
 
-- clamps within range
+1. expect clamp i64
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("clamps within range")
 expect clamp_i64(x=5, min_val=0, max_val=10) == 5
 ```
 
@@ -139,18 +152,16 @@ expect clamp_i64(x=5, min_val=0, max_val=10) == 5
 
 #### clamps below min
 
-- clamps below min
+1. expect clamp i64
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("clamps below min")
 expect clamp_i64(x=-5, min_val=0, max_val=10) == 0
 ```
 
@@ -158,18 +169,16 @@ expect clamp_i64(x=-5, min_val=0, max_val=10) == 0
 
 #### clamps above max
 
-- clamps above max
+1. expect clamp i64
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("clamps above max")
 expect clamp_i64(x=15, min_val=0, max_val=10) == 10
 ```
 
@@ -179,18 +188,16 @@ expect clamp_i64(x=15, min_val=0, max_val=10) == 10
 
 #### returns 1 for positive
 
-- returns 1 for positive
+1. expect sign i64
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("returns 1 for positive")
 expect sign_i64(5) == 1
 ```
 
@@ -198,18 +205,16 @@ expect sign_i64(5) == 1
 
 #### returns -1 for negative
 
-- returns -1 for negative
+1. expect sign i64
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("returns -1 for negative")
 expect sign_i64(-5) == -1
 ```
 
@@ -217,18 +222,16 @@ expect sign_i64(-5) == -1
 
 #### returns 0 for zero
 
-- returns 0 for zero
+1. expect sign i64
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("returns 0 for zero")
 expect sign_i64(0) == 0
 ```
 
@@ -238,18 +241,17 @@ expect sign_i64(0) == 0
 
 #### calculates powers
 
-- calculates powers
+1. expect pow i64
+2. expect pow i64
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("calculates powers")
 expect pow_i64(base=2, exp=3) == 8
 expect pow_i64(base=3, exp=2) == 9
 ```
@@ -258,18 +260,16 @@ expect pow_i64(base=3, exp=2) == 9
 
 #### handles zero exponent
 
-- handles zero exponent
+1. expect pow i64
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("handles zero exponent")
 expect pow_i64(base=10, exp=0) == 1
 ```
 
@@ -277,18 +277,16 @@ expect pow_i64(base=10, exp=0) == 1
 
 #### handles zero base
 
-- handles zero base
+1. expect pow i64
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("handles zero base")
 expect pow_i64(base=0, exp=5) == 0
 ```
 
@@ -296,18 +294,17 @@ expect pow_i64(base=0, exp=5) == 0
 
 #### handles negative base
 
-- handles negative base
+1. expect pow i64
+2. expect pow i64
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("handles negative base")
 expect pow_i64(base=-2, exp=3) == -8
 expect pow_i64(base=-2, exp=4) == 16
 ```
@@ -318,28 +315,9 @@ expect pow_i64(base=-2, exp=4) == 16
 
 #### calculates gcd
 
-- calculates gcd
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 5 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-UNIT
-step("calculates gcd")
-expect gcd(a=12, b=8) == 4
-expect gcd(a=21, b=14) == 7
-expect gcd(a=17, b=19) == 1
-```
-
-</details>
-
-#### gcd with same number
-
-- gcd with same number
+1. expect gcd
+2. expect gcd
+3. expect gcd
 
 
 <details>
@@ -349,8 +327,25 @@ Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("gcd with same number")
+expect gcd(a=12, b=8) == 4
+expect gcd(a=21, b=14) == 7
+expect gcd(a=17, b=19) == 1
+```
+
+</details>
+
+#### gcd with same number
+
+1. expect gcd
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
 expect gcd(a=10, b=10) == 10
 ```
 
@@ -358,18 +353,17 @@ expect gcd(a=10, b=10) == 10
 
 #### gcd with zero
 
-- gcd with zero
+1. expect gcd
+2. expect gcd
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("gcd with zero")
 expect gcd(a=0, b=5) == 5
 expect gcd(a=5, b=0) == 5
 ```
@@ -378,18 +372,17 @@ expect gcd(a=5, b=0) == 5
 
 #### calculates lcm
 
-- calculates lcm
+1. expect lcm
+2. expect lcm
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("calculates lcm")
 expect lcm(a=4, b=6) == 12
 expect lcm(a=3, b=5) == 15
 ```
@@ -400,18 +393,18 @@ expect lcm(a=3, b=5) == 15
 
 #### calculates factorial
 
-- calculates factorial
+1. expect factorial
+2. expect factorial
+3. expect factorial
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("calculates factorial")
 expect factorial(0) == 1
 expect factorial(1) == 1
 expect factorial(5) == 120
@@ -421,18 +414,19 @@ expect factorial(5) == 120
 
 #### calculates binomial
 
-- calculates binomial
+1. expect binomial
+2. expect binomial
+3. expect binomial
+4. expect binomial
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("calculates binomial")
 expect binomial(n=5, k=2) == 10
 expect binomial(n=4, k=2) == 6
 expect binomial(n=5, k=0) == 1
@@ -445,18 +439,19 @@ expect binomial(n=5, k=5) == 1
 
 #### detects even
 
-- detects even
+1. expect is even
+2. expect is even
+3. expect is even
+4. expect not is even
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("detects even")
 expect is_even(0)
 expect is_even(2)
 expect is_even(-4)
@@ -467,18 +462,18 @@ expect not is_even(1)
 
 #### detects odd
 
-- detects odd
+1. expect is odd
+2. expect is odd
+3. expect not is odd
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("detects odd")
 expect is_odd(1)
 expect is_odd(3)
 expect not is_odd(0)
@@ -490,18 +485,18 @@ expect not is_odd(0)
 
 #### checks divisibility
 
-- checks divisibility
+1. expect is divisible by
+2. expect is divisible by
+3. expect not is divisible by
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("checks divisibility")
 expect is_divisible_by(x=10, d=2)
 expect is_divisible_by(x=15, d=5)
 expect not is_divisible_by(x=7, d=3)
@@ -513,18 +508,18 @@ expect not is_divisible_by(x=7, d=3)
 
 #### checks in range
 
-- checks in range
+1. expect in range i64
+2. expect not in range i64
+3. expect not in range i64
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("checks in range")
 expect in_range_i64(x=5, min_val=0, max_val=10)
 expect not in_range_i64(x=-1, min_val=0, max_val=10)
 expect not in_range_i64(x=11, min_val=0, max_val=10)
@@ -536,18 +531,16 @@ expect not in_range_i64(x=11, min_val=0, max_val=10)
 
 #### calculates sum
 
-- calculates sum
+1. expect sum i64
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("calculates sum")
 expect sum_i64([1, 2, 3, 4, 5]) == 15
 ```
 
@@ -555,18 +548,16 @@ expect sum_i64([1, 2, 3, 4, 5]) == 15
 
 #### sum of empty is 0
 
-- sum of empty is 0
+1. expect sum i64
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("sum of empty is 0")
 val empty_list: [i64] = []
 expect sum_i64(empty_list) == 0
 ```
@@ -575,18 +566,16 @@ expect sum_i64(empty_list) == 0
 
 #### calculates product
 
-- calculates product
+1. expect product i64
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("calculates product")
 expect product_i64([2, 3, 4]) == 24
 ```
 
@@ -594,18 +583,16 @@ expect product_i64([2, 3, 4]) == 24
 
 #### product of empty is 1
 
-- product of empty is 1
+1. expect product i64
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("product of empty is 1")
 val empty_list: [i64] = []
 expect product_i64(empty_list) == 1
 ```
@@ -614,18 +601,13 @@ expect product_i64(empty_list) == 1
 
 #### calculates average
 
-- calculates average
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("calculates average")
 val result = average_i64([1, 2, 3, 4, 5])
 expect result == 3
 ```
@@ -634,18 +616,13 @@ expect result == 3
 
 #### average of empty is nil
 
-- average of empty is nil
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("average of empty is nil")
 val empty_list: [i64] = []
 val result = average_i64(empty_list)
 expect result == nil
@@ -655,18 +632,13 @@ expect result == nil
 
 #### calculates median odd
 
-- calculates median odd
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("calculates median odd")
 val result = median_i64([1, 2, 3, 4, 5])
 expect result == 3
 ```
@@ -675,18 +647,13 @@ expect result == 3
 
 #### calculates median even
 
-- calculates median even
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("calculates median even")
 val result = median_i64([1, 2, 3, 4])
 expect result == 2
 ```
@@ -700,12 +667,12 @@ expect result == 2
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/tooling/math_utils_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering Math Utilities, Absolute Value, Min/Max, Clamp, Sign, Power, GCD and LCM, Factorial and Binomial, Even/Odd, Divisibility, Range, Statistics.
+Tests covering:
 - Math Utilities
 - Absolute Value
 - Min/Max
@@ -731,51 +698,3 @@ Tests covering Math Utilities, Absolute Value, Min/Max, Clamp, Sign, Power, GCD 
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-UNIT`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `095026a74c046edbb061aa202e9dd4a2390be9071c3fa2f2648c9750b790c625`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `095026a74c046edbb061aa202e9dd4a2390be9071c3fa2f2648c9750b790c625`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `095026a74c046edbb061aa202e9dd4a2390be9071c3fa2f2648c9750b790c625`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/01_unit/app/tooling/math_utils_spec.spl
-mirror: doc/06_spec/01_unit/app/tooling/math_utils_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/app/tooling/math_utils_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/app/tooling/math_utils_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/app/tooling/math_utils_spec.spl:40:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'returns positive for positive' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/tooling/math_utils_spec.spl:45:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'returns positive for negative' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/tooling/math_utils_spec.spl:50:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'returns zero for zero' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

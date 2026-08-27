@@ -23,8 +23,7 @@ Date: 2026-06-25
 - `chat_template_status`: `none`, `present`, or `missing`
 - `lora_adapter_count`: integer count without adapter paths
 - `dynamic_lora_status`: `disabled`, `trusted`, or `blocked`
-- `torch_ready`: `ready`, `unavailable`, `blocked`, or `unchecked` depending
-  on the owner Torch/SFFI readiness facade or deterministic test injection
+- `torch_ready`: `blocked` or `unchecked` in Option A
 - `evidence_jsonl`: one SPipe/dashboard diagnostics event
 
 `LlmRuntimeServePlan`:
@@ -52,24 +51,15 @@ Date: 2026-06-25
 6. Generate a sanitized static serve-plan event when requested; do not start
    vLLM or probe HTTP in this slice.
 7. Let the existing dashboard diagnostics collector summarize that event.
-8. Parse already-fetched `/v1/models` response bodies before transport; report
-   ready, auth rejection, malformed, wrong-model, invalid-endpoint, and
-   redaction outcomes without exposing private model identifiers.
-9. Keep live request planning separate from transport. Build sanitized
-   `/v1/models` and `/v1/chat/completions` plans first, reject invalid
-   endpoints, and block unsupported chat parameters at the planner boundary.
+8. Defer live `/v1/models` probing to the live vLLM option.
+9. For the live vLLM option, parse already-fetched `/v1/models` response
+   bodies first. Transport and process supervision are separate follow-on work.
 10. Build sanitized request-plan metadata for `/v1/models` and
-    `/v1/chat/completions` before HTTP transport. Transport uses the existing
-    owner HTTP facade only after planning succeeds.
-11. Parse already-fetched `/v1/chat/completions` response bodies and redact
-    generated assistant content from public evidence.
-12. Gate `vllm serve` lifecycle through sanitized serve plans and owner process
-    facades. Treat spawn success as process evidence only; endpoint readiness
-    still requires observed transport/probe evidence.
-13. Route dashboard control requests through the runtime owner boundary.
-    Preflight remains intent-only; side-effecting actions return skipped,
-    blocked, executor-required, or owner execution JSONL without letting
-    dashboard rendering import process or HTTP backends.
+    `/v1/chat/completions` before adding HTTP transport. Unsupported chat
+    parameters block at the planner boundary.
+11. Parse already-fetched `/v1/chat/completions` response bodies before adding
+    transport. Public evidence must report status and counts without exposing
+    generated assistant content.
 
 ## Error Handling
 
@@ -82,16 +72,12 @@ Date: 2026-06-25
   `status=missing` with `reason=invalid_endpoint`.
 - Malformed adapter entries become `reason=invalid_adapter_entry` instead of
   being silently dropped.
-- Known Torch/SFFI or Slang loader placeholder behavior becomes
+- Known Torch/SFFI or svLLM loader placeholder behavior becomes
   `status=blocked`; it must not be normalized into `ready`.
-- Missing local vLLM or GPU resources become `skipped` or `blocked` evidence
-  before spawn/fetch paths are attempted.
-- Non-positive internal process sentinels render as public pid `0` in JSONL,
-  text, and HTML.
 
 ## Test Design
 
-- Manifest with base model and no LoRA is blocked by default while Torch/Slang
+- Manifest with base model and no LoRA is blocked by default while Torch/svLLM
   placeholder readiness remains unresolved.
 - Absent chat template is reported as `none`; a configured but missing chat
   template path is reported as `missing`.
@@ -112,32 +98,21 @@ Date: 2026-06-25
   endpoint credentials,
   and LoRA adapter paths.
 - Malformed adapter tokens and invalid endpoints are reported explicitly.
-- Live vLLM tests cover request planning and already-fetched `/v1/models` and
-  `/v1/chat/completions` response parsing, including base/adapter model
-  selection, auth rejection, malformed responses, wrong model, unsupported
-  parameters, and generated-content redaction.
+- Live vLLM tests, when selected, cover `/v1/models`, `/v1/chat/completions`,
+  base/adapter model selection, auth rejection, and unsupported parameters.
 - The first live `/v1/models` slice covers already-fetched response parsing:
   ready model lists, auth rejection, malformed bodies, wrong-model responses,
   invalid endpoints, and path/sensitive model redaction without exposing the
   internal absence marker.
-- Serve lifecycle and readiness tests prove no-spawn planning failures,
-  process-state adaptation, timeout cleanup policy, skipped local-resource
-  preflight, and observed-readiness summaries without requiring a host vLLM
-  server.
-- Dashboard route specs prove authenticated preflight and deterministic
-  side-effect action JSONL for missing-resource or invalid-pid cases without
-  spawning a process.
 
 ## Ponytail Cut
 
-The first implementation stopped at manifest/probe/evidence, then advanced
-through bounded planning, transport, lifecycle, readiness, and dashboard-control
-evidence without requiring a live vLLM/GPU host. Keep that cut: no trainer, no
-new scheduler, no dynamic adapter plugin, and no claim of live serving until
-real endpoint evidence exists.
+The first implementation should stop at manifest/probe/evidence. No trainer, no
+new scheduler, no vLLM supervisor, and no adapter plugin until live evidence
+requires it.
 
 If implementation starts from the runtime blocker lane instead, the cut is:
-clear the reported Torch availability/seed/device placeholders and Slang loader
+clear the reported Torch availability/seed/device placeholders and svLLM loader
 stubs with focused tests, then return to the readiness bridge.
 
 ## Implemented Option A Evidence
@@ -147,15 +122,13 @@ stubs with focused tests, then return to the readiness bridge.
 - `src/app/llm_runtime/serve_plan.spl`
 - `test/01_unit/app/llm_runtime/vllm_readiness_spec.spl`
 - `test/unit/app/llm_runtime/vllm_readiness_spec.spl`
-- `doc/06_spec/01_unit/app/llm_runtime/vllm_readiness_spec.md`
-- `doc/06_spec/unit/app/llm_runtime/vllm_readiness_spec.md`
 - `test/03_system/app/llm_runtime/feature/vllm_torch_readiness_spec.spl`
 - `doc/06_spec/03_system/app/llm_runtime/feature/vllm_torch_readiness_spec.md`
 
 The implemented bridge validates required local manifest fields, reports
 optional absence with explicit text states, surfaces malformed adapter tokens,
 blocks untrusted dynamic LoRA, omits adapter paths and sensitive-looking model
-labels from JSONL evidence, and keeps Torch/Slang placeholder readiness as
+labels from JSONL evidence, and keeps Torch/svLLM placeholder readiness as
 `blocked` by default while those owner modules are known placeholders. The
 static serve-plan path emits sanitized vLLM command metadata and rejects invalid
 endpoints without starting vLLM or probing live HTTP endpoints.
@@ -309,8 +282,8 @@ Runtime-adjacent decision record:
 - `src/app/web_dashboard/server.spl`
 - `test/01_unit/app/llm_dashboard/collectors/vllm_control_panel_spec.spl`
 - `test/unit/app/llm_dashboard/collectors/vllm_control_panel_spec.spl`
-- `doc/06_spec/01_unit/app/llm_dashboard/collectors/vllm_control_panel_spec.md`
-- `doc/06_spec/unit/app/llm_dashboard/collectors/vllm_control_panel_spec.md`
+- `doc/06_spec/test/01_unit/app/llm_dashboard/collectors/vllm_control_panel_spec.md`
+- `doc/06_spec/test/unit/app/llm_dashboard/collectors/vllm_control_panel_spec.md`
 
 The dashboard now renders a vLLM control panel with `preflight`, `start`,
 `poll`, `probe`, and `stop` intents and exposes `/api/vllm/control` for
@@ -346,8 +319,8 @@ Runtime-adjacent decision record:
 - `src/app/llm_runtime/dashboard_live_control_executor.spl`
 - `test/01_unit/app/llm_runtime/vllm_dashboard_live_control_spec.spl`
 - `test/unit/app/llm_runtime/vllm_dashboard_live_control_spec.spl`
-- `doc/06_spec/01_unit/app/llm_runtime/vllm_dashboard_live_control_spec.md`
-- `doc/06_spec/unit/app/llm_runtime/vllm_dashboard_live_control_spec.md`
+- `doc/06_spec/test/01_unit/app/llm_runtime/vllm_dashboard_live_control_spec.md`
+- `doc/06_spec/test/unit/app/llm_runtime/vllm_dashboard_live_control_spec.md`
 
 The runtime now owns dashboard-requested vLLM control execution. The pure
 control module validates `preflight`, `start`, `poll`, `probe`, and `stop`
@@ -378,8 +351,8 @@ Runtime-adjacent decision record:
 - `src/app/llm_runtime/control_cli.spl`
 - `test/01_unit/app/llm_runtime/vllm_control_cli_spec.spl`
 - `test/unit/app/llm_runtime/vllm_control_cli_spec.spl`
-- `doc/06_spec/01_unit/app/llm_runtime/vllm_control_cli_spec.md`
-- `doc/06_spec/unit/app/llm_runtime/vllm_control_cli_spec.md`
+- `doc/06_spec/test/01_unit/app/llm_runtime/vllm_control_cli_spec.md`
+- `doc/06_spec/test/unit/app/llm_runtime/vllm_control_cli_spec.md`
 
 The runtime exposes `control_cli.spl`, which accepts explicit action,
 base-model, endpoint, pid, and local resource flags and emits public JSONL. The
@@ -418,8 +391,8 @@ Runtime-adjacent decision record:
 
 - `test/01_unit/app/cli/llm_runtime_control_command_spec.spl`
 - `test/unit/app/cli/llm_runtime_control_command_spec.spl`
-- `doc/06_spec/01_unit/app/cli/llm_runtime_control_command_spec.md`
-- `doc/06_spec/unit/app/cli/llm_runtime_control_command_spec.md`
+- `doc/06_spec/test/01_unit/app/cli/llm_runtime_control_command_spec.md`
+- `doc/06_spec/test/unit/app/cli/llm_runtime_control_command_spec.md`
 
 Mirrored SPipe coverage now proves the top-level command is registered in the
 canonical CLI command table, routed by the direct dispatcher branch, and shown
@@ -446,8 +419,8 @@ vLLM command logic.
 - `src/app/llm_runtime/control_cli.spl`
 - `test/01_unit/app/llm_runtime/vllm_control_cli_spec.spl`
 - `test/unit/app/llm_runtime/vllm_control_cli_spec.spl`
-- `doc/06_spec/01_unit/app/llm_runtime/vllm_control_cli_spec.md`
-- `doc/06_spec/unit/app/llm_runtime/vllm_control_cli_spec.md`
+- `doc/06_spec/test/01_unit/app/llm_runtime/vllm_control_cli_spec.md`
+- `doc/06_spec/test/unit/app/llm_runtime/vllm_control_cli_spec.md`
 
 The runtime control CLI now accepts `--detect-resources` for local host
 capability classification. When explicit `--vllm-available` or
@@ -478,8 +451,8 @@ Runtime-adjacent decision record:
 - `src/app/web_dashboard/server.spl`
 - `test/01_unit/app/llm_dashboard/collectors/vllm_control_panel_spec.spl`
 - `test/unit/app/llm_dashboard/collectors/vllm_control_panel_spec.spl`
-- `doc/06_spec/01_unit/app/llm_dashboard/collectors/vllm_control_panel_spec.md`
-- `doc/06_spec/unit/app/llm_dashboard/collectors/vllm_control_panel_spec.md`
+- `doc/06_spec/test/01_unit/app/llm_dashboard/collectors/vllm_control_panel_spec.md`
+- `doc/06_spec/test/unit/app/llm_dashboard/collectors/vllm_control_panel_spec.md`
 
 The web dashboard `/api/vllm/control` route now accepts query-style control
 inputs for `action`, `pid`, `base_model`/`base-model`, `endpoint`,
@@ -514,7 +487,7 @@ runtime panic. Torch training seed helpers now return explicit
 SFFI exists. Explicit Torch CUDA device ids now pass through GC/NoGC backend
 placement, `Tensor.cuda`, and stream creation instead of being forced to device
 `0`; optimizer state initialization no longer silently moves state tensors to
-CUDA `0` while device-aware optimizer-state SFFI remains unselected. Slang
+CUDA `0` while device-aware optimizer-state SFFI remains unselected. svLLM
 canonical v0 manifests now parse, non-empty tensor/chunk
 metadata materializes into `TensorPack`, declared chunk digests are shape
 validated, already-read manifests load without throwing, and filesystem-backed
@@ -535,7 +508,7 @@ scheduling or GPU staging. Streaming readiness JSONL now carries a separate
 `local_read_bytes` field so clean pack roots can prove local bytes are readable
 without turning native streaming readiness green. The native capability probe
 now executes the StdFs NVFS client spec and records
-`slang_native_capability_local_read_range_bytes_status` plus a reason field so
+`svllm_native_capability_local_read_range_bytes_status` plus a reason field so
 strict evidence can show local file-backed read-range progress while keeping
 native `read_range`, pinned-buffer registration, and device staging
 unsupported. Remaining blockers include full async NVFS scheduling,
