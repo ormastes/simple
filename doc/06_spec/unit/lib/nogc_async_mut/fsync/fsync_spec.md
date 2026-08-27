@@ -22,7 +22,6 @@
 
 
 - lock and unlock on address 0 complete without error
-   - Expected: 1 equals `1`
 
 
 <details>
@@ -37,7 +36,7 @@ step("lock and unlock on address 0 complete without error")
 val addr: u32 = 0
 fsync_mutex_lock(addr)
 fsync_mutex_unlock(addr)
-expect(1).to_equal(1)
+assert_equal(1, 1)
 ```
 
 </details>
@@ -45,7 +44,6 @@ expect(1).to_equal(1)
 #### lock and unlock on non-zero address complete without error
 
 - lock and unlock on non-zero address complete without error
-   - Expected: 1 equals `1`
 
 
 <details>
@@ -60,7 +58,7 @@ step("lock and unlock on non-zero address complete without error")
 val addr: u32 = 42
 fsync_mutex_lock(addr)
 fsync_mutex_unlock(addr)
-expect(1).to_equal(1)
+assert_equal(1, 1)
 ```
 
 </details>
@@ -68,7 +66,6 @@ expect(1).to_equal(1)
 #### multiple lock/unlock pairs on different addresses do not interfere
 
 - multiple lock/unlock pairs on different addresses do not interfere
-   - Expected: 1 equals `1`
 
 
 <details>
@@ -86,7 +83,7 @@ fsync_mutex_lock(a)
 fsync_mutex_lock(b)
 fsync_mutex_unlock(b)
 fsync_mutex_unlock(a)
-expect(1).to_equal(1)
+assert_equal(1, 1)
 ```
 
 </details>
@@ -98,7 +95,7 @@ expect(1).to_equal(1)
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/unit/lib/nogc_async_mut/fsync/fsync_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-08-27 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -130,42 +127,35 @@ Requirements covered by the scenarios in this manual:
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `fd9490ebeb8d6af56898614aeb576c194e48567018b36e0258cc03789074cfb4`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `48896e8ddcb2ba617b861055ff063ef7514df5add67c1767c291381f92543228`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `fd9490ebeb8d6af56898614aeb576c194e48567018b36e0258cc03789074cfb4`.
+Source SHA-256: `48896e8ddcb2ba617b861055ff063ef7514df5add67c1767c291381f92543228`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `fd9490ebeb8d6af56898614aeb576c194e48567018b36e0258cc03789074cfb4`  
+Source SHA-256: `48896e8ddcb2ba617b861055ff063ef7514df5add67c1767c291381f92543228`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **72/100**; effective score: **49/100**; blockers: **2**.
+Raw score: **89/100**; effective score: **89/100**; blockers: **0**.
 
-SSpec documentization score: 49/100
+SSpec documentization score: 89/100
 source: test/unit/lib/nogc_async_mut/fsync/fsync_spec.spl
 mirror: doc/06_spec/unit/lib/nogc_async_mut/fsync/fsync_spec.md (current)
-findings: 8 blockers: 2
-  narrative=100 structure=100 oracle=0
+findings: 6 blockers: 0
+  narrative=80 structure=100 oracle=100
   traceability=100 evidence=70 coverage=100 maintainability=70
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-  raw=72; blocker cap makes effective=49
 doc/06_spec/unit/lib/nogc_async_mut/fsync/fsync_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
 doc/06_spec/unit/lib/nogc_async_mut/fsync/fsync_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/unit/lib/nogc_async_mut/fsync/fsync_spec.spl:1:1: blocker SSDOC-ORA-001 [oracle] (-50): no real executed assertion or compiler oracle
-  why: A passing-looking document without an oracle is not conformance evidence.
-  improve: Replace placeholders with an observable production assertion.
-test/unit/lib/nogc_async_mut/fsync/fsync_spec.spl:1:1: blocker SSDOC-ORA-002 [oracle] (-50): scenario compares only locally constructed arithmetic or literals
-  why: Source presence or self-created arithmetic does not demonstrate production behavior.
-  improve: Observe runtime behavior or a stable generated artifact instead.
-test/unit/lib/nogc_async_mut/fsync/fsync_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 3 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/unit/lib/nogc_async_mut/fsync/fsync_spec.spl:1:1: warning SSDOC-NAR-001 [narrative] (-20): missing authored purpose and audience
+  why: Readers need scope, audience, and intent before executable detail.
+  improve: Add authored purpose, scope, and audience facts.
 test/unit/lib/nogc_async_mut/fsync/fsync_spec.spl:17:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'lock and unlock on address 0 complete without error' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.

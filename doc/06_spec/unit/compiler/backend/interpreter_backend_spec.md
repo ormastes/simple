@@ -17,15 +17,80 @@
 
 #### creates a backend port with stable metadata
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+<details>
+<summary>Executable SSpec</summary>
 
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
 
-- creates a backend port with stable metadata
-   - Expected: backend.name equals `interpreter`
-   - Expected: target_triple() equals `interpreter-simple-runtime`
-   - Expected: supports_jit() is true
+```simple
+val backend = create_interpreter_backend()
+val target_triple = backend.target_triple_fn
+val supports_jit = backend.supports_jit_fn
 
+assert_equal(backend.name, "interpreter")
+assert_equal(target_triple(), "interpreter-simple-runtime")
+assert_equal(supports_jit(), true)
+```
+
+</details>
+
+#### returns an independent backend port per factory call
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val first = create_interpreter_backend()
+val second = create_interpreter_backend()
+val first_target_triple = first.target_triple_fn
+val second_target_triple = second.target_triple_fn
+val first_supports_jit = first.supports_jit_fn
+val second_supports_jit = second.supports_jit_fn
+
+assert_equal(first.name, second.name)
+assert_equal(first_target_triple(), second_target_triple())
+assert_equal(first_supports_jit(), second_supports_jit())
+```
+
+</details>
+
+#### provides a callable run function
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val backend = create_interpreter_backend()
+
+assert_equal(backend.run_fn, backend.run_fn)
+```
+
+</details>
+
+#### loads the legacy interpreter backend module
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val backend = InterpreterBackendImpl.new()
+
+assert_equal(backend.name(), "interpreter")
+```
+
+</details>
+
+#### rejects a missing binary operator
 
 <details>
 <summary>Executable SSpec</summary>
@@ -34,109 +99,6 @@ Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("creates a backend port with stable metadata")
-val backend = create_interpreter_backend()
-val target_triple = backend.target_triple_fn
-val supports_jit = backend.supports_jit_fn
-
-expect(backend.name).to_equal("interpreter")
-expect(target_triple()).to_equal("interpreter-simple-runtime")
-expect(supports_jit()).to_equal(true)
-```
-
-</details>
-
-#### returns an independent backend port per factory call
-
-- returns an independent backend port per factory call
-   - Expected: first.name equals `second.name`
-   - Expected: first_target_triple() equals `second_target_triple()`
-   - Expected: first_supports_jit() equals `second_supports_jit()`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 12 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-UNIT
-step("returns an independent backend port per factory call")
-val first = create_interpreter_backend()
-val second = create_interpreter_backend()
-val first_target_triple = first.target_triple_fn
-val second_target_triple = second.target_triple_fn
-val first_supports_jit = first.supports_jit_fn
-val second_supports_jit = second.supports_jit_fn
-
-expect(first.name).to_equal(second.name)
-expect(first_target_triple()).to_equal(second_target_triple())
-expect(first_supports_jit()).to_equal(second_supports_jit())
-```
-
-</details>
-
-#### provides a callable run function
-
-- provides a callable run function
-   - Expected: backend.run_fn equals `backend.run_fn`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 5 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-UNIT
-step("provides a callable run function")
-val backend = create_interpreter_backend()
-
-expect(backend.run_fn).to_equal(backend.run_fn)
-```
-
-</details>
-
-#### loads the legacy interpreter backend module
-
-- loads the legacy interpreter backend module
-   - Expected: backend.name() equals `interpreter`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 5 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-UNIT
-step("loads the legacy interpreter backend module")
-val backend = InterpreterBackendImpl.new()
-
-expect(backend.name()).to_equal("interpreter")
-```
-
-</details>
-
-#### rejects a missing binary operator
-
-- rejects a missing binary operator
-   - Expected: failed_closed is true
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 11 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-UNIT
-step("rejects a missing binary operator")
 val backend = InterpreterBackendImpl.new()
 val result = backend.eval_binop(nil, Value.Int(1), Value.Int(2), Span.default(), false, false)
 var failed_closed = false
@@ -145,27 +107,20 @@ match result:
         failed_closed = err.kind == BackendErrorKind.Internal and err.span.? and err.message.contains("missing HIR binary operator")
     case Ok(_):
         failed_closed = false
-expect(failed_closed).to_equal(true)
+assert_equal(failed_closed, true)
 ```
 
 </details>
 
 #### renders str and text builtin arguments
 
-- renders str and text builtin arguments
-   - Expected: rendered_str is true
-   - Expected: rendered_text is true
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("renders str and text builtin arguments")
 val backend = InterpreterBackendImpl.new()
 var rendered_str = false
 match backend.try_call_builtin("str", [Value.Int(7)]):
@@ -179,97 +134,73 @@ match backend.try_call_builtin("text", [Value.Bool(true)]):
         rendered_text = value == "true"
     case _:
         rendered_text = false
-expect(rendered_str).to_equal(true)
-expect(rendered_text).to_equal(true)
+assert_equal(rendered_str, true)
+assert_equal(rendered_text, true)
 ```
 
 </details>
 
 #### rejects unknown binary operators before evaluation
 
-- rejects unknown binary operators before evaluation
-   - Expected: op_kind_to_binop(60) equals `BinOp.Add`
-   - Expected: op_kind_to_binop(9999) equals `BinOp.Invalid`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("rejects unknown binary operators before evaluation")
-expect(op_kind_to_binop(60)).to_equal(BinOp.Add)
-expect(op_kind_to_binop(9999)).to_equal(BinOp.Invalid)
+assert_equal(op_kind_to_binop(60), BinOp.Add)
+assert_equal(op_kind_to_binop(9999), BinOp.Invalid)
 ```
 
 </details>
 
 #### keeps function lookup off shared optional mutation
 
-- keeps function lookup off shared optional mutation
-   - Expected: calls_source does not contain `var cf_target: HirFunction? = nil`
-   - Expected: calls_source does not contain `cf_target = Some(cf_f)`
-   - Expected: interpreter_source does not contain `var cf_named: HirFunction? = nil`
-   - Expected: interpreter_source does not contain `cf_named = Some(cf_f2)`
-   - Expected: calls_source does not contain `HirFunction? = nil`
-   - Expected: interpreter_source does not contain `HirFunction? = nil`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("keeps function lookup off shared optional mutation")
 val calls_source = file_read("src/compiler/70.backend/backend/interpreter_calls.spl")
 val interpreter_source = file_read("src/compiler/70.backend/backend/interpreter.spl")
 
 # Neither call site may accumulate the hit into an optional that is
 # mutated across loop iterations (the original defect).
-expect(calls_source.contains("var cf_target: HirFunction? = nil")).to_equal(false)
-expect(calls_source.contains("cf_target = Some(cf_f)")).to_equal(false)
-expect(interpreter_source.contains("var cf_named: HirFunction? = nil")).to_equal(false)
-expect(interpreter_source.contains("cf_named = Some(cf_f2)")).to_equal(false)
-expect(calls_source.contains("HirFunction? = nil")).to_equal(false)
-expect(interpreter_source.contains("HirFunction? = nil")).to_equal(false)
+assert_equal(calls_source.contains("var cf_target: HirFunction? = nil"), false)
+assert_equal(calls_source.contains("cf_target = Some(cf_f)"), false)
+assert_equal(interpreter_source.contains("var cf_named: HirFunction? = nil"), false)
+assert_equal(interpreter_source.contains("cf_named = Some(cf_f2)"), false)
+assert_equal(calls_source.contains("HirFunction? = nil"), false)
+assert_equal(interpreter_source.contains("HirFunction? = nil"), false)
 
 # The two former inline `var cf_*_index = -1` scans were centralized into
 # one resolver. It must still carry the index-based idiom, and BOTH call
 # sites must route through it rather than re-rolling their own scan.
-expect(calls_source).to_contain("fn resolve_function_by_name(name: text, ctx: EvalContext) -> HirFunction?:")
-expect(calls_source).to_contain("var found_index = -1")
-expect(calls_source).to_contain("self.resolve_function_by_name(f_t.name, ctx)")
-expect(interpreter_source).to_contain("self.resolve_function_by_name(cname_t, ctx)")
+assert_contains(calls_source, "fn resolve_function_by_name(name: text, ctx: EvalContext) -> HirFunction?:")
+assert_contains(calls_source, "var found_index = -1")
+assert_contains(calls_source, "self.resolve_function_by_name(f_t.name, ctx)")
+assert_contains(interpreter_source, "self.resolve_function_by_name(cname_t, ctx)")
 ```
 
 </details>
 
 #### uses runtime enum discriminants for struct-shadowed variants
 
-- uses runtime enum discriminants for struct-shadowed variants
-   - Expected: source does not contain `fn interp_expr_disc`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("uses runtime enum discriminants for struct-shadowed variants")
 val source = file_read("src/compiler/70.backend/backend/interpreter.spl")
-expect(source).to_contain("val ee_disc: i64 = rt_enum_discriminant(expr.kind)")
-expect(source).to_contain("if ee_disc == 1138084884:  # hash(\"Block\")")
-expect(source).to_contain("val stmt_disc = rt_enum_discriminant(stmt.kind)")
-expect(source.contains("fn interp_expr_disc")).to_equal(false)
+assert_contains(source, "val ee_disc: i64 = rt_enum_discriminant(expr.kind)")
+assert_contains(source, "if ee_disc == 1138084884:  # hash(\"Block\")")
+assert_contains(source, "val stmt_disc = rt_enum_discriminant(stmt.kind)")
+assert_equal(source.contains("fn interp_expr_disc"), false)
 expect(source.index_of("case HirExprKind.NilLit:")).to_be_greater_than(source.index_of("case HirExprKind.Call(callee, args, _):"))
 ```
 
@@ -277,42 +208,29 @@ expect(source.index_of("case HirExprKind.NilLit:")).to_be_greater_than(source.in
 
 #### pops scopes through the core-array ABI
 
-- pops scopes through the core-array ABI
-   - Expected: source does not contain `self.scopes = self.scopes[0:last_idx]`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("pops scopes through the core-array ABI")
 val source = file_read("src/compiler/70.backend/backend/env.spl")
-expect(source).to_contain("self.scopes.pop()")
-expect(source.contains("self.scopes = self.scopes[0:last_idx]")).to_equal(false)
+assert_contains(source, "self.scopes.pop()")
+assert_equal(source.contains("self.scopes = self.scopes[0:last_idx]"), false)
 ```
 
 </details>
 
 #### tears down a popped scope so its names stop resolving
 
-- tears down a popped scope so its names stop resolving
-   - Expected: env.scopes.len() equals `2`
-   - Expected: env.scopes.len() equals `1`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 29 lines folded for reproduction.
+Runnable source: 27 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("tears down a popped scope so its names stop resolving")
 # Behavioral oracle for pop_scope. The source-grep above only proves a
 # spelling; this proves teardown actually happens. `[Dict].pop()`
 # mutates the receiver IN PLACE and returns the removed element, so
@@ -323,13 +241,13 @@ var env = Environment.new()
 env.define("outer", Value.Int(1))
 
 env.push_scope()
-expect(env.scopes.len()).to_equal(2)
+assert_equal(env.scopes.len(), 2)
 env.define("inner", Value.Int(2))
 assert_true(env.lookup("inner").?)
 
 env.pop_scope()
 # depth returns to its prior value ...
-expect(env.scopes.len()).to_equal(1)
+assert_equal(env.scopes.len(), 1)
 # ... the popped scope's name no longer resolves ...
 assert_false(env.lookup("inner").?)
 # ... and the surviving outer scope is intact (catches a write-back
@@ -337,33 +255,27 @@ assert_false(env.lookup("inner").?)
 match env.lookup("outer"):
     case Some(v):
         match v:
-            case Value.Int(value): expect(value).to_equal(1)
-            case _: expect(false).to_equal(true)
-    case _: expect(false).to_equal(true)
+            case Value.Int(value): assert_equal(value, 1)
+            case _: assert_equal(false, true)
+    case _: assert_equal(false, true)
 ```
 
 </details>
 
 #### keeps the global scope when pop_scope underflows
 
-- keeps the global scope when pop_scope underflows
-   - Expected: env.scopes.len() equals `1`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("keeps the global scope when pop_scope underflows")
 var env = Environment.new()
 env.define("only", Value.Int(7))
 env.pop_scope()
 env.pop_scope()
-expect(env.scopes.len()).to_equal(1)
+assert_equal(env.scopes.len(), 1)
 assert_true(env.lookup("only").?)
 ```
 
@@ -371,18 +283,13 @@ assert_true(env.lookup("only").?)
 
 #### snapshots visible closure locals with inner shadowing
 
-- snapshots visible closure locals with inner shadowing
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
-step("snapshots visible closure locals with inner shadowing")
 var env = Environment.new()
 var outer_scope: Dict<text, Value> = {}
 outer_scope["outer"] = Value.Int(40)
@@ -393,11 +300,11 @@ env.scopes = [outer_scope, inner_scope]
 
 val captured = env.snapshot_locals()
 match captured["outer"]:
-    case Value.Int(value): expect(value).to_equal(41)
-    case _: expect(false).to_equal(true)
+    case Value.Int(value): assert_equal(value, 41)
+    case _: assert_equal(false, true)
 match captured["inner"]:
-    case Value.Int(value): expect(value).to_equal(1)
-    case _: expect(false).to_equal(true)
+    case Value.Int(value): assert_equal(value, 1)
+    case _: assert_equal(false, true)
 ```
 
 </details>
@@ -409,7 +316,7 @@ match captured["inner"]:
 | Category | Compiler |
 | Status | Active |
 | Source | `test/unit/compiler/backend/interpreter_backend_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-08-27 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -430,57 +337,57 @@ Tests covering Interpreter Backend.
 
 </details>
 
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-UNIT`
-<!-- sspec-maintain:traceability:end -->
-
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `3553ee27383923d9bf8e8de36ccc82380f57e98df074ca9728579d64635d0e9f`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `cd05bb84eeff02f94b5069684e8aa705d2f03a8716903c8e49836aafb6d369a8`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `3553ee27383923d9bf8e8de36ccc82380f57e98df074ca9728579d64635d0e9f`.
+Source SHA-256: `cd05bb84eeff02f94b5069684e8aa705d2f03a8716903c8e49836aafb6d369a8`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `3553ee27383923d9bf8e8de36ccc82380f57e98df074ca9728579d64635d0e9f`  
+Source SHA-256: `cd05bb84eeff02f94b5069684e8aa705d2f03a8716903c8e49836aafb6d369a8`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **76/100**; effective score: **49/100**; blockers: **1**.
+Raw score: **82/100**; effective score: **82/100**; blockers: **0**.
 
-SSpec documentization score: 49/100
+SSpec documentization score: 82/100
 source: test/unit/compiler/backend/interpreter_backend_spec.spl
 mirror: doc/06_spec/unit/compiler/backend/interpreter_backend_spec.md (current)
-findings: 7 blockers: 1
-  narrative=100 structure=100 oracle=20
-  traceability=100 evidence=70 coverage=100 maintainability=70
+findings: 10 blockers: 0
+  narrative=80 structure=60 oracle=100
+  traceability=80 evidence=100 coverage=100 maintainability=45
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-  raw=76; blocker cap makes effective=49
 doc/06_spec/unit/compiler/backend/interpreter_backend_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/unit/compiler/backend/interpreter_backend_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+doc/06_spec/unit/compiler/backend/interpreter_backend_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, assumptions/preconditions, primary workflow, traceability, unsupported/limitations, recovery/troubleshooting
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/unit/compiler/backend/interpreter_backend_spec.spl:1:1: blocker SSDOC-ORA-002 [oracle] (-50): scenario relies on source-text inspection as system evidence
-  why: Source presence or self-created arithmetic does not demonstrate production behavior.
-  improve: Observe runtime behavior or a stable generated artifact instead.
-test/unit/compiler/backend/interpreter_backend_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 6 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/unit/compiler/backend/interpreter_backend_spec.spl:18:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates a backend port with stable metadata' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/unit/compiler/backend/interpreter_backend_spec.spl:29:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'returns an independent backend port per factory call' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/unit/compiler/backend/interpreter_backend_spec.spl:43:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'provides a callable run function' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/unit/compiler/backend/interpreter_backend_spec.spl:1:1: advice SSDOC-MNT-001 [maintainability] (-15): multiple scenarios form a flat, unfolded presentation
+  why: Long flat dumps obscure the primary workflow.
+  improve: Group secondary detail and keep the primary workflow visible.
+test/unit/compiler/backend/interpreter_backend_spec.spl:1:1: advice SSDOC-MNT-007 [maintainability] (-10): research, plan, architecture, or design metadata links are incomplete
+  why: Reviewers need selected lifecycle evidence, not inferred project state.
+  improve: Link the selected lifecycle artifacts or configure a reasoned scope suppression.
+test/unit/compiler/backend/interpreter_backend_spec.spl:1:1: warning SSDOC-NAR-001 [narrative] (-20): missing authored purpose and audience
+  why: Readers need scope, audience, and intent before executable detail.
+  improve: Add authored purpose, scope, and audience facts.
+test/unit/compiler/backend/interpreter_backend_spec.spl:1:1: warning SSDOC-TRC-001 [traceability] (-20): no implemented requirement identity
+  why: Stable requirement identity connects intent, implementation, and evidence.
+  improve: Bind scenarios to stable selected REQ identities.
+test/unit/compiler/backend/interpreter_backend_spec.spl:11:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'creates a backend port with stable metadata' has no visible step flow
+  why: Ordered visible actions make the manual operable.
+  improve: Add ordered step("...") calls for meaningful actions.
+test/unit/compiler/backend/interpreter_backend_spec.spl:20:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'returns an independent backend port per factory call' has no visible step flow
+  why: Ordered visible actions make the manual operable.
+  improve: Add ordered step("...") calls for meaningful actions.
+test/unit/compiler/backend/interpreter_backend_spec.spl:32:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'provides a callable run function' has no visible step flow
+  why: Ordered visible actions make the manual operable.
+  improve: Add ordered step("...") calls for meaningful actions.
+test/unit/compiler/backend/interpreter_backend_spec.spl:37:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'loads the legacy interpreter backend module' has no visible step flow
+  why: Ordered visible actions make the manual operable.
+  improve: Add ordered step("...") calls for meaningful actions.
 <!-- sspec-maintain:scorecard:end -->

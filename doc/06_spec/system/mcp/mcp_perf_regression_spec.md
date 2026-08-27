@@ -24,7 +24,7 @@ Comprehensive tests for MCP performance regression prevention. Covers four areas
 | Requirements | N/A |
 | Plan | doc/03_plan/mcp_performance_regression_prevention_plan_2026-03-30.md |
 | Source | `test/system/mcp/mcp_perf_regression_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-08-27 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -54,8 +54,6 @@ Covers four areas:
 #### detects ENTRY assignment to .spl file in wrapper
 
 - detects ENTRY assignment to .spl file in wrapper
-   - Expected: path.ends_with("_mcp_server") is true
-   - Expected: source contains `.spl`
 
 
 <details>
@@ -70,8 +68,8 @@ step("detects ENTRY assignment to .spl file in wrapper")
 val source = "ENTRY=\"src/app/mcp/main.spl\"\nexec \"$RUNTIME\" \"$ENTRY\""
 val path = "bin/simple_mcp_server"
 # Lint function exists and can be called on wrapper-like paths
-expect(path.ends_with("_mcp_server")).to_equal(true)
-expect(source.contains(".spl")).to_equal(true)
+assert_equal(path.ends_with("_mcp_server"), true)
+assert_equal(source.contains(".spl"), true)
 ```
 
 </details>
@@ -79,8 +77,6 @@ expect(source.contains(".spl")).to_equal(true)
 #### detects exec with .spl argument
 
 - detects exec with .spl argument
-   - Expected: source contains `exec`
-   - Expected: source contains `".spl") or source`
 
 
 <details>
@@ -93,8 +89,8 @@ Reproduction: this block contains the complete executable scenario source.
 # @req REQ-SSPEC-SYSTEM
 step("detects exec with .spl argument")
 val source = "exec \"$RUNTIME\" \"$ENTRY_SOURCE\" 2>/dev/null"
-expect(source.contains("exec")).to_equal(true)
-expect(source.contains(".spl") or source.contains("ENTRY")).to_equal(true)
+assert_equal(source.contains("exec"), true)
+assert_equal(source.contains(".spl") or source.contains("ENTRY"), true)
 ```
 
 </details>
@@ -102,7 +98,6 @@ expect(source.contains(".spl") or source.contains("ENTRY")).to_equal(true)
 #### does not flag non-wrapper files
 
 - does not flag non-wrapper files
-   - Expected: is_wrapper is false
 
 
 <details>
@@ -116,7 +111,7 @@ Reproduction: this block contains the complete executable scenario source.
 step("does not flag non-wrapper files")
 val path = "src/app/mcp/main.spl"
 val is_wrapper = path.ends_with("_mcp_server") or path.ends_with("_mcp_server.cmd")
-expect(is_wrapper).to_equal(false)
+assert_equal(is_wrapper, false)
 ```
 
 </details>
@@ -124,7 +119,6 @@ expect(is_wrapper).to_equal(false)
 #### does not flag .cmd wrapper without .spl reference
 
 - does not flag .cmd wrapper without .spl reference
-   - Expected: source does not contain `.spl`
 
 
 <details>
@@ -137,7 +131,7 @@ Reproduction: this block contains the complete executable scenario source.
 # @req REQ-SSPEC-SYSTEM
 step("does not flag .cmd wrapper without .spl reference")
 val source = "set \"ENTRY=%SCRIPT_DIR%..\\build\\mcp.smf\"\n\"%RUNTIME%\" \"%ENTRY%\""
-expect(source.contains(".spl")).to_equal(false)
+assert_equal(source.contains(".spl"), false)
 ```
 
 </details>
@@ -147,8 +141,6 @@ expect(source.contains(".spl")).to_equal(false)
 #### detects rt_dir_walk in handle_ function
 
 - detects rt_dir_walk in handle_ function
-   - Expected: fn_name.starts_with("handle_") is true
-   - Expected: line contains `rt_dir_walk(`
 
 
 <details>
@@ -162,8 +154,8 @@ Reproduction: this block contains the complete executable scenario source.
 step("detects rt_dir_walk in handle_ function")
 val fn_name = "handle_search"
 val line = "    val files = rt_dir_walk(\"/vault\")"
-expect(fn_name.starts_with("handle_")).to_equal(true)
-expect(line.contains("rt_dir_walk(")).to_equal(true)
+assert_equal(fn_name.starts_with("handle_"), true)
+assert_equal(line.contains("rt_dir_walk("), true)
 ```
 
 </details>
@@ -171,8 +163,6 @@ expect(line.contains("rt_dir_walk(")).to_equal(true)
 #### detects scan_vault in dispatch function
 
 - detects scan_vault in dispatch function
-   - Expected: fn_name.starts_with("dispatch_") is true
-   - Expected: line contains `scan_vault(`
 
 
 <details>
@@ -186,8 +176,8 @@ Reproduction: this block contains the complete executable scenario source.
 step("detects scan_vault in dispatch function")
 val fn_name = "dispatch_analytics"
 val line = "    val all = scan_vault(root)"
-expect(fn_name.starts_with("dispatch_")).to_equal(true)
-expect(line.contains("scan_vault(")).to_equal(true)
+assert_equal(fn_name.starts_with("dispatch_"), true)
+assert_equal(line.contains("scan_vault("), true)
 ```
 
 </details>
@@ -195,7 +185,6 @@ expect(line.contains("scan_vault(")).to_equal(true)
 #### skips scan calls in reindex functions
 
 - skips scan calls in reindex functions
-   - Expected: is_admin is true
 
 
 <details>
@@ -209,7 +198,7 @@ Reproduction: this block contains the complete executable scenario source.
 step("skips scan calls in reindex functions")
 val fn_name = "handle_reindex_vault"
 val is_admin = fn_name.contains("reindex")
-expect(is_admin).to_equal(true)
+assert_equal(is_admin, true)
 ```
 
 </details>
@@ -217,7 +206,6 @@ expect(is_admin).to_equal(true)
 #### skips scan calls in admin functions
 
 - skips scan calls in admin functions
-   - Expected: is_admin is true
 
 
 <details>
@@ -231,7 +219,7 @@ Reproduction: this block contains the complete executable scenario source.
 step("skips scan calls in admin functions")
 val fn_name = "handle_admin_rebuild"
 val is_admin = fn_name.contains("admin") or fn_name.contains("rebuild")
-expect(is_admin).to_equal(true)
+assert_equal(is_admin, true)
 ```
 
 </details>
@@ -239,7 +227,6 @@ expect(is_admin).to_equal(true)
 #### skips non-MCP source files
 
 - skips non-MCP source files
-   - Expected: is_mcp is false
 
 
 <details>
@@ -253,7 +240,7 @@ Reproduction: this block contains the complete executable scenario source.
 step("skips non-MCP source files")
 val path = "src/lib/common/text/parser.spl"
 val is_mcp = path.contains("/mcp/") or path.contains("/mcp_")
-expect(is_mcp).to_equal(false)
+assert_equal(is_mcp, false)
 ```
 
 </details>
@@ -263,7 +250,6 @@ expect(is_mcp).to_equal(false)
 #### detects rt_process_run in handler
 
 - detects rt_process_run in handler
-   - Expected: line contains `rt_process_run(`
 
 
 <details>
@@ -276,7 +262,7 @@ Reproduction: this block contains the complete executable scenario source.
 # @req REQ-SSPEC-SYSTEM
 step("detects rt_process_run in handler")
 val line = "    rt_process_run(\"ls\", [\"-la\"])"
-expect(line.contains("rt_process_run(")).to_equal(true)
+assert_equal(line.contains("rt_process_run("), true)
 ```
 
 </details>
@@ -284,7 +270,6 @@ expect(line.contains("rt_process_run(")).to_equal(true)
 #### detects shell_cmd in handler
 
 - detects shell_cmd in handler
-   - Expected: line contains `shell_cmd(`
 
 
 <details>
@@ -297,7 +282,7 @@ Reproduction: this block contains the complete executable scenario source.
 # @req REQ-SSPEC-SYSTEM
 step("detects shell_cmd in handler")
 val line = "    shell_cmd(cmd)"
-expect(line.contains("shell_cmd(")).to_equal(true)
+assert_equal(line.contains("shell_cmd("), true)
 ```
 
 </details>
@@ -305,7 +290,6 @@ expect(line.contains("shell_cmd(")).to_equal(true)
 #### skips cli_passthrough.spl entirely
 
 - skips cli_passthrough.spl entirely
-   - Expected: should_skip is true
 
 
 <details>
@@ -319,7 +303,7 @@ Reproduction: this block contains the complete executable scenario source.
 step("skips cli_passthrough.spl entirely")
 val path = "src/app/mcp/cli_passthrough.spl"
 val should_skip = path.ends_with("cli_passthrough.spl")
-expect(should_skip).to_equal(true)
+assert_equal(should_skip, true)
 ```
 
 </details>
@@ -327,7 +311,6 @@ expect(should_skip).to_equal(true)
 #### flags subprocess in dispatch function
 
 - flags subprocess in dispatch function
-   - Expected: is_handler is true
 
 
 <details>
@@ -344,7 +327,7 @@ val is_handle = fn_name.starts_with("handle_")
 val is_dispatch = fn_name.starts_with("dispatch_")
 val is_private_dispatch = fn_name.starts_with("_dispatch_")
 val is_handler = is_handle or is_dispatch or is_private_dispatch
-expect(is_handler).to_equal(true)
+assert_equal(is_handler, true)
 ```
 
 </details>
@@ -354,7 +337,6 @@ expect(is_handler).to_equal(true)
 #### detects cache var without invalidation
 
 - detects cache var without invalidation
-   - Expected: is_cache is true
 
 
 <details>
@@ -368,7 +350,7 @@ Reproduction: this block contains the complete executable scenario source.
 step("detects cache var without invalidation")
 val line = "var TOOLS_CACHE = \"\""
 val is_cache = line.contains("var ") and line.contains("_CACHE")
-expect(is_cache).to_equal(true)
+assert_equal(is_cache, true)
 ```
 
 </details>
@@ -376,7 +358,6 @@ expect(is_cache).to_equal(true)
 #### accepts cache var with invalidation function
 
 - accepts cache var with invalidation function
-   - Expected: has_invalidation is true
 
 
 <details>
@@ -391,7 +372,7 @@ step("accepts cache var with invalidation function")
 val source = "var TOOLS_CACHE = \"\"\nfn invalidate_tools():\n    TOOLS_CACHE = \"\""
 val has_invalidation = source.contains("fn invalidate") or source.contains("_CACHE = \"\"")
 # There are two occurrences: the declaration and the reset
-expect(has_invalidation).to_equal(true)
+assert_equal(has_invalidation, true)
 ```
 
 </details>
@@ -399,7 +380,6 @@ expect(has_invalidation).to_equal(true)
 #### detects cached_ prefix variables
 
 - detects cached_ prefix variables
-   - Expected: is_cache is true
 
 
 <details>
@@ -413,7 +393,7 @@ Reproduction: this block contains the complete executable scenario source.
 step("detects cached_ prefix variables")
 val line = "var cached_results = []"
 val is_cache = line.starts_with("var cached_")
-expect(is_cache).to_equal(true)
+assert_equal(is_cache, true)
 ```
 
 </details>
@@ -423,7 +403,6 @@ expect(is_cache).to_equal(true)
 #### perf_guard.spl module exists
 
 - perf_guard.spl module exists
-   - Expected: exists is true
 
 
 <details>
@@ -436,7 +415,7 @@ Reproduction: this block contains the complete executable scenario source.
 # @req REQ-SSPEC-SYSTEM
 step("perf_guard.spl module exists")
 val exists = rt_file_exists("src/lib/nogc_async_mut/mcp/perf_guard.spl")
-expect(exists).to_equal(true)
+assert_equal(exists, true)
 ```
 
 </details>
@@ -444,7 +423,6 @@ expect(exists).to_equal(true)
 #### defines McpPerfGuard struct
 
 - defines McpPerfGuard struct
-   - Expected: source contains `struct McpPerfGuard`
 
 
 <details>
@@ -457,7 +435,7 @@ Reproduction: this block contains the complete executable scenario source.
 # @req REQ-SSPEC-SYSTEM
 step("defines McpPerfGuard struct")
 val source = rt_file_read_text("src/lib/nogc_async_mut/mcp/perf_guard.spl")
-expect(source.contains("struct McpPerfGuard")).to_equal(true)
+assert_equal(source.contains("struct McpPerfGuard"), true)
 ```
 
 </details>
@@ -465,7 +443,6 @@ expect(source.contains("struct McpPerfGuard")).to_equal(true)
 #### defines PerfViolation struct
 
 - defines PerfViolation struct
-   - Expected: source contains `struct PerfViolation`
 
 
 <details>
@@ -478,7 +455,7 @@ Reproduction: this block contains the complete executable scenario source.
 # @req REQ-SSPEC-SYSTEM
 step("defines PerfViolation struct")
 val source = rt_file_read_text("src/lib/nogc_async_mut/mcp/perf_guard.spl")
-expect(source.contains("struct PerfViolation")).to_equal(true)
+assert_equal(source.contains("struct PerfViolation"), true)
 ```
 
 </details>
@@ -486,7 +463,6 @@ expect(source.contains("struct PerfViolation")).to_equal(true)
 #### tracks dir_walks counter
 
 - tracks dir_walks counter
-   - Expected: source contains `record_dir_walk`
 
 
 <details>
@@ -499,7 +475,7 @@ Reproduction: this block contains the complete executable scenario source.
 # @req REQ-SSPEC-SYSTEM
 step("tracks dir_walks counter")
 val source = rt_file_read_text("src/lib/nogc_async_mut/mcp/perf_guard.spl")
-expect(source.contains("record_dir_walk")).to_equal(true)
+assert_equal(source.contains("record_dir_walk"), true)
 ```
 
 </details>
@@ -507,7 +483,6 @@ expect(source.contains("record_dir_walk")).to_equal(true)
 #### tracks file_reads counter
 
 - tracks file_reads counter
-   - Expected: source contains `record_file_read`
 
 
 <details>
@@ -520,7 +495,7 @@ Reproduction: this block contains the complete executable scenario source.
 # @req REQ-SSPEC-SYSTEM
 step("tracks file_reads counter")
 val source = rt_file_read_text("src/lib/nogc_async_mut/mcp/perf_guard.spl")
-expect(source.contains("record_file_read")).to_equal(true)
+assert_equal(source.contains("record_file_read"), true)
 ```
 
 </details>
@@ -528,7 +503,6 @@ expect(source.contains("record_file_read")).to_equal(true)
 #### tracks subprocess counter
 
 - tracks subprocess counter
-   - Expected: source contains `record_subprocess`
 
 
 <details>
@@ -541,7 +515,7 @@ Reproduction: this block contains the complete executable scenario source.
 # @req REQ-SSPEC-SYSTEM
 step("tracks subprocess counter")
 val source = rt_file_read_text("src/lib/nogc_async_mut/mcp/perf_guard.spl")
-expect(source.contains("record_subprocess")).to_equal(true)
+assert_equal(source.contains("record_subprocess"), true)
 ```
 
 </details>
@@ -549,7 +523,6 @@ expect(source.contains("record_subprocess")).to_equal(true)
 #### checks latency threshold
 
 - checks latency threshold
-   - Expected: source contains `PERF_LATENCY`
 
 
 <details>
@@ -562,7 +535,7 @@ Reproduction: this block contains the complete executable scenario source.
 # @req REQ-SSPEC-SYSTEM
 step("checks latency threshold")
 val source = rt_file_read_text("src/lib/nogc_async_mut/mcp/perf_guard.spl")
-expect(source.contains("PERF_LATENCY")).to_equal(true)
+assert_equal(source.contains("PERF_LATENCY"), true)
 ```
 
 </details>
@@ -570,7 +543,6 @@ expect(source.contains("PERF_LATENCY")).to_equal(true)
 #### supports disable via environment variable
 
 - supports disable via environment variable
-   - Expected: source contains `MCP_PERF_GUARD`
 
 
 <details>
@@ -583,7 +555,7 @@ Reproduction: this block contains the complete executable scenario source.
 # @req REQ-SSPEC-SYSTEM
 step("supports disable via environment variable")
 val source = rt_file_read_text("src/lib/nogc_async_mut/mcp/perf_guard.spl")
-expect(source.contains("MCP_PERF_GUARD")).to_equal(true)
+assert_equal(source.contains("MCP_PERF_GUARD"), true)
 ```
 
 </details>
@@ -591,7 +563,6 @@ expect(source.contains("MCP_PERF_GUARD")).to_equal(true)
 #### provides snapshot for diagnostics
 
 - provides snapshot for diagnostics
-   - Expected: source contains `McpPerfSnapshot`
 
 
 <details>
@@ -604,7 +575,7 @@ Reproduction: this block contains the complete executable scenario source.
 # @req REQ-SSPEC-SYSTEM
 step("provides snapshot for diagnostics")
 val source = rt_file_read_text("src/lib/nogc_async_mut/mcp/perf_guard.spl")
-expect(source.contains("McpPerfSnapshot")).to_equal(true)
+assert_equal(source.contains("McpPerfSnapshot"), true)
 ```
 
 </details>
@@ -614,7 +585,6 @@ expect(source.contains("McpPerfSnapshot")).to_equal(true)
 #### wrapper_validator.spl module exists
 
 - wrapper_validator.spl module exists
-   - Expected: exists is true
 
 
 <details>
@@ -627,7 +597,7 @@ Reproduction: this block contains the complete executable scenario source.
 # @req REQ-SSPEC-SYSTEM
 step("wrapper_validator.spl module exists")
 val exists = rt_file_exists("src/lib/nogc_async_mut/mcp/wrapper_validator.spl")
-expect(exists).to_equal(true)
+assert_equal(exists, true)
 ```
 
 </details>
@@ -635,7 +605,6 @@ expect(exists).to_equal(true)
 #### defines WrapperValidationResult struct
 
 - defines WrapperValidationResult struct
-   - Expected: source contains `struct WrapperValidationResult`
 
 
 <details>
@@ -648,7 +617,7 @@ Reproduction: this block contains the complete executable scenario source.
 # @req REQ-SSPEC-SYSTEM
 step("defines WrapperValidationResult struct")
 val source = rt_file_read_text("src/lib/nogc_async_mut/mcp/wrapper_validator.spl")
-expect(source.contains("struct WrapperValidationResult")).to_equal(true)
+assert_equal(source.contains("struct WrapperValidationResult"), true)
 ```
 
 </details>
@@ -656,11 +625,6 @@ expect(source.contains("struct WrapperValidationResult")).to_equal(true)
 #### validates all five wrapper scripts
 
 - validates all five wrapper scripts
-   - Expected: source contains `simple_mcp_server`
-   - Expected: source contains `simple_lsp_mcp_server`
-   - Expected: source contains `t32_mcp_server`
-   - Expected: source contains `t32_lsp_mcp_server`
-   - Expected: source contains `obsidian_lsp_mcp_server`
 
 
 <details>
@@ -673,11 +637,11 @@ Reproduction: this block contains the complete executable scenario source.
 # @req REQ-SSPEC-SYSTEM
 step("validates all five wrapper scripts")
 val source = rt_file_read_text("src/lib/nogc_async_mut/mcp/wrapper_validator.spl")
-expect(source.contains("simple_mcp_server")).to_equal(true)
-expect(source.contains("simple_lsp_mcp_server")).to_equal(true)
-expect(source.contains("t32_mcp_server")).to_equal(true)
-expect(source.contains("t32_lsp_mcp_server")).to_equal(true)
-expect(source.contains("obsidian_lsp_mcp_server")).to_equal(true)
+assert_equal(source.contains("simple_mcp_server"), true)
+assert_equal(source.contains("simple_lsp_mcp_server"), true)
+assert_equal(source.contains("t32_mcp_server"), true)
+assert_equal(source.contains("t32_lsp_mcp_server"), true)
+assert_equal(source.contains("obsidian_lsp_mcp_server"), true)
 ```
 
 </details>
@@ -685,7 +649,6 @@ expect(source.contains("obsidian_lsp_mcp_server")).to_equal(true)
 #### checks for .spl entrypoint as anti-pattern
 
 - checks for .spl entrypoint as anti-pattern
-   - Expected: source contains `has_spl_entry`
 
 
 <details>
@@ -698,7 +661,7 @@ Reproduction: this block contains the complete executable scenario source.
 # @req REQ-SSPEC-SYSTEM
 step("checks for .spl entrypoint as anti-pattern")
 val source = rt_file_read_text("src/lib/nogc_async_mut/mcp/wrapper_validator.spl")
-expect(source.contains("has_spl_entry")).to_equal(true)
+assert_equal(source.contains("has_spl_entry"), true)
 ```
 
 </details>
@@ -706,7 +669,6 @@ expect(source.contains("has_spl_entry")).to_equal(true)
 #### checks for Rust bootstrap path as anti-pattern
 
 - checks for Rust bootstrap path as anti-pattern
-   - Expected: source contains `compiler_rust/target`
 
 
 <details>
@@ -719,7 +681,7 @@ Reproduction: this block contains the complete executable scenario source.
 # @req REQ-SSPEC-SYSTEM
 step("checks for Rust bootstrap path as anti-pattern")
 val source = rt_file_read_text("src/lib/nogc_async_mut/mcp/wrapper_validator.spl")
-expect(source.contains("compiler_rust/target")).to_equal(true)
+assert_equal(source.contains("compiler_rust/target"), true)
 ```
 
 </details>
@@ -727,7 +689,6 @@ expect(source.contains("compiler_rust/target")).to_equal(true)
 #### checks for log suppression
 
 - checks for log suppression
-   - Expected: source contains `SIMPLE_LOG=error`
 
 
 <details>
@@ -740,7 +701,7 @@ Reproduction: this block contains the complete executable scenario source.
 # @req REQ-SSPEC-SYSTEM
 step("checks for log suppression")
 val source = rt_file_read_text("src/lib/nogc_async_mut/mcp/wrapper_validator.spl")
-expect(source.contains("SIMPLE_LOG=error")).to_equal(true)
+assert_equal(source.contains("SIMPLE_LOG=error"), true)
 ```
 
 </details>
@@ -748,7 +709,6 @@ expect(source.contains("SIMPLE_LOG=error")).to_equal(true)
 #### checks for stderr suppression
 
 - checks for stderr suppression
-   - Expected: source contains `2>/dev/null`
 
 
 <details>
@@ -761,7 +721,7 @@ Reproduction: this block contains the complete executable scenario source.
 # @req REQ-SSPEC-SYSTEM
 step("checks for stderr suppression")
 val source = rt_file_read_text("src/lib/nogc_async_mut/mcp/wrapper_validator.spl")
-expect(source.contains("2>/dev/null")).to_equal(true)
+assert_equal(source.contains("2>/dev/null"), true)
 ```
 
 </details>
@@ -771,7 +731,6 @@ expect(source.contains("2>/dev/null")).to_equal(true)
 #### bin/simple_mcp_server exists
 
 - bin/simple_mcp_server exists
-   - Expected: exists is true
 
 
 <details>
@@ -784,7 +743,7 @@ Reproduction: this block contains the complete executable scenario source.
 # @req REQ-SSPEC-SYSTEM
 step("bin/simple_mcp_server exists")
 val exists = rt_file_exists("bin/simple_mcp_server")
-expect(exists).to_equal(true)
+assert_equal(exists, true)
 ```
 
 </details>
@@ -792,7 +751,6 @@ expect(exists).to_equal(true)
 #### bin/simple_lsp_mcp_server exists
 
 - bin/simple_lsp_mcp_server exists
-   - Expected: exists is true
 
 
 <details>
@@ -805,7 +763,7 @@ Reproduction: this block contains the complete executable scenario source.
 # @req REQ-SSPEC-SYSTEM
 step("bin/simple_lsp_mcp_server exists")
 val exists = rt_file_exists("bin/simple_lsp_mcp_server")
-expect(exists).to_equal(true)
+assert_equal(exists, true)
 ```
 
 </details>
@@ -813,7 +771,6 @@ expect(exists).to_equal(true)
 #### bin/t32_mcp_server exists
 
 - bin/t32_mcp_server exists
-   - Expected: exists is true
 
 
 <details>
@@ -826,7 +783,7 @@ Reproduction: this block contains the complete executable scenario source.
 # @req REQ-SSPEC-SYSTEM
 step("bin/t32_mcp_server exists")
 val exists = rt_file_exists("bin/t32_mcp_server")
-expect(exists).to_equal(true)
+assert_equal(exists, true)
 ```
 
 </details>
@@ -834,7 +791,6 @@ expect(exists).to_equal(true)
 #### bin/t32_lsp_mcp_server exists
 
 - bin/t32_lsp_mcp_server exists
-   - Expected: exists is true
 
 
 <details>
@@ -847,7 +803,7 @@ Reproduction: this block contains the complete executable scenario source.
 # @req REQ-SSPEC-SYSTEM
 step("bin/t32_lsp_mcp_server exists")
 val exists = rt_file_exists("bin/t32_lsp_mcp_server")
-expect(exists).to_equal(true)
+assert_equal(exists, true)
 ```
 
 </details>
@@ -855,7 +811,6 @@ expect(exists).to_equal(true)
 #### bin/obsidian_lsp_mcp_server exists
 
 - bin/obsidian_lsp_mcp_server exists
-   - Expected: exists is true
 
 
 <details>
@@ -868,7 +823,7 @@ Reproduction: this block contains the complete executable scenario source.
 # @req REQ-SSPEC-SYSTEM
 step("bin/obsidian_lsp_mcp_server exists")
 val exists = rt_file_exists("bin/obsidian_lsp_mcp_server")
-expect(exists).to_equal(true)
+assert_equal(exists, true)
 ```
 
 </details>
@@ -878,7 +833,6 @@ expect(exists).to_equal(true)
 #### mcp_perf_lint.spl exists in lint directory
 
 - mcp_perf_lint.spl exists in lint directory
-   - Expected: exists is true
 
 
 <details>
@@ -891,7 +845,7 @@ Reproduction: this block contains the complete executable scenario source.
 # @req REQ-SSPEC-SYSTEM
 step("mcp_perf_lint.spl exists in lint directory")
 val exists = rt_file_exists("src/compiler/35.semantics/lint/mcp_perf_lint.spl")
-expect(exists).to_equal(true)
+assert_equal(exists, true)
 ```
 
 </details>
@@ -899,7 +853,6 @@ expect(exists).to_equal(true)
 #### lint __init__.spl exports mcp_perf_lint
 
 - lint __init__.spl exports mcp_perf_lint
-   - Expected: source contains `mcp_perf_lint`
 
 
 <details>
@@ -912,7 +865,7 @@ Reproduction: this block contains the complete executable scenario source.
 # @req REQ-SSPEC-SYSTEM
 step("lint __init__.spl exports mcp_perf_lint")
 val source = rt_file_read_text("src/compiler/35.semantics/lint/__init__.spl")
-expect(source.contains("mcp_perf_lint")).to_equal(true)
+assert_equal(source.contains("mcp_perf_lint"), true)
 ```
 
 </details>
@@ -920,7 +873,6 @@ expect(source.contains("mcp_perf_lint")).to_equal(true)
 #### lint exports McpPerfLintWarning
 
 - lint exports McpPerfLintWarning
-   - Expected: source contains `McpPerfLintWarning`
 
 
 <details>
@@ -933,7 +885,7 @@ Reproduction: this block contains the complete executable scenario source.
 # @req REQ-SSPEC-SYSTEM
 step("lint exports McpPerfLintWarning")
 val source = rt_file_read_text("src/compiler/35.semantics/lint/__init__.spl")
-expect(source.contains("McpPerfLintWarning")).to_equal(true)
+assert_equal(source.contains("McpPerfLintWarning"), true)
 ```
 
 </details>
@@ -941,10 +893,6 @@ expect(source.contains("McpPerfLintWarning")).to_equal(true)
 #### lint exports all four check functions
 
 - lint exports all four check functions
-   - Expected: source contains `lint_source_entrypoint`
-   - Expected: source contains `lint_full_tree_scan`
-   - Expected: source contains `lint_per_request_subprocess`
-   - Expected: source contains `lint_cache_no_invalidation`
 
 
 <details>
@@ -957,10 +905,10 @@ Reproduction: this block contains the complete executable scenario source.
 # @req REQ-SSPEC-SYSTEM
 step("lint exports all four check functions")
 val source = rt_file_read_text("src/compiler/35.semantics/lint/__init__.spl")
-expect(source.contains("lint_source_entrypoint")).to_equal(true)
-expect(source.contains("lint_full_tree_scan")).to_equal(true)
-expect(source.contains("lint_per_request_subprocess")).to_equal(true)
-expect(source.contains("lint_cache_no_invalidation")).to_equal(true)
+assert_equal(source.contains("lint_source_entrypoint"), true)
+assert_equal(source.contains("lint_full_tree_scan"), true)
+assert_equal(source.contains("lint_per_request_subprocess"), true)
+assert_equal(source.contains("lint_cache_no_invalidation"), true)
 ```
 
 </details>
@@ -970,7 +918,6 @@ expect(source.contains("lint_cache_no_invalidation")).to_equal(true)
 #### MCP main.spl has tool dispatch cache
 
 - MCP main.spl has tool dispatch cache
-   - Expected: source contains `TOOLS_CACHE`
 
 
 <details>
@@ -983,7 +930,7 @@ Reproduction: this block contains the complete executable scenario source.
 # @req REQ-SSPEC-SYSTEM
 step("MCP main.spl has tool dispatch cache")
 val source = rt_file_read_text("src/app/mcp/main.spl")
-expect(source.contains("TOOLS_CACHE")).to_equal(true)
+assert_equal(source.contains("TOOLS_CACHE"), true)
 ```
 
 </details>
@@ -991,7 +938,6 @@ expect(source.contains("TOOLS_CACHE")).to_equal(true)
 #### MCP main.spl has init response cache
 
 - MCP main.spl has init response cache
-   - Expected: source contains `INIT_CACHE`
 
 
 <details>
@@ -1004,7 +950,7 @@ Reproduction: this block contains the complete executable scenario source.
 # @req REQ-SSPEC-SYSTEM
 step("MCP main.spl has init response cache")
 val source = rt_file_read_text("src/app/mcp/main.spl")
-expect(source.contains("INIT_CACHE")).to_equal(true)
+assert_equal(source.contains("INIT_CACHE"), true)
 ```
 
 </details>
@@ -1012,9 +958,6 @@ expect(source.contains("INIT_CACHE")).to_equal(true)
 #### MCP main.spl uses table-driven dispatch
 
 - MCP main.spl uses table-driven dispatch
-   - Expected: source contains `dispatch_tool`
-   - Expected: source contains `use .tool_table`
-   - Expected: table_source contains `get_tool_table`
 
 
 <details>
@@ -1028,9 +971,9 @@ Reproduction: this block contains the complete executable scenario source.
 step("MCP main.spl uses table-driven dispatch")
 val source = rt_file_read_text("src/app/mcp/main.spl")
 val table_source = rt_file_read_text("src/app/mcp/tool_table.spl")
-expect(source.contains("dispatch_tool")).to_equal(true)
-expect(source.contains("use .tool_table")).to_equal(true)
-expect(table_source.contains("get_tool_table")).to_equal(true)
+assert_equal(source.contains("dispatch_tool"), true)
+assert_equal(source.contains("use .tool_table"), true)
+assert_equal(table_source.contains("get_tool_table"), true)
 ```
 
 </details>
@@ -1038,7 +981,6 @@ expect(table_source.contains("get_tool_table")).to_equal(true)
 #### MCP main.spl has in-process handlers for core tools
 
 - MCP main.spl has in-process handlers for core tools
-   - Expected: source contains `_dispatch_in_process`
 
 
 <details>
@@ -1051,7 +993,7 @@ Reproduction: this block contains the complete executable scenario source.
 # @req REQ-SSPEC-SYSTEM
 step("MCP main.spl has in-process handlers for core tools")
 val source = rt_file_read_text("src/app/mcp/main_dispatch.spl")
-expect(source.contains("_dispatch_in_process")).to_equal(true)
+assert_equal(source.contains("_dispatch_in_process"), true)
 ```
 
 </details>
@@ -1059,9 +1001,6 @@ expect(source.contains("_dispatch_in_process")).to_equal(true)
 #### MCP cli_passthrough is isolated from in-process handlers
 
 - MCP cli_passthrough is isolated from in-process handlers
-   - Expected: source contains `_dispatch_cli_direct`
-   - Expected: source contains `handle_cli_passthrough_direct`
-   - Expected: table_source contains `"cli"`
 
 
 <details>
@@ -1076,9 +1015,9 @@ step("MCP cli_passthrough is isolated from in-process handlers")
 val source = rt_file_read_text("src/app/mcp/main_dispatch.spl")
 val table_source = rt_file_read_text("src/app/mcp/tool_table.spl")
 # CLI passthrough is used only for handler_kind="cli"
-expect(source.contains("_dispatch_cli_direct")).to_equal(true)
-expect(source.contains("handle_cli_passthrough_direct")).to_equal(true)
-expect(table_source.contains("\"cli\"")).to_equal(true)
+assert_equal(source.contains("_dispatch_cli_direct"), true)
+assert_equal(source.contains("handle_cli_passthrough_direct"), true)
+assert_equal(table_source.contains("\"cli\""), true)
 ```
 
 </details>
@@ -1112,36 +1051,32 @@ Requirements covered by the scenarios in this manual:
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `e0b44ed1f42a704d6bc04b428b104fb6a62faccd7dcb2bba987ef3fe09bd041a`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `442c68ac39ad18ce5eca9715817be6a5f49d2066d2d54618748686230f16cd08`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `e0b44ed1f42a704d6bc04b428b104fb6a62faccd7dcb2bba987ef3fe09bd041a`.
+Source SHA-256: `442c68ac39ad18ce5eca9715817be6a5f49d2066d2d54618748686230f16cd08`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `e0b44ed1f42a704d6bc04b428b104fb6a62faccd7dcb2bba987ef3fe09bd041a`  
+Source SHA-256: `442c68ac39ad18ce5eca9715817be6a5f49d2066d2d54618748686230f16cd08`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **82/100**; effective score: **49/100**; blockers: **1**.
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
 
-SSpec documentization score: 49/100
+SSpec documentization score: 92/100
 source: test/system/mcp/mcp_perf_regression_spec.spl
 mirror: doc/06_spec/system/mcp/mcp_perf_regression_spec.md (current)
-findings: 6 blockers: 1
-  narrative=100 structure=100 oracle=50
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
   traceability=100 evidence=70 coverage=100 maintainability=70
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-  raw=82; blocker cap makes effective=49
 doc/06_spec/system/mcp/mcp_perf_regression_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
 doc/06_spec/system/mcp/mcp_perf_regression_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/system/mcp/mcp_perf_regression_spec.spl:1:1: blocker SSDOC-ORA-002 [oracle] (-50): scenario relies on source-text inspection as system evidence
-  why: Source presence or self-created arithmetic does not demonstrate production behavior.
-  improve: Observe runtime behavior or a stable generated artifact instead.
 test/system/mcp/mcp_perf_regression_spec.spl:60:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'detects ENTRY assignment to .spl file in wrapper' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.

@@ -1,6 +1,6 @@
-# Compile Delegation Wrapper Loop Specification
+# compile_delegation_wrapper_loop_spec
 
-> Tests covering release-wrapper self-delegation (delegation-loop regression), delegation-cycle generalization: every external spawn in the driver facades is guarded, delegation-cycle root cause: the external facade must not shadow the in-process driver.
+> Purpose and audience: owning engineering team verifying release-wrapper self-delegation (delegation-loop regression).
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -9,7 +9,21 @@
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Compile Delegation Wrapper Loop Specification
+# compile_delegation_wrapper_loop_spec
+
+Purpose and audience: owning engineering team verifying release-wrapper self-delegation (delegation-loop regression).
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Compiler |
+| Status | Active |
+| Source | `test/unit/compiler/driver/compile_delegation_wrapper_loop_spec.spl` |
+| Updated | 2026-08-27 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+Purpose and audience: owning engineering team verifying release-wrapper self-delegation (delegation-loop regression).
 
 ## Scenarios
 
@@ -136,8 +150,6 @@ for facade in facades:
 #### keeps the lightweight facade lightweight: it never loads the full in-process driver
 
 - keeps the lightweight facade lightweight: it never loads the full in-process driver
-   - Expected: source does not contain `use lazy compiler.driver.driver_api_compile_single`
-   - Expected: source does not contain `compiler_driver_create`
 
 
 <details>
@@ -154,8 +166,8 @@ step("keeps the lightweight facade lightweight: it never loads the full in-proce
 # full driver here would make every selective import evaluate the whole
 # compiler graph under the test interpreter.
 val source = read_file("src/compiler/80.driver/driver_public_compile_process.spl")
-expect(source.contains("use lazy compiler.driver.driver_api_compile_single")).to_equal(false)
-expect(source.contains("compiler_driver_create")).to_equal(false)
+assert_equal(source.contains("use lazy compiler.driver.driver_api_compile_single"), false)
+assert_equal(source.contains("compiler_driver_create"), false)
 ```
 
 </details>
@@ -189,7 +201,6 @@ check(result != "")
 #### defines every delegating entry point under a distinct external_ name
 
 - defines every delegating entry point under a distinct external_ name
-   - Expected: delegator does not contain `pub fn " + name + "(`
 
 
 <details>
@@ -208,7 +219,7 @@ for name in COLLIDING:
     # The in-process driver keeps the short name...
     check(in_process.contains("pub fn " + name + "("))
     # ...and the delegator must NOT also define it.
-    expect(delegator.contains("pub fn " + name + "(")).to_equal(false)
+    assert_equal(delegator.contains("pub fn " + name + "("), false)
     check(delegator.contains("pub fn external_" + name + "("))
 ```
 
@@ -241,7 +252,6 @@ for name in COLLIDING:
 #### generalizes: no delegating facade redefines an in-process driver entry point
 
 - generalizes: no delegating facade redefines an in-process driver entry point
-   - Expected: source does not contain `pub fn " + name + "(`
 
 
 <details>
@@ -268,27 +278,10 @@ for path in delegating:
     if source.contains("rt_process_run(simple_bin"):
         for name in COLLIDING:
             if in_process.contains("pub fn " + name + "("):
-                expect(source.contains("pub fn " + name + "(")).to_equal(false)
+                assert_equal(source.contains("pub fn " + name + "("), false)
 ```
 
 </details>
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Compiler |
-| Status | Active |
-| Source | `test/unit/compiler/driver/compile_delegation_wrapper_loop_spec.spl` |
-| Updated | 2026-08-26 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering release-wrapper self-delegation (delegation-loop regression), delegation-cycle generalization: every external spawn in the driver facades is guarded, delegation-cycle root cause: the external facade must not shadow the in-process driver.
-- release-wrapper self-delegation (delegation-loop regression)
-- delegation-cycle generalization: every external spawn in the driver facades is guarded
-- delegation-cycle root cause: the external facade must not shadow the in-process driver
 
 ## Scenario Summary
 
@@ -314,34 +307,30 @@ Requirements covered by the scenarios in this manual:
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `fe2ebb8425e92430221a02966b167be7ee5747ad8ff12179856bc86700d630eb`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `853105de07a1610be854a3515bcbd406afa132aa0b09811d5f6d746ace72d930`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `fe2ebb8425e92430221a02966b167be7ee5747ad8ff12179856bc86700d630eb`.
+Source SHA-256: `853105de07a1610be854a3515bcbd406afa132aa0b09811d5f6d746ace72d930`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `fe2ebb8425e92430221a02966b167be7ee5747ad8ff12179856bc86700d630eb`  
+Source SHA-256: `853105de07a1610be854a3515bcbd406afa132aa0b09811d5f6d746ace72d930`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **87/100**; effective score: **49/100**; blockers: **1**.
+Raw score: **97/100**; effective score: **97/100**; blockers: **0**.
 
-SSpec documentization score: 49/100
+SSpec documentization score: 97/100
 source: test/unit/compiler/driver/compile_delegation_wrapper_loop_spec.spl
 mirror: doc/06_spec/unit/compiler/driver/compile_delegation_wrapper_loop_spec.md (current)
-findings: 3 blockers: 1
-  narrative=100 structure=100 oracle=50
+findings: 2 blockers: 0
+  narrative=100 structure=100 oracle=100
   traceability=100 evidence=100 coverage=100 maintainability=70
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-  raw=87; blocker cap makes effective=49
 doc/06_spec/unit/compiler/driver/compile_delegation_wrapper_loop_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/unit/compiler/driver/compile_delegation_wrapper_loop_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+doc/06_spec/unit/compiler/driver/compile_delegation_wrapper_loop_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/unit/compiler/driver/compile_delegation_wrapper_loop_spec.spl:1:1: blocker SSDOC-ORA-002 [oracle] (-50): scenario relies on source-text inspection as system evidence
-  why: Source presence or self-created arithmetic does not demonstrate production behavior.
-  improve: Observe runtime behavior or a stable generated artifact instead.
 <!-- sspec-maintain:scorecard:end -->
