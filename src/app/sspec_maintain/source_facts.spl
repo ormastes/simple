@@ -10,9 +10,14 @@ fn _quoted_name(line: text) -> text:
 
 fn _is_standalone_assertion(line: text) -> bool:
     val lower = line.lower()
-    lower.contains("assert_equal(") or lower.contains("assert_not_equal(") or
+    # assert_eq/assert_ne are std.spec's short aliases of assert_equal/
+    # assert_not_equal (src/lib/nogc_sync_mut/spec.spl) — the scorer read every
+    # assert_eq spec as assertion-less until 2026-08-27.
+    lower.contains("assert_eq(") or lower.contains("assert_ne(") or
+        lower.contains("assert_equal(") or lower.contains("assert_not_equal(") or
         lower.contains("assert_true(") or lower.contains("assert_false(") or
-        lower.contains("assert_contains(") or lower.contains("assert_nil(")
+        lower.contains("assert_contains(") or lower.contains("assert_nil(") or
+        lower.contains("assert_not_nil(")
 
 fn _is_real_assertion(line: text) -> bool:
     val lower = line.lower()
@@ -43,10 +48,28 @@ fn _is_real_assertion(line: text) -> bool:
             return false
     true
 
+fn _count_unescaped_triple(raw: text) -> i64:
+    # Count `"""` occurrences NOT preceded by a backslash. A naive count
+    # misreads the escaped `\"\"\"` inside single-line string fixtures (e.g.
+    # tag_parsing_spec.spl) as real docstring fences, flipping the scanner
+    # into in_triple_string for the rest of the file and hiding every
+    # scenario below the fixture (0-scenario ORA-001 false blocker).
+    var count: i64 = 0
+    var i: i64 = 0
+    while i >= 0:
+        val index = raw.index_of("\"\"\"", i)
+        if index < 0:
+            return count
+        if index == 0 or raw.substring(index - 1, index) != "\\":
+            count = count + 1
+        i = index + 3
+    count
+
 fn _count_sub(haystack: text, needle: text) -> i64:
     # Non-overlapping occurrence count; needle is never empty at call sites.
     if needle == "" or haystack == "":
         return 0
+
     var count: i64 = 0
     var rest = haystack
     val needle_len = needle.len()
@@ -256,13 +279,13 @@ fn extract_sspec_source_facts(path: text, source: text) -> SspecSourceFacts:
     for raw in lines:
         line_number = line_number + 1
         if in_triple_string:
-            if _count_sub(raw, "\"\"\"") > 0:
+            if _count_unescaped_triple(raw) > 0:
                 in_triple_string = false
             continue
         val line = raw.trim()
         val line_lower = line.lower()
         val indent = _indent_width(raw)
-        if _count_sub(raw, "\"\"\"") % 2 == 1:
+        if _count_unescaped_triple(raw) % 2 == 1:
             in_triple_string = true
         if current_line > 0 and line != "" and indent <= current_indent:
             scenarios.push(_finish_scenario(current_name, current_line,

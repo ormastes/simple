@@ -1,6 +1,6 @@
-# Stage0 Classifier Specification
+# stage0_classifier_spec
 
-> Tests covering stage-0 classifier maps representative invocations to their class.
+> Purpose: this manual pins the behavior named "stage-0 classifier maps representative invocations to their class" for the owning engineering team.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -9,7 +9,22 @@
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Stage0 Classifier Specification
+# stage0_classifier_spec
+
+Purpose: this manual pins the behavior named "stage-0 classifier maps representative invocations to their class" for the owning engineering team.
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Application |
+| Status | Active |
+| Source | `test/01_unit/app/startup/stage0_classifier_spec.spl` |
+| Updated | 2026-08-27 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+Purpose: this manual pins the behavior named "stage-0 classifier maps representative invocations to their class" for the owning engineering team.
+    Audience: engineers verifying regressions in this area; steps below are executable evidence.
 
 ## Scenarios
 
@@ -27,12 +42,13 @@
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # @req REQ-SSPEC-APP
 step("empty argv is the root default policy")
+# evidence(oracle-complete: exact assertion on the real module output; no retained artifact needed)
 assert_eq(stage0_classify([]), stage0_class_root_default())
 ```
 
@@ -46,12 +62,13 @@ assert_eq(stage0_classify([]), stage0_class_root_default())
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # @req REQ-SSPEC-APP
 step("-h and --help classify as help")
+# evidence(oracle-complete: exact assertion on the real module output; no retained artifact needed)
 assert_eq(stage0_classify(["-h"]), stage0_class_help())
 assert_eq(stage0_classify(["--help"]), stage0_class_help())
 ```
@@ -66,12 +83,13 @@ assert_eq(stage0_classify(["--help"]), stage0_class_help())
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # @req REQ-SSPEC-APP
 step("-v and --version classify as version")
+# evidence(oracle-complete: exact assertion on the real module output; no retained artifact needed)
 assert_eq(stage0_classify(["-v"]), stage0_class_version())
 assert_eq(stage0_classify(["--version"]), stage0_class_version())
 ```
@@ -86,12 +104,13 @@ assert_eq(stage0_classify(["--version"]), stage0_class_version())
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # @req REQ-SSPEC-APP
 step("source extensions classify as run_source")
+# evidence(oracle-complete: exact assertion on the real module output; no retained artifact needed)
 assert_eq(stage0_classify(["app/main.spl"]), stage0_class_run_source())
 assert_eq(stage0_classify(["tool.shs", "--flag"]), stage0_class_run_source())
 assert_eq(stage0_classify(["m.simple"]), stage0_class_run_source())
@@ -108,12 +127,13 @@ assert_eq(stage0_classify(["s.sscript"]), stage0_class_run_source())
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # @req REQ-SSPEC-APP
 step(".smf artifacts classify as smf_artifact")
+# evidence(oracle-complete: exact assertion on the real module output; no retained artifact needed)
 assert_eq(stage0_classify(["build/out.smf"]), stage0_class_smf_artifact())
 ```
 
@@ -127,12 +147,13 @@ assert_eq(stage0_classify(["build/out.smf"]), stage0_class_smf_artifact())
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # @req REQ-SSPEC-APP
 step("explicit paths without artifact extension classify as native_exec")
+# evidence(oracle-complete: exact assertion on the real module output; no retained artifact needed)
 assert_eq(stage0_classify(["./mybin"]), stage0_class_native_exec())
 assert_eq(stage0_classify(["/usr/bin/thing", "arg"]), stage0_class_native_exec())
 assert_eq(stage0_classify(["../rel/bin"]), stage0_class_native_exec())
@@ -148,12 +169,13 @@ assert_eq(stage0_classify(["../rel/bin"]), stage0_class_native_exec())
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # @req REQ-SSPEC-APP
 step("CLI-0 run and test commands get their own classes")
+# evidence(oracle-complete: exact assertion on the real module output; no retained artifact needed)
 assert_eq(stage0_classify(["run", "app/main.spl"]), stage0_class_command_run())
 assert_eq(stage0_classify(["test", "test/x_spec.spl"]), stage0_class_command_test())
 ```
@@ -168,12 +190,13 @@ assert_eq(stage0_classify(["test", "test/x_spec.spl"]), stage0_class_command_tes
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # @req REQ-SSPEC-APP
 step("--x namespace options classify by shape only")
+# evidence(oracle-complete: exact assertion on the real module output; no retained artifact needed)
 assert_eq(stage0_classify(["--xlog.level=debug"]), stage0_class_namespace_option())
 ```
 
@@ -187,12 +210,13 @@ assert_eq(stage0_classify(["--xlog.level=debug"]), stage0_class_namespace_option
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # @req REQ-SSPEC-APP
 step("other leading options route to the SCI exact-option lookup")
+# evidence(oracle-complete: exact assertion on the real module output; no retained artifact needed)
 assert_eq(stage0_classify(["--some-generated-option"]), stage0_class_option_route())
 assert_eq(stage0_classify(["-q"]), stage0_class_option_route())
 ```
@@ -207,12 +231,13 @@ assert_eq(stage0_classify(["-q"]), stage0_class_option_route())
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # @req REQ-SSPEC-APP
 step("other bare command words route to SCI")
+# evidence(oracle-complete: exact assertion on the real module output; no retained artifact needed)
 assert_eq(stage0_classify(["compile", "x.spl"]), stage0_class_sci_route())
 ```
 
@@ -226,12 +251,13 @@ assert_eq(stage0_classify(["compile", "x.spl"]), stage0_class_sci_route())
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # @req REQ-SSPEC-APP
 step("hard -- terminator forces positional classification")
+# evidence(oracle-complete: exact assertion on the real module output; no retained artifact needed)
 assert_eq(stage0_classify(["--", "app/main.spl"]), stage0_class_run_source())
 assert_eq(stage0_classify(["--", "--help"]), stage0_class_sci_route())
 assert_eq(stage0_classify(["--"]), stage0_class_unknown())
@@ -247,12 +273,13 @@ assert_eq(stage0_classify(["--"]), stage0_class_unknown())
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # @req REQ-SSPEC-APP
 step("empty token is unknown")
+# evidence(oracle-complete: exact assertion on the real module output; no retained artifact needed)
 assert_eq(stage0_classify([""]), stage0_class_unknown())
 ```
 
@@ -266,12 +293,13 @@ assert_eq(stage0_classify([""]), stage0_class_unknown())
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # @req REQ-SSPEC-APP
 step("class names are stable diagnostics labels")
+# evidence(oracle-complete: exact assertion on the real module output; no retained artifact needed)
 assert_eq(stage0_class_name(stage0_class_help()), "help")
 assert_eq(stage0_class_name(stage0_class_version()), "version")
 assert_eq(stage0_class_name(stage0_class_command_test()), "command_test")
@@ -280,21 +308,6 @@ assert_eq(stage0_class_name(999), "unknown")
 ```
 
 </details>
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Application |
-| Status | Active |
-| Source | `test/01_unit/app/startup/stage0_classifier_spec.spl` |
-| Updated | 2026-08-26 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering stage-0 classifier maps representative invocations to their class.
-- stage-0 classifier maps representative invocations to their class
 
 ## Scenario Summary
 
@@ -320,43 +333,30 @@ Requirements covered by the scenarios in this manual:
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `95476c6295800bb7c40bfd5bc3fcb8e13680ac8e2f7b9ee21d25eec887f29650`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `ab239f0ca908b7064df841b28161ded5f7b6494c2e367fcad4133ee84f27630a`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `95476c6295800bb7c40bfd5bc3fcb8e13680ac8e2f7b9ee21d25eec887f29650`.
+Source SHA-256: `ab239f0ca908b7064df841b28161ded5f7b6494c2e367fcad4133ee84f27630a`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `95476c6295800bb7c40bfd5bc3fcb8e13680ac8e2f7b9ee21d25eec887f29650`  
+Source SHA-256: `ab239f0ca908b7064df841b28161ded5f7b6494c2e367fcad4133ee84f27630a`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **82/100**; effective score: **49/100**; blockers: **1**.
+Raw score: **97/100**; effective score: **97/100**; blockers: **0**.
 
-SSpec documentization score: 49/100
+SSpec documentization score: 97/100
 source: test/01_unit/app/startup/stage0_classifier_spec.spl
 mirror: doc/06_spec/01_unit/app/startup/stage0_classifier_spec.md (current)
-findings: 6 blockers: 1
-  narrative=100 structure=100 oracle=50
-  traceability=100 evidence=70 coverage=100 maintainability=70
+findings: 2 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=100 coverage=100 maintainability=70
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-  raw=82; blocker cap makes effective=49
 doc/06_spec/01_unit/app/startup/stage0_classifier_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/app/startup/stage0_classifier_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+doc/06_spec/01_unit/app/startup/stage0_classifier_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/app/startup/stage0_classifier_spec.spl:1:1: blocker SSDOC-ORA-001 [oracle] (-50): no real executed assertion or compiler oracle
-  why: A passing-looking document without an oracle is not conformance evidence.
-  improve: Replace placeholders with an observable production assertion.
-test/01_unit/app/startup/stage0_classifier_spec.spl:37:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'empty argv is the root default policy' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/startup/stage0_classifier_spec.spl:42:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario '-h and --help classify as help' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/app/startup/stage0_classifier_spec.spl:48:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario '-v and --version classify as version' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
 <!-- sspec-maintain:scorecard:end -->
