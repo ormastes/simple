@@ -323,3 +323,6 @@ passing placeholder.
     fail with `E-SFFI-CACHE-PINS-READ` and existing mark-sweep manifest reads
     fail with `E-SFFI-CACHE-MANIFEST-READ`; normal absent pins remain empty.
     Do not reintroduce `file_read_nullable(...) ?? ""` on either path.
+58. Keep cache lease's eight raw contracts behind inline lexical owners.
+    Unreadable existing leases fail closed for query paths and remain retained
+    by reclaim; do not silently convert them to empty text or delete them.

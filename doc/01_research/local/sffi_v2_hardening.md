@@ -1765,3 +1765,14 @@ review. The new branches execute only on foreign-read failure; normal paths
 retain their direct call shape and add no allocation, copy, loop, lookup, lock,
 or dispatch. This is fail-closed contract repair, not artifact signing or
 global provider verification.
+
+### Compiler cache-lease raw-owner and unreadable-read repair (2026-08-27)
+
+The cache lease owner now isolates eight raw filesystem/directory/process/time
+contracts in private always-inline lexical wrappers. Existing unreadable lease
+files fail closed with `E-SFFI-CACHE-LEASE-READ` for heartbeat/read/list paths;
+the reclaim path conservatively leaves an unreadable lease in place rather than
+deleting it. Normal missing leases retain their existing API behavior. The
+authority audit and source check pass. Optimizer analysis reports 49 existing
+opportunities (48 MIR, one preallocation); no normal-path allocation, copy,
+lookup, lock, retry, or dispatch was added. This remains unsigned containment.
