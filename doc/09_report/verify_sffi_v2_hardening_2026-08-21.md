@@ -249,6 +249,18 @@ a claim that SFFI v2 is complete.
 - FAIL (global admission): no artifact-bound provider signature or semantic
   evidence exists. Global SFFI verification remains **FAIL**.
 
+## Follow-up: authority census after cache-family containment (2026-08-27)
+
+- PASS (inventory): source authority census reports 14,064 missing call sites,
+  2,298 lexical scopes, and 1,625 function-wide unsafe scopes. The cache pass
+  reduced missing calls by 96 and added 37 lexical scopes compared with the
+  prior 14,160/2,261 snapshot.
+- WARN (scope): these are source classifications, not ABI, ownership,
+  provider-language, artifact, or cryptographic-signature verification.
+- FAIL (global admission): 14,064 unscoped call sites remain. SSH session and
+  Torch dynamic operations are the next largest provider families; global SFFI
+  safety and signed verification remain **FAIL**.
+
 ## Follow-up: compiler mark-sweep raw-owner consolidation (2026-08-27)
 
 - PASS (static/source): seven raw mark-sweep contracts are unsafe-tagged and

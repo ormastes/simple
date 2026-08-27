@@ -1776,3 +1776,14 @@ deleting it. Normal missing leases retain their existing API behavior. The
 authority audit and source check pass. Optimizer analysis reports 49 existing
 opportunities (48 MIR, one preallocation); no normal-path allocation, copy,
 lookup, lock, retry, or dispatch was added. This remains unsigned containment.
+
+### Authority census after cache-family containment (2026-08-27)
+
+The source authority census now records 14,064 missing raw call sites, 2,298
+lexical FFI scopes, and 1,625 function-wide unsafe scopes. The cache-family
+repairs reduced missing call sites by 96 from the previous 14,160 snapshot and
+increased lexical scopes by 37. This is source classification only—not ABI,
+provider-language, artifact, or signature proof. The next largest unresolved
+production families are SSH session (136 missing call sites) and Torch dynamic
+operations (129); both need provider-specific ABI/ownership design rather than
+bulk annotation.
