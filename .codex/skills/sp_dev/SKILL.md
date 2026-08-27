@@ -70,6 +70,12 @@ approve`, run `spipe self-review-guide` (or
 review, protected dispatch, and exact-head poll. This is the canonical
 discovery entry point.
 
+If `spipe` is absent or returns `unknown command: self-review-guide`, initialize
+the pinned plugin with `git submodule update --init .spipe/spipe` and run the
+`node .spipe/spipe/cli/spipe.js self-review-guide` form. The unknown command
+means a stale installation; it does not authorize falling back to author
+`gh pr review --approve`.
+
 When a lane reaches protected PR integration, tell the operator and future LLM
 that GitHub forbids a PR author from submitting an `APPROVED` review on their
 own PR. `SPipe Self Review Admission` is a short-lived required status check,
