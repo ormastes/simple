@@ -501,3 +501,14 @@ a claim that SFFI v2 is complete.
   or additional provider call was introduced. No runtime benchmark was run.
 - FAIL (global admission): the provider has no artifact-bound ABI/ownership
   verification receipt or trusted signature. This family remains unsafe-only.
+
+## Follow-up: small scalar math containment (2026-08-27)
+
+- PASS (static/source): noise, statistics, ML metrics, and vector-distance
+  owners explicitly tag four scalar-math declarations and scope nine existing
+  direct calls lexically.
+- PASS (performance shape): the static guard retains the existing call count
+  and loop shape; no helper dispatch, allocation, copy, lookup, lock, retry,
+  or additional provider call was added. No runtime benchmark was run.
+- FAIL (global admission): the provider lacks artifact-bound ABI/ownership
+  verification and a trusted signature. These paths remain unsafe-only.
