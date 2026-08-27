@@ -193,10 +193,10 @@ fn expr_uses_self(expr: &ast::Expr) -> bool {
         ast::Expr::Try(expr)
         | ast::Expr::ForceUnwrap(expr)
         | ast::Expr::ExistsCheck(expr)
-        | ast::Expr::UnwrapOrReturn { expr, .. }
         | ast::Expr::Await(expr)
         | ast::Expr::Spawn(expr)
         | ast::Expr::ContractOld(expr) => expr_uses_self(expr),
+        ast::Expr::UnwrapOrReturn { expr, default } => expr_uses_self(expr) || expr_uses_self(default),
         ast::Expr::DoBlock(nodes) | ast::Expr::UnsafeBlock(nodes, _) => nodes.iter().any(node_uses_self),
         _ => false,
     }
