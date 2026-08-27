@@ -423,3 +423,16 @@ a claim that SFFI v2 is complete.
   in the facade/consumer.
 - FAIL (global admission): the Rust interpreter provider has no artifact-bound
   ABI/ownership receipt or trusted signature. This facade remains unsafe-only.
+
+## Source-only SFFI inventory refresh (2026-08-27)
+
+- `SFFI_SOURCE_ONLY=1 rt-safety-census.shs` found 11,106 declaration rows and
+  2,966 distinct symbols. It classifies 3,153 rows (2,070 symbols) as tagged
+  unsafe, 935 rows as unsafe with a documented contract, and 7,713 rows
+  (1,351 symbols) as untouched.
+- Implementation definitions observed by language: C 2,378 rows/1,889 symbols
+  in 91 files; C++ 219/219 in one file; Rust 2,145/2,122 in 172 files; Simple
+  637/623 in 62 files. These are implementation observations, not ABI proof.
+- Verified, signature-verified, and verified-and-signed rows are all zero.
+  Source-only mode intentionally reports no provider identity/backing; it
+  cannot be used to claim global admission or unsafe minimization.
