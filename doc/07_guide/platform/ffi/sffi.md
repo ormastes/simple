@@ -86,6 +86,17 @@ its output as a source-only warning queue: it can prioritize containment work,
 but it cannot establish ABI compatibility, nullability, ownership, loaded
 artifact identity, provider verification, or signature admission.
 
+For a module+symbol review queue, run
+`scripts/audit/rt-unsafe-priority.shs`. Its `textual_rt_token_estimate` is
+deliberately **not** a lexical call count: strings and docstrings can increase
+it, although line comments are removed. Use it only as a stable ordering hint.
+Before any narrow mechanical edit, validate an exact module+symbol unsafe-tag,
+contract, and state policy with
+`scripts/audit/rt-unsafe-autofix-contract.shs POLICY.tsv`. It rejects prefixes,
+wildcards, duplicate mappings, and ambiguous declarations; it does not edit
+source or establish provider verification/signing/admission. The focused
+sabotage fixture is `test/01_unit/scripts/rt_unsafe_priority_contract_test.shs`.
+
 Do **not** apply a blanket autofix to direct `rt_*` calls. A rewrite is allowed
 only when the symbol has an approved per-contract mapping to a canonical safe
 facade, or when it can add the exact declaration annotation and smallest

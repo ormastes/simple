@@ -533,3 +533,13 @@ passing placeholder.
      signature before loader publication. Keep the hot path as a cached typed
      call plus required validation; do not add per-call hashing, lookup,
      signature work, allocation, copy, lock, retry, or provider call.
+102. Use `scripts/audit/rt-unsafe-priority.shs` only as a source-only textual
+     ordering hint for direct `rt_*` migration debt. Its per-module+symbol
+     estimate can include strings/docstrings and must never be called a lexical
+     call count, reachability result, ABI proof, or admission result.
+103. A reviewed mechanical change must first pass the exact module+symbol
+     mapping in `scripts/audit/rt-unsafe-autofix-contract.shs POLICY.tsv`.
+     It checks only unsafe-tag, contract, and source state, rejects wildcard or
+     ambiguous mappings, and does not modify source. Keep the string/docstring/
+     comment sabotage coverage in
+     `test/01_unit/scripts/rt_unsafe_priority_contract_test.shs`.
