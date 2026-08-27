@@ -518,3 +518,7 @@ passing placeholder.
     existing `HotReloadResult.IoError` paths must remain authoritative; preserve
     four direct disk calls with no retries, extra I/O, copies, lookup/lock work,
     or change to hot-reload/update semantics pending provider admission.
+99. Keep backend C compilation on `read_file_text_result` for source input;
+    unreadable input must exit nonzero. Retain raw bootstrap-argument and
+    generated-output-write operations as lexical unsafe calls, with exactly one
+    normal argument read, source read, and output write and no retries/copies.

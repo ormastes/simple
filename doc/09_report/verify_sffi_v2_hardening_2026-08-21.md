@@ -726,3 +726,16 @@ a claim that SFFI v2 is complete.
   to hot-reload/update semantics was introduced. No runtime benchmark was run.
 - FAIL (global admission): raw disk providers lack artifact-bound ABI,
   ownership, verification, and trusted-signature evidence. They remain unsafe.
+
+## Follow-up: backend C-compile entrypoint migration (2026-08-27)
+
+- PASS (static/source): the entrypoint no longer declares/calls raw source
+  reads; it uses `read_file_text_result`. Argument and output-write ABIs remain
+  explicitly unsafe/lexical.
+- PASS (semantics/performance shape): unreadable input exits nonzero. Successful
+  compilation retains exactly one argument read, source read, and output write,
+  with no retry, extra I/O, copy, lookup, lock, or duplicate compilation. No
+  runtime benchmark was run.
+- FAIL (global admission): the canonical read and raw argument/write providers
+  remain outside artifact-bound ABI/ownership verification and trusted-signature
+  admission.
