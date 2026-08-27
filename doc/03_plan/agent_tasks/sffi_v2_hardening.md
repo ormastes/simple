@@ -380,3 +380,7 @@ passing placeholder.
     truncating it to epoch zero; collection still performs one read. Redis
     time failure needs a separate command-protocol contract, so do not collapse
     it into this metadata-only change.
+69. Redis TTL dispatch uses one shared integer wall-clock read per inbound
+    chunk. A negative result closes the connection before dispatch rather than
+    retaining stale/fabricated time. Keep the read count, parser, and successful
+    request loop unchanged; artifact signing and verification remain separate.
