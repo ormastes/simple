@@ -84,6 +84,220 @@ bootstrap_scheduler_verify_task_receipt() {
         "$bootstrap_scheduler_task_receipt")" = passed ] || return 1
 }
 
+bootstrap_scheduler_path_within() {
+    bootstrap_scheduler_path_root=$1
+    bootstrap_scheduler_path_candidate=$2
+    [ -f "$bootstrap_scheduler_path_candidate" ] &&
+        [ ! -L "$bootstrap_scheduler_path_candidate" ] || return 1
+    bootstrap_scheduler_path_root=$(CDPATH= cd -- \
+        "$bootstrap_scheduler_path_root" && pwd -P) || return 1
+    bootstrap_scheduler_path_parent=$(CDPATH= cd -- \
+        "$(dirname -- "$bootstrap_scheduler_path_candidate")" && pwd -P) ||
+        return 1
+    bootstrap_scheduler_path_live=\
+"$bootstrap_scheduler_path_parent/$(basename -- "$bootstrap_scheduler_path_candidate")"
+    [ "$bootstrap_scheduler_path_live" = "$bootstrap_scheduler_path_candidate" ] ||
+        return 1
+    case "$bootstrap_scheduler_path_live" in
+        "$bootstrap_scheduler_path_root"/*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+bootstrap_scheduler_verify_qualification_result() {
+    bootstrap_scheduler_qualification_result=$1
+    bootstrap_scheduler_qualification_generation=$2
+    bootstrap_scheduler_qualification_lease_sha=$3
+    bootstrap_scheduler_qualification_output=$4
+    bootstrap_scheduler_qualification_generation_dir=$5
+    [ "$(bootstrap_scheduler_manifest_value schema \
+        "$bootstrap_scheduler_qualification_result")" = \
+        simple-bootstrap-qualification-result-v1 ] || return 1
+    [ "$(bootstrap_scheduler_manifest_value generation \
+        "$bootstrap_scheduler_qualification_result")" = \
+        "$bootstrap_scheduler_qualification_generation" ] || return 1
+    [ "$(bootstrap_scheduler_manifest_value status \
+        "$bootstrap_scheduler_qualification_result")" = passed ] || return 1
+    [ "$(bootstrap_scheduler_manifest_value lease_sha256 \
+        "$bootstrap_scheduler_qualification_result")" = \
+        "$bootstrap_scheduler_qualification_lease_sha" ] || return 1
+    for bootstrap_scheduler_qualification_stem in admission candidate gate_log; do
+        bootstrap_scheduler_qualification_path=$(
+            bootstrap_scheduler_manifest_value \
+                "${bootstrap_scheduler_qualification_stem}_path" \
+                "$bootstrap_scheduler_qualification_result"
+        ) || return 1
+        bootstrap_scheduler_qualification_hash=$(
+            bootstrap_scheduler_manifest_value \
+                "${bootstrap_scheduler_qualification_stem}_sha256" \
+                "$bootstrap_scheduler_qualification_result"
+        ) || return 1
+        case "$bootstrap_scheduler_qualification_stem" in
+            gate_log)
+                bootstrap_scheduler_path_within \
+                    "$bootstrap_scheduler_qualification_generation_dir" \
+                    "$bootstrap_scheduler_qualification_path" || return 1
+                ;;
+            *)
+                bootstrap_scheduler_path_within \
+                    "$bootstrap_scheduler_qualification_output" \
+                    "$bootstrap_scheduler_qualification_path" || return 1
+                ;;
+        esac
+        [ "$(bootstrap_scheduler_hash_file \
+            "$bootstrap_scheduler_qualification_path")" = \
+            "$bootstrap_scheduler_qualification_hash" ] || return 1
+    done
+    [ "$(bootstrap_scheduler_manifest_value gate \
+        "$bootstrap_scheduler_qualification_result")" = \
+        check-stage2-hello-world-native-build ] || return 1
+    grep -Eq '^PASS — [1-9][0-9]* case\(s\) checked' \
+        "$(bootstrap_scheduler_manifest_value gate_log_path \
+            "$bootstrap_scheduler_qualification_result")" || return 1
+}
+
+bootstrap_scheduler_verify_stage3_result() {
+    bootstrap_scheduler_stage3_result=$1
+    bootstrap_scheduler_stage3_generation=$2
+    bootstrap_scheduler_stage3_lease_sha=$3
+    bootstrap_scheduler_stage3_output=$4
+    [ "$(bootstrap_scheduler_manifest_value schema \
+        "$bootstrap_scheduler_stage3_result")" = \
+        simple-bootstrap-stage3-scheduler-result-v1 ] || return 1
+    [ "$(bootstrap_scheduler_manifest_value generation \
+        "$bootstrap_scheduler_stage3_result")" = \
+        "$bootstrap_scheduler_stage3_generation" ] || return 1
+    [ "$(bootstrap_scheduler_manifest_value status \
+        "$bootstrap_scheduler_stage3_result")" = verified ] || return 1
+    [ "$(bootstrap_scheduler_manifest_value lease_sha256 \
+        "$bootstrap_scheduler_stage3_result")" = \
+        "$bootstrap_scheduler_stage3_lease_sha" ] || return 1
+    for bootstrap_scheduler_stage3_stem in provenance candidate parent_admission; do
+        bootstrap_scheduler_stage3_path=$(bootstrap_scheduler_manifest_value \
+            "${bootstrap_scheduler_stage3_stem}_path" \
+            "$bootstrap_scheduler_stage3_result") || return 1
+        bootstrap_scheduler_stage3_hash=$(bootstrap_scheduler_manifest_value \
+            "${bootstrap_scheduler_stage3_stem}_sha256" \
+            "$bootstrap_scheduler_stage3_result") || return 1
+        bootstrap_scheduler_path_within "$bootstrap_scheduler_stage3_output" \
+            "$bootstrap_scheduler_stage3_path" || return 1
+        [ "$(bootstrap_scheduler_hash_file "$bootstrap_scheduler_stage3_path")" = \
+            "$bootstrap_scheduler_stage3_hash" ] || return 1
+    done
+}
+
+bootstrap_scheduler_verify_lineage_admission() {
+    bootstrap_scheduler_lineage=$1
+    bootstrap_scheduler_lineage_generation=$2
+    bootstrap_scheduler_lineage_lease_sha=$3
+    bootstrap_scheduler_lineage_output=$4
+    [ "$(bootstrap_scheduler_manifest_value schema \
+        "$bootstrap_scheduler_lineage")" = \
+        simple-bootstrap-lineage-admission-v1 ] || return 1
+    [ "$(bootstrap_scheduler_manifest_value generation \
+        "$bootstrap_scheduler_lineage")" = \
+        "$bootstrap_scheduler_lineage_generation" ] || return 1
+    [ "$(bootstrap_scheduler_manifest_value status \
+        "$bootstrap_scheduler_lineage")" = qualified ] || return 1
+    [ "$(bootstrap_scheduler_manifest_value lease_sha256 \
+        "$bootstrap_scheduler_lineage")" = \
+        "$bootstrap_scheduler_lineage_lease_sha" ] || return 1
+    [ "$(bootstrap_scheduler_manifest_value bootstrap_output \
+        "$bootstrap_scheduler_lineage")" = \
+        "$bootstrap_scheduler_lineage_output" ] || return 1
+    [ "$(bootstrap_scheduler_manifest_value ancestor_chain \
+        "$bootstrap_scheduler_lineage")" = qualified-untainted ] || return 1
+    bootstrap_scheduler_lineage_lease=$(bootstrap_scheduler_manifest_value \
+        generation_lease_path "$bootstrap_scheduler_lineage") || return 1
+    bootstrap_scheduler_path_within "$bootstrap_scheduler_lineage_output" \
+        "$bootstrap_scheduler_lineage_lease" || return 1
+    bootstrap_scheduler_lease_current "$bootstrap_scheduler_lineage_lease" \
+        "$bootstrap_scheduler_lineage_generation" \
+        "$bootstrap_scheduler_lineage_lease_sha" || return 1
+    for bootstrap_scheduler_lineage_stem in \
+        qualification_result stage3_result stage3_provenance stage3_candidate \
+        parent_admission; do
+        bootstrap_scheduler_lineage_path=$(bootstrap_scheduler_manifest_value \
+            "${bootstrap_scheduler_lineage_stem}_path" \
+            "$bootstrap_scheduler_lineage") || return 1
+        bootstrap_scheduler_lineage_hash=$(bootstrap_scheduler_manifest_value \
+            "${bootstrap_scheduler_lineage_stem}_sha256" \
+            "$bootstrap_scheduler_lineage") || return 1
+        bootstrap_scheduler_path_within "$bootstrap_scheduler_lineage_output" \
+            "$bootstrap_scheduler_lineage_path" || return 1
+        [ "$(bootstrap_scheduler_hash_file "$bootstrap_scheduler_lineage_path")" = \
+            "$bootstrap_scheduler_lineage_hash" ] || return 1
+    done
+}
+
+bootstrap_scheduler_verify_continuation_result() {
+    bootstrap_scheduler_continuation_result=$1
+    bootstrap_scheduler_continuation_generation=$2
+    bootstrap_scheduler_continuation_lease_sha=$3
+    bootstrap_scheduler_continuation_output=$4
+    bootstrap_scheduler_continuation_expect=$5
+    [ "$(bootstrap_scheduler_manifest_value schema \
+        "$bootstrap_scheduler_continuation_result")" = \
+        simple-bootstrap-stage4-scheduler-result-v1 ] || return 1
+    [ "$(bootstrap_scheduler_manifest_value generation \
+        "$bootstrap_scheduler_continuation_result")" = \
+        "$bootstrap_scheduler_continuation_generation" ] || return 1
+    [ "$(bootstrap_scheduler_manifest_value status \
+        "$bootstrap_scheduler_continuation_result")" = verified ] || return 1
+    [ "$(bootstrap_scheduler_manifest_value lease_sha256 \
+        "$bootstrap_scheduler_continuation_result")" = \
+        "$bootstrap_scheduler_continuation_lease_sha" ] || return 1
+    [ "$(bootstrap_scheduler_manifest_value publication_status \
+        "$bootstrap_scheduler_continuation_result")" = \
+        "$bootstrap_scheduler_continuation_expect" ] || return 1
+    for bootstrap_scheduler_continuation_stem in \
+        continuation lineage stage3_provenance stage4 stage4_provenance; do
+        bootstrap_scheduler_continuation_path=$(
+            bootstrap_scheduler_manifest_value \
+                "${bootstrap_scheduler_continuation_stem}_path" \
+                "$bootstrap_scheduler_continuation_result"
+        ) || return 1
+        bootstrap_scheduler_continuation_hash=$(
+            bootstrap_scheduler_manifest_value \
+                "${bootstrap_scheduler_continuation_stem}_sha256" \
+                "$bootstrap_scheduler_continuation_result"
+        ) || return 1
+        bootstrap_scheduler_path_within "$bootstrap_scheduler_continuation_output" \
+            "$bootstrap_scheduler_continuation_path" || return 1
+        [ "$(bootstrap_scheduler_hash_file \
+            "$bootstrap_scheduler_continuation_path")" = \
+            "$bootstrap_scheduler_continuation_hash" ] || return 1
+    done
+    [ "$(bootstrap_scheduler_manifest_value lineage_sha256 \
+        "$bootstrap_scheduler_continuation_result")" = \
+        "$(bootstrap_scheduler_manifest_value lineage_sha256 \
+            "$(bootstrap_scheduler_manifest_value continuation_path \
+                "$bootstrap_scheduler_continuation_result")")" ] || return 1
+}
+
+bootstrap_scheduler_verify_deploy_receipt() {
+    bootstrap_scheduler_deploy_receipt=$1
+    bootstrap_scheduler_deploy_root=$2
+    bootstrap_scheduler_deploy_stage4_sha=$3
+    [ "$(bootstrap_scheduler_manifest_value schema \
+        "$bootstrap_scheduler_deploy_receipt")" = \
+        bootstrap-deploy-receipt-v1 ] || return 1
+    [ "$(bootstrap_scheduler_manifest_value deployment_status \
+        "$bootstrap_scheduler_deploy_receipt")" = pass ] || return 1
+    [ "$(bootstrap_scheduler_manifest_value stage4_candidate_sha256 \
+        "$bootstrap_scheduler_deploy_receipt")" = \
+        "$bootstrap_scheduler_deploy_stage4_sha" ] || return 1
+    [ "$(bootstrap_scheduler_manifest_value current_sha256 \
+        "$bootstrap_scheduler_deploy_receipt")" = \
+        "$bootstrap_scheduler_deploy_stage4_sha" ] || return 1
+    bootstrap_scheduler_deploy_current=$(bootstrap_scheduler_manifest_value \
+        current_path "$bootstrap_scheduler_deploy_receipt") || return 1
+    bootstrap_scheduler_path_within "$bootstrap_scheduler_deploy_root" \
+        "$bootstrap_scheduler_deploy_current" || return 1
+    [ "$(bootstrap_scheduler_hash_file "$bootstrap_scheduler_deploy_current")" = \
+        "$bootstrap_scheduler_deploy_stage4_sha" ] || return 1
+}
+
 bootstrap_scheduler_write_invalidation() {
     bootstrap_scheduler_invalidation_dir=$1
     bootstrap_scheduler_invalidation_generation=$2

@@ -38,30 +38,37 @@ The immutable graph authority is
 | `events.env` | machine-readable task/generation transitions |
 | `tasks/*.env` | typed exit/status receipts bound to the original current lease |
 | `qualification.result.env` | independently reverified Stage-2 admission plus the broad hello-world native-build gate |
-| `lineage-admission.env` | final qualified, untainted ancestor-chain receipt |
+| `stage3.result.env` | reverified Stage-3 provenance/candidate bound to the qualified parent admission |
+| `lineage-admission.env` | immutable qualified ancestor-chain admission, written before any Stage-4 continuation |
+| `stage4.result.env` | reverified continuation, Stage-4 artifact/provenance, lineage, and publication result |
 | `failure-manifest.env` | failure root, task completeness, source/policy/graph/lease identities, and invalidation disposition |
 | `invalidations/*.env` | recursive Stage 2 → Stage 3 → Stage 4 → deploy → release revocation receipts |
 
 After Stage 2 publishes its immutable smoke-admission receipt, the stage engine
 immediately starts Stage 3 on the compiler critical path. With at least two CPU
-slots and the configured memory reserve, the supervisor concurrently rechecks
+slots and enforceable per-child memory limits, the supervisor concurrently rechecks
 the admission and runs `check-stage2-hello-world-native-build.shs`. This is a
 real compiler qualification: it builds/executes the `--entry` form and checks
 the positional form for crash/hang. It is not a sleep-only planner.
 
 `SIMPLE_BOOTSTRAP_SCHEDULER_CPU_SLOTS` and
-`SIMPLE_BOOTSTRAP_SCHEDULER_MEMORY_MIB` may cap the scheduler. One CPU slot or
-insufficient memory selects `serialized-resource-guard`: Stage 3 completes
-before broad qualification rather than starving the compiler critical path.
-Qualification otherwise consumes one CPU slot and its declared memory reserve;
-the compiler owns the remainder. Deploy remains an exclusive token.
+`SIMPLE_BOOTSTRAP_SCHEDULER_MEMORY_MIB` may cap the scheduler. The supervisor
+passes bounded thread counts to both compiler children and enforces each memory
+claim with the shell's `ulimit -v`. One CPU slot, insufficient memory (including
+the safety reserve), or a platform without `ulimit -v` selects
+`serialized-resource-guard`: Stage 3 completes before broad qualification, so
+unenforceable claims never overlap. `graph.env` records the actual enforcement
+mode and limits. Deploy remains an exclusive token.
 
 ## Quarantine and continuation
 
 Stage 3 is speculative while its Stage-2 parent is only smoke-admitted. The
 supervisor strips `--full-cli`, `--deploy`, and `--release` from that provisional
-engine invocation. A Stage-4 continuation starts only after both the engine and
-parent qualification receipts pass under the same current lease.
+engine invocation. The supervisor re-verifies the real qualification gate log,
+Stage-2 admission/candidate, and Stage-3 provenance/candidate under the same
+current lease, then writes and re-verifies `lineage-admission.env`. Only that
+hashed receipt authorizes the shipped entrypoint to start Stage 4. Environment
+booleans and alternate engine/qualifier paths are not authority.
 
 - `--full-cli` uses the admitted Stage-3 continuation and records
   `publication_status=quarantined` without touching `bin/release`.
@@ -109,7 +116,8 @@ sh -n scripts/bootstrap/bootstrap-strategy.sh \
   scripts/bootstrap/bootstrap-scheduler-contract.shs
 ```
 
-The scheduler test injects only self-test-gated task fixtures. Production task
-overrides are rejected. It covers overlap, late-parent recursive invalidation,
-stale-lease publication, preserved tainted descendants, resource serialization,
-and override denial.
+The scheduler test invokes the side-effect-light contract helpers directly. It
+uses adversarial receipts for path escape, hash drift, tainted lineage, mutated
+Stage-4 output, recursive invalidation, and verifies that production engine or
+qualifier override variables are inert. No test-only bypass exists in the
+shipped supervisor.

@@ -75,6 +75,8 @@ resume_stage4_prepare() {
     echo stage3_provenance_sha256="$(bootstrap_stage3_hash_file "$manifest")"
     echo parent_compiler_path="$candidate"
     echo parent_compiler_sha256="$(bootstrap_stage3_hash_file "$candidate")"
+    echo lineage_path="${scheduler_lineage_admission:?scheduler lineage is required}"
+    echo lineage_sha256="${scheduler_lineage_sha256:?scheduler lineage hash is required}"
     echo bootstrap_lock_path="$lock"
     echo bootstrap_lock_owner_pid="$$"
     echo immutable_snapshot_path="$resume_stage4_before"
@@ -108,15 +110,19 @@ resume_stage4_finalize() {
     echo immutable_after_sha256="$(bootstrap_stage3_hash_file "$after")"
     echo stage4_output_sha256="$(bootstrap_stage3_hash_file "$full_bin")"
     echo stage4_provenance_sha256="$(bootstrap_stage3_hash_file "${full_bin}.provenance.env")"
+    echo stage4_output_path="$full_bin"
+    echo stage4_provenance_path="${full_bin}.provenance.env"
   } >>"$tmp" || return 1
   if [ "${SIMPLE_BOOTSTRAP_STAGE4_QUARANTINE:-0}" = 1 ]; then
     [ "${deploy:-0}" -eq 0 ] || return 1
     echo publication_status=quarantined >>"$tmp" || return 1
+    echo deploy_receipt_path=not-published >>"$tmp" || return 1
     echo deploy_receipt_sha256=not-published >>"$tmp" || return 1
   else
     deploy_receipt="$repo_root/bin/release/$PLATFORM/bootstrap-deploy-receipt.env"
     [ -f "$deploy_receipt" ] && [ ! -L "$deploy_receipt" ] || return 1
     echo publication_status=deployed >>"$tmp" || return 1
+    echo deploy_receipt_path="$deploy_receipt" >>"$tmp" || return 1
     echo deploy_receipt_sha256="$(bootstrap_stage3_hash_file "$deploy_receipt")" >>"$tmp" || return 1
   fi
   mv "$tmp" "$resume_stage4_receipt"; resume_stage4_work=
