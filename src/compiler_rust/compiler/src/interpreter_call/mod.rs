@@ -762,11 +762,24 @@ pub(crate) fn evaluate_call(
                 // Cross-module (module path, name) resolution: the calling
                 // module's own definitions and import bindings pre-filter the
                 // flat candidate set; see `filter_overloads_by_caller_binding`.
-                let candidates = filter_overloads_by_caller_binding(name, &overloads, &evaluated_args)?
-                    .unwrap_or_else(|| overloads.clone());
-                if let Some(func) =
-                    select_overload(&candidates, &evaluated_args).or_else(|| select_overload(&overloads, &evaluated_args))
-                {
+                let selected = match filter_overloads_by_caller_binding(name, &overloads, &evaluated_args)? {
+                    Some(candidates) => Some(select_overload(&candidates, &evaluated_args).ok_or_else(|| {
+                        let ctx = ErrorContext::new()
+                            .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                            .with_help(format!(
+                                "the caller's module/import binding authorizes {} `{name}` overload(s); none accepts these arguments",
+                                candidates.len()
+                            ));
+                        CompileError::semantic_with_context(
+                            format!("no caller-authorized overload of `{name}` matches the supplied arguments"),
+                            ctx,
+                        )
+                    })?),
+                    // No caller/module binding information applies: preserve
+                    // the historical flat-registry overload selection.
+                    None => select_overload(&overloads, &evaluated_args),
+                };
+                if let Some(func) = selected {
                     return core::exec_function_with_values_and_writeback(
                         &func,
                         &evaluated_args,
