@@ -988,6 +988,30 @@ tampered-root, missing/ambiguous alias, and foreign-authority alias cases.
 Merge owner remains `/root`; final acceptance remains owned by an independent
 normal/highest-capability reviewer.
 
+### 10.22 P2.5 bridge non-admission and P3 owner boundary (2026-08-27)
+
+This section supersedes every earlier task assignment, including the following
+Wave 5 P2 publisher-repair prose, that gives P2/P2.5 a durable journal,
+terminal/fence/current, publication, open, or recovery duty. Those entries are
+forensic history only; P3 is the exclusive durable vertical owner.
+
+1. **P2.5 — `NON-ADMITTED`.** A rejected historical Node capability rejected
+   `expectedDigest:null`. That does not make CAS a P2.5 admission condition;
+   P2.5 has not admitted a publisher or terminal/current owner.
+2. **Permitted P2.5 scope.** It may expose only sealed nonmutating
+   materialization and validation ports. It must not stage, fence, publish,
+   replace `current`, open/recover, or mint synthetic test authority.
+3. **P3-only scope.** P3 owns raw predecessor bytes+digest, equal replay,
+   successor exact tuple validation, terminal/fence/current durability, deep
+   open/recovery validation, and private composition-root test seams.
+4. **No shortcut.** Do not reintroduce a public factory, installer,
+   constructor, structural brand, or rename fallback. Missing exact replacement
+   capability is hard denial.
+5. **Handoff.** P2.5 admission is only its narrow sealed
+   materialization/validation prerequisite; do not move P3 logic into it.
+   Independent highest-capability review is required before P3 implementation
+   merge.
+
 ### Wave 5 admission-remediation execution order (2026-08-26)
 
 This is a serial authority chain. No agent may implement a successor against a
@@ -1039,7 +1063,7 @@ authority inventories. Synthetic manifests/maps cannot satisfy W5A-18/19.
 |---|---|---|---|
 | W5A-P commit publisher | `src/core/knowledge_compiler_commit_publisher.js`, materializer, composition-root wiring | exact base/publication input, immutable base snapshot, sealed inventories/manifests, closure permit | W5A-25..27 parity/all-and-only contributor proof |
 | W5A-S authority ports | `src/workspace/registry_authority_v1.js`, `src/storage/snapshot_authority_v1.js`, `src/storage/target_inventory_store.js` | branded revisioned registry/snapshot/inventory construction and store wiring | real owner construction before W5A-P/E |
-| W5A-J publication journal | `src/storage/authority_publication_journal.js` | closed `WireHeaderV1`/`ScopeBindingV1` records, append-only objects/terminals, fenced `replaceCurrentIfExactV1`, sole recovery owner | W5A-28a..e forced fault/restart/concurrent-read/replay proof |
+| W5A-J P3 publication journal | `src/storage/authority_publication_journal.js` | P3-owned closed `WireHeaderV1`/`ScopeBindingV1` records, append-only objects/terminals, fenced `replaceCurrentIfExactV1`, sole recovery owner | W5A-28a..e forced fault/restart/concurrent-read/replay proof |
 | W5A-E independent oracle | focused production fixtures | real roots/pages/projections and substitution evidence | W5A-30 + highest-capability PASS |
 
 Frozen names: `KnowledgeCompilerCommitPublisherV1`, `CommitInputV1`,
@@ -1052,7 +1076,7 @@ publish -> recovery-safe acknowledgement. URI/MCP/materializer stays read-only.
 Merge owner: `/root`; final reviewer: independent highest-capability reviewer.
 No authority/cursor/URI/projection admission before W5A-P/J/E passes.
 
-### 10.25 Publisher non-admission repair sequence (2026-08-26)
+### 10.25 Legacy publisher non-admission history (2026-08-26)
 
 **Status: `NON-ADMITTED`.** The first W5A-P candidate may not be repaired by
 loosening an oracle. It failed five ownership/evidence gates: public
@@ -1063,14 +1087,14 @@ non-production crash/parity proof.
 | Step | Owner | Required deliverable | Admission evidence |
 |---|---|---|---|
 | P1 | W5A-P + W5A-S | closure-branded `TargetInventoryStoreV1` path and canonical replay envelope hash | strings, structural objects, serialized permits, public journals, and caller roots deny |
-| P2 | W5A-J | journal-owned content-addressed inventory/manifest objects, full record/terminal fields, atomic state machine | staged objects/record/terminal/current pointer survive fsync/replacement/restart and replay exactly |
-| P3 | W5A-J + W5A-E | deep current/recovery verifier, exact predecessor/generation terminal arbiter, and process-crash recovery | readers see only old/new complete record; stale terminal denies; same proposal replays; competing proposal converges one winner; corruption denies |
-| P4 | W5A-P + W5A-E | real clean/incremental publisher parity and sealed directory continuations | W5A-26, W5A-28, W5A-31..35 PASS against production filesystem owners |
+| P2/P2.5 | W5A-P | sealed nonmutating materialization/validation inputs only | no journal, terminal/current, publication, recovery, public factory/installer, or synthetic test authority |
+| P3 | W5A-J + W5A-E | complete journal-owned object/record/terminal/fence/current/open/recovery slice, exact predecessor/generation terminal arbiter, and process-crash recovery | readers see only old/new complete record; stale terminal denies; same proposal replays; competing proposal converges one winner; corruption denies |
+| P4 | W5A-P + W5A-E | P3 clean/incremental publisher parity and sealed directory continuations | W5A-26, W5A-28, W5A-31..35 PASS against production filesystem owners |
 
 `AuthorityPublicationRecordV1` must contain exact workspace/project/worktree/
 revision IDs, expected registry/base/publication IDs, base and authority
 snapshot IDs, ordered project roots, aggregate root, manifest digests, object
-hashes, and canonical replay-envelope digest. The journal alone owns its
+hashes, and canonical replay-envelope digest. The P3 journal alone owns its
 objects, transitions (`staging -> objects_durable -> record_durable -> terminal_durable ->
 fenced_current -> acknowledged`), recovery, and current pointer. W5A-P accepts no
 parallel shortcut: cursor, URI, projection, MCP, and materialization remain

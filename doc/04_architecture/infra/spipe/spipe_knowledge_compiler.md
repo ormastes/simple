@@ -1829,3 +1829,27 @@ visible, ack. Objects and terminals are append-only; current alone is mutable.
 `EACCES`/`EPERM` deny; `EXDEV` invalid mount; `ENOTSUP`/`EOPNOTSUPP` unsupported
 required durability; any other Node error is fatal. No fallback rename or
 synthetic capability publishes.
+
+### 21.9 P2.5 bridge containment and P3 exclusive owner
+
+This section supersedes the P2/P2.5 ownership assignments in 21.5--21.7:
+their durable-journal, terminal/fence/current, publication, open, and recovery
+descriptions are historical non-admission evidence. P3 is the only normative
+owner of that vertical slice.
+
+P2.5 may return P3 only sealed, nonmutating materialized values and validation
+results. It MUST NOT write objects, terminal records, or `current`; acquire a
+fence; publish; open/recover; or mint synthetic authority for tests. Its
+composition root may not export a public journal factory, installer,
+constructor, or structural brand substitute. A missing
+`replaceCurrentIfExactV1` denies the P3 publication request, never permits a
+rename fallback.
+
+The rejected P2.5 attempt is `NON-ADMITTED` forensic evidence: its Node test
+capability rejected `expectedDigest:null`. That historical failure neither
+conditions P2.5 admission nor gives it a conditional-current seam; P2.5 is
+admitted only for sealed materialization/validation. P3 exclusively owns exact
+predecessor raw bytes/digest (null only at genesis), equal-input terminal
+replay, successor exact scope/tuple validation, append-only terminal plus
+fence/current durability, deep open/recovery validation, and private test
+seams. Those seams cannot become callable synthetic publication authority.

@@ -885,8 +885,8 @@ durable publication; any other errno is fatal. No rename fallback is allowed.
 
 | Seal | Interface that must exist first | Required production oracle | No-shortcut rule |
 |---|---|---|---|
-| P2 publisher | P1-branded `TargetInventoryStoreV1`, canonical replay envelope, `AuthorityPublicationJournalV1` | Same envelope replays; any changed revision/expected ID/delta denies. Two independently launched writers and SIGKILL recovery expose only a complete predecessor/successor. The durable first-use directory chain is fsynced, and stale recovery unlinks only an exact revalidated owner/lock identity. | No public journal/`instanceof`, in-memory mutex, path-blind stale unlink, process-free race, or fixture recovery. Current `EEXIST` first-use race keeps P2 non-admitted. |
-| Read authority | P2 durable records; composition-root `SnapshotAuthorityPortV1`, opaque view, canonical target, closed expected binding | `openBoundSnapshot` opens actual registry/snapshot state through branded `TargetInventoryStoreV1.openPublishedAuthorityInventoryV1`; prove all dual-snapshot/manifest/instance/worktree/revision/target substitutions deny before authorization or projection, and clean/incremental parity passes. | No raw manifest, cache, resolver result, caller map, structural/serialized authority value, or public journal access. |
+| P3 durable publication | P1-branded sealed materialization/validation inputs, canonical replay envelope, P3-owned `AuthorityPublicationJournalV1` | Same envelope replays; changed revision/expected ID/delta denies. P3-only independent writer and SIGKILL recovery expose one complete predecessor/successor. | No public journal/`instanceof`, in-memory mutex, path-blind stale unlink, process-free race, fixture recovery, or P2/P2.5 writer. |
+| Read authority | P3 durable records; composition-root `SnapshotAuthorityPortV1`, opaque view, canonical target, closed expected binding | `openBoundSnapshot` opens actual registry/snapshot state through branded `TargetInventoryStoreV1.openPublishedAuthorityInventoryV1`; prove all dual-snapshot/manifest/instance/worktree/revision/target substitutions deny before authorization or projection, and clean/incremental parity passes. | No raw manifest, cache, resolver result, caller map, structural/serialized authority value, or public journal access. |
 | URI/projection | Read-authority view plus branded `AuthorizationPortV1` and frozen receipt ABI | Resolve URI/alias only to candidate; prove sealed membership, verify receipt/window/revocation, compare every frozen receipt/binding field, then render/list. Exercise hostile URI/Unicode/path/receipt and canonical-positive matrices with one public denial. | No raw filesystem lookup, alias-only success, local signer, duck-typed grant, or rejected URI candidate reuse. |
 | Cursor/MCP/materializer | Admitted URI binding and ProjectionPort | Authenticate continuation domain/position/limit; prove sealed order, `1..100`, <=100 entries, <=200 lines, <=6,000 tokenizer-v1 tokens, zero pre-admission ProjectionPort calls, cache partitioning, and read-only materialization. | No synthetic cursor table, mock projection, adapter-only evidence, or write-through materializer. |
 
@@ -899,3 +899,23 @@ The matrix adds admission sequencing only. It retains all existing normative
 authority/cursor interfaces, raw snapshot APIs, and the exact
 `spipe-markdown-token-v1@1` <=6,000-token rule; rejected cursor candidates are
 forensic evidence and cannot delete or relax them.
+
+### 12.9 P2.5 materialization-only bridge boundary
+
+This section supersedes the earlier P2 publisher row: P2/P2.5 own only sealed
+inputs, while P3 owns journal, terminal/fence/current, publication, open, and
+recovery.
+
+P2.5 may provide P3 only sealed, nonmutating materialization/validation
+outputs. It MUST NOT retain/export a writer, install a journal, construct a
+public publisher, write terminal/current, fence, publish, open/recover, or
+furnish synthetic test authority. Missing `replaceCurrentIfExactV1` is hard
+denial of the P3 publication request, never permission for a rename fallback.
+
+The P2.5 attempt is `NON-ADMITTED` forensic evidence: its Node test capability
+rejected `expectedDigest:null`. That failure does not make CAS a P2.5 admission
+condition; P2.5 admission is limited to sealed materialization/validation.
+P3 remains sole owner of raw predecessor bytes+digest, equal replay, successor
+exact tuple verification, terminal/fence/current/open/recovery, and private
+test-seam containment. No adapter/factory/installer/lookalike transfers those
+powers to P2.5.

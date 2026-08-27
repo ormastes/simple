@@ -3395,3 +3395,26 @@ W5A-28 is five forced independent-process schedules, not one generic CAS test:
 These schedules prove certificate rejection, clock-window failure, revocation
 failure, and no-reuse after recovery. They are the sole P3
 publication/recovery acceptance meaning pending independent PASS.
+
+### 43.7 P2.5 bridge boundary and non-admission (2026-08-27)
+
+This section supersedes every earlier P2/P2.5 assignment of journal staging,
+terminal/fence/current mutation, publication, open, or recovery. Those are P3
+operations, not a P2 or P2.5 compatibility responsibility.
+
+P2.5 is a narrow bridge prerequisite, not an alternate publisher. It may expose
+only sealed, nonmutating materialization and validation ports to P3. It MUST
+NOT stage, publish, replace `current`, recover publication state, mint
+synthetic test authority, or own a terminal/fence/current/open/recovery
+operation. It cannot install a journal, provide a public factory/constructor
+or structural substitute, or fall back to rename when exact conditional-current
+publication is unavailable.
+
+The P2.5 attempt is `NON-ADMITTED` forensic history: an out-of-scope historical
+attempt exposed a Node CAS capability and rejected the null exact-predecessor
+form required for initial (`G=0`) publication. It is not a condition of narrow
+P2.5 materialization/validation admission. P3 alone owns exact old raw pointer
+bytes plus digest (null only at `G=0`), equal
+proposal replay, successor exact tuple validation, terminal/fence/current/open/
+recovery, and contained test seams. No later bridge may reintroduce a public
+factory/installer or rename fallback.

@@ -1686,8 +1686,8 @@ is fatal. No fallback rename may be injected.
 
 | Gate | Must pass before next gate | Mandatory added/retained proof | Explicit non-evidence |
 |---|---|---|---|
-| P2 durable publisher | W5A-25..35 foundation | Same canonical envelope replays; changed revision/expected IDs/deltas deny; independently launched writer race and SIGKILL/recovery prove old-or-new complete state. First-use nested ledger ancestors are all durable; stale unlock revalidates exact observed owner/lock identity before removal. | In-process-only lock/race, timer-only stale detection, path-blind unlink, public permit/journal, or focused unit success. The known `EEXIST` first-use race is a FAIL. |
-| A read authority | P2 PASS | Real `SnapshotAuthorityPortV1.openBoundSnapshot` opens production registry/snapshot state through branded `TargetInventoryStoreV1.openPublishedAuthorityInventoryV1` and rejects every dual-snapshot, manifest, instance, worktree, revision, target, and brand substitution before AuthorizationPort/ProjectionPort. | Fixture manifests, caches, maps, structural views, mocked stores, or public journal access. |
+| P3 durable publication | W5A-25..35 foundation | P3-only canonical envelope replay, writer race, SIGKILL/recovery, exact old/new complete state, and all current-pointer durability cases pass. P2/P2.5 remain sealed inputs only. | In-process-only lock/race, timer-only stale detection, path-blind unlink, public permit/journal, focused unit success, or a P2/P2.5 writer. |
+| A read authority | P3 PASS | Real `SnapshotAuthorityPortV1.openBoundSnapshot` opens production registry/snapshot state through branded `TargetInventoryStoreV1.openPublishedAuthorityInventoryV1` and rejects every dual-snapshot, manifest, instance, worktree, revision, target, and brand substitution before AuthorizationPort/ProjectionPort. | Fixture manifests, caches, maps, structural views, mocked stores, or public journal access. |
 | U URI/projection | A PASS | Resolver candidate undergoes sealed target proof plus real receipt signature/window/revocation and full receipt/binding comparison; URI hostile matrix and canonical-positive families prove zero pre-admission projection calls and one public denial. | Raw paths, local signers, duck-typed grants, alias-only output, or old rejected URI code. |
 | C cursor/adapters | U PASS | W5C plus bounded-page/cache/materialization cases prove authenticated domain/position/limit and read-only adapters. | Mock ProjectionPort, synthetic cursor state, or adapter-only fixture. |
 
@@ -1697,3 +1697,21 @@ highest-capability review PASS. Any failure marks the gate and all successors
 The gates are additive to the normative authority/cursor and raw-snapshot
 contracts, including exact `spipe-markdown-token-v1@1` <=6,000 testing;
 rejected cursor code cannot remove or relax any of those cases.
+
+### 22.5 P2.5 containment negative matrix
+
+The rejected P2.5 attempt is `NON-ADMITTED` forensic evidence because its Node
+capability rejected `expectedDigest:null`. This does not condition P2.5
+admission on CAS: only P3 owns that capability, while P2.5 is gated solely on
+sealed materialization/validation. These negative cases cannot substitute for a
+P3 oracle.
+
+| ID | Setup/action | Required result |
+|---|---|---|
+| W5A-36 | Ask P2.5 to stage, fence, publish, replace `current`, open/recover, or mint test publication authority | Deny before filesystem mutation; P3 remains sole durable owner. |
+| W5A-37 | Supply a public journal/publisher factory, installer, constructor, structural lookalike, serialized brand, or synthetic test seam | Deny; no callable publication capability exists outside P3's composition root. |
+| W5A-38 | Disable P3's `replaceCurrentIfExactV1`, then request initial/successor P3 publication | Deny without rename fallback; no ack/current mutation. |
+| W5A-39 | Exercise P3 `G=0` with `expectedDigest:null`, then `G>0` with altered raw predecessor bytes/digest, equal replay, and altered successor tuple | Genesis accepts only exact null; altered inputs deny; equal bytes replay one terminal. |
+
+W5A-36..39 prove containment only. W5A-28 and W5A-31..35 remain authoritative
+P3 terminal/fence/current/open/recovery evidence.
