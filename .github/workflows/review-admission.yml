@@ -283,8 +283,46 @@ jobs:
           policy_sha256=$(sha256sum "$policy_path" | awk '{print $1}')
           now_unix=$(date -u +%s)
           expires_at_unix=$((now_unix + 600))
+          write_evaluation_request() {
+            request_now=$1
+            request_ruleset_sha256=$2
+            request_output=$3
+            jq -cn \
+              --arg repository_provider github --argjson repository_id "$repository_id" \
+              --arg repository_node_id "$repository_node_id" --arg repository "$repository_name" \
+              --argjson pull_request_number "$PR_NUMBER" --arg head_sha "$head_sha" \
+              --arg session_id "$SESSION_ID" --arg author_provider github --arg author_identity "$author_id" \
+              --arg reviewer_provider github --arg reviewer_identity "$actor_id" \
+              --arg reviewer_model "$REVIEWER_MODEL" --arg reviewer_effort "$REVIEWER_EFFORT" \
+              --argjson now_unix "$request_now" --argjson expires_at_unix "$expires_at_unix" \
+              --arg review_evidence_sha256 "$review_evidence_sha256" --arg policy_sha256 "$policy_sha256" \
+              --argjson target_repository_id "$base_repository_id" --arg target_ref "$base_ref" \
+              --arg target_ruleset_id "github:ruleset:$target_ruleset_id" \
+              --arg target_ruleset_version "$expected_ruleset" --arg target_ruleset_sha256 "$request_ruleset_sha256" \
+              --arg base_sha "$base_sha" --arg merge_base_sha "$merge_base_sha" --arg diff_sha256 "$diff_sha256" \
+              '{schema:"spipe-self-review-request/1",repository_provider:$repository_provider,
+                repository_id:$repository_id,repository_node_id:$repository_node_id,repository:$repository,
+                pull_request_number:$pull_request_number,head_sha:$head_sha,session_id:$session_id,
+                author_provider:$author_provider,author_identity:$author_identity,
+                reviewer_provider:$reviewer_provider,reviewer_identity:$reviewer_identity,
+                reviewer_model:$reviewer_model,reviewer_tier:"high_capability",reviewer_effort:$reviewer_effort,
+                review_evidence_mode:"self_attested",now_unix:$now_unix,
+                decision_expires_at_unix:$expires_at_unix,higher_model_verdict:"PASS",
+                higher_model_p0_count:0,higher_model_p1_count:0,
+                review_evidence_sha256:$review_evidence_sha256,expected_policy_db_sha256:$policy_sha256,
+                policy_db_authenticated:true,changed_manifest_authenticated:true,
+                review_evidence_broker_authenticated:false,self_attestation_authorized:true,
+                target_repository_id:$target_repository_id,target_ref:$target_ref,
+                target_ruleset_id:$target_ruleset_id,target_ruleset_version:$target_ruleset_version,
+                target_ruleset_sha256:$target_ruleset_sha256,base_sha:$base_sha,
+                merge_base_sha:$merge_base_sha,diff_sha256:$diff_sha256,strict_up_to_date:true,
+                protected_target:true,provider_resolution_authenticated:true}' >"$request_output"
+          }
           failure_stage='external policy or exact-head self-review evaluation failed'
-          SPIPE_SELF_REVIEW_POLICY_DB="$policy_path" bin/simple release self-review-plan --json --policy-db="$policy_path" --changed-manifest="$audit_dir/changed-paths.sdn" --repository-provider=github --repository-id="$repository_id" --repository-node-id="$repository_node_id" --repository="$repository_name" --pull-request-number="$PR_NUMBER" --head-sha="$head_sha" --session-id="$SESSION_ID" --author-provider=github --author-identity="$author_id" --reviewer-provider=github --reviewer-identity="$actor_id" --reviewer-model="$REVIEWER_MODEL" --reviewer-tier=high_capability --reviewer-effort="$REVIEWER_EFFORT" --now-unix="$now_unix" --expires-at-unix="$expires_at_unix" --review-verdict=PASS --review-p0-count=0 --review-p1-count=0 --review-evidence-mode=self_attested --review-evidence-sha256="$review_evidence_sha256" --policy-db-sha256="$policy_sha256" --target-repository-id="$base_repository_id" --target-ref="$base_ref" --target-ruleset-id="github:ruleset:$target_ruleset_id" --target-ruleset-version="$expected_ruleset" --target-ruleset-sha256="$target_ruleset_sha256" --base-sha="$base_sha" --merge-base-sha="$merge_base_sha" --diff-sha256="$diff_sha256" --policy-db-authenticated --changed-manifest-authenticated --self-attestation-authorized --provider-resolution-authenticated --strict-up-to-date --protected-target >"$audit_dir/decision.json"
+          write_evaluation_request "$now_unix" "$target_ruleset_sha256" "$audit_dir/evaluation-request.json"
+          SPIPE_SELF_REVIEW_POLICY_DB="$policy_path" node scripts/release/self-review-policy-evaluator.mjs \
+            --policy-db="$policy_path" --changed-manifest="$audit_dir/changed-paths.sdn" \
+            --request="$audit_dir/evaluation-request.json" >"$audit_dir/decision.json"
 
           # Re-resolve every mutable provider fact immediately before emission.
           failure_stage='provider head/base/diff/ruleset revalidation failed'
@@ -308,10 +346,13 @@ jobs:
           cmp "$audit_dir/changed-paths.sdn" "$audit_dir/revalidated-changed-paths.sdn"
           current_now_unix=$(date -u +%s)
           test "$current_now_unix" -lt "$expires_at_unix"
-          # Re-read external policy and re-run the pure current-decision consumer
+          # Re-read external policy and re-run the tracked v1 decision adapter
           # after all provider facts are re-resolved, immediately before emission.
           failure_stage='current external policy decision or final exact-state assertion failed'
-          SPIPE_SELF_REVIEW_POLICY_DB="$policy_path" bin/simple release self-review-plan --json --policy-db="$policy_path" --changed-manifest="$audit_dir/revalidated-changed-paths.sdn" --repository-provider=github --repository-id="$repository_id" --repository-node-id="$repository_node_id" --repository="$repository_name" --pull-request-number="$PR_NUMBER" --head-sha="$head_sha" --session-id="$SESSION_ID" --author-provider=github --author-identity="$author_id" --reviewer-provider=github --reviewer-identity="$actor_id" --reviewer-model="$REVIEWER_MODEL" --reviewer-tier=high_capability --reviewer-effort="$REVIEWER_EFFORT" --now-unix="$current_now_unix" --expires-at-unix="$expires_at_unix" --review-verdict=PASS --review-p0-count=0 --review-p1-count=0 --review-evidence-mode=self_attested --review-evidence-sha256="$review_evidence_sha256" --policy-db-sha256="$policy_sha256" --target-repository-id="$base_repository_id" --target-ref="$base_ref" --target-ruleset-id="github:ruleset:$target_ruleset_id" --target-ruleset-version="$expected_ruleset" --target-ruleset-sha256="$current_ruleset_sha256" --base-sha="$base_sha" --merge-base-sha="$merge_base_sha" --diff-sha256="$diff_sha256" --policy-db-authenticated --changed-manifest-authenticated --self-attestation-authorized --provider-resolution-authenticated --strict-up-to-date --protected-target >"$audit_dir/current-decision.json"
+          write_evaluation_request "$current_now_unix" "$current_ruleset_sha256" "$audit_dir/current-evaluation-request.json"
+          SPIPE_SELF_REVIEW_POLICY_DB="$policy_path" node scripts/release/self-review-policy-evaluator.mjs \
+            --policy-db="$policy_path" --changed-manifest="$audit_dir/revalidated-changed-paths.sdn" \
+            --request="$audit_dir/current-evaluation-request.json" >"$audit_dir/current-decision.json"
           jq -e --arg head "$head_sha" --arg base "$base_sha" --arg merge "$merge_base_sha" --arg diff "$diff_sha256" --arg ruleset "github:ruleset:$target_ruleset_id" --arg ruleset_version "$expected_ruleset" --arg ruleset_sha "$target_ruleset_sha256" '.decision_schema == "spipe-self-review-decision/1" and .status == "ok" and .allowed == true and .head_sha == $head and .base_sha == $base and .merge_base_sha == $merge and .diff_sha256 == $diff and .target_ruleset_id == $ruleset and .target_ruleset_version == $ruleset_version and .target_ruleset_sha256 == $ruleset_sha and .strict_up_to_date == true and .protected_target == true and .review_evidence_mode == "self_attested" and .provider_approval_claimed == false' "$audit_dir/current-decision.json" >/dev/null
 
           external_id="spipe-self-review/1|$PR_NUMBER|$base_ref|$base_sha|$merge_base_sha|$diff_sha256|github:ruleset:$target_ruleset_id|$expected_ruleset|$target_ruleset_sha256|$expires_at_unix"

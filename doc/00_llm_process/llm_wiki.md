@@ -912,6 +912,9 @@ If `spipe` is absent or reports `unknown command: self-review-guide`, the
 installed/global SPipe is stale. Use the repository-pinned implementation:
 
 ```bash
+git fetch origin main
+git switch main
+git merge --ff-only origin/main
 git submodule update --init .spipe/spipe
 node .spipe/spipe/cli/spipe.js self-review-guide
 ```
