@@ -22,17 +22,61 @@
 # the reverse. It must never produce a dangling hit: nothing in trash/ is
 # served (cas_get / action_get never look there).
 
-extern fn rt_file_read_text(path: text) -> text
+@unsafe(reason: "raw mark-sweep file-existence ABI", capabilities: [ffi])
 extern fn rt_file_exists(path: text) -> bool
+@unsafe(reason: "raw mark-sweep file-move status ABI", capabilities: [ffi])
 extern fn rt_file_move(old_path: text, new_path: text) -> bool
+@unsafe(reason: "raw mark-sweep directory-create status ABI", capabilities: [ffi])
 extern fn rt_dir_create_all(path: text) -> bool
+@unsafe(reason: "raw mark-sweep directory predicate ABI", capabilities: [ffi])
 extern fn rt_dir_exists(path: text) -> bool
+@unsafe(reason: "raw mark-sweep runtime-owned directory-walk ABI", capabilities: [ffi])
 extern fn rt_dir_walk(root: text) -> [text]
+@unsafe(reason: "raw mark-sweep process-id ABI", capabilities: [ffi])
 extern fn rt_getpid() -> i64
+@unsafe(reason: "raw mark-sweep wall-clock ABI", capabilities: [ffi])
 extern fn rt_time_now_unix_micros() -> i64
 
 use compiler.driver.cache.cas_store.{ActionManifest, action_manifest_parse, cas_blob_path, cas_action_path}
 use compiler.driver.cache.lease.lease.{lease_list_active, CacheLease}
+use std.nogc_sync_mut.io_runtime.{file_read_nullable}
+
+# Private direct-call wrappers prevent raw ABI spread without changing the
+# mark/sweep traversal, allocation behavior, or policy decisions.
+@always_inline
+fn mark_file_exists_raw(path: text) -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_file_exists(path)
+
+@always_inline
+fn mark_file_move_raw(old_path: text, new_path: text) -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_file_move(old_path, new_path)
+
+@always_inline
+fn mark_dir_create_all_raw(path: text) -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_dir_create_all(path)
+
+@always_inline
+fn mark_dir_exists_raw(path: text) -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_dir_exists(path)
+
+@always_inline
+fn mark_dir_walk_raw(root: text) -> [text]:
+    unsafe(capabilities: [ffi]):
+        rt_dir_walk(root)
+
+@always_inline
+fn mark_process_id_raw() -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_getpid()
+
+@always_inline
+fn mark_time_now_unix_micros_raw() -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_time_now_unix_micros()
 
 struct MarkSweepResult:
     marked_manifests: i64
@@ -44,10 +88,10 @@ fn trash_dir(root: text) -> text:
     "{root}/trash"
 
 fn move_to_trash(root: text, path: text) -> bool:
-    rt_dir_create_all(trash_dir(root))
-    val stamp = "{rt_getpid()}-{rt_time_now_unix_micros()}"
+    mark_dir_create_all_raw(trash_dir(root))
+    val stamp = "{mark_process_id_raw()}-{mark_time_now_unix_micros_raw()}"
     val name = path.replace("/", "_")
-    rt_file_move(path, "{trash_dir(root)}/{name}-{stamp}")
+    mark_file_move_raw(path, "{trash_dir(root)}/{name}-{stamp}")
 
 fn contains_digest(digests: [text], digest: text) -> bool:
     for d in digests:
@@ -58,22 +102,22 @@ fn contains_digest(digests: [text], digest: text) -> bool:
 # Collect every action-manifest file path under root/actions.
 fn list_action_paths(root: text) -> [text]:
     val dir = "{root}/actions"
-    if not rt_file_exists(dir):
+    if not mark_file_exists_raw(dir):
         return []
     var out: [text] = []
-    for path in rt_dir_walk(dir):
-        if not rt_dir_exists(path):
+    for path in mark_dir_walk_raw(dir):
+        if not mark_dir_exists_raw(path):
             out = out.push(path)
     out
 
 # Collect every blob file path under root/cas.
 fn list_blob_paths(root: text) -> [text]:
     val dir = "{root}/cas"
-    if not rt_file_exists(dir):
+    if not mark_file_exists_raw(dir):
         return []
     var out: [text] = []
-    for path in rt_dir_walk(dir):
-        if not rt_dir_exists(path):
+    for path in mark_dir_walk_raw(dir):
+        if not mark_dir_exists_raw(path):
             out = out.push(path)
     out
 
@@ -84,9 +128,9 @@ fn list_blob_paths(root: text) -> [text]:
 # needs pin metadata beyond membership.
 fn read_pins(root: text) -> [text]:
     val path = "{root}/pins"
-    if not rt_file_exists(path):
+    if not mark_file_exists_raw(path):
         return []
-    val content = rt_file_read_text(path) ?? ""
+    val content = file_read_nullable(path) ?? ""
     var out: [text] = []
     for line in content.split("\n"):
         if line.trim() != "":
@@ -119,7 +163,7 @@ fn gc_mark_and_sweep(root: text) -> MarkSweepResult:
     var manifests_trashed: i64 = 0
 
     for path in action_paths:
-        val content = rt_file_read_text(path) ?? ""
+        val content = file_read_nullable(path) ?? ""
         match action_manifest_parse(content):
             case Some(manifest):
                 manifests_kept = manifests_kept + 1

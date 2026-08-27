@@ -1732,3 +1732,18 @@ reports 22 existing opportunities (21 MIR, one collection preallocation); no
 loop, allocation, copy, lookup, or dispatch was added by the wrapper change.
 The already-recorded `gc_spec` lease-source-text test failure prevents claiming
 a full cache-GC test pass for this adjacent module.
+
+### Compiler mark-sweep raw-owner consolidation (2026-08-27)
+
+The cache mark-sweep owner now has seven unsafe-tagged raw
+filesystem/directory/process/time declarations, isolated behind private
+always-inline lexical wrappers. Its two raw text reads were removed in favor
+of the canonical nullable file-read facade. This preserves the existing mark
+and trash policy and its direct ABI-call shape, without adding retries, locks,
+allocations, copies, lookups, or dispatch.
+
+The authority audit and source check pass. Optimizer analysis reports 46
+existing opportunities (42 MIR, four preallocation) for separate benchmarked
+work. `nil` still normalizes to empty pin/manifest content, so unreadable
+existing input remains an explicit unverified contract limitation; this change
+does not mark mark-sweep or global SFFI safe/signed.

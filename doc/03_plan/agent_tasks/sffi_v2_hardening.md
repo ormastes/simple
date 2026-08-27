@@ -314,3 +314,8 @@ passing placeholder.
     the current `nil`-to-empty-pins policy verified: migrate it to a distinct
     missing-versus-unreadable status before mission-critical cache admission.
     Measure the recorded optimizer candidates independently.
+56. Keep mark-sweep's seven raw filesystem/directory/process/time calls behind
+    inline lexical owners and route text reads through the canonical nullable
+    facade. Do not infer safe pin/manifest semantics from `nil`-to-empty
+    normalization; define typed unreadable-input outcomes before marking the
+    cache GC verified or signed.
