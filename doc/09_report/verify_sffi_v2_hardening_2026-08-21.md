@@ -221,3 +221,17 @@ a claim that SFFI v2 is complete.
   pins file, so this boundary is not promoted to verified safe.
 - FAIL (global admission): no artifact-bound provider signature or semantic
   evidence exists. Global SFFI verification remains **FAIL**.
+
+## Follow-up: compiler mark-sweep raw-owner consolidation (2026-08-27)
+
+- PASS (static/source): seven raw mark-sweep contracts are unsafe-tagged and
+  isolated in private always-inline lexical owners; raw text reads are replaced
+  by canonical nullable reads. The authority audit and source check pass.
+- PASS (performance shape): no retry, lock, allocation, copy, lookup, or
+  dispatch was added. Optimizer analysis reports 46 existing opportunities
+  (42 MIR, four preallocation) for separate measured work.
+- WARN (contract): nil still normalizes to empty pin/manifest content, so an
+  unreadable existing input is not yet distinguishable from absence. This
+  boundary remains unverified.
+- FAIL (global admission): no artifact-bound provider signature or semantic
+  evidence exists. Global SFFI verification remains **FAIL**.
