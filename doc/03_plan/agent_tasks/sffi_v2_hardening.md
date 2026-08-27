@@ -365,3 +365,8 @@ passing placeholder.
     consumers must fail closed before expiry/token processing. Preserve one
     clock read per operation, then require artifact-bound admission before
     calling the provider verified.
+66. TLS certificate and OIDC expiry validation use the same integer clock
+    contract. Certificate validation returns false on clock failure; OIDC
+    returns `Err`. Neither consumer may retain the legacy float-interpreter/
+    integer-native seconds ABI or add a second clock read. This is fail-closed
+    containment only, pending signed artifact-bound provider evidence.
