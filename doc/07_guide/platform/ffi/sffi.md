@@ -78,6 +78,17 @@ Before publishing an ordinary wrapper, preserve the actual ABI result and:
 
 If an obligation is unknown, retain an unsafe API or isolate the provider.
 
+### Return representation is part of the ABI
+
+Names do not authorize a conversion between integer and floating-point return
+families. For example, legacy `rt_time_now_seconds()` is an `i64` C ABI;
+fractional time uses the distinct `rt_time_now_seconds_f64() -> f64` provider.
+Interpreter registration, native declarations, and callers must use the same
+symbol and return type. A wrapper may convert only after the raw call in a
+small lexical unsafe scope, and must retain an explicit failure contract.
+Do not add a second clock read, allocation, lookup, lock, or retry merely to
+bridge representations.
+
 ### Usage
 
 ```simple

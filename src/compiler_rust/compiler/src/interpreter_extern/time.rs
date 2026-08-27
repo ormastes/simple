@@ -13,12 +13,18 @@ use crate::value::Value;
 /// * `args` - Evaluated arguments (none expected)
 ///
 /// # Returns
-/// * Float representing seconds since Unix epoch (with fractional seconds)
+/// * i64 representing seconds since Unix epoch
 pub fn rt_time_now_seconds(_args: &[Value]) -> Result<Value, CompileError> {
-    unsafe {
-        let time = simple_runtime::value::rt_time_now_seconds();
-        Ok(Value::Float(time))
-    }
+    Ok(Value::Int(simple_runtime::value::rt_time_now_seconds()))
+}
+
+/// Get current time in fractional seconds since Unix epoch.
+///
+/// This is separately named because `rt_time_now_seconds` is the legacy C
+/// integer ABI.  Keeping the two return families distinct prevents an
+/// interpreter/native return-representation mismatch.
+pub fn rt_time_now_seconds_f64(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Float(simple_runtime::value::rt_time_now_seconds_f64()))
 }
 
 /// Get current time as Unix timestamp (integer seconds since epoch)
@@ -31,10 +37,7 @@ pub fn rt_time_now_seconds(_args: &[Value]) -> Result<Value, CompileError> {
 /// # Returns
 /// * i64 representing seconds since Unix epoch (integer)
 pub fn _current_time_unix(_args: &[Value]) -> Result<Value, CompileError> {
-    unsafe {
-        let time = simple_runtime::value::rt_time_now_seconds();
-        Ok(Value::Int(time as i64))
-    }
+    Ok(Value::Int(simple_runtime::value::rt_time_now_seconds()))
 }
 
 /// Get current time in milliseconds since Unix epoch
@@ -47,32 +50,23 @@ pub fn _current_time_unix(_args: &[Value]) -> Result<Value, CompileError> {
 /// # Returns
 /// * i64 representing milliseconds since Unix epoch
 pub fn rt_current_time_ms(_args: &[Value]) -> Result<Value, CompileError> {
-    unsafe {
-        let time_seconds = simple_runtime::value::rt_time_now_seconds();
-        let time_ms = (time_seconds * 1000.0) as i64;
-        Ok(Value::Int(time_ms))
-    }
+    let time_seconds = simple_runtime::value::rt_time_now_seconds();
+    Ok(Value::Int(time_seconds.saturating_mul(1000)))
 }
 
 /// Get current time in milliseconds since Unix epoch (alias for web stack)
 ///
 /// Callable from Simple as: `rt_time_now_ms()`
 pub fn rt_time_now_ms(_args: &[Value]) -> Result<Value, CompileError> {
-    unsafe {
-        let time_seconds = simple_runtime::value::rt_time_now_seconds();
-        let time_ms = (time_seconds * 1000.0) as i64;
-        Ok(Value::Int(time_ms))
-    }
+    let time_seconds = simple_runtime::value::rt_time_now_seconds();
+    Ok(Value::Int(time_seconds.saturating_mul(1000)))
 }
 
 /// Get current time as integer seconds since Unix epoch (DNS resolver)
 ///
 /// Callable from Simple as: `rt_time_now()`
 pub fn rt_time_now(_args: &[Value]) -> Result<Value, CompileError> {
-    unsafe {
-        let time = simple_runtime::value::rt_time_now_seconds();
-        Ok(Value::Int(time as i64))
-    }
+    Ok(Value::Int(simple_runtime::value::rt_time_now_seconds()))
 }
 
 // ============================================================================
@@ -705,12 +699,12 @@ mod tests {
     fn test_rt_time_now_seconds() {
         let result = rt_time_now_seconds(&[]).unwrap();
         match result {
-            Value::Float(t) => {
+            Value::Int(t) => {
                 // Time should be reasonable (after year 2020, before year 2100)
-                assert!(t > 1_600_000_000.0); // After Sept 2020
-                assert!(t < 4_000_000_000.0); // Before year 2100
+                assert!(t > 1_600_000_000); // After Sept 2020
+                assert!(t < 4_000_000_000); // Before year 2100
             }
-            _ => panic!("Expected Float value"),
+            _ => panic!("Expected Int value"),
         }
     }
 

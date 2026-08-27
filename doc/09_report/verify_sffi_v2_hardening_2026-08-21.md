@@ -387,3 +387,17 @@ a claim that SFFI v2 is complete.
   or retry.
 - FAIL (global admission): this does not supply a signed artifact or provider
   verification receipt; repository-wide SFFI remains unverified.
+
+## Follow-up: legacy seconds return-representation repair (2026-08-27)
+
+- PASS (static/source): the native `rt_time_now_seconds -> i64` ABI now has
+  the same integer representation in the Rust runtime and interpreter. The
+  fractional `rt_time_now_seconds_f64 -> f64` provider is separately
+  registered and used by the two bootstrap consumers that require subsecond
+  time. The authority guard checks both representations and lexical scopes.
+- PASS (performance shape): both clock variants remain one direct inline
+  provider call. No allocation, copy, lookup, lock, retry, or extra read was
+  added to either clock path.
+- FAIL (global admission): static/source checks do not establish exact runtime
+  artifact identity, trusted signature, ABI admission, or semantic provider
+  verification. The provider remains unsigned and unverified globally.

@@ -384,3 +384,10 @@ passing placeholder.
     chunk. A negative result closes the connection before dispatch rather than
     retaining stale/fabricated time. Keep the read count, parser, and successful
     request loop unchanged; artifact signing and verification remain separate.
+70. Preserve the legacy `rt_time_now_seconds -> i64` C ABI in every lane.
+    Fractional seconds are a different `rt_time_now_seconds_f64 -> f64`
+    provider and must be declared/called by that exact name in bootstrap code.
+    The Rust interpreter must return `Value::Int` for the integer symbol and
+    `Value::Float` only for the f64 symbol. Keep both direct, inline calls;
+    do not add conversion allocations, lookup, locking, retries, or extra
+    clock reads. This resolves a representation defect, not provider signing.

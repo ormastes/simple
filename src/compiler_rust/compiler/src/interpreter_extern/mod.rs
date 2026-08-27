@@ -2045,6 +2045,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_time_now_ms", time::rt_time_now_ms);
     insert_simple!("rt_time_now_nanos", time::rt_time_now_nanos);
     insert_simple!("rt_time_now_seconds", time::rt_time_now_seconds);
+    insert_simple!("rt_time_now_seconds_f64", time::rt_time_now_seconds_f64);
     insert_simple!("rt_time_now", time::rt_time_now);
     insert_simple!("rt_time_now_unix_micros", time::rt_time_now_unix_micros);
     insert_simple!("rt_timestamp_add_days", time::rt_timestamp_add_days);
