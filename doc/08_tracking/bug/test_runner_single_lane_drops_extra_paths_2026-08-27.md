@@ -109,6 +109,12 @@ Refusing (rather than running them all) is deliberate and minimal: this lane is
 single-file by design and is spawned as a child with one path by every real
 caller. The multi-path capability already exists correctly on the default lane.
 
+The parser also uses an explicit one-value option table before classifying
+positionals. This preserves forwarded pairs such as `--format json` and
+adapter-owned `--qemu-socket <socket>` without weakening the multiple-path
+guard: boolean flags consume no following token, so a real second path still
+fails closed. A known value-taking option with no value is invalid.
+
 ## Specs
 
 - **Reproducer:** `test/01_unit/app/test_runner_new/single_lane_extra_paths_spec.spl`
@@ -120,15 +126,17 @@ caller. The multi-path capability already exists correctly on the default lane.
   — walks the adjacent argv shapes (extra path interleaved between flags,
   `--timeout=` form, three paths, the same path twice) plus the
   already-fail-closed classes (no path, non-`.spl`, nonexistent `.spl`) and the
-  single-path/`--list` contracts. `10 total, 10 passed`.
+  single-path/`--list` contracts. It also covers separated `--format` values
+  before and after the path, an adapter-forwarded QEMU socket, a real second
+  path after a format pair, and a missing option value. `15 total, 15 passed`.
 
 ## Guard
 
 `scripts/check/check-test-runner-single-lane-paths.shs` — fail-closed, verdict
 as the last line of stdout, fatal `--selftest`, 0 invocations is `ERROR` never a
-pass. Three probes: two paths bare, two paths with `--timeout` (the documented
-trap shape), and a single-path non-regression case so the fix cannot degenerate
-into "reject everything".
+pass. Four probes: two paths bare, two paths with `--timeout` (the documented
+trap shape), a single-path non-regression case so the fix cannot degenerate
+into "reject everything", and a successful single path with `--format json`.
 
 Verified as a real ratchet, not a tautology:
 
