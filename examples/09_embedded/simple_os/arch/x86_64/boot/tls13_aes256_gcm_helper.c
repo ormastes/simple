@@ -110,12 +110,14 @@ static spl_i64 x86_aes_repack_bytes(spl_i64 rv)
 #define rt_tls13_aes256_gcm_encrypt x86_tls13_aes256_gcm_encrypt_tagged
 #define rt_tls13_aes256_gcm_decrypt x86_tls13_aes256_gcm_decrypt_tagged
 #define rt_ssh_aes256_gcm_decrypt_packet x86_ssh_aes256_gcm_decrypt_packet_tagged
+#define rt_ssh_aes256_gcm_decrypt_packet_v2 x86_ssh_aes256_gcm_decrypt_packet_v2_tagged
 
 #include "../../riscv64/boot/tls13_aes256_gcm_helper.c"
 
 #undef rt_tls13_aes256_gcm_encrypt
 #undef rt_tls13_aes256_gcm_decrypt
 #undef rt_ssh_aes256_gcm_decrypt_packet
+#undef rt_ssh_aes256_gcm_decrypt_packet_v2
 
 spl_i64 rt_tls13_aes256_gcm_encrypt(spl_i64 key_value, spl_i64 nonce_value,
                                     spl_i64 plaintext_value, spl_i64 aad_value)
@@ -136,5 +138,12 @@ spl_i64 rt_ssh_aes256_gcm_decrypt_packet(spl_i64 key_value, spl_i64 iv_value,
                                          spl_i64 seq_value, spl_i64 packet_value)
 {
     return x86_aes_repack_bytes(x86_ssh_aes256_gcm_decrypt_packet_tagged(
+        key_value, iv_value, seq_value, packet_value));
+}
+
+spl_i64 rt_ssh_aes256_gcm_decrypt_packet_v2(spl_i64 key_value, spl_i64 iv_value,
+                                            spl_i64 seq_value, spl_i64 packet_value)
+{
+    return x86_aes_repack_bytes(x86_ssh_aes256_gcm_decrypt_packet_v2_tagged(
         key_value, iv_value, seq_value, packet_value));
 }
