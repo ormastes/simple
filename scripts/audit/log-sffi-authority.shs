@@ -1,0 +1,24 @@
+#!/bin/sh
+# Static ratchet for the high-fanout logger's environment/stderr boundary.
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+source="$root/src/lib/nogc_sync_mut/log.spl"
+
+test "$(grep -Ec '^extern fn rt_(env_get|stderr_write|stderr_flush)' "$source")" -eq 3
+test "$(grep -Ec '^@unsafe\(' "$source")" -eq 3
+grep -Fq 'extern fn rt_env_get(key: text) -> text?' "$source"
+
+raw_calls=$(awk '
+    /unsafe\(capabilities: \[ffi\]\):/ { pending=1; next }
+    pending && /^[[:space:]]+rt_(env_get|stderr_write|stderr_flush)/ { count++; pending=0; next }
+    pending { pending=0 }
+    END { print count + 0 }
+' "$source")
+test "$raw_calls" -eq 6
+
+emit_body=$(awk '/^fn _emit\(/ { capture=1 } capture { print } capture && /^fn get_log_level/ { exit }' "$source")
+printf '%s\n' "$emit_body" | grep -Fq 'rt_stderr_write(line +'
+printf '%s\n' "$emit_body" | grep -Fq 'rt_stderr_flush()'
+
+echo 'Logger SFFI authority: PASS raw_declarations=3 lexical_raw_calls=6 nullable_env=preserved disabled_log_fast_path=unchanged'
