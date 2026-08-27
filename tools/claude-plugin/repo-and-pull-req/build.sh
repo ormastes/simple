@@ -64,6 +64,22 @@ if grep -Fq 'If no pending reviews and no unresolved comments: exit' \
     "${SCRIPT_DIR}/skills/git/gh_pull_req_review.md"; then
     echo "ERROR: clean PR exits before L2/L3 admission"; exit 1
 fi
+if ! awk '
+    /^### Step 1 / { in_step1=1; next }
+    /^### Step 2 / { in_step1=0 }
+    in_step1 && /^REPO=\$\(gh repo view / { found=1 }
+    END { exit(found ? 0 : 1) }
+' "${SCRIPT_DIR}/skills/git/gh_pull_req_review.md"; then
+    echo "ERROR: shared Step 1 does not initialize REPO for a clean L2/L3 PR"; exit 1
+fi
+if ! awk '
+    /^#### L3 / { in_l3=1; next }
+    /^### Step 5b / { in_l3=0 }
+    in_l3 && /repos\/\$\{REPO\}\/pulls\/\$\{PR_NUMBER\}/ { found=1 }
+    END { exit(found ? 0 : 1) }
+' "${SCRIPT_DIR}/skills/git/gh_pull_req_review.md"; then
+    echo "ERROR: clean L3 provider lookup is not bound to initialized REPO"; exit 1
+fi
 grep -Fq 'USER_ACCOUNT_APPROVED=false' "${SCRIPT_DIR}/agents/review_loop.md" || {
     echo "ERROR: provider approval is not reset before revalidation"; exit 1;
 }

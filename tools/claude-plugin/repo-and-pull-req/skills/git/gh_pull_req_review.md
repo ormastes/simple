@@ -28,6 +28,7 @@ defaults to `1`. Older state files with no `level` key default to `1`.
 ### Step 1 — Check PR Status
 
 ```bash
+REPO=$(gh repo view --json nameWithOwner --jq .nameWithOwner)
 PR_STATUS=$(gh pr view "${PR_NUMBER}" --json state,reviewDecision,reviews,url,headRefName)
 STATE=$(echo "$PR_STATUS" | jq -r .state)
 REVIEW_DECISION=$(echo "$PR_STATUS" | jq -r .reviewDecision)
@@ -45,7 +46,6 @@ BRANCH=$(echo "$PR_STATUS" | jq -r .headRefName)
 
 ```bash
 # Get all review comments
-REPO=$(gh repo view --json nameWithOwner --jq .nameWithOwner)
 COMMENTS=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/comments" \
   --jq '.[] | {id, path, line, body, user: .user.login, created_at, in_reply_to_id}')
 
