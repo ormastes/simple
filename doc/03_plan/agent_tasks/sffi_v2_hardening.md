@@ -449,3 +449,8 @@ passing placeholder.
     reads and two scope calls require lexical unsafe scopes. Do not introduce
     numeric substitutes, helper dispatch, allocation, copying, lookup, locks,
     retries, or extra calls. This is source containment, not provider admission.
+83. Keep the WM lane-boundary gate's raw file read explicitly unsafe until an
+    error-preserving safe facade exists. Do not replace its failure state with
+    an empty text fallback: that would make an unreadable baseline/path look
+    like valid empty input. Its two direct reads remain lexical with no added
+    allocation, copying, lookup, locks, retries, or additional I/O.
