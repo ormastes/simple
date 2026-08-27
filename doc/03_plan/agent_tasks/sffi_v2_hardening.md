@@ -510,3 +510,7 @@ passing placeholder.
     than creating misleading missing/unknown-reference warnings. Preserve the
     normal read/scan count without retries, extra I/O, copies, lookup, locks,
     or duplicate lint passes.
+97. Keep optional monomorphization-cache persistence explicitly unsafe and
+    lexical. Unreadable persistent cache remains a cache miss by design; do
+    not add retries, extra I/O, copies, lookup/lock work, or any overhead to
+    the in-memory O(1) lookup/store hot path pending provider admission.

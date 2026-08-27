@@ -706,3 +706,13 @@ a claim that SFFI v2 is complete.
   lookup, lock, or duplicate lint pass. No runtime benchmark was run.
 - FAIL (global admission): the canonical I/O providers remain outside
   artifact-bound ABI/ownership verification and trusted-signature admission.
+
+## Follow-up: monomorphization-cache disk boundary containment (2026-08-27)
+
+- PASS (static/source): three optional persistent-cache file declarations and
+  their disk-only calls are explicitly unsafe/lexical.
+- PASS (performance/semantics shape): unreadable persistence remains a cache
+  miss; no retry, extra I/O, copy, lookup/lock work, or in-memory hot-path
+  overhead was added. No runtime benchmark was run.
+- FAIL (global admission): the raw disk providers lack artifact-bound ABI,
+  ownership, verification, and trusted-signature evidence. They remain unsafe.
