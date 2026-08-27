@@ -106,6 +106,39 @@ slice2 `dc58fec5f1b` `8da31723373`; slice3 `e5a7528f063` `46bb8524167`
     indent. Workaround applied across the sweep was to hoist the condition into
     a local `val`; that is a workaround, not a fix — the grammar should accept
     the compact form. Needs a seed parser change.
+    **FIXED 2026-08-27 — two defects, and the reported framing was misleading
+    on both.**
+    - *"expected Indent, found Self_/Underscore".* NOT an indentation defect.
+      When an `if`/`while` condition uses a multi-line operator continuation at
+      the SAME column as the body, the lexer emits no fresh `Indent` for the
+      body, so `header_continuation_is_equal_column` (`parser_helpers.rs`) asks
+      `is_statement_start()` whether the body's first token opens a statement.
+      That list (`parser_impl/core.rs`) contained `Identifier` and `Me` but
+      omitted `Self_` and `Underscore`, so a body beginning `self.x = …` fell
+      through to `expect(Indent)`. Any other leading token — an ordinary
+      identifier included — parsed fine, which is exactly why it read as an
+      indentation problem. Fixed by completing the token list; both callers
+      (the equal-column check and `parse_block_after_newline`'s flat-body
+      shape) genuinely want "can a statement start here", and `self.x = 1` /
+      `_ = f()` qualify, so this is not a grammar weakening. The "body indent
+      equals the continuation indent" clause in the original report is a
+      necessary condition, not the cause.
+    - *"expected identifier, found Newline" in the hoisted-`val` case*
+      (`authenticated_fs_exec_submission_service_v1.spl`, 3 sshd specs). The
+      recorded suspicion of a `.?` or `==`/`!=` continuation is WRONG. It is the
+      TYPE ANNOTATION that wraps: `var g_service_v1:` / newline /
+      `AuthenticatedFsExecUserServiceV1? = nil`. The trailing-colon continuation
+      now mirrors the trailing-`=` continuation `var_decl.rs` already accepted;
+      the consumed Indent's compensating Dedent is drained after the
+      initializer, since `= nil` sits on the continuation line. A colon whose
+      next line is not an indented type is put back, so genuinely malformed
+      input still produces the original diagnostic.
+    Gates: `parser/src/multiline_condition_self_body_test.rs` (7 tests, incl.
+    the previously-working shapes that hid the defect, and must-still-reject
+    cases for a type annotation with no type) and
+    `test/01_unit/language/multiline_condition_self_body_spec.spl` (5 green).
+    Full parser suite 319 green. All five product files named across items
+    23-25 now parse.
 24. **Inline `unsafe(caps): expr` one-line body rejected.** Only the
     block/indented form parses; the one-line colon form is a documented shape
     that the seed does not accept.
