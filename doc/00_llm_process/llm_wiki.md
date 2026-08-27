@@ -899,6 +899,19 @@ convergence and DDC remain explicit release/trust targets. Canonical guide:
 
 ## UP Squared free debug transport qualification
 
+## Protected GitHub PR handoff
+
+When branch protection requires a pull request, push the reviewed branch and
+open or update its PR rather than pushing directly to `main`. Record whether it
+is `unverified`, `REVIEW_REQUIRED`, `awaiting-independent-approval`,
+`awaiting-required-checks`, `merge-blocked`, or `merged`. A model or static
+review is advisory evidence; it does not satisfy GitHub's approval rule. The
+author's credential cannot self-approve, so request an eligible independent
+reviewer. `--no-verify` only skips local Git hooks and cannot bypass remote
+checks or protection. The operator guide is
+`doc/07_guide/app/devhub.md`; the executable review workflow is
+`tools/claude-plugin/repo-and-pull-req/skills/git/gh_pull_req_review.md`.
+
 - GNU GDB/GDB multiarch, OpenOCD, and picocom are the legitimate free host
   baseline; they do not turn an arbitrary USB cable into Intel DCI.
 - Intel DCI run control/DMA uses a closed proprietary ExI transport. Free GDB

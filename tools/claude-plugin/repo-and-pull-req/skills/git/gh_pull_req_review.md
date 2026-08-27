@@ -6,9 +6,9 @@ fixes code or replies, then branches by `--level`:
 - **L1** (default): post review, opportunistic auto-rebase + merge if
   PR is **already** APPROVED at check time. Single-pass, no polling.
   This is the existing behavior — preserved verbatim.
-- **L2**: post review, run Codex-first bot reviewer, bot-approves via
-  `gh pr review --approve`, polls checks, merges via
-  `gh pr merge --squash`.
+- **L2**: post review, run Codex-first bot reviewer, then bot-approves via
+  `gh pr review --approve` only when its authenticated GitHub identity is not
+  the PR author; polls checks and merges via `gh pr merge --squash`.
 - **L3**: post review, wait for **human** APPROVED review (do NOT
   bot-approve), poll checks, merge.
 
@@ -118,9 +118,21 @@ DECISION=$(echo "$UPDATED_STATUS" | jq -r .reviewDecision)
 
 #### L1 — Post review only + opportunistic merge (current behavior)
 
-If `DECISION == "APPROVED"` and all comments addressed:
+If `DECISION == "APPROVED"`, at least one approval is from a login other than
+the PR author, and all comments are addressed:
 
 ```bash
+if ! AUTHOR=$(gh pr view "${PR_NUMBER}" --json author --jq .author.login) || [ -z "$AUTHOR" ]; then
+  echo "could not determine PR author; do not merge" >&2
+  exit 2
+fi
+REVIEWS_JSON=$(gh pr view "${PR_NUMBER}" --json reviews)
+INDEPENDENT_APPROVED=$(printf '%s\n' "$REVIEWS_JSON" | jq --arg author "$AUTHOR" \
+  '[.reviews[] | select(.state=="APPROVED" and .author.login != $author)] | length')
+if [ "$INDEPENDENT_APPROVED" -le 0 ]; then
+  echo "no independent approval; do not merge" >&2
+  exit 0
+fi
 # Rebase onto latest main
 jj git fetch
 jj rebase -d main@origin
@@ -146,6 +158,23 @@ polling, no bot-approve, no checks-wait.
    `verdict_source`. Persist these in state JSON.
 2. If `verdict == approve`:
    ```bash
+   if ! AUTHOR=$(gh pr view "${PR_NUMBER}" --json author --jq .author.login) || [ -z "$AUTHOR" ]; then
+     echo "could not determine PR author; do not approve" >&2
+     exit 2
+   fi
+   if ! ACTOR=$(gh api user --jq .login) || [ -z "$ACTOR" ]; then
+     echo "could not determine authenticated reviewer; do not approve" >&2
+     exit 2
+   fi
+   if [ "$ACTOR" = "$AUTHOR" ]; then
+     echo "blocked-self-review: author credential cannot approve its own PR" >&2
+     exit 2
+   fi
+   ```
+   GitHub remains the authority for configured reviewer eligibility; a rejected
+   review submission blocks the workflow and must not be retried as a bypass.
+
+   ```bash
    gh pr review "${PR_NUMBER}" --approve --body "Bot approval (${APPROVER}/${VERDICT_SOURCE})"
    APPROVE_RC=$?
    ```
@@ -168,10 +197,21 @@ polling, no bot-approve, no checks-wait.
 #### L3 — Post review only + poll for human approval + merge
 
 1. Post review comments only. Do NOT bot-approve.
-2. Poll for human APPROVED review:
+2. Poll for an independent human APPROVED review.  A GitHub `User` is the
+   documented non-bot minimum; an unknown or bot account does not qualify:
    ```bash
-   HUMAN_APPROVED_COUNT=$(gh pr view "${PR_NUMBER}" --json reviews \
-     --jq '[.reviews[] | select(.state=="APPROVED")] | length')
+   if ! AUTHOR=$(gh pr view "${PR_NUMBER}" --json author --jq .author.login) || [ -z "$AUTHOR" ]; then
+     echo "could not determine PR author; keep waiting" >&2
+     exit 2
+   fi
+   REVIEWS_JSON=$(gh pr view "${PR_NUMBER}" --json reviews)
+   HUMAN_APPROVED_COUNT=0
+   for reviewer in $(printf '%s\n' "$REVIEWS_JSON" | jq --arg author "$AUTHOR" -r \
+     '.reviews[] | select(.state=="APPROVED" and .author.login != $author) | .author.login'); do
+     if reviewer_type=$(gh api "users/${reviewer}" --jq .type) && [ "$reviewer_type" = "User" ]; then
+       HUMAN_APPROVED_COUNT=$((HUMAN_APPROVED_COUNT + 1))
+     fi
+   done
    if [ "$HUMAN_APPROVED_COUNT" -gt 0 ]; then
      HUMAN_APPROVED=true
    fi

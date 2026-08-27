@@ -135,6 +135,20 @@ devhub github repo clone owner/name
 
 Requires: `gh` installed and authenticated.
 
+#### Protected PR handoff
+
+Use `devhub github pr review <PR> --approve` only from an account that is
+eligible to review that pull request.  An author (including an agent acting
+through the author's `gh` credential) must not self-approve.  A higher-effort
+static review is useful before requesting or updating a PR, but it is advisory:
+record its scope and any unverified residuals in the PR description or comment.
+GitHub branch protection remains authoritative for approval and required status
+checks.  When protection requires a PR, push the reviewed branch rather than
+`main`, open/update the PR, and use auto-merge only after the repository can
+satisfy its protected checks and independent-review policy; enabling it merely
+queues the merge.  `--no-verify` skips local Git hooks only; it does not satisfy
+or bypass GitHub checks.
+
 ### `bb` (alias `b`) — Bitbucket Cloud
 
 Real REST client (`adapter_bitbucket_curl.spl`), not a passthrough — requires

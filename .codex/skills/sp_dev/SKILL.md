@@ -936,6 +936,16 @@ When a workflow or tool contract changes, update the matching `doc/07_guide`,
 `.claude/agents/spipe/`, and `.gemini/commands/` instructions before handoff. Treat stale process docs
 as unfinished work, not release cleanup.
 
+For a protected GitHub publication, keep the handoff state explicit:
+`unverified`, `REVIEW_REQUIRED`, `awaiting-independent-approval`,
+`awaiting-required-checks`, `merge-blocked`, or `merged`. A static or
+higher-effort agent review is advisory evidence, never a GitHub approval. The
+PR author must not self-approve through the same credential; use an eligible,
+independent reviewer. `--no-verify` skips local Git hooks only and never
+bypasses repository protection or required checks. See
+`doc/07_guide/app/devhub.md` and
+`tools/claude-plugin/repo-and-pull-req/skills/git/gh_pull_req_review.md`.
+
 For broad SPipe planning lanes, split independent research or implementation
 checks across lower-model parallel agents when available (for example Codex
 Spark, Claude Haiku, or Claude Sonnet). The best available
