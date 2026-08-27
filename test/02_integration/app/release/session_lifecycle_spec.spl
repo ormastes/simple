@@ -1,0 +1,75 @@
+"""Bounded critical-path evidence for the durable release-session lifecycle."""
+# @req: REQ-004, REQ-005, REQ-015
+use std.spec.{describe, it, expect, step}
+use std.nogc_sync_mut.io.file_ops.{file_hash_sha256}
+use app.io.mod.{process_run_bounded, dir_create_all, file_atomic_write, time_now_unix_micros, getpid}
+use app.release.policy.{ReleaseSession}
+use app.release.session_authority.{
+    register_release_session, verify_registered_release_session,
+    begin_release_session_mutation, advance_release_session_head,
+    end_release_session_mutation, check_release_session_cleanup,
+    close_release_session
+}
+
+fn run(command: text, arguments: [text]) -> (text, i64):
+    val (stdout, _stderr, code) = process_run_bounded(command, arguments, 10000, 262144)
+    (stdout.trim(), code)
+
+fn git(root: text, arguments: [text]) -> text:
+    val (stdout, code) = run("git", ["-C", root] + arguments)
+    if code != 0:
+        return ""
+    stdout
+
+describe "Durable release session critical path":
+    it "registers, commits under one lease, advances the head CAS, and closes cleanly":
+        step("Create one isolated linked worktree at an immutable base")
+        val fixture = "/tmp/simple-release-lifecycle-" + getpid().to_text() + "-" + time_now_unix_micros().to_text()
+        val primary = fixture + "/primary"
+        val workspace = fixture + "/work"
+        expect(dir_create_all(primary + "/.spipe/policy")).to_be(true)
+        expect(file_atomic_write(primary + "/.spipe/policy/vcs.sdn", "policy: fixture\n")).to_be(true)
+        expect(file_atomic_write(primary + "/tracked.txt", "base\n")).to_be(true)
+        val (_init_out, init_code) = run("git", ["-C", primary, "init", "-b", "main"])
+        expect(init_code).to_equal(0)
+        git(primary, ["config", "user.email", "release-session@example.invalid"])
+        git(primary, ["config", "user.name", "Release Session Spec"])
+        git(primary, ["add", "."])
+        git(primary, ["commit", "-m", "fixture base"])
+        val base = git(primary, ["rev-parse", "HEAD"])
+        git(primary, ["update-ref", "refs/remotes/origin/main", base])
+        val branch = "work/release/local-20260826-903-session-lifecycle"
+        git(primary, ["worktree", "add", "-b", branch, workspace, base])
+        val (canonical, realpath_code) = run("realpath", [workspace])
+        expect(realpath_code).to_equal(0)
+        val session = ReleaseSession(
+            session_id: "session-lifecycle-" + getpid().to_text(),
+            workspace_path: canonical, main_workspace_path: primary,
+            work_branch: branch, target_ref: "main", base_sha: base,
+            expected_target_sha: base,
+            policy_sha256: file_hash_sha256(canonical + "/.spipe/policy/vcs.sdn")
+        )
+
+        step("Hold one mutation lease across the owned commit and registry CAS")
+        val registered = register_release_session(canonical, session)
+        expect(registered.valid).to_be(true)
+        val lease = begin_release_session_mutation(canonical, session)
+        expect(lease.valid).to_be(true)
+        expect(file_atomic_write(canonical + "/tracked.txt", "owned session commit\n")).to_be(true)
+        git(canonical, ["add", "tracked.txt"])
+        git(canonical, ["commit", "-m", "test: owned release-session commit"])
+        val advanced = advance_release_session_head(
+            lease, session, registered.registry_sha256, base
+        )
+        expect(advanced.valid).to_be(true)
+        expect(end_release_session_mutation(lease)).to_be(true)
+
+        step("Verify the mutable head, prove cleanup safety, and preserve a closed record")
+        expect(verify_registered_release_session(canonical, session).valid).to_be(true)
+        expect(check_release_session_cleanup(canonical, session).valid).to_be(true)
+        expect(close_release_session(canonical, session, advanced.registry_sha256).valid).to_be(true)
+        expect(verify_registered_release_session(canonical, session).valid).to_be(false)
+        val (_removed, remove_code) = run("git", ["-C", primary, "worktree", "remove", "--force", canonical])
+        expect(remove_code).to_equal(0)
+        val (_cleaned, cleanup_code) = run("rm", ["-rf", "--", fixture])
+        expect(cleanup_code).to_equal(0)

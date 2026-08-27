@@ -1,137 +1,164 @@
-# Publish all MCP server npm packages
-# Triggers on version tags (e.g., v1.0.0) or manual dispatch
-#
-# Publishes 5 packages:
-#   @simple-lang/mcp-server         (simple-mcp)
-#   @simple-lang/lsp-mcp-server     (simple-lsp-mcp)
-#   @simple-lang/t32-mcp-server     (t32-mcp)
-#   @simple-lang/t32-lsp-mcp-server (t32-lsp-mcp)
-#   @simple-lang/obsidian-search    (obsidian-search)
-
-name: Publish npm Packages
+name: Publish admitted npm packages
 
 on:
-  push:
-    tags:
-      - 'v*.*.*'
-  workflow_dispatch:
-    inputs:
-      version:
-        description: 'Version to publish (e.g., 1.0.0). Leave empty to use tag version.'
-        required: false
-        type: string
-      packages:
-        description: 'Packages to publish (all, mcp, lsp-mcp, t32-mcp, t32-lsp-mcp, obsidian-search)'
-        required: false
-        default: 'all'
-        type: choice
-        options:
-          - all
-          - mcp
-          - lsp-mcp
-          - t32-mcp
-          - t32-lsp-mcp
-          - obsidian-search
+  release:
+    types: [published]
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: npm-${{ github.event.release.tag_name }}
+  cancel-in-progress: false
 
 permissions:
-  packages: write
   contents: read
+  actions: read
+  id-token: write
+  attestations: read
 
 jobs:
   publish:
     runs-on: ubuntu-latest
+    environment: npm-release
     strategy:
+      fail-fast: true
       matrix:
         include:
-          - name: mcp
-            dir: tools/mcp-registry
-            pkg: "@simple-lang/mcp-server"
-          - name: lsp-mcp
-            dir: tools/lsp-mcp-registry
-            pkg: "@simple-lang/lsp-mcp-server"
-          - name: t32-mcp
-            dir: tools/t32-mcp-registry
-            pkg: "@simple-lang/t32-mcp-server"
-          - name: t32-lsp-mcp
-            dir: tools/t32-lsp-mcp-registry
-            pkg: "@simple-lang/t32-lsp-mcp-server"
-          - name: obsidian-lsp-mcp
-            dir: tools/obsidian-lsp-mcp-registry
-            pkg: "@simple-lang/obsidian-lsp-mcp-server"
-
+          - package: '@simple-lang/mcp-server'
+            asset_prefix: simple-lang-mcp-server
+          - package: '@simple-lang/lsp-mcp-server'
+            asset_prefix: simple-lang-lsp-mcp-server
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          node-version: '20'
-          registry-url: 'https://registry.npmjs.org'
+          ref: ${{ github.event.release.tag_name }}
+          fetch-depth: 1
+          persist-credentials: false
 
-      - name: Check if package should be published
-        id: check
-        run: |
-          SELECTED="${{ inputs.packages || 'all' }}"
-          if [ "$SELECTED" = "all" ] || [ "$SELECTED" = "${{ matrix.name }}" ]; then
-            echo "should_publish=true" >> $GITHUB_OUTPUT
-          else
-            echo "should_publish=false" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Extract version
-        if: steps.check.outputs.should_publish == 'true'
-        id: version
-        shell: bash
-        run: |
-          if [ -n "${{ inputs.version }}" ]; then
-            VERSION="${{ inputs.version }}"
-          elif [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-            VERSION="${GITHUB_REF#refs/tags/v}"
-          else
-            echo "::error::No version provided and not triggered by a tag (GITHUB_REF=${GITHUB_REF}). Specify the 'version' input on workflow_dispatch." >&2
-            exit 1
-          fi
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "Resolved VERSION=${VERSION}"
-
-      - name: Update package version
-        if: steps.check.outputs.should_publish == 'true'
-        working-directory: ${{ matrix.dir }}
-        run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          # Update version in package.json
-          node -e "
-            const fs = require('fs');
-            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
-            pkg.version = '${VERSION}';
-            if (Object.prototype.hasOwnProperty.call(pkg, 'runtimeVersion')) {
-              pkg.runtimeVersion = '${VERSION}';
-            }
-            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
-          "
-          # Update version in server.json
-          node -e "
-            const fs = require('fs');
-            const srv = JSON.parse(fs.readFileSync('server.json', 'utf8'));
-            srv.version = '${VERSION}';
-            if (srv.packages) srv.packages.forEach(p => p.version = '${VERSION}');
-            fs.writeFileSync('server.json', JSON.stringify(srv, null, 2) + '\n');
-          "
-          echo "Publishing ${{ matrix.pkg }}@${VERSION}"
-
-      - name: Verify MCP bootstrap release asset
-        if: steps.check.outputs.should_publish == 'true' && (matrix.name == 'mcp' || matrix.name == 'lsp-mcp')
+      - name: Verify live GitHub release policy
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: sh scripts/check-mcp-release-assets.shs "${{ matrix.dir }}"
+          GH_TOKEN: ${{ secrets.RELEASE_ADMIN_TOKEN }}
+        run: |
+          test -n "$GH_TOKEN"
+          scripts/release/github-policy.shs verify-live "$GITHUB_REPOSITORY"
 
-      - name: Publish to npm
-        if: steps.check.outputs.should_publish == 'true'
-        working-directory: ${{ matrix.dir }}
+      - name: Verify signed admission chain and download exact admitted tarball
+        id: identity
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+          PACKAGE: ${{ matrix.package }}
+          ASSET_PREFIX: ${{ matrix.asset_prefix }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ADMIN_TOKEN: ${{ secrets.RELEASE_ADMIN_TOKEN }}
+        run: |
+          set -euo pipefail
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)\.[0-9]+)?$ ]]
+          version=${TAG#v}
+          test -n "$RELEASE_ADMIN_TOKEN"
+          test "$(GH_TOKEN="$RELEASE_ADMIN_TOKEN" gh api \
+            "repos/${GITHUB_REPOSITORY}/immutable-releases" --jq '.enabled')" = true
+          gh release verify "$TAG"
+          mkdir release-assets
+          for receipt in artifacts.sha256 release-admission.json qualification.json \
+            promotion-receipt.json; do
+            gh release download "$TAG" --pattern "$receipt" --dir release-assets
+            gh release verify-asset "$TAG" "release-assets/$receipt"
+          done
+          ref_json=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}")
+          test "$(jq -r '.object.type' <<<"$ref_json")" = tag
+          tag_object_sha=$(jq -er '.object.sha' <<<"$ref_json")
+          tag_json=$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${tag_object_sha}")
+          test "$(jq -r '.tag' <<<"$tag_json")" = "$TAG"
+          test "$(jq -r '.verification.verified' <<<"$tag_json")" = true
+          admission_sha256=$(jq -r '.message' <<<"$tag_json" |
+            sed -n 's/^Admission-SHA256: //p')
+          promotion_receipt_sha256=$(jq -r '.message' <<<"$tag_json" |
+            sed -n 's/^Promotion-Receipt-SHA256: //p')
+          [[ "$admission_sha256" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$promotion_receipt_sha256" =~ ^[0-9a-f]{64}$ ]]
+          printf '%s  %s\n' "$promotion_receipt_sha256" release-assets/promotion-receipt.json |
+            sha256sum --check --strict
+          test "$(jq -r '.admission_sha256' release-assets/promotion-receipt.json)" = \
+            "$admission_sha256"
+          test "$(jq -r '.version' release-assets/promotion-receipt.json)" = "$version"
+          test "$(jq -r '.object.sha' <<<"$tag_json")" = \
+            "$(jq -r '.candidate_commit_sha' release-assets/promotion-receipt.json)"
+          artifact_id=$(jq -er '.candidate_artifact_id' release-assets/promotion-receipt.json)
+          artifact_digest=$(jq -er '.candidate_artifact_digest' release-assets/promotion-receipt.json)
+          [[ "$artifact_id" =~ ^[0-9]+$ ]]
+          [[ "$artifact_digest" =~ ^[0-9a-f]{64}$ ]]
+          test "$(jq -r '.message' <<<"$tag_json" |
+            sed -n 's/^Candidate-Artifact-ID: //p')" = "$artifact_id"
+          test "$(jq -r '.message' <<<"$tag_json" |
+            sed -n 's/^Candidate-Artifact-Digest: //p')" = "$artifact_digest"
+          artifact_json=$(gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}")
+          test "$(jq -r '.workflow_run.id' <<<"$artifact_json")" = \
+            "$(jq -r '.candidate_workflow_run_id' release-assets/promotion-receipt.json)"
+          test "$(jq -r '.workflow_run.head_sha' <<<"$artifact_json")" = \
+            "$(jq -r '.candidate_commit_sha' release-assets/promotion-receipt.json)"
+          remote_digest=$(jq -er '.digest' <<<"$artifact_json")
+          case "$remote_digest" in
+            "$artifact_digest"|"sha256:$artifact_digest") ;;
+            *) echo "published candidate artifact identity changed" >&2; exit 1 ;;
+          esac
+          test "$(jq -r '.version' release-assets/release-admission.json)" = "$version"
+          test "$(jq -r '.admitted' release-assets/release-admission.json)" = true
+          test "$(jq -r '.rebuild_allowed' release-assets/release-admission.json)" = false
+          test "$(jq -r '.fallback_used' release-assets/release-admission.json)" = false
+          printf '%s  %s\n' "$admission_sha256" release-assets/release-admission.json |
+            sha256sum --check --strict
+          qualification_sha256=$(jq -er \
+            '.qualification_receipt_sha256' release-assets/release-admission.json)
+          printf '%s  %s\n' "$qualification_sha256" release-assets/qualification.json |
+            sha256sum --check --strict
+          jq -e --slurpfile qualification release-assets/qualification.json '
+            .candidate_identity == $qualification[0].candidate_identity and
+            .candidate_commit_sha == $qualification[0].candidate_commit_sha and
+            .artifact_manifest_sha256 == $qualification[0].artifact_manifest_sha256 and
+            .required_support_sha256 == $qualification[0].required_support_sha256 and
+            .required_support_passed == true and
+            $qualification[0].required_support_passed == true' \
+            release-assets/release-admission.json >/dev/null
+          artifact_manifest_sha256=$(jq -er \
+            '.artifact_manifest_sha256' release-assets/release-admission.json)
+          printf '%s  %s\n' "$artifact_manifest_sha256" release-assets/artifacts.sha256 |
+            sha256sum --check --strict
+          asset="${ASSET_PREFIX}-${version}.tgz"
+          grep -Eq "^[0-9a-f]{64}  ${asset}$" release-assets/artifacts.sha256
+          gh release download "$TAG" --pattern "$asset" --dir release-assets
+          (cd release-assets && sha256sum --check --strict --ignore-missing artifacts.sha256)
+          gh release verify-asset "$TAG" "release-assets/$asset"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "asset=release-assets/$asset" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+          registry-url: https://registry.npmjs.org
+
+      - name: Publish exact candidate tarball idempotently
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm publish --access public
+          PACKAGE: ${{ matrix.package }}
+          VERSION: ${{ steps.identity.outputs.version }}
+          ASSET: ${{ steps.identity.outputs.asset }}
+        run: |
+          set -euo pipefail
+          dist_tag=latest
+          case "$VERSION" in
+            *-alpha.*) dist_tag=alpha ;;
+            *-beta.*) dist_tag=beta ;;
+            *-rc.*) dist_tag=rc ;;
+          esac
+          if npm view "$PACKAGE@$VERSION" version >/dev/null 2>&1; then
+            mkdir registry-copy
+            registry_asset=$(npm pack "$PACKAGE@$VERSION" \
+              --pack-destination registry-copy --json | jq -r '.[0].filename')
+            cmp --silent "$ASSET" "registry-copy/$registry_asset" || {
+              echo "registry version exists with different bytes" >&2; exit 1;
+            }
+            test "$(npm view "$PACKAGE" "dist-tags.$dist_tag")" = "$VERSION"
+            exit 0
+          fi
+          npm publish "$ASSET" --access public --provenance --tag "$dist_tag"
+          test "$(npm view "$PACKAGE@$VERSION" version)" = "$VERSION"
+          test "$(npm view "$PACKAGE" "dist-tags.$dist_tag")" = "$VERSION"

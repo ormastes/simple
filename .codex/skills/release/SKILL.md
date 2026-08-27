@@ -1,136 +1,37 @@
 ---
 name: release
-description: "Codex release skill. Version bump (major/minor/patch/exact), CHANGELOG update, commit, tag, push (ask before push). Prerequisite: verify PASS."
+description: Prepare and promote stable or prerelease Simple releases from isolated sessions and immutable admitted candidates.
 ---
 
-# Release — Codex Version Bump and Tag
+# Protected Simple Release
 
-**Cooperative Phase:** Release (after verification passes)
-**Self-sufficient.** Can be run by any LLM independently.
+Use [the software-release guide](../../../doc/07_guide/infra/software_release.md) and `release/version.sdn` as the canonical product-version authority.
 
-## Tools
+## Procedure
 
-- **Simple MCP** — read/write project files
+1. Require a prior verification `STATUS: PASS`, including one `bin/simple test test --whole --mode=interpreter` result and current SPipe/manual evidence.
+2. Start an isolated release session: one `work/release/...` branch, one worktree, exact protected target SHA, and private outputs. Never author in the main worktree.
+3. Render/check every declared version projection. New prereleases use lowercase numbered `alpha.N`, `beta.N`, or `rc.N`.
+4. For beta maintenance, target `release/X.Y`. Admit only one caller-selected reviewed bug-fix commit at a time with source SHA, change/work IDs, review/check receipts, result SHA, exact stable patch-ID equivalence, and renewed focused evidence. Adapted patches fail closed until a separately reviewed equivalence protocol exists. Never automatically select fixes.
+5. Before each candidate attempt, after a bootstrap failure fix, and before release admission, fetch once and compare exact `main` and release-line snapshots read-only. Present reviewed fix proposals; do not automatically choose or apply them.
+6. Backport an approved `main` fix or forward-port an approved shared release-first fix on an isolated target-specific work branch before candidate admission. Renew evidence, record a divergence receipt, and let integration authority CAS-update the protected target. Only a `non_fix` release-specific compatibility classification with reason, owner, and expiry may remain release-only.
+7. Keep `main` as development trunk; never reset/repoint it to `release/X.Y`, make it track the release line, or merge the whole release line merely to carry a fix.
+8. Submit through protected compare-and-swap integration and create a new immutable `candidate/v.../aNNN`.
+9. Build and qualify the exact candidate once. Required failures, stale inputs, and fallback artifacts block admission.
+10. Promotion verifies exact candidate/artifact/evidence digests and prepares one signed annotated tag pushed as one exact ref. Promotion never rebuilds.
+11. Ask before any push or publication. Draft, attach exact assets, verify, then publish immutably.
+12. Rollback redeploys an earlier admitted release. Withdrawal preserves tag/assets/history. Corrections receive a new version.
 
-## Usage
+Use `simple release version-check|beta-prepare|backport-check|candidate-check|promote-check|withdraw-check` for the pure validation boundaries.
 
-- No args or `patch`/`third`: bump patch (0.9.3 -> 0.9.4)
-- `minor`/`second`: bump minor (0.9.3 -> 0.10.0)
-- `major`/`first`: bump major (0.9.3 -> 1.0.0)
-- `X.Y.Z`: set exact version
+For protected PR integration, explicitly self-attest high-capability/high-effort PASS with zero P0/P1, then dispatch `SPipe Self Review Admission`. This is not authenticated independent review. The trusted default-branch workflow resolves the protected target, normalized ruleset digest, head, base, merge-base, and diff, applies operator-owned deny/constraint policy, re-resolves before emitting a ten-minute required check, and never claims provider Approve. Trusted PR/base/policy events reset success immediately; scheduling is backup. The user accepts that generic GitHub Actions App identity is not an independent security boundary. Candidate admission accepts only `spipe-review-admission/1`; keep release-environment approval separate.
 
-## Prerequisite
+For the repository mutation boundary, use
+`scripts/release/converge-reviewed-fix.shs` with one exact commit and its bound
+`spipe-review-receipt/1`. It fetches both remote heads before creating the
+private branch/worktree, emits `spipe-reviewed-fix-preparation/1`, and stops
+before push or protected integration.
 
-Run `verify` skill first — must show **STATUS: PASS**.
+Never move `main` or `release/*` directly, broadly push every local tag, create unsigned/lightweight release tags, delete or move published tags, rebuild during promotion, or substitute seed/old/source-only artifacts.
 
-Run `bin/simple test test --whole --mode=interpreter` after bootstrap and
-before changing versions or tags. This release-blocking command includes the
-full spec/long-test surface, `.spl` comment doctests, and executable Markdown
-code fences; any failure stops release.
-
-Do NOT proceed with release if verification has any FAIL items.
-For SimpleOS mission-critical releases, also run
-`sh scripts/check/check-simpleos-mission-critical-release.shs`; do not release
-while it reports blocked or failed, and PASS requires `release_blockers=none`.
-
-SPipe specs and SPipe coverage are verified before release. Do not create,
-rewrite, or weaken SPipe during release; if SPipe is missing, stale, or
-placeholder-based, stop and go back to verify/implementation.
-Generated-manual quality and lower-model sidecar review must already be covered
-by verify PASS; release does not repair or accept them afterward.
-Workflow/tooling/evidence/spec/verification contract docs must already be fresh
-from verify; release must not repair stale `doc/07_guide`, `doc/06_spec`,
-`.codex/skills`, `.agents/skills`, `.claude/skills`, `.claude/agents/spipe`,
-or `.gemini/commands` instructions.
-
-## Steps
-
-### 1. Read Current Version
-Read from the root `VERSION` file.
-
-### 2. Calculate New Version
-Apply bump rule (major/minor/patch) or use exact version.
-
-### 3. Update All Version Locations
-
-| File | Line | Field/Pattern |
-|------|------|---------------|
-| `VERSION` | — | Entire file content |
-| `src/app/cli/cli_helpers.spl` | 15 | Hardcoded fallback in `get_version()` |
-| `src/app/cli/_CliMain/args_and_os_commands.spl` | 67 | Hardcoded fallback in `get_version()` |
-| `src/app/cli/bootstrap_main.spl` | 18 | Hardcoded in `bootstrap_version()` |
-
-### 4. Update CHANGELOG
-
-Add new section to `CHANGELOG.md`:
-
-```markdown
-## [X.Y.Z] - YYYY-MM-DD
-
-### Added
-- <new features>
-
-### Changed
-- <modifications>
-
-### Fixed
-- <bug fixes>
-```
-
-Populate from recent commits since last release tag.
-
-### 5. Commit
-
-```bash
-jj commit -m "chore: release vX.Y.Z"
-```
-
-### 6. Tag
-
-```bash
-git tag -a vX.Y.Z -m "Release vX.Y.Z"
-```
-
-### 7. Sync and Push (ASK FIRST)
-
-**Do NOT push without user approval.**
-
-Ask: **"Ready to push vX.Y.Z to remote? (y/n)"**
-
-If approved:
-```bash
-FILE_COUNT_BEFORE=$(git ls-files | wc -l | tr -d ' ')
-jj git fetch
-jj rebase -d main@origin
-FILE_COUNT_AFTER=$(git ls-files | wc -l | tr -d ' ')
-test "$FILE_COUNT_AFTER" -ge "$FILE_COUNT_BEFORE"
-jj bookmark set main -r @-
-env -u GITHUB_TOKEN -u GH_TOKEN jj git push --bookmark main
-env -u GITHUB_TOKEN -u GH_TOKEN git push --tags
-```
-
-If HTTPS auth fails, do not print tokens or embed them in remote URLs. Run
-`env -u GITHUB_TOKEN -u GH_TOKEN gh auth setup-git` when the stored GitHub CLI
-credential should be used; stale `GH_TOKEN` or `GITHUB_TOKEN` values can
-override that credential.
-
-## Artifacts Produced
-
-| Artifact | Path |
-|----------|------|
-| Updated version | `VERSION`, `src/app/cli/cli_helpers.spl`, `src/app/cli/_CliMain/args_and_os_commands.spl`, `src/app/cli/bootstrap_main.spl` |
-| Changelog | `CHANGELOG.md` |
-| Git tag | `vX.Y.Z` |
-
-## Rules
-
-- NEVER release without verify PASS
-- NEVER release SimpleOS mission-critical artifacts while
-  `check-simpleos-mission-critical-release.shs` is blocked or failed, or lacks
-  `release_blockers=none`
-- NEVER update SPipe in release; release must consume verified SPipe evidence
-- NEVER accept generated-manual quality or sidecar-review gaps during release
-- NEVER push without user approval
-- NEVER skip version locations — all 4 version sources must be updated (VERSION file + 3 .spl files)
-- NEVER release if `find doc/06_spec -name '*_spec.spl' | wc -l` is nonzero
-- All code in `.spl` — no Python, no Bash
+Live rulesets, signing, protected pushes, and publication require explicit authority. Do not confuse a local plan PASS with a live release PASS.
