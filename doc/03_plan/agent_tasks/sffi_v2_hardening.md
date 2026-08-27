@@ -423,3 +423,9 @@ passing placeholder.
     remain direct lexical scopes; positive index-handle checks and negative
     search/index sentinels retain their current semantics with no extra copy,
     lookup, allocation, lock, retry, or call.
+78. Keep Engine 2D scalar math wrappers explicit raw-FFI boundaries. Its three
+    scalar declarations and three direct trigonometric/square-root calls must
+    remain tagged and lexically scoped. Do not introduce a helper indirection,
+    allocation, copy, lookup, lock, retry, or additional provider invocation;
+    the source-shape check is containment evidence only, not ABI, artifact,
+    signature, or semantic-provider verification.
