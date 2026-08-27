@@ -1,0 +1,24 @@
+#!/bin/sh
+# Static ownership/unsafe-scope guard for the bootstrap interpreter env facade.
+# It is source containment only, never artifact or signature verification.
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+binding="$root/src/app/interpreter/ffi/env_ffi.spl"
+consumer="$root/src/app/interpreter/ffi/eval_slice.spl"
+provider="$root/src/compiler_rust/compiler/src/interpreter_extern/env_sffi.rs"
+
+test "$(grep -c '^@unsafe(' "$binding")" -eq 12
+test "$(grep -c '^extern fn rt_env_' "$binding")" -eq 12
+grep -q 'nil is ordinary missing variable only' "$binding"
+grep -q 'unsafe(capabilities: \[ffi\]):' "$consumer"
+grep -A1 'unsafe(capabilities: \[ffi\]):' "$consumer" | grep -q 'rt_env_get_var(env_handle, name)'
+grep -q 'pub fn rt_env_get_var' "$provider"
+grep -q 'invalid_handle("rt_env_get_var", handle)' "$provider"
+
+if grep -Eq 'rt_alloc|dlsym|CString|HashMap|mutex' "$binding" "$consumer"; then
+    echo 'interpreter environment SFFI gained explicit allocation, lookup, or locking' >&2
+    exit 1
+fi
+
+echo 'Interpreter env SFFI authority: PASS raw_declarations=12 lexical_raw_calls=1 provider=rust_interpreter artifact_admission=absent'

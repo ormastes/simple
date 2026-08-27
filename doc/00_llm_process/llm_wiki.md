@@ -372,6 +372,18 @@ externs reading as `connected=false`). A digest/hash/checksum comparison that
 `bin/simple run` uses — re-verify with `SIMPLE_EXECUTION_MODE=jit` (or plain
 `bin/simple run`) before trusting a cross-engine equality claim.
 
+### SFFI direct-runtime-hook rule
+
+Use `scripts/audit/sffi-unsafe-backlog.shs` to warn on owned direct `rt_*`
+declarations without a contract-bearing unsafe boundary. The audit is
+source-only prioritization; it does not prove ABI/null/ownership correctness,
+provider safety, artifact identity, verification, or signing. Never bulk
+autofix this queue. A rewrite needs a reviewed per-contract safe-facade mapping
+or a semantics-preserving exact annotation plus minimal lexical
+`unsafe(capabilities: [ffi])` scope. It must not change a nullable/sentinel
+result into a fabricated default or add hot-path allocation, copying, lookup,
+locking, retries, or an extra provider call.
+
 ## Evidence discipline: census, sabotage, and size
 
 - **Census:** raw false-positive rates measured here ran 83.9% (arity), 74% (a
@@ -912,6 +924,9 @@ If `spipe` is absent or reports `unknown command: self-review-guide`, the
 installed/global SPipe is stale. Use the repository-pinned implementation:
 
 ```bash
+git fetch origin main
+git switch main
+git merge --ff-only origin/main
 git submodule update --init .spipe/spipe
 node .spipe/spipe/cli/spipe.js self-review-guide
 ```

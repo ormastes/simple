@@ -96,7 +96,8 @@ pub use aes::{
     rt_aes256_encrypt_block_into, rt_aes256_encrypt_block_pure, rt_aes_decrypt_block_with_expanded,
     rt_aes_encrypt_block_with_expanded, rt_aes_rcon, rt_aes_sbox, rt_tls13_aes128_gcm_decrypt,
     rt_tls13_aes128_gcm_encrypt, rt_tls13_aes256_gcm_decrypt, rt_tls13_aes256_gcm_encrypt,
-    rt_ssh_aes256_gcm_decrypt_packet, rt_ssh_aes256_gcm_decrypt_packet_payload_len,
+    rt_ssh_aes256_gcm_decrypt_packet, rt_ssh_aes256_gcm_decrypt_packet_v2,
+    rt_ssh_aes256_gcm_decrypt_packet_payload_len,
 };
 
 // Re-export object types
@@ -365,8 +366,9 @@ pub use log_sffi::{
     rt_log_set_global_level, rt_log_set_scope_level, rt_log_trace, rt_log_verbose, rt_log_warn,
 };
 
-// Re-export time SFFI functions
-pub use sffi::rt_time_now_seconds;
+// Re-export time SFFI functions used by the interpreter crate. Keep the legacy
+// integer-seconds ABI and the fractional ABI separately named.
+pub use sffi::{fractional_seconds_to_millis, rt_time_now_seconds, rt_time_now_seconds_f64};
 
 // Re-export environment & process SFFI functions
 pub use sffi::{

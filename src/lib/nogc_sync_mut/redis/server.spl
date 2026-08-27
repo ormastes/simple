@@ -305,7 +305,13 @@ class RedisServer:
             if chunk == nil or chunk!.len() == 0:
                 break
             buf = buf + bytes_to_text(chunk!)
-            self.now_seconds = rt_time_now_seconds()
+            val now_micros = unsafe(capabilities: [ffi]):
+                rt_time_now_unix_micros()
+            if now_micros < 0:
+                # Do not dispatch TTL-sensitive commands with a fabricated
+                # clock value; the existing close path releases the socket.
+                break
+            self.now_seconds = now_micros / 1000000
             # Drain all complete commands from the buffer.
             var progressed = true
             while progressed:
@@ -490,4 +496,5 @@ extern fn rt_io_tcp_write_text(fd: i64, data: text) -> i64
 @unsafe(reason: "raw descriptor close consumes one live descriptor; false means close failed", capabilities: [ffi])
 extern fn rt_io_tcp_close(fd: i64) -> bool
 use std.common.string_core.{bytes_to_text}
-extern fn rt_time_now_seconds() -> i64
+@unsafe(reason: "raw wall-clock microsecond provider; negative i64 sentinel is failure", capabilities: [ffi])
+extern fn rt_time_now_unix_micros() -> i64

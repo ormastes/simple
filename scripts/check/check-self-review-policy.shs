@@ -8,7 +8,10 @@ fail() { echo "check-self-review-policy: FAIL — $*" >&2; exit 1; }
 
 bash -n scripts/release/self-review-changed-manifest.shs || fail "changed-path manifest producer does not parse"
 test -f src/app/release/self_review_policy.spl || fail "pure-Simple evaluator is missing"
+test -f scripts/release/self-review-policy-evaluator.mjs || fail "tracked hosted-runner evaluator adapter is missing"
 test -f test/01_unit/app/release/self_review_policy_spec.spl || fail "focused evaluator spec is missing"
+test -f test/01_unit/app/release/self_review_policy_evaluator_test.mjs || fail "focused adapter parity spec is missing"
+test -f test/01_unit/app/release/self_review_changed_manifest_test.mjs || fail "focused manifest producer regression is missing"
 test -f .spipe/policy/self-review-policy.sdn || fail "checked-in policy projection is missing"
 
 if find .spipe -type f -name '*self-review*.jsonl' -print | grep . >/dev/null; then
@@ -27,6 +30,21 @@ for token in \
   'policy_workflow_and_source_text: reviewable'; do
   rg -Fq "$token" .spipe/policy/self-review-policy.sdn || fail "missing policy projection token: $token"
 done
+
+for token in \
+  'spipe-self-review-request/1' \
+  'spipe-self-review-decision/1' \
+  'operator policy explicitly denies' \
+  'operator constraint deny scope matched' \
+  'operator constraint does not allow every changed path' \
+  'provider_approval_claimed: false'; do
+  rg -Fq "$token" scripts/release/self-review-policy-evaluator.mjs ||
+    fail "tracked adapter contract is missing: $token"
+done
+node --test test/01_unit/app/release/self_review_policy_evaluator_test.mjs >/dev/null ||
+  fail "tracked adapter parity/adversarial tests failed"
+node --test test/01_unit/app/release/self_review_changed_manifest_test.mjs >/dev/null ||
+  fail "changed-path manifest producer regression failed"
 
 for scope in code text file directory_files directory_recursive; do
   rg -q "^[[:space:]]+- $scope$" .spipe/policy/self-review-policy.sdn ||
@@ -77,15 +95,19 @@ for token in \
   'self_attestation:' \
   'expected_head_sha:' \
   'test "$head_sha" = "$EXPECTED_HEAD_SHA"' \
-  'review-evidence-mode=self_attested' \
-  'self-attestation-authorized' \
+  'review_evidence_mode:"self_attested"' \
+  'self_attestation_authorized:true' \
   'SPIPE_SELF_REVIEW_POLICY_DB' \
+  'node scripts/release/self-review-policy-evaluator.mjs' \
+  'spipe-self-review-request/1' \
   'refs/pull/$PR_NUMBER/head' \
+  'git fetch --no-tags --no-recurse-submodules' \
+  'sync the PR branch, review its new exact head, and dispatch again' \
   'merge_base_sha=$(git merge-base' \
   'target_ruleset_id=$(resolve_ruleset)' \
   'target_ruleset_sha256=$(jq -Sc' \
-  'target-ruleset-version="$expected_ruleset"' \
-  'target-ruleset-sha256="$target_ruleset_sha256"' \
+  'target_ruleset_version "$expected_ruleset"' \
+  'target_ruleset_sha256 "$request_ruleset_sha256"' \
   'strict_required_status_checks_policy == true' \
   'external_id="spipe-self-review/1|' \
   'pull_request_target:' \
@@ -94,6 +116,7 @@ for token in \
   'types: [self_review_policy_changed, self_review_ruleset_changed]' \
   'conclusion:"action_required"' \
   'current-decision.json' \
+  '.allowed == false and (.reason | type == "string" and length > 0)' \
   'WORKFLOW_REF' \
   'environment: self-review-admission' \
   'permissions:' \
@@ -111,6 +134,7 @@ fi
 for token in \
   'git diff --name-status -z --find-renames --find-copies' \
   'git diff --raw -z --find-renames --find-copies "$merge_base_sha"' \
+  'git cat-file blob "$revision:$path"' \
   "120000) printf 'symlink'" \
   "160000) printf 'submodule'" \
   'encoding=non_utf8' \
@@ -121,6 +145,9 @@ for token in \
   rg -Fq "$token" scripts/release/self-review-changed-manifest.shs ||
     fail "provider manifest producer is missing: $token"
 done
+if rg -q 'git show[[:space:]]+"\$revision:\$path"' scripts/release/self-review-changed-manifest.shs; then
+  fail "provider manifest producer uses porcelain blob reads that parse historical submodule configuration"
+fi
 
 sh scripts/check/check-self-review-guidance.shs
 

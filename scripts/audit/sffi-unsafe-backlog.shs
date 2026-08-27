@@ -1,0 +1,54 @@
+#!/bin/sh
+# Emit every owned Simple SFFI declaration lacking an explicit unsafe(ffi) tag.
+# This is a source-only prioritization ledger, never provider/admission proof.
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+out=${1:-/dev/stdout}
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT INT TERM
+
+SFFI_SOURCE_ONLY=1 sh "$root/scripts/audit/sffi-contract-inventory.shs" \
+    "$work/contracts.tsv" "$work/symbols.tsv" >/dev/null 2>&1
+
+# This conservative textual estimate prioritizes high-fanout raw boundaries.
+# It excludes comments and declarations, but is not a resolved call graph or
+# any kind of ABI/provider/admission proof.
+find "$root/src" "$root/test" -type f -name '*.spl' ! -path '*/vendor/*' -print0 |
+xargs -0 -r -n 200 perl -ne '
+    s/#.*$//;
+    next if /^\s*(?:pub\s+)?(?:unsafe\s+)?extern\s+fn\s+/;
+    while (/\b((?:rt_|spl_)[A-Za-z0-9_]+)\s*\(/g) { print "$1\n" }
+' | LC_ALL=C sort | uniq -c | awk 'BEGIN { OFS="\t" } { print $2, $1 }' \
+    >"$work/raw-call-estimates.tsv"
+
+expected_header='symbol	backing	provider_language	provider_id	source_signature_sha256	file	line	unsafe_tag	contract	cryptographic_admission	evidence	state	scoped_callsite_estimate	backing_first_declaring_file'
+actual_header=$(head -n 1 "$work/contracts.tsv")
+test "$actual_header" = "$(printf '%b' "$expected_header")" || {
+    echo 'SFFI unsafe backlog: unsupported contract-inventory schema' >&2
+    exit 2
+}
+
+{
+    printf 'file	line	symbol	source_raw_call_estimate	source_signature_sha256	unsafe_tag	contract	provider_id	state\n'
+    awk -F '\t' 'BEGIN { OFS="\t" }
+        NR == FNR { calls[$1]=$2; next }
+        FNR > 1 && $8 != "tagged" {
+            print $6, $7, $1, (calls[$1] + 0), $5, $8, $9, $4, $12
+        }
+    ' "$work/raw-call-estimates.tsv" "$work/contracts.tsv" |
+        LC_ALL=C sort -t "$(printf '\t')" -k4,4nr -k1,1 -k2,2n -k3,3
+} >"$work/backlog.tsv"
+
+if [ "$out" = /dev/stdout ]; then
+    cat "$work/backlog.tsv"
+else
+    test ! -e "$out" || test -f "$out" || {
+        echo 'SFFI unsafe backlog: output must be a regular file path' >&2
+        exit 2
+    }
+    cp "$work/backlog.tsv" "$out"
+fi
+
+count=$(awk 'END { if (NR > 0) print NR - 1; else print 0 }' "$work/backlog.tsv")
+echo "SFFI unsafe backlog: rows=$count source_only=true admission=absent" >&2

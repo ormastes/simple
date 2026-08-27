@@ -1,13 +1,19 @@
 # SFFI - Simple Foreign Function Interface
 
 **Version:** 0.5.0
-**Status:** Production Ready
+**Status:** Partially hardened; global verified/signed admission is not complete
 
 ---
 
 ## Overview
 
 SFFI (Simple FFI) is Simple's mechanism for calling C/C++/Rust functions. It uses a layered wrapper pattern that keeps unsafe code isolated and provides clean Simple APIs.
+
+> **Assurance boundary (2026-08-26):** A scoped raw binding is not globally
+> safe, verified, or signed merely because it has an `unsafe(ffi)` annotation.
+> That annotation records an unproven foreign boundary. A provider is admitted
+> as signed only after its exact artifact, ABI registry, build inputs, compiler,
+> and verification receipt are bound to a trusted Ed25519 key.
 
 **Key Concepts:**
 - **Raw FFI** (`extern fn rt_*`) -- Direct C function declarations
@@ -23,9 +29,13 @@ The standard pattern for wrapping runtime C functions:
 ### Tier 1: Raw FFI Declaration
 
 ```simple
-# In src/lib/ffi/mod.spl
+# In the canonical no-GC sync runtime owner.
+# Actual declarations must state their exact ABI and error contract.
+@unsafe(reason: "raw runtime ABI", capabilities: [ffi])
 extern fn rt_file_read_text(path: text) -> text
+@unsafe(reason: "raw runtime ABI", capabilities: [ffi])
 extern fn rt_file_write_text(path: text, content: text) -> bool
+@unsafe(reason: "raw runtime ABI", capabilities: [ffi])
 extern fn rt_file_exists(path: text) -> bool
 ```
 
@@ -38,14 +48,76 @@ Naming convention: `rt_` prefix maps to C functions in `src/runtime/runtime.c`.
 use std.ffi.{rt_file_read_text, rt_file_write_text, rt_file_exists}
 
 fn file_read(path: text) -> text:
-    rt_file_read_text(path)
+    unsafe(capabilities: [ffi]):
+        rt_file_read_text(path)
 
 fn file_write(path: text, content: text) -> bool:
-    rt_file_write_text(path, content)
+    unsafe(capabilities: [ffi]):
+        rt_file_write_text(path, content)
 
 fn file_exists(path: text) -> bool:
-    rt_file_exists(path)
+    unsafe(capabilities: [ffi]):
+        rt_file_exists(path)
 ```
+
+### Boundary admission checklist
+
+Before publishing an ordinary wrapper, preserve the actual ABI result and:
+
+1. Mark the raw declaration `unsafe(ffi)` and use the smallest lexical
+   `unsafe(capabilities: [ffi])` call scope.
+2. Map a failed status, missing symbol, null/invalid handle, or malformed
+   descriptor to an explicit error—not `nil`, `0`, `false`, or empty data.
+3. Validate nullability, sentinels, pointer/length relations, UTF-8,
+   ownership/release domain, and unwind/callback policy before lifting rich
+   Simple values.
+4. Keep calls direct: no per-call hashing, signature verification, registry
+   lookup, generic all-integer marshalling, or avoidable copies.
+5. For signed admission, bind the exact provider artifact and evidence to a
+   trusted key during loading. Admission never belongs on the hot call path.
+
+If an obligation is unknown, retain an unsafe API or isolate the provider.
+
+### Direct runtime-hook warning and migration
+
+Run `scripts/audit/sffi-unsafe-backlog.shs` to inventory owned direct `rt_*`
+declarations that do not yet carry a contract-bearing unsafe boundary. Treat
+its output as a source-only warning queue: it can prioritize containment work,
+but it cannot establish ABI compatibility, nullability, ownership, loaded
+artifact identity, provider verification, or signature admission.
+
+For a module+symbol review queue, run
+`scripts/audit/rt-unsafe-priority.shs`. Its `textual_rt_token_estimate` is
+deliberately **not** a lexical call count: strings and docstrings can increase
+it, although line comments are removed. Contract classification comes from the
+declaration and annotations, never from names such as `try_*` or `*_checked`.
+Use it only as a stable ordering hint.
+Before any narrow mechanical edit, validate an exact module+symbol unsafe-tag,
+contract, and state policy with
+`scripts/audit/rt-unsafe-autofix-contract.shs POLICY.tsv`. It rejects prefixes,
+wildcards, duplicate mappings, and ambiguous declarations; it does not edit
+source or establish provider verification/signing/admission. The focused
+sabotage fixture is `test/01_unit/scripts/rt_unsafe_priority_contract_test.shs`.
+
+Do **not** apply a blanket autofix to direct `rt_*` calls. A rewrite is allowed
+only when the symbol has an approved per-contract mapping to a canonical safe
+facade, or when it can add the exact declaration annotation and smallest
+lexical `unsafe(capabilities: [ffi])` scope without changing the ABI, error
+meaning, ownership, call count, allocation/copy behavior, lookup/lock work, or
+hot-path dispatch. Otherwise leave the boundary explicitly unsafe and record a
+migration task. In particular, never auto-convert a nullable/sentinel result
+to `nil`, zero, `false`, or empty data.
+
+### Return representation is part of the ABI
+
+Names do not authorize a conversion between integer and floating-point return
+families. For example, legacy `rt_time_now_seconds()` is an `i64` C ABI;
+fractional time uses the distinct `rt_time_now_seconds_f64() -> f64` provider.
+Interpreter registration, native declarations, and callers must use the same
+symbol and return type. A wrapper may convert only after the raw call in a
+small lexical unsafe scope, and must retain an explicit failure contract.
+Do not add a second clock read, allocation, lookup, lock, or retry merely to
+bridge representations.
 
 ### Usage
 
@@ -143,6 +215,18 @@ and `examples/10_tooling/libraries/external_compression/`.
 > SimpleOS, raw foreign returns are not mission-critical-safe. Missing symbols,
 > missing returns, null violations, or bridge failures must never be interpreted
 > as ordinary nil/zero/empty values.
+
+The PR-75 source-authority tranche is enforced as one fail-closed aggregate:
+
+```bash
+sh scripts/check/check-sffi-v2-authority.shs
+```
+
+The aggregate runs all 46 named guards, requires the exact count, and fails if
+any child is missing or red. It is a blocking push-tier entry in
+`config/check/must_check_gates.sdn` and an independent non-advisory step in the
+repo-hygiene CI workflow; adding an opt-out or unwired baseline is not an
+accepted substitute.
 
 ### Opaque Handle Pattern
 
