@@ -854,6 +854,20 @@ Acceptance requires idempotent remove/re-add statistics, query-term
 deduplication, `explain:false` until explanations are implemented, and an
 independent final-corpus clean rebuild oracle. Wave 4 remains `IN PROGRESS`.
 
+### 13.0.1 W4A operator admission rule
+
+The detailed W4A closure sequence is Section 13.1 of
+`doc/05_design/infra/spipe/spipe_knowledge_compiler_search_providers.md`.
+Operators must treat the JS, native-Simple, and DBFS probes as fixture inputs,
+not admission evidence.  A target becomes usable only when its closed
+`ProviderConformanceRecordV1` verifies the pinned manifest, logical root,
+scope binding, statistics, score/explanation/page digests, and applicable
+matrix cells.  Native process use additionally requires the framed-transport
+security matrix and binary/Stage-4 provenance; a qualified performance receipt
+is separately required for NFR performance claims.  PureDatabase, textual DB,
+and server DB adapters are Wave 10 consumers of the frozen contract and must
+not be implied by DBFS or provider success.
+
 The clean post-push lint attempt stopped before a lint verdict because the
 bootstrap runtime/codegen path could not resolve `Array.sort_by`. Record that
 as a tooling blocker, not a scorer failure or pass. No duplicate-check receipt

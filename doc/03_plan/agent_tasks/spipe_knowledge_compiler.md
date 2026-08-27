@@ -188,6 +188,26 @@ result nodes remain Wave 7 work.
 **Deliverables:** C publishes shared documents/analyzer/corpus stats/scorer/top-k/explanations/provider protocol and exact + BM25 + graph candidate fusion using deterministic Reciprocal Rank Fusion; D implements the dependency-free fixed-point JavaScript fallback as an in-process `SearchProvider`, always wraps it with `InProcessSearchProviderAdapter` before satisfying internal search ports, and adds initial search/resolve/read commands; E migrates the DBFS scorer compatibility facade to the canonical common scorer without editing C's paths. The shared golden corpus and adapter conformance kit cross-check all three owned outputs. Remaining textual, embedded, and server database adapters consume this contract but are implemented only in Wave 10.
 **Exit gates:** provider ordering/ties and RRF explanations match golden results; real document lengths are used by the DBFS path; DBFS legacy entry points preserve compatibility while producing canonical-scorer golden parity; embeddings are optional; incremental index equals clean rebuild; the adapter conformance kit is frozen for Wave 10.
 
+#### W4A — provider-conformance closure (merge-owner sequence)
+
+`doc/05_design/infra/spipe/spipe_knowledge_compiler_search_providers.md`
+Section 13.1 is the authoritative W4A sequence.  It closes Wave 4 in this
+order: (1) frozen common oracle/fixture, (2) JS in-process baseline, (3) native
+Simple lexical parity, (4) long-lived framed process adapter, (5) fail-closed
+same-root JS degradation, and (6) independently reviewed admission evidence.
+It is not permission to broaden `bm25-fixed-v1`, reimplement RRF in Simple, or
+call a micro-corpus probe a provider PASS.
+
+The merge owner accepts a target only with a closed
+`ProviderConformanceRecordV1`, recomputed fixture/root/statistics/score/
+explanation evidence, the exact applicability matrix, and the security cells
+applicable to its transport.  Native process work additionally requires all
+streaming/control rows W4-SRCH-28–39 and a verified binary/provenance binding.
+W4-SRCH-09 is separate qualified performance evidence; lack of that receipt
+keeps NFR performance open even if functional conformance succeeds.  Wave 10
+adapts PureDatabase, textual DB, and server DB through the frozen contract;
+it must not reopen the completed Wave-4 DBFS scorer/facade migration.
+
 #### Wave 4 streaming/deadline fan-out
 
 The best-model/merge-owner pass freezes the interfaces above, the
