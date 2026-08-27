@@ -89,7 +89,9 @@ artifact identity, provider verification, or signature admission.
 For a module+symbol review queue, run
 `scripts/audit/rt-unsafe-priority.shs`. Its `textual_rt_token_estimate` is
 deliberately **not** a lexical call count: strings and docstrings can increase
-it, although line comments are removed. Use it only as a stable ordering hint.
+it, although line comments are removed. Contract classification comes from the
+declaration and annotations, never from names such as `try_*` or `*_checked`.
+Use it only as a stable ordering hint.
 Before any narrow mechanical edit, validate an exact module+symbol unsafe-tag,
 contract, and state policy with
 `scripts/audit/rt-unsafe-autofix-contract.shs POLICY.tsv`. It rejects prefixes,

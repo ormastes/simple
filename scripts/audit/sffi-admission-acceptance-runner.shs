@@ -87,7 +87,6 @@ openssl pkey -in "$work/private.pem" -pubout -out "$work/public.pem" >/dev/null 
 printf 'test-key\ttest.sffi.acceptance\tpublic.pem\n' >"$work/trust.tsv"
 write_manifest
 sign_manifest
-null_probe_required=false
 
 case "$fixture_id" in
     admitted)
@@ -112,10 +111,25 @@ case "$fixture_id" in
         printf 'stale\n' >>"$work/report.tsv"
         ;;
     null-contract)
-        # First admit the signed evidence. The local C probe runs only after
-        # that authentication and is deliberately not converted to a signed
-        # report or an admission category.
-        null_probe_required=true
+        # Exercise the real provider before binding the observed contract
+        # failure into a v2 report. The manifest signature authenticates that
+        # exact report hash, so null-contract reaches callers through the same
+        # verifier-authored status channel as every other rejection.
+        cc "$null_probe" -ldl -o "$work/null-contract-probe"
+        if probe_output=$("$work/null-contract-probe" "$work/provider.so"); then
+            probe_status=0
+        else
+            probe_status=$?
+        fi
+        test "$probe_status" -eq 1 &&
+            test "$probe_output" = E-SFFI-ADM-NULL-CONTRACT || {
+            echo 'internal-error'
+            exit 3
+        }
+        printf 'schema\tsimple.sffi-verification-report.v2\nprovider_id\ttest.sffi.acceptance\nartifact_sha256\t%s\nabi_registry_sha256\t%s\nresult\tfail\nreason\tnull-contract\n' \
+            "$artifact_hash" "$abi_hash" >"$work/report.tsv"
+        write_manifest
+        sign_manifest
         ;;
     *)
         echo "sffi acceptance: fixture is not implemented: $fixture_id" >&2
@@ -140,29 +154,6 @@ status_row=$(awk -F '\t' '
 ' "$work/status.tsv" 2>/dev/null || true)
 decision=$(printf '%s\n' "$status_row" | awk -F '\t' '{ print $1 }')
 actual_code=$(printf '%s\n' "$status_row" | awk -F '\t' '{ print $2 }')
-
-if test "$null_probe_required" = true; then
-    if test "$admission_status" -ne 0 || test "$decision" != admitted ||
-       test "$actual_code" != SFFI-ADMITTED; then
-        echo 'internal-error'
-        exit 3
-    fi
-    cc "$null_probe" -ldl -o "$work/null-contract-probe"
-    if probe_output=$("$work/null-contract-probe" "$work/provider.so"); then
-        probe_status=0
-    else
-        probe_status=$?
-    fi
-    test "$probe_status" -eq 1 &&
-        test "$probe_output" = E-SFFI-ADM-NULL-CONTRACT || {
-        echo 'internal-error'
-        exit 3
-    }
-    # The real local sabotage is unsigned diagnostic evidence. It blocks the
-    # fixture rather than claiming an authenticated null-contract category.
-    echo 'internal-error'
-    exit 3
-fi
 
 if test "$category" = admitted; then
     if test "$admission_status" -eq 0 && test "$decision" = admitted &&

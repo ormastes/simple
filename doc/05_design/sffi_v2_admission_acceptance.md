@@ -16,6 +16,11 @@ The runner serializes only canonical categories:
 `internal-error` is never accepted as the expected result for a negative
 security fixture.
 
+The verifier status file is an ephemeral typed decision channel, not signed
+provider evidence. It is cleared before validation, may report why local
+authentication could not begin (for example missing signature or untrusted
+signer), and cannot substitute for the verifier-minted admission receipt.
+
 ## Hot-path design
 
 The runner is maintenance/test-time only. Production admission caches typed

@@ -18,11 +18,19 @@ abi_registry=$8
 verification_report=$9
 output=${10}
 status_output=${SFFI_ADMISSION_STATUS_OUTPUT:-}
-authenticated=false
 
-# Consumers that need a machine-readable failure class opt in through a
-# separate status path. Human diagnostics retain their existing form, and the
-# admission receipt is still written only after every cryptographic check.
+# A status is a verifier-authored decision, not signed provider evidence. Drop
+# any previous decision before validating inputs so an early parse/tooling
+# failure can never leave a stale `admitted` status for the caller to consume.
+if test "$status_output" != ""; then
+    rm -f -- "$status_output"
+fi
+
+# Consumers that need a machine-readable verifier decision opt in through a
+# separate status path. Human diagnostics retain their existing form. A
+# rejected status may describe why authentication could not begin; only the
+# admission receipt is signed-evidence-derived and it is still written after
+# every cryptographic check succeeds.
 write_status() {
     decision=$1
     code=$2
@@ -40,9 +48,7 @@ write_status() {
 reject() {
     code=$1
     shift
-    if test "$authenticated" = true; then
-        write_status rejected "$code"
-    fi
+    write_status rejected "$code"
     echo "sffi evidence admission: $*" >&2
     exit 1
 }
@@ -189,10 +195,8 @@ authenticate_signed_manifest() {
         NF == 3 && $1 == key && $2 == provider { count++; path=$3 }
         END { if (count == 1) print path }
     ' "$trust_store")
-    test "$trust_matches" != "" || {
-        echo 'sffi evidence admission: signer is not trusted for provider' >&2
-        exit 1
-    }
+    test "$trust_matches" != "" ||
+        reject E-SFFI-ADM-UNTRUSTED-SIGNER 'signer is not trusted for provider'
     case "$trust_matches" in
         /*) public_key=$trust_matches ;;
         *) public_key=$(dirname "$trust_store")/$trust_matches ;;
@@ -217,7 +221,6 @@ authenticate_signed_manifest() {
 }
 
 authenticate_signed_manifest
-authenticated=true
 
 check_hash() {
     code=$1
