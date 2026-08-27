@@ -602,3 +602,14 @@ a claim that SFFI v2 is complete.
 - FAIL (global admission): the raw text provider has no artifact-bound ABI,
   ownership, verification, or trusted-signature evidence. This boundary remains
   unsafe until its public API can propagate a typed error.
+
+## Follow-up: dashboard schedule/daemon collector containment (2026-08-27)
+
+- PASS (static/source): the one raw schedule/lock-text declaration and two
+  existing direct reads are explicitly unsafe/lexical.
+- PASS (semantics/performance shape): unreadable input is not represented as a
+  fabricated missing schedule/daemon. No retry, extra I/O, copy, lookup, lock,
+  or task fabrication was added. No runtime benchmark was run.
+- FAIL (global admission): the raw provider has no artifact-bound ABI,
+  ownership, verification, or trusted-signature evidence. It remains unsafe
+  until the collection API can propagate typed errors.

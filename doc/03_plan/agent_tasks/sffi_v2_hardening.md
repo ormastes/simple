@@ -472,3 +472,7 @@ passing placeholder.
     Do not silently interpret an unreadable session file as absence; preserve
     its one direct call with no retry, extra I/O, copy, lookup, lock, or task
     fabrication.
+88. Keep dashboard schedule/daemon file reads explicitly unsafe until their
+    collection results can carry typed I/O failure. Do not turn unreadable
+    schedule or lock files into absent tasks; preserve two lexical direct reads
+    with no retry, extra I/O, copy, lookup, lock, or task fabrication.
