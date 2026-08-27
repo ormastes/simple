@@ -298,3 +298,8 @@ passing placeholder.
     but require a smallest lexical FFI scope for every direct raw call. Do not
     coerce failure to empty text or add call-time validation work; migrate the
     ABI to nullable/status-out before declaring these facade results safe.
+53. Keep compiler CAS raw filesystem/process/time calls behind six private
+    always-inline lexical owners. Preserve its atomic-rename and corruption
+    semantics while preventing direct-call spread. Treat the optimizer's 70
+    reported module opportunities as a separate measured-performance task; do
+    not fold unmeasured collection/loop rewrites into SFFI containment.
