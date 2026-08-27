@@ -49,7 +49,33 @@ jq -e '
     {app_id:null,preserve_required_reviewers:true} and
   .status_context == "SPipe Review Admission" and
   .authorized_dispatcher == {type:"User",id:2378857} and
-  .fallback_reason == "no eligible independent reviewer"' \
+  .fallback_reason == "no eligible independent reviewer" and
+  .privileged_self_review.schema == "spipe-self-review-decision/1" and
+  .privileged_self_review.configured == true and
+  .privileged_self_review.default_allow == true and
+  .privileged_self_review.review_evidence_mode == "self_attested" and
+  .privileged_self_review.self_attestation_is_independent_authentication == false and
+  .privileged_self_review.external_policy_db_secret == "SPIPE_SELF_REVIEW_POLICY_DB" and
+  .privileged_self_review.required_check ==
+    {context:"SPipe Self Review Admission",integration_id:15368} and
+  .privileged_self_review.workflow == ".github/workflows/review-admission.yml" and
+  .privileged_self_review.trusted_default_branch == "main" and
+  .privileged_self_review.environment == "self-review-admission" and
+  .privileged_self_review.generic_actions_app_trust_accepted == true and
+  .privileged_self_review.generic_actions_app_is_independent_security_identity == false and
+  .privileged_self_review.server_resolved_head_base_merge_base_diff_and_ruleset == true and
+  .privileged_self_review.normalized_ruleset_digest_required == true and
+  .privileged_self_review.ruleset_projection_version_required == true and
+  .privileged_self_review.strict_up_to_date == true and
+  .privileged_self_review.protected_target == true and
+  .privileged_self_review.decision_ttl_seconds == 600 and
+  .privileged_self_review.scheduled_invalidator_is_backup == true and
+  .privileged_self_review.immediate_pull_request_target_events == ["synchronize","edited","closed","reopened"] and
+  .privileged_self_review.protected_base_push_invalidation == true and
+  .privileged_self_review.repository_dispatch_invalidation == ["self_review_policy_changed","self_review_ruleset_changed"] and
+  .privileged_self_review.candidate_admission_receipt_schema == "spipe-review-admission/1" and
+  .privileged_self_review.self_review_decision_can_authorize_release_candidate == false and
+  .privileged_self_review.provider_approval_claimed == false' \
   .github/review-admission-broker.json >/dev/null ||
     fail "unconfigured dedicated review broker plan is not fail-closed"
 
@@ -80,14 +106,14 @@ jq -e '[.rules[].type] | index("pull_request") != null' \
 jq -e '[.rules[].type] | index("pull_request") != null' \
     .github/rulesets/spipe-vcs-v3-release-lines.json >/dev/null || fail "release lines are not PR-only"
 
-required_check='[{"context":"Code Idiom & Structural Ratchet Gates","integration_id":15368}]'
+required_check='[{"context":"Code Idiom & Structural Ratchet Gates","integration_id":15368},{"context":"SPipe Self Review Admission","integration_id":15368}]'
 for profile in main release-lines; do
     file=".github/rulesets/spipe-vcs-v3-$profile.json"
     jq -e --argjson required "$required_check" '
         ([.rules[] | select(.type == "pull_request")][0].parameters |
-          .required_approving_review_count == 1 and
-          .require_code_owner_review == true and
-          .require_last_push_approval == true) and
+          .required_approving_review_count == 0 and
+          .require_code_owner_review == false and
+          .require_last_push_approval == false) and
         ([.rules[] | select(.type == "required_status_checks")][0].parameters |
           .strict_required_status_checks_policy == true and
           .do_not_enforce_on_create == false and
@@ -102,7 +128,7 @@ rg -q "branches: \[main, master, develop, 'release/\*\*'\]" \
     .github/workflows/repo-hygiene.yml ||
     fail "configured release-line check does not run on release pull requests"
 
-[ "$(rg -c 'approving_reviews: 1' .spipe/policy/vcs.sdn)" -eq 2 ] ||
+[ "$(rg -c 'approving_reviews: 0' .spipe/policy/vcs.sdn)" -eq 2 ] ||
     fail "canonical approval counts are stale"
 rg -q 'context: Code Idiom & Structural Ratchet Gates' .spipe/policy/vcs.sdn ||
     fail "canonical required check name is missing"
@@ -136,6 +162,12 @@ rg -q 'admin_bypass: deny' .spipe/policy/vcs.sdn ||
     fail "review admission permits an admin bypass"
 rg -q 'live_apply: unsupported_until_external_signed_broker' .spipe/policy/vcs.sdn ||
     fail "unconfigured review broker does not block live apply"
+rg -q 'required_status_context: SPipe Self Review Admission' .spipe/policy/vcs.sdn ||
+    fail "privileged self-review status context is missing"
+rg -q 'default_allow: true' .spipe/policy/self-review-policy.sdn ||
+    fail "self-review checked-in projection is not default allow"
+rg -q 'checked_in_grants: forbidden' .spipe/policy/self-review-policy.sdn ||
+    fail "pull-request worktree can grant self-review authority"
 rg -q 'workflow_dispatch:' .github/workflows/review-admission.yml ||
     fail "server-side review dispatch workflow is missing"
 rg -q 'pull_request_number:' .github/workflows/review-admission.yml ||
@@ -153,13 +185,25 @@ printf '%s\n' "$dispatch_keys" | rg -qx 'pull_request_number' ||
     fail "review dispatch does not declare pull_request_number as an input"
 printf '%s\n' "$dispatch_keys" | rg -qx 'session_id' ||
     fail "review dispatch does not declare session_id as an input"
+for key in reviewer_model reviewer_effort self_attestation; do
+    printf '%s\n' "$dispatch_keys" | rg -qx "$key" ||
+        fail "review dispatch does not carry explicit self-attestation field: $key"
+done
 if printf '%s\n' "$dispatch_keys" | rg -q '^candidate_commit_sha$|^head_sha$'; then
     fail "review dispatch must resolve the current PR head instead of accepting a caller SHA"
 fi
-if rg -q 'SPIPE_REVIEW_BROKER_TOKEN|record-review|review_receipt_json' \
-    .github/workflows/review-admission.yml scripts/release/github-policy.shs; then
-    fail "planner-only review flow must not accept receipts or issue broker PASS"
-fi
+rg -q 'checks: write' .github/workflows/review-admission.yml ||
+    fail "self-review broker cannot publish the exact-head required check"
+rg -q 'environment: self-review-admission' .github/workflows/review-admission.yml ||
+    fail "self-review broker is not gated by the dedicated environment"
+rg -q 'review-evidence-mode=self_attested' .github/workflows/review-admission.yml ||
+    fail "self-review broker masquerades caller evidence as authenticated higher-model review"
+rg -q 'conclusion:"action_required"' .github/workflows/review-admission.yml ||
+    fail "self-review broker does not reset expired successful checks"
+rg -q 'provider_approval_claimed == false' .github/workflows/review-admission.yml ||
+    fail "self-review broker does not reject a false provider approval claim"
+rg -q 'SPIPE_SELF_REVIEW_POLICY_DB' .github/workflows/review-admission.yml ||
+    fail "self-review broker does not load operator-owned policy state"
 
 for environment in protected-integration release npm-release; do
     jq -e '.prevent_self_review == true and
@@ -186,4 +230,4 @@ for environment in protected-integration release npm-release; do
     rg -q "$environment-environment.json" .spipe/policy/vcs.sdn ||
         fail "policy does not bind $environment environment"
 done
-echo "check-github-policy-projection: PASS — active protections preserved; review broker plan is explicit and fail-closed"
+echo "check-github-policy-projection: PASS — PR-only protection uses short-lived exact-state self-review admission; release environments remain independently protected"

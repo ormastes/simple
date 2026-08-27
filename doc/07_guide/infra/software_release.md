@@ -59,7 +59,94 @@ If either protected head changes, discard stale admission and retry from a fresh
 
 Provider evidence accepts only configured required check identities: exact check name, GitHub App integration ID, exact PR head, completed state, and `success` conclusion. Neutral, skipped, unrelated, duplicate, or name-only check runs do not satisfy release admission. The canonical check identities are projected together in `.spipe/policy/vcs.sdn` and the protected branch rulesets.
 
-### Independent review and sole-owner fallback
+### Protected PR scoped self-review admission
+
+Protected `main`, `integration/main`, and `release/*` PRs require zero provider
+Approve reviews. Instead, their rulesets require both `Code Idiom & Structural
+Ratchet Gates` and `SPipe Self Review Admission` from the GitHub Actions App
+identity. The latter is an exact-head check, not an Approve review and not a
+claim that GitHub accepted self-approval.
+
+After self-review with a high-capability model at `high` effort or above, Spipe
+dispatches PR number, session, model/effort, and literal `PASS:0:0`. This is
+explicit `self_attested` evidence, not an authenticated higher-model receipt or
+independent review. The workflow accepts no caller SHA/base/diff/ruleset. From
+its trusted default-branch definition it resolves protected target/ref/ruleset,
+author, head, base, merge-base, and changed paths, then re-resolves them before
+publishing a ten-minute `spipe-self-review-decision/1` check. Push, retarget,
+ruleset change, diff drift, or expiry requires a new dispatch.
+
+The checked-in `.spipe/policy/self-review-policy.sdn` is projection only and
+cannot grant or deny a session. Operator policy is external UTF-8 JSONL from
+the `SPIPE_SELF_REVIEW_POLICY_DB` Actions secret with schema
+`spipe-self-review-policy-db/1`; a missing, malformed, unauthenticated, broken
+hash chain, or over-24-hour record fails closed. Ordinary code and text is
+allowed by default. An exact matching `deny` record rejects the user/session;
+each exact matching `constrain` record must cover every path and any deny scope
+wins. Scope kinds are `code`, `text`, exact `file`, immediate
+`directory_files`, and descendant `directory_recursive`. Rename evaluates old
+and new names, delete the old name, and copy the new name. Traversal, symlink,
+submodule, unsupported type, non-UTF-8, noncanonical classification, and
+authenticated credential/secret material are denied. Unknown extensions count
+as code. Policy, workflow, guide, and evaluator source text remains reviewable.
+
+`simple release self-review-plan` is the pure decision boundary. It reads the
+policy only from the path named by `SPIPE_SELF_REVIEW_POLICY_DB`, consumes the
+server-generated target/head/base/merge-base/diff manifest, emits no mutation,
+and always reports `provider_approval_claimed=false`. The current user policy
+uses explicit `self_attested` review evidence. It must never be labeled as an
+authenticated higher-model receipt or independent approval. Release-candidate
+admission and protected release/npm environments are separate authorities and
+retain their independent controls. The exact external JSONL header, record,
+scope, hash-chain, evidence, and audit formats are documented in
+`doc/07_guide/infra/self_review_policy_db.md`.
+
+The check is short lived: the workflow binds a canonical digest of the active
+ruleset, re-resolves the target/ref/ruleset digest, regenerates the exact
+merge-base diff, and reruns the pure current-decision consumer immediately
+before success. Trusted `pull_request_target` events immediately reset a
+same-head success to `action_required` after synchronize, edit/retarget,
+reopen, or close; protected-base pushes do the same for base-SHA movement, and
+operator policy/ruleset changes use repository dispatch. The five-minute
+schedule is only a backup for expiry or missed delivery. Strict up-to-date
+remains mandatory.
+
+Direct GitHub merge cannot call the pure Simple consumer after the check has
+completed. Its provider gate is therefore the exact-head required check plus
+the event invalidators and strict ruleset. Candidate admission separately
+accepts only `spipe-review-admission/1`; a `spipe-self-review-decision/1`, stale
+or current, cannot authorize release. GitHub cannot make a success permanent
+authority, and this design does not claim that it can.
+
+By explicit user decision, the ruleset currently trusts generic GitHub Actions
+App ID 15368. Repository Actions defaults are read-only and the intended
+default-branch emitter uses the `self-review-admission` environment, but a
+same-repository PR workflow can still potentially spoof that generic context.
+This is an accepted trust risk, not an independent broker security boundary.
+The `pull_request_target` invalidator uses only the protected default-branch
+workflow definition and provider payload/API data; it never checks out or
+executes pull-request code. Event delivery and the same generic Actions App
+identity remain part of the explicitly accepted residual risk. "Immediate"
+means event-driven rather than waiting for the schedule: GitHub does not
+guarantee event-job completion before every concurrent merge attempt, so this
+workflow does not claim an impossible permanent or race-free approval.
+
+#### One-time bootstrap plan
+
+The workflow/evaluator cannot protect the merge that first installs them. For
+that one transition only, freeze repository mutation, record the exact current
+ruleset IDs/digests and PR head, obtain an xhigh exact-head PASS with zero
+P0/P1, configure the external default-allow JSONL header secret, and have the
+repository policy owner temporarily set approval count to zero while retaining
+the existing structural check. Merge only the recorded PR head, verify the new
+default-branch workflow/evaluator bytes, immediately CAS-apply the final
+rulesets requiring `SPipe Self Review Admission`, and verify live projection
+parity. Abort and restore the captured rulesets if the protected head, PR head,
+review receipt, policy digest, or any intervening PR changes. Retain before,
+transition, merge, and final-policy receipts. This is a one-use migration plan,
+not a reusable bypass or release approval.
+
+### Candidate/release independent review and sole-owner fallback
 
 Normal admission uses a closed `spipe-review-admission/1` receipt from a
 high-capability model running at `high` effort or above. The receipt binds the
@@ -74,19 +161,13 @@ requires the literal reason `no eligible independent reviewer`, the provider
 owner identity, and a digest of the retained verifier-unavailability receipt.
 It is not an admin bypass, self-review, or permission to omit checks.
 
-An authorized user requests server-side planning with the
-`SPipe server-side review request plan` workflow, supplying only a PR number and
-feature/session identifier—never a head SHA or review receipt. The workflow
-resolves the current PR head and checks from GitHub, retains a blocked audit
-artifact, and issues no PASS. Only a future external signed verifier/broker App
-may provide the closed receipt and publish `SPipe Review Admission`; this
-repository must not hold its token or act as its own broker. GitHub rulesets cannot natively express conditional model
-review versus owner attestation, and environment required reviewers cannot
-represent that alternative. Therefore `.github/review-admission-broker.json`
-is intentionally fail-closed until that external signed protocol, dedicated App,
-and custom environment protection rule exist. Existing protected-integration, release, and npm-release
-reviewers remain enabled; do not remove them or apply a partial projection to
-escape the sole-owner circularity.
+This candidate/release receipt is distinct from PR `SPipe Self Review
+Admission`. GitHub rulesets cannot natively express conditional model review
+versus owner attestation, and environment required reviewers cannot represent
+that alternative. Therefore the `SPipe Review Admission` App/custom-environment
+portion of `.github/review-admission-broker.json` remains fail-closed until its
+external signed protocol and dedicated App are configured. Existing
+protected-integration, release, and npm-release reviewers remain enabled.
 
 Prepare one selected fix with `scripts/release/converge-reviewed-fix.shs`. The
 command requires a create-once `spipe-review-receipt/1` file bound to the exact
@@ -173,10 +254,13 @@ declared rulesets match their projections, the protected-integration, release,
 and npm-release environments exist with the declared policy, and immutable
 releases are enabled. This is configuration evidence, not release admission.
 The declared environment reviewer is also the sole repository owner, so GitHub
-`prevent_self_review` makes that path circular. The broker projection is not yet
-configured and `github-policy.shs apply-live` consequently fails closed. No
-`SPipe Review Admission` check or environment fallback may be claimed live
-until the dedicated App IDs are installed, pinned, and reverified.
+`prevent_self_review` still makes the release-environment path circular. The
+candidate/release `SPipe Review Admission` App projection is not configured and
+`github-policy.shs apply-live` consequently remains fail-closed. The separate
+PR `SPipe Self Review Admission` source projection now exists, but it is not
+live evidence until the one-time bootstrap plan is executed, the external
+policy DB secret is configured, the workflow is present on the default branch,
+both protected rulesets are CAS-applied, and live parity is reverified.
 
 The exact release lineage still lacks admitted Stage 3 and Stage 4 receipts and
 one clean release-grade `bin/simple test test --whole --mode=interpreter` PASS.

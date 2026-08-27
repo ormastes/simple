@@ -24,6 +24,8 @@ Use [the software-release guide](../../../doc/07_guide/infra/software_release.md
 
 Use `simple release version-check|beta-prepare|backport-check|candidate-check|promote-check|withdraw-check` for the pure validation boundaries.
 
+For protected PR integration, explicitly self-attest high-capability/high-effort PASS with zero P0/P1, then dispatch `SPipe Self Review Admission`. This is not authenticated independent review. The trusted default-branch workflow resolves the protected target, normalized ruleset digest, head, base, merge-base, and diff, applies operator-owned deny/constraint policy, re-resolves before emitting a ten-minute required check, and never claims provider Approve. Trusted PR/base/policy events reset success immediately; scheduling is backup. The user accepts that generic GitHub Actions App identity is not an independent security boundary. Candidate admission accepts only `spipe-review-admission/1`; keep release-environment approval separate.
+
 For the repository mutation boundary, use
 `scripts/release/converge-reviewed-fix.shs` with one exact commit and its bound
 `spipe-review-receipt/1`. It fetches both remote heads before creating the

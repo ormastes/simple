@@ -70,6 +70,26 @@ build-graph identities. CI serializes these as the
 `simple-release-admission/1` schemas; admission carries the same bound fields
 plus the qualification and convergence receipt digests.
 
+### Scoped self-review
+
+`SelfReviewPolicyDb` parses external UTF-8 JSONL with one closed
+`spipe-self-review-policy-db/1` header followed by closed
+`spipe-self-review-policy-db/grant/1` records. Records are `deny` or `constrain`,
+use an append hash chain, bind an operator signature/key ID and exact provider,
+PR, protected target/ruleset, head, base, merge-base, diff, session, reviewer,
+evidence mode/digest, and expiry facts. The checked-in
+SDN projection contains no records.
+
+`SelfReviewChangedManifest` binds provider repository numeric/node/name
+identity, PR, head, base, merge-base, diff, and every typed path change.
+`SelfReviewRequest` additionally binds target ruleset, author/reviewer identity,
+explicit self-attestation or genuinely broker-signed evidence, policy DB digest,
+and decision expiry. `evaluate_self_review` first rejects
+invalid/authentication/stale/secret path facts, then applies exact operator deny
+precedence and constraint intersection, finally returning
+`spipe-self-review-decision/1`. An allowed decision names a separate check-run
+broker action and always sets `provider_approval_claimed=false`.
+
 ### Promotion
 
 `ReleaseAdmission` binds the complete candidate identity, qualification receipt,
@@ -95,6 +115,7 @@ beta-prepare --version=... --target=release/X.Y --target-sha=... --session=...
 backport-check --source-sha=... --change-id=... --work-id=... --kind=fix ...
 convergence-discover --root=... <session and reviewed selection facts>
 convergence-receipt --root=... <post-integration receipt facts>
+self-review-plan --policy-db=... --changed-manifest=... <exact target/base/diff/evidence facts>
 candidate-check --version=... --attempt=N --commit=... <digest flags>
 support-check --root=...
 promote-check --tag=v... --commit=... --candidate-commit=... --signed --annotated --exact-push --no-rebuild --no-fallback
@@ -145,6 +166,8 @@ Each primary step has success and adjacent rejection assertions. Advanced projec
 4. Update plugin version/capabilities/projections/parity gate.
 5. Build and attest candidates in candidate CI, promote only their admitted
    assets in release CI, and publish admitted npm tarballs unchanged.
+6. Bootstrap scoped self-review once under a frozen exact-state self-attestation,
+   then require its final GitHub Actions check in both protected branch rulesets.
 
 ## Runtime boundary decision
 

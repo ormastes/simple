@@ -12,4 +12,6 @@ Never author in the main worktree, directly update protected refs, automatically
 
 Validation commands: `simple release version-check`, `beta-prepare`, `backport-check`, `candidate-check`, `promote-check`, and `withdraw-check`.
 
+Protected PR integration uses `SPipe Self Review Admission`, not provider Approve. Explicit `self_attested` high-capability/high-effort PASS with zero P0/P1 is not authenticated independent review. The trusted default-branch workflow resolves/re-resolves protected target/ruleset, head, base, merge-base, and diff, then emits a ten-minute check without claiming provider approval. Push, retarget, ruleset change, diff drift, or expiry invalidates it. Generic Actions App trust risk is user-accepted, not independent security. Release-environment approval and candidate admission remain separate.
+
 Live rulesets, signing, protected pushes, and publication require explicit authority. A local plan PASS is not live release evidence.

@@ -21,6 +21,7 @@
 | REQ-012..014 | process-level CLI JSON isolation and adversarial routing, plugin schema/capability, and model projection parity |
 | REQ-015 | focused suite and final release-bound whole test evidence |
 | REQ-016 | bounded read-only convergence planning in both directions; explicit reviewed selection; no mutation; release-first forward-port to `main`; reject making `main` track the release line |
+| REQ-017..021 | exact target/head/base/merge-base/diff default-allow decision; honest self-attested mode; no provider approval/permanence claim; stale/expired/retarget/ruleset/P0-P1/secret rejection; deny precedence; constraint scopes; rename old+new; symlink/non-UTF-8/traversal/quote/non-ASCII alias failure; scheduled expiry reset; bootstrap source contract |
 
 ## Execution order
 
@@ -34,3 +35,9 @@ declared environments, and immutable releases pass
 configuration only. Real signed beta tag creation, protected publication, and
 registry publication remain external release gates and cannot be counted as
 PASS until exact candidate receipts exist.
+
+The new self-review ruleset/workflow files are source projections only until
+the one-time bootstrap receipts prove that the external policy DB secret was
+configured, the workflow reached the default branch, both rulesets were
+CAS-applied, and `verify-live` passed again. Do not infer live admission from
+the pure evaluator or static workflow checks.

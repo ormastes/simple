@@ -30,6 +30,12 @@ use app.release.candidate_authority.{
     create_candidate_plan, load_candidate_status, record_candidate_admission,
     plan_persisted_candidate_promotion
 }
+use app.release.self_review_policy.{
+    SelfReviewRequest, load_self_review_policy_db,
+    load_self_review_changed_manifest, evaluate_self_review,
+    self_review_decision_current
+}
+use std.nogc_sync_mut.io.env_ops.{env_get}
 
 
 fn print_help():
@@ -50,6 +56,7 @@ fn print_help():
     print "  convergence-discover Fetch exact refs and validate one reviewed fix selection"
     print "  convergence-receipt  Record post-integration main/release divergence"
     print "  convergence-admission Validate protected-integration convergence evidence"
+    print "  self-review-plan     Evaluate an exact-head scoped self-review decision"
     print "  candidate-check      Validate one immutable candidate manifest"
     print "  candidate-create     Persist a create-once candidate plan from a registered session"
     print "  candidate-status     Read and verify persisted candidate/admission state"
@@ -108,7 +115,7 @@ fn print_plan_json():
     print "{\"output_version\":\"simple-release/v1\",\"command\":\"release plan\",\"status\":\"blocked\",\"steps\":3,\"implemented\":0,\"partial\":1,\"pending\":2,\"reason\":\"promote-only provider and live-policy verification are not implemented\"}"
 
 fn print_help_json():
-    print "{\"output_version\":\"simple-release/v1\",\"command\":\"release help\",\"status\":\"ok\",\"mutation\":\"none\",\"commands\":[\"plan\",\"version-check\",\"version-render-plan\",\"version-bump-plan\",\"version-bump\",\"session-register\",\"session-status\",\"session-cleanup-check\",\"session-close\",\"beta-prepare\",\"backport-check\",\"convergence-discover\",\"convergence-receipt\",\"convergence-admission\",\"candidate-check\",\"candidate-create\",\"candidate-status\",\"candidate-admit\",\"support-check\",\"promote-check\",\"withdraw-check\"]}"
+    print "{\"output_version\":\"simple-release/v1\",\"command\":\"release help\",\"status\":\"ok\",\"mutation\":\"none\",\"commands\":[\"plan\",\"version-check\",\"version-render-plan\",\"version-bump-plan\",\"version-bump\",\"session-register\",\"session-status\",\"session-cleanup-check\",\"session-close\",\"beta-prepare\",\"backport-check\",\"convergence-discover\",\"convergence-receipt\",\"convergence-admission\",\"self-review-plan\",\"candidate-check\",\"candidate-create\",\"candidate-status\",\"candidate-admit\",\"support-check\",\"promote-check\",\"withdraw-check\"]}"
 
 fn arg_value(args: [text], key: text) -> text:
     val prefix = "--{key}="
@@ -549,6 +556,99 @@ fn run_convergence_admission(args: [text], as_json: bool) -> i64:
         error("release", receipt.reason)
     if receipt.valid: 0 else: 1
 
+fn run_self_review_plan(args: [text], as_json: bool) -> i64:
+    val keys = [
+        "policy-db", "changed-manifest", "repository-provider", "repository-id",
+        "repository-node-id", "repository", "pull-request-number", "head-sha",
+        "session-id", "author-provider", "author-identity", "reviewer-provider",
+        "reviewer-identity", "reviewer-model", "reviewer-tier", "reviewer-effort",
+        "now-unix", "expires-at-unix", "review-verdict", "review-p0-count",
+        "review-p1-count", "review-evidence-mode", "review-evidence-sha256",
+        "policy-db-sha256", "target-repository-id", "target-ref",
+        "target-ruleset-id", "target-ruleset-version", "target-ruleset-sha256", "base-sha",
+        "merge-base-sha", "diff-sha256"
+    ]
+    val flags = [
+        "policy-db-authenticated", "changed-manifest-authenticated",
+        "review-evidence-broker-authenticated", "self-attestation-authorized",
+        "provider-resolution-authenticated", "strict-up-to-date", "protected-target"
+    ]
+    val args_check = _validate_command_args(args, keys, flags)
+    if not args_check.valid:
+        return _print_release_check("self-review-plan", args_check, as_json)
+    val configured_policy_path = env_get("SPIPE_SELF_REVIEW_POLICY_DB")
+    val requested_policy_path = arg_value(args, "policy-db")
+    if configured_policy_path == "" or requested_policy_path != configured_policy_path:
+        return _print_release_check("self-review-plan", ReleaseCheck(
+            valid: false,
+            reason: "self-review policy must come from SPIPE_SELF_REVIEW_POLICY_DB, not the PR worktree"
+        ), as_json)
+    val policy = load_self_review_policy_db(requested_policy_path)
+    val manifest = load_self_review_changed_manifest(arg_value(args, "changed-manifest"))
+    val request = SelfReviewRequest(
+        repository_provider: arg_value(args, "repository-provider"),
+        repository_id: arg_value(args, "repository-id").to_int() ?? 0,
+        repository_node_id: arg_value(args, "repository-node-id"),
+        repository: arg_value(args, "repository"),
+        pull_request_number: arg_value(args, "pull-request-number").to_int() ?? 0,
+        head_sha: arg_value(args, "head-sha"), session_id: arg_value(args, "session-id"),
+        author_provider: arg_value(args, "author-provider"),
+        author_identity: arg_value(args, "author-identity"),
+        reviewer_provider: arg_value(args, "reviewer-provider"),
+        reviewer_identity: arg_value(args, "reviewer-identity"),
+        reviewer_model: arg_value(args, "reviewer-model"),
+        reviewer_tier: arg_value(args, "reviewer-tier"),
+        reviewer_effort: arg_value(args, "reviewer-effort"),
+        review_evidence_mode: arg_value(args, "review-evidence-mode"),
+        now_unix: arg_value(args, "now-unix").to_int() ?? 0,
+        decision_expires_at_unix: arg_value(args, "expires-at-unix").to_int() ?? 0,
+        higher_model_verdict: arg_value(args, "review-verdict"),
+        higher_model_p0_count: arg_value(args, "review-p0-count").to_int() ?? -1,
+        higher_model_p1_count: arg_value(args, "review-p1-count").to_int() ?? -1,
+        review_evidence_sha256: arg_value(args, "review-evidence-sha256"),
+        expected_policy_db_sha256: arg_value(args, "policy-db-sha256"),
+        policy_db_authenticated: has_flag(args, "policy-db-authenticated"),
+        changed_manifest_authenticated: has_flag(args, "changed-manifest-authenticated"),
+        review_evidence_broker_authenticated: has_flag(args, "review-evidence-broker-authenticated"),
+        self_attestation_authorized: has_flag(args, "self-attestation-authorized"),
+        target_repository_id: arg_value(args, "target-repository-id").to_int() ?? 0,
+        target_ref: arg_value(args, "target-ref"),
+        target_ruleset_id: arg_value(args, "target-ruleset-id"),
+        target_ruleset_version: arg_value(args, "target-ruleset-version"),
+        target_ruleset_sha256: arg_value(args, "target-ruleset-sha256"),
+        base_sha: arg_value(args, "base-sha"),
+        merge_base_sha: arg_value(args, "merge-base-sha"),
+        diff_sha256: arg_value(args, "diff-sha256"),
+        strict_up_to_date: has_flag(args, "strict-up-to-date"),
+        protected_target: has_flag(args, "protected-target"),
+        provider_resolution_authenticated: has_flag(args, "provider-resolution-authenticated")
+    )
+    val decision = evaluate_self_review(policy, manifest, request)
+    val decision_current = self_review_decision_current(
+        decision, request.now_unix, request.head_sha, request.base_sha,
+        request.merge_base_sha, request.diff_sha256, request.target_ruleset_id,
+        request.target_ruleset_version,
+        request.target_ruleset_sha256
+    )
+    if as_json:
+        var record_json: [text] = []
+        for record_id in decision.matched_constraint_record_ids:
+            record_json.push("\"" + _json_escape(record_id) + "\"")
+        val status = if decision_current: "ok" else: "rejected"
+        val allowed = if decision_current: "true" else: "false"
+        val strict = if decision.strict_up_to_date: "true" else: "false"
+        val protected = if decision.protected_target: "true" else: "false"
+        print "{\"output_version\":\"simple-release/v1\",\"command\":\"release self-review-plan\",\"status\":\"{status}\",\"mutation\":\"none\",\"decision_schema\":\"{decision.schema}\",\"allowed\":{allowed},\"reason\":\"{_json_escape(decision.reason)}\",\"repository\":\"{_json_escape(decision.repository)}\",\"pull_request_number\":{decision.pull_request_number},\"head_sha\":\"{decision.head_sha}\",\"base_sha\":\"{decision.base_sha}\",\"merge_base_sha\":\"{decision.merge_base_sha}\",\"diff_sha256\":\"{decision.diff_sha256}\",\"target_repository_id\":{decision.target_repository_id},\"target_ref\":\"{_json_escape(decision.target_ref)}\",\"target_ruleset_id\":\"{_json_escape(decision.target_ruleset_id)}\",\"target_ruleset_version\":\"{decision.target_ruleset_version}\",\"target_ruleset_sha256\":\"{decision.target_ruleset_sha256}\",\"strict_up_to_date\":{strict},\"protected_target\":{protected},\"session_id\":\"{_json_escape(decision.session_id)}\",\"reviewer_identity\":\"{_json_escape(decision.reviewer_identity)}\",\"issued_at_unix\":{decision.issued_at_unix},\"expires_at_unix\":{decision.expires_at_unix},\"policy_db_sha256\":\"{decision.policy_db_sha256}\",\"changed_manifest_sha256\":\"{decision.changed_manifest_sha256}\",\"review_evidence_mode\":\"{decision.review_evidence_mode}\",\"review_evidence_sha256\":\"{decision.review_evidence_sha256}\",\"matched_constraint_record_ids\":[{record_json.join(",")}],\"provider_action\":\"{decision.provider_action}\",\"provider_approval_claimed\":false}"
+    elif decision_current:
+        print "Release self-review-plan: PASS"
+        print "  exact head: {decision.head_sha}"
+        print "  changed manifest: {decision.changed_manifest_sha256}"
+        print "  provider action: {decision.provider_action}"
+        print "  provider approval claimed: false"
+    else:
+        error("release", decision.reason)
+    if decision_current: 0 else: 1
+
 fn _candidate_from_args(args: [text]) -> CandidateManifest:
     CandidateManifest(
         version: arg_value(args, "version"),
@@ -652,12 +752,13 @@ fn _admission_from_args(args: [text]) -> ReleaseAdmission:
         artifact_manifest_sha256: arg_value(args, "artifact-sha256"),
         evidence_manifest_sha256: arg_value(args, "evidence-sha256"),
         qualification_receipt_sha256: arg_value(args, "qualification-sha256"),
+        admission_receipt_schema: arg_value(args, "admission-receipt-schema"),
         admission_receipt_sha256: arg_value(args, "admission-sha256")
     )
 
 fn run_candidate_admit(args: [text], as_json: bool) -> i64:
     var keys = _candidate_session_value_keys()
-    for key in ["candidate-identity", "artifact-sha256", "qualification-sha256", "admission-sha256", "expected-candidate-state-sha256"]:
+    for key in ["candidate-identity", "artifact-sha256", "qualification-sha256", "admission-receipt-schema", "admission-sha256", "expected-candidate-state-sha256"]:
         keys.push(key)
     val args_check = _validate_command_args(args, keys, [])
     if not args_check.valid:
@@ -803,6 +904,8 @@ fn run_release(args: [text]) -> i64:
             return run_convergence_receipt(sub_args, as_json)
         case "convergence-admission":
             return run_convergence_admission(sub_args, as_json)
+        case "self-review-plan":
+            return run_self_review_plan(sub_args, as_json)
         case "candidate-check":
             return run_candidate_check(sub_args, as_json)
         case "candidate-create":

@@ -13,6 +13,7 @@ Interfaces and manual/setup/checker names are frozen in `.spipe/release_process_
 | Policy/version | Primary: requirements, policy schema, pure version/session checks |
 | Beta/backport | Primary: typed backport admission and rejection tests |
 | Candidate/promotion | Primary: immutable candidate, no-rebuild promotion, withdrawal checks |
+| Scoped self-review | Primary: external deny/constraint DB, pure evaluator, exact changed-path manifest, GitHub Actions check broker, ruleset projection, bootstrap plan |
 | Spipe plugin/projections | Bounded sidecar inventory merged by primary; primary edits/version/parity acceptance |
 | Tests/manual | Primary owns executable spec, docgen/manual review, and REQ traceability |
 | Docs/wiki | Bounded sidecar inventory; primary performs `$spipe_doc_wiki_refactor` and final freshness review |

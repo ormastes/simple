@@ -38,6 +38,14 @@ The pure layer parses and validates caller-supplied facts and produces typed pla
   and post-integration divergence receipts.
 - `src/app/release/support_policy.spl`: parsed required support rows shared by
   candidate qualification and admission.
+- `src/app/release/self_review_policy.spl`: pure external-policy, exact-state
+  changed-path, honest evidence-mode, deny/constraint, and expiry evaluator.
+- `.spipe/policy/self-review-policy.sdn`: non-authoritative checked-in projection;
+  operator JSONL records remain external to the PR worktree.
+- `.github/workflows/review-admission.yml`: protected-environment,
+  trusted-default-branch workflow that resolves and re-resolves protected
+  target/head/base/merge-base/diff, publishes a short-lived required check, and
+  expires old successes without submitting provider Approve.
 - `src/app/release/github.spl`: low-level provider; callable only after admission.
 - `examples/05_stdlib/spipe/`: canonical embedded plugin package and generated operator/model projections.
 
@@ -59,6 +67,34 @@ The pure layer parses and validates caller-supplied facts and produces typed pla
 10. Periodic main/release discovery is read-only. Only an explicit reviewed convergence plan may cross a fix between protected lines.
 11. Convergence inventory is computed at a reviewed pre-administration boundary; manifest-only commits and the final integration merge are outside that inventory, avoiding commit self-reference.
 12. Provider evidence is accepted only for configured check-name/App identities, and every backport or forward port must be stable-patch-ID equivalent to its exact source commit with an aligned provider review/check receipt. Adapted equivalence is a separate future authority path.
+13. Ordinary code/text defaults allow after explicitly authorized `self_attested` PASS with zero P0/P1; that evidence is never labeled authenticated or independent, and external deny/constraints win.
+14. Rename checks old+new, delete old, copy new. Traversal, path aliases, symlink, submodule, non-UTF-8, actual secrets, stale target/head/base/diff/ruleset, malformed policy/hash chain, and dishonest evidence deny.
+15. A self-review decision creates no provider approval or permanence claim. It binds the normalized ruleset digest, expires in ten minutes, and is reset by trusted PR/base/policy events with scheduling as backup. Candidate admission accepts only `spipe-review-admission/1`; protected release/npm environment review remains separate.
+
+## Scoped self-review boundary
+
+The provider rulesets replace an unsatisfiable sole-owner Approve requirement
+with the GitHub-Actions-owned `SPipe Self Review Admission` status on the exact
+PR head. The workflow reads an operator-owned external JSONL deny/constraint
+database, generates the changed-path manifest from exact fetched
+base/merge-base/head Git objects, binds the protected target ruleset, and
+invokes the pure evaluator. This makes the policy source
+reviewable without letting a PR edit its own live authority. The check-run
+adapter consumes only an allowed decision and still records
+`provider_approval_claimed=false`.
+
+The external records are append/hash-chain shaped, signed by an operator key,
+and bind repository numeric/node/name identity, PR, head, session, reviewer,
+manifest/evidence digest, issuer, and a maximum 24-hour record window. `deny`
+rejects the exact binding. `constrain` intersects allow scopes;
+its deny scopes take precedence. No matching record means default allow for
+ordinary reviewed code/text. Credential/secret semantics remain an immutable
+denial independent of path rename.
+
+By user decision, App ID 15368 is a generic GitHub Actions trust identity, not
+an independent broker. Read-only repository defaults and the protected
+`self-review-admission` environment constrain the intended workflow but cannot
+eliminate same-repository context spoofing. This accepted risk is explicit.
 
 ## MDSOC evaluation
 

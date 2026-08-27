@@ -44,6 +44,7 @@ Use the shipped validation commands before provider mutation:
 simple release version-check
 simple release beta-prepare
 simple release backport-check
+simple release self-review-plan
 simple release candidate-check
 simple release promote-check
 simple release withdraw-check
@@ -102,6 +103,9 @@ or a mismatched commit/digest fail before a provider can run.
   promotion is never a build retry.
 - `withdrawal must preserve published release identity` means redeploy or
   publish a new correction rather than rewriting history.
+- `no exact self-attested review evidence` means review the server-current
+  target/head/base/diff and redispatch; never label it independently
+  authenticated, reuse expired evidence, or claim provider Approve.
 
 ## Verification boundary
 
@@ -111,6 +115,7 @@ once. Required external rows stay blocked until their own receipts exist.
 """
 # @req: REQ-001 REQ-002 REQ-003 REQ-004 REQ-005 REQ-006 REQ-007 REQ-008
 # @req: REQ-009 REQ-010 REQ-011 REQ-012 REQ-013 REQ-014 REQ-015 REQ-016
+# @req: REQ-017 REQ-018 REQ-019 REQ-020 REQ-021
 # research: doc/01_research/infra/release/simple_spipe_release_branch_tag_test_repair_bootstrap_scheduling_hardening_2026-08-26.md
 # architecture: doc/04_architecture/release_process_hardening.md
 # design: doc/05_design/release_process_hardening.md
@@ -128,6 +133,10 @@ use app.release.convergence.{
     ReviewedBugFix, ConvergenceRequest, ConvergenceAdmissionRequest,
     plan_release_main_convergence, check_convergence_admission
 }
+use app.release.self_review_policy.{
+    SelfReviewRequest, parse_self_review_policy_db,
+    parse_self_review_changed_manifest, evaluate_self_review
+}
 
 fn sha_a() -> text: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 fn sha_b() -> text: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
@@ -138,6 +147,67 @@ fn digest_c() -> text: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccc
 fn digest_d() -> text: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
 fn digest_e() -> text: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
 fn digest_f() -> text: "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+
+fn setup_self_review_policy() -> text:
+    "{\"schema\":\"spipe-self-review-policy-db/1\",\"default_allow\":true,\"max_ttl_seconds\":86400,\"authority\":\"operator_owned_external\"}\n"
+
+fn setup_self_review_manifest() -> text:
+    """changed_paths:
+  schema: spipe-changed-path-manifest/1
+  repository_provider: github
+  repository_id: 1175797696
+  repository_node_id: R_kgDORhU_wA
+  repository: ormastes/simple
+  pull_request_number: 28
+  head_sha: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  base_repository_provider: github
+  base_repository_id: 1175797696
+  base_repository_node_id: R_kgDORhU_wA
+  base_repository: ormastes/simple
+  base_ref: refs/heads/main
+  base_sha: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  merge_base_sha: cccccccccccccccccccccccccccccccccccccccc
+  diff_sha256: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  changes:
+    - status: modified
+      path: doc/07_guide/infra/software_release.md
+      previous_path:
+      content_kind: text
+      previous_content_kind: text
+      semantic_class: ordinary
+      previous_semantic_class: ordinary
+      file_type: regular
+      previous_file_type: regular
+      encoding: utf8
+      previous_encoding: utf8
+"""
+
+fn setup_self_review_request(policy_sha256: text) -> SelfReviewRequest:
+    SelfReviewRequest(
+        repository_provider: "github", repository_id: 1175797696,
+        repository_node_id: "R_kgDORhU_wA", repository: "ormastes/simple",
+        pull_request_number: 28, head_sha: sha_a(), session_id: "release-hardening",
+        author_provider: "github", author_identity: "2378857",
+        reviewer_provider: "github", reviewer_identity: "2378857",
+        reviewer_model: "codex/gpt-5.6-sol", reviewer_tier: "high_capability",
+        reviewer_effort: "xhigh", review_evidence_mode: "self_attested",
+        now_unix: 1787846400,
+        decision_expires_at_unix: 1787847300,
+        higher_model_verdict: "PASS", higher_model_p0_count: 0,
+        higher_model_p1_count: 0,
+        review_evidence_sha256: digest_a(),
+        expected_policy_db_sha256: policy_sha256,
+        policy_db_authenticated: true, changed_manifest_authenticated: true,
+        review_evidence_broker_authenticated: false,
+        self_attestation_authorized: true,
+        target_repository_id: 1175797696, target_ref: "refs/heads/main",
+        target_ruleset_id: "github:ruleset:123", target_ruleset_version: "spipe-vcs-v3-main",
+        target_ruleset_sha256: digest_c(),
+        base_sha: sha_b(),
+        merge_base_sha: sha_c(), diff_sha256: digest_b(),
+        strict_up_to_date: true, protected_target: true,
+        provider_resolution_authenticated: true
+    )
 
 fn setup_release_fixture() -> ReleaseSession:
     ReleaseSession(
@@ -401,6 +471,26 @@ describe "Hardened Simple and Spipe software release":
         )
         expect(plan_release_main_convergence(unsafe_tracking).reason).to_equal("main must remain an independent trunk and never track a release branch")
 
+    it "admits exact-state self-attested review without claiming independent approval":
+        step("Self-attest the exact protected PR head/base/diff with the scoped gate")
+        val policy = parse_self_review_policy_db(setup_self_review_policy())
+        val manifest = parse_self_review_changed_manifest(setup_self_review_manifest())
+        val decision = evaluate_self_review(policy, manifest, setup_self_review_request(policy.sha256))
+        expect(decision.allowed).to_be(true)
+        expect(decision.head_sha).to_equal(sha_a())
+        expect(decision.review_evidence_mode).to_equal("self_attested")
+        expect(decision.provider_action).to_contain("separate_eligible_broker")
+        expect(decision.provider_approval_claimed).to_be(false)
+
+        step("Reject stale and secret-bearing evidence before the provider check")
+        var stale = setup_self_review_request(policy.sha256)
+        stale.head_sha = sha_b()
+        expect(evaluate_self_review(policy, manifest, stale).allowed).to_be(false)
+        val secret_manifest = parse_self_review_changed_manifest(
+            setup_self_review_manifest().replace("semantic_class: ordinary", "semantic_class: credential_secret")
+        )
+        expect(evaluate_self_review(policy, secret_manifest, setup_self_review_request(policy.sha256)).allowed).to_be(false)
+
     it "freezes one complete candidate and rejects mutation":
         step("Freeze and qualify the release candidate")
         val candidate = setup_candidate_fixture()
@@ -454,6 +544,7 @@ describe "Hardened Simple and Spipe software release":
             artifact_manifest_sha256: digest_a(),
             evidence_manifest_sha256: candidate.evidence_manifest_sha256,
             qualification_receipt_sha256: digest_b(),
+            admission_receipt_schema: "spipe-review-admission/1",
             admission_receipt_sha256: digest_c()
         )
         val plan = PromotionPlan(
@@ -470,6 +561,9 @@ describe "Hardened Simple and Spipe software release":
             fallback_artifact: false
         )
         expect(check_promotion_plan(admission, plan).valid).to_be(true)
+        var self_review_only = admission
+        self_review_only.admission_receipt_schema = "spipe-self-review-decision/1"
+        expect(check_promotion_plan(self_review_only, plan).reason).to_contain("self-review decisions cannot authorize")
         val rebuild = PromotionPlan(
             candidate_identity: plan.candidate_identity,
             tag: plan.tag,
