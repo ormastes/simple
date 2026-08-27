@@ -349,3 +349,8 @@ passing placeholder.
     `unsafe(ffi)` scope. Do not turn its ambiguous text, tuple, or boolean
     values into safe APIs; no allocation, lookup, lock, or per-call admission
     work is permitted while the facade is retained for compatibility.
+63. Keep the syscall-backed clock/progress owner exact: all nine declarations
+    are `unsafe(ffi)`, the six executed raw calls are lexical, and native clock
+    failures retain the documented negative sentinel. Do not add a second clock
+    read, allocation, lock, lookup, or retry to progress init/elapsed paths.
+    This source contract does not sign or verify the clock provider.
