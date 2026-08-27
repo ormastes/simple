@@ -58,6 +58,22 @@ if grep -Eq '[Ww]ait(s|ing)? for human|HUMAN_APPROVED' \
 fi
 echo "OK: review admission and provider-account wording are synchronized"
 
+# A clean PR must still reach L2/L3 admission, and persisted approval/evidence
+# state must remain exact-head and fail closed.
+if grep -Fq 'If no pending reviews and no unresolved comments: exit' \
+    "${SCRIPT_DIR}/skills/git/gh_pull_req_review.md"; then
+    echo "ERROR: clean PR exits before L2/L3 admission"; exit 1
+fi
+grep -Fq 'USER_ACCOUNT_APPROVED=false' "${SCRIPT_DIR}/agents/review_loop.md" || {
+    echo "ERROR: provider approval is not reset before revalidation"; exit 1;
+}
+for field in review_head_sha reviewer_model reviewer_effort review_p0_count review_p1_count; do
+    grep -Fq "$field" "${SCRIPT_DIR}/agents/review_loop.md" || {
+        echo "ERROR: review state is missing $field"; exit 1;
+    }
+done
+echo "OK: clean-PR flow and exact reviewer state are synchronized"
+
 # Validate JSON syntax
 if python3 -c "import json, sys; json.load(open(sys.argv[1]))" \
     "${SCRIPT_DIR}/.claude-plugin/plugin.json" 2>/dev/null; then

@@ -35,7 +35,11 @@ BRANCH=$(echo "$PR_STATUS" | jq -r .headRefName)
 ```
 
 - If `STATE == "MERGED"` or `STATE == "CLOSED"`: exit, run post-merge cleanup
-- If no pending reviews and no unresolved comments: exit (nothing to do)
+- If there are no pending reviews or unresolved comments, skip only Steps 2-4.
+  Continue to Step 5: a clean L2/L3 PR still requires the Codex-first verdict,
+  scoped self-review dispatch or provider approval, required-check polling, and
+  merge-state handling. A clean L1 PR must likewise reach its opportunistic
+  merge decision.
 
 ### Step 2 — Fetch Review Comments
 
@@ -216,24 +220,31 @@ polling, no bot-approve, no checks-wait.
 #### L3 — Poll for an eligible independent provider user-account approval
 
 1. Post review comments only. Do NOT bot-approve.
-2. Poll for an independent `APPROVED` review whose provider actor type is
-   `User`, not `Bot`/App. This proves only the provider account class and
-   independence from the author; it does not prove a human operated it:
+2. Reset `USER_ACCOUNT_APPROVED=false` at the start of every cycle; never seed
+   it from persisted `user_account_approved` or legacy `human_approved`. Poll
+   for a current exact-head independent `APPROVED` review whose provider actor
+   type is `User`, not `Bot`/App. This proves only the provider account class
+   and independence from the author; it does not prove a human operated it:
    ```bash
-   if ! AUTHOR=$(gh pr view "${PR_NUMBER}" --json author --jq .author.login) || [ -z "$AUTHOR" ]; then
-     echo "could not determine PR author; keep waiting" >&2
-     exit 2
-   fi
-   REVIEWS_JSON=$(gh pr view "${PR_NUMBER}" --json reviews)
-   USER_ACCOUNT_APPROVED_COUNT=0
-   for reviewer in $(printf '%s\n' "$REVIEWS_JSON" | jq --arg author "$AUTHOR" -r \
-     '.reviews[] | select(.state=="APPROVED" and .author.login != $author) | .author.login'); do
-     if reviewer_type=$(gh api "users/${reviewer}" --jq .type) && [ "$reviewer_type" = "User" ]; then
-       USER_ACCOUNT_APPROVED_COUNT=$((USER_ACCOUNT_APPROVED_COUNT + 1))
-     fi
-   done
+   PR_JSON=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}")
+   HEAD_SHA=$(printf '%s\n' "$PR_JSON" | jq -er .head.sha)
+   AUTHOR_ID=$(printf '%s\n' "$PR_JSON" | jq -er '.user.id | tostring')
+   REVIEWS_JSON=$(gh api --paginate \
+     "repos/${REPO}/pulls/${PR_NUMBER}/reviews?per_page=100" | jq -s 'add')
+   USER_ACCOUNT_APPROVED_COUNT=$(printf '%s\n' "$REVIEWS_JSON" |
+     jq --arg head "$HEAD_SHA" --arg author "$AUTHOR_ID" '
+       [.[] | select(.commit_id == $head)]
+       | sort_by(.submitted_at, .id)
+       | group_by(.user.id)
+       | map(last)
+       | [.[] | select(.state == "APPROVED"
+                       and (.user.id | tostring) != $author
+                       and .user.type == "User")]
+       | length')
    if [ "$USER_ACCOUNT_APPROVED_COUNT" -gt 0 ]; then
      USER_ACCOUNT_APPROVED=true
+   else
+     USER_ACCOUNT_APPROVED=false
    fi
    ```
 3. Poll checks (same query as L2).

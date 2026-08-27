@@ -46,6 +46,11 @@ listed in *Step 1*):
   "level": 1,
   "approver": "codex",
   "verdict_source": "codex:rescue",
+  "review_head_sha": "0123456789abcdef0123456789abcdef01234567",
+  "reviewer_model": "gpt-5.6-sol",
+  "reviewer_effort": "high",
+  "review_p0_count": 0,
+  "review_p1_count": 0,
   "bot_approved": false,
   "user_account_approved": false,
   "self_review_admitted": false,
@@ -91,8 +96,16 @@ if [ -f "$STATE_FILE" ]; then
   LEVEL=$(jq       -r ".level // ${CLI_LEVEL:-1}"   "$STATE_FILE")
   TARGET=$(jq      -r ".target // \"${CLI_TARGET:-$DETECTED_TARGET}\"" "$STATE_FILE")
   APPROVER=$(jq    -r '.approver // "null"'         "$STATE_FILE")
+  REVIEW_HEAD_SHA=$(jq -r '.review_head_sha // "null"' "$STATE_FILE")
+  REVIEWER_MODEL=$(jq -r '.reviewer_model // "null"' "$STATE_FILE")
+  REVIEWER_EFFORT=$(jq -r '.reviewer_effort // "null"' "$STATE_FILE")
+  REVIEW_P0_COUNT=$(jq -r '.review_p0_count // -1' "$STATE_FILE")
+  REVIEW_P1_COUNT=$(jq -r '.review_p1_count // -1' "$STATE_FILE")
   BOT_APPROVED=$(jq -r '.bot_approved   // false'   "$STATE_FILE")
-  USER_ACCOUNT_APPROVED=$(jq -r '.user_account_approved // .human_approved // false' "$STATE_FILE")
+  # Approval is provider state, not a durable capability. Ignore both the new
+  # audit field and legacy .human_approved here; Step 6 revalidates an
+  # independent provider User approval on the current exact head every cycle.
+  USER_ACCOUNT_APPROVED=false
   SELF_REVIEW_ADMITTED=$(jq -r '.self_review_admitted // false' "$STATE_FILE")
   ADMISSION_DISPATCHED=$(jq -r '.admission_dispatched // false' "$STATE_FILE")
   ADMISSION_SCOPE=$(jq -r '.admission_scope // "null"' "$STATE_FILE")
@@ -104,6 +117,11 @@ else
   LEVEL="${CLI_LEVEL:-1}"
   TARGET="${CLI_TARGET:-$DETECTED_TARGET}"
   APPROVER="null"
+  REVIEW_HEAD_SHA=null
+  REVIEWER_MODEL=null
+  REVIEWER_EFFORT=null
+  REVIEW_P0_COUNT=-1
+  REVIEW_P1_COUNT=-1
   BOT_APPROVED=false
   USER_ACCOUNT_APPROVED=false
   SELF_REVIEW_ADMITTED=false
@@ -238,10 +256,13 @@ fi
 
 1. Run review pass (Step 3). Do not bot-approve. Set
    `status=awaiting-provider-user`.
-2. Poll for an independent `APPROVED` review from a provider actor whose type
-   is `User`, not a GitHub App/Bot. This account classification does not prove
-   that a human operated it. Use the lookup in `gh_pull_req_review.md`, then set
-   `USER_ACCOUNT_APPROVED=true`.
+2. Reset `USER_ACCOUNT_APPROVED=false`, ignoring persisted
+   `user_account_approved` and legacy `human_approved`. Recompute it from the
+   current provider review records: require the current exact head, the latest
+   review per actor to be `APPROVED`, an actor ID different from the author,
+   and provider type `User`, not GitHub App/Bot. This account classification
+   does not prove that a human operated it. Use the fail-closed lookup in
+   `gh_pull_req_review.md`.
    ```bash
    # Resolve author, review actors, and each actor's provider type fail-closed.
    ```
@@ -296,6 +317,11 @@ jq -n \
   --argjson level "$LEVEL" \
   --arg approver "$APPROVER" \
   --arg vsrc "${VERDICT_SOURCE:-null}" \
+  --arg review_head "$REVIEW_HEAD_SHA" \
+  --arg reviewer_model "$REVIEWER_MODEL" \
+  --arg reviewer_effort "$REVIEWER_EFFORT" \
+  --argjson review_p0 "$REVIEW_P0_COUNT" \
+  --argjson review_p1 "$REVIEW_P1_COUNT" \
   --argjson bot_app "$BOT_APPROVED" \
   --argjson user_app "$USER_ACCOUNT_APPROVED" \
   --argjson self_app "$SELF_REVIEW_ADMITTED" \
@@ -310,6 +336,9 @@ jq -n \
   --arg status "${STATUS:-watching}" \
   '{pr_number:$pr, branch:$br, jira_key:$jk, target:$target, level:$level,
     approver:$approver, verdict_source:$vsrc,
+    review_head_sha:$review_head, reviewer_model:$reviewer_model,
+    reviewer_effort:$reviewer_effort, review_p0_count:$review_p0,
+    review_p1_count:$review_p1,
     bot_approved:$bot_app, user_account_approved:$user_app,
     self_review_admitted:$self_app, admission_dispatched:$admission_sent,
     admission_scope:$admission_scope,
