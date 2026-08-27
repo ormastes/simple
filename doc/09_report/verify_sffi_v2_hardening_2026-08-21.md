@@ -648,3 +648,15 @@ a claim that SFFI v2 is complete.
   duplicate response. No runtime benchmark was run.
 - FAIL (global admission): the canonical file-read provider remains outside
   artifact-bound ABI/ownership verification and trusted-signature admission.
+
+## Follow-up: Portal template file-read containment (2026-08-27)
+
+- PASS (static/source): the template loader's one raw text declaration and
+  direct read are explicitly unsafe/lexical.
+- PASS (performance shape): its single direct read and rendering behavior are
+  unchanged; no retry, extra I/O, copy, lookup, lock, or duplicate rendering
+  was introduced. No runtime benchmark was run.
+- FAIL (global admission): the raw provider lacks artifact-bound ABI,
+  ownership, verification, and trusted-signature evidence. A result-typed
+  rendering API is required before unreadable templates can be safely distinct
+  from intentional empty-view fallback.

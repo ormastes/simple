@@ -488,3 +488,7 @@ passing placeholder.
     read failure must produce HTTP 500 rather than empty/fabricated content.
     Preserve one normal read and response build with no retries, extra I/O,
     copies, lookup, locks, or duplicate response generation.
+92. Keep Portal template reads explicitly unsafe while the rendering API uses
+    empty-view fallback and has no typed I/O error channel. Preserve its one
+    direct read with no retry, extra I/O, copy, lookup, lock, or duplicate
+    rendering; a result-typed rendering design is required before safe lifting.
