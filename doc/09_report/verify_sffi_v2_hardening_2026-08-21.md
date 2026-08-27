@@ -569,3 +569,12 @@ a claim that SFFI v2 is complete.
   build invocation. No runtime benchmark was run.
 - FAIL (global admission): neither bootstrap provider has artifact-bound ABI,
   ownership, verification, or trusted-signature evidence. Both remain unsafe.
+
+## Follow-up: bootstrap argument-probe containment (2026-08-27)
+
+- PASS (static/source): the probe's raw argument-array declaration and its one
+  direct call are explicitly unsafe/lexical.
+- PASS (performance shape): no bootstrap import, array copy, lookup, lock,
+  retry, or second argument read was introduced. No runtime benchmark was run.
+- FAIL (global admission): the raw array provider is not bound to ABI/ownership
+  verification or a trusted signature, so this tiny probe remains unsafe.

@@ -459,3 +459,7 @@ passing placeholder.
     bootstrap closure, allocate/copy arguments, add lookup/locking/retries, or
     issue another native-build call. These remain unsafe pending exact ABI and
     artifact-bound provider evidence.
+85. Keep the bootstrap argument probe's raw array acquisition explicit and
+    lexical. Preserve its one call and avoid bootstrap imports, array copies,
+    lookup, locking, retries, or additional argument reads; it remains unsafe
+    until the exact provider ABI/artifact has been admitted.
