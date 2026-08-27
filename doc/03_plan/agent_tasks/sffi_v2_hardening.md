@@ -303,3 +303,9 @@ passing placeholder.
     semantics while preventing direct-call spread. Treat the optimizer's 70
     reported module opportunities as a separate measured-performance task; do
     not fold unmeasured collection/loop rewrites into SFFI containment.
+54. Keep fast-GC's twelve raw directory/filesystem/time contracts behind
+    private always-inline lexical owners. Preserve nullable-size/list/walk and
+    atomic-trash behavior. Before changing its existing selection sweep, add a
+    bounded candidate benchmark; the current source-text lease test failure
+    (`variable dir not found`) is a separate compiler/test defect and cannot be
+    recorded as a fast-GC pass.
