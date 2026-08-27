@@ -18,8 +18,13 @@ use os.kernel.memory.vmm_address_space.{vmm_map_nvme_bar_high}
 use os.x86_64_fs_exec_provider_status.{x86_64_fs_exec_provider_blocked_marker}
 use os.services.vfs.vfs_boot_init.{vfs_boot_init, g_mount_table}
 use os.kernel.loader.x86_64_authenticated_media_fixture.{x86_64_authenticated_media_execute_v1}
+use os.kernel.loader.boot_service_context_v1.{boot_service_context_publish_v1}
+use os.kernel.loader.spawn_recipes.{
+    SPAWN_RECIPE_AUTH_MEDIA_HELLO, spawn_recipe_seed_parent_caps
+}
 use os.kernel.loader.authenticated_fs_exec_submission_service_v1.{authenticated_fs_exec_user_install_canonical_vfs_owner_v1}
 use os.kernel.scheduler.scheduler_types.{Scheduler}
+use os.kernel.ipc.ipc.{IpcManager}
 
 fn fail(reason: text):
     serial_println(reason)
@@ -66,7 +71,18 @@ fn spl_start():
         return
 
     serial_println("FS_PROGRAM_BEGIN path=/FSEXEC.ELF arch=x86_64")
-    val rc = x86_64_authenticated_media_execute_v1(Scheduler.new(), g_mount_table)
+    var boot_scheduler = Scheduler.new()
+    var boot_ipc = IpcManager.new()
+    val boot_task = boot_service_context_publish_v1(
+        boot_scheduler, boot_ipc,
+        spawn_recipe_seed_parent_caps(SPAWN_RECIPE_AUTH_MEDIA_HELLO, 1u64))
+    if not boot_task.?:
+        fail("[fs-program] boot service context failed")
+        return
+    serial_println(
+        "[fs-program] boot service context ok task={boot_task.unwrap().id}")
+    val rc = x86_64_authenticated_media_execute_v1(
+        boot_scheduler, g_mount_table)
     if rc != 37:
         serial_println(x86_64_fs_exec_provider_blocked_marker(rc))
         fail("[fs-program] execution failed rc={rc}")

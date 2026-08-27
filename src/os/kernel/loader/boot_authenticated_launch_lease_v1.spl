@@ -7,9 +7,7 @@ creates a root token, accepts the ambient `CapabilitySet.full()` representation,
 or substitutes an architecture-local capability set.
 """
 
-use os.kernel.scheduler.scheduler_types.{
-    Scheduler, scheduler_current_execution_identity_matches_v1
-}
+use os.kernel.scheduler.scheduler_types.{Scheduler}
 use os.kernel.scheduler.scheduler_capability_snapshot_lease_v1.{
     scheduler_current_execution_snapshot_task_id_v1,
     scheduler_current_execution_snapshot_lifecycle_generation_v1,
@@ -245,9 +243,25 @@ pub fn boot_authenticated_launch_lease_consume_once_v1(
     # if that execution exited, re-execed, ceased to be current, or if a PID was
     # recycled with another lifecycle generation. A later state change cannot
     # revive the retained capability snapshot.
-    if not scheduler_current_execution_identity_matches_v1(
-        scheduler, slot.caller, slot.caller_lifecycle_generation,
-        slot.caller_exec_generation):
+    val current_execution = scheduler.current_execution_snapshot_v1()
+    var execution_identity_matches = false
+    if current_execution.?:
+        val current = current_execution.unwrap()
+        val current_task_id =
+            scheduler_current_execution_snapshot_task_id_v1(current)
+        val current_lifecycle_generation =
+            scheduler_current_execution_snapshot_lifecycle_generation_v1(current)
+        val current_exec_generation =
+            scheduler_current_execution_snapshot_exec_generation_v1(current)
+        val current_pinned = scheduler_capability_snapshot_consume_once_v1(
+            scheduler_current_execution_snapshot_lease_v1(current),
+            current_task_id, current_lifecycle_generation,
+            current_exec_generation)
+        execution_identity_matches = current_pinned.? and
+            current_task_id == slot.caller and
+            current_lifecycle_generation == slot.caller_lifecycle_generation and
+            current_exec_generation == slot.caller_exec_generation
+    if not execution_identity_matches:
         slot.state = _BootAuthenticatedLaunchLeaseStateV1.Free
         slot.caller = 0u64
         slot.caller_lifecycle_generation = 0u64
