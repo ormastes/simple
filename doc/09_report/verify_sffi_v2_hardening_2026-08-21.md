@@ -322,3 +322,15 @@ a claim that SFFI v2 is complete.
 - FAIL (global admission): this is a backed source contract, not a signed
   artifact or semantic verification receipt. The provider remains unsafe and
   unsigned at repository scope.
+
+## Follow-up: logger nullable environment SFFI (2026-08-27)
+
+- PASS (static/source): all three raw logger declarations are `unsafe(ffi)`;
+  `rt_env_get` now exposes its nullable result and all six environment/stderr
+  calls use minimal lexical scopes.
+- PASS (performance shape): logger configuration still reads the environment
+  only during lazy initialization, while the disabled-log path remains its
+  existing integer comparison. The change adds no call, allocation, or lookup
+  to that path.
+- FAIL (global admission): no signed logger/runtime artifact or semantic
+  provider receipt was created. This is source containment, not verification.

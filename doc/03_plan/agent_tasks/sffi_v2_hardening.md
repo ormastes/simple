@@ -354,3 +354,8 @@ passing placeholder.
     failures retain the documented negative sentinel. Do not add a second clock
     read, allocation, lock, lookup, or retry to progress init/elapsed paths.
     This source contract does not sign or verify the clock provider.
+64. Keep the high-fanout logger's three runtime declarations explicitly unsafe.
+    `rt_env_get` is nullable and must remain `text?`; its four lazy-init reads
+    and the two stderr calls are lexical. Do not add work to the disabled-log
+    integer-comparison fast path or turn a missing environment variable into a
+    foreign-call success claim. Signing and provider verification remain absent.
