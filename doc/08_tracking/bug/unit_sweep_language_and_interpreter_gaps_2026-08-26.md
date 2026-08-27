@@ -127,6 +127,36 @@ slice2 `dc58fec5f1b` `8da31723373`; slice3 `e5a7528f063` `46bb8524167`
     Undiagnosed — the error points at a dedent with no obvious offending
     construct; needs a reduced repro before it can be filed against a specific
     grammar rule.
+    **DIAGNOSED AND FIXED 2026-08-27 — it was TWO unrelated defects, not one.**
+    - *Grammar defect (2 of the 3 files:* `initramfs_validate.spl`,
+      `guest_toolchain_artifact_build_receipt.spl`*).* Minimal repro:
+      `val p = g() ??` newline `    return Err("m")`. `return` is usable as a
+      plain identifier in primary position, so the `??` fallback parser
+      (`parser/src/expressions/postfix.rs`, `DoubleQuestion` arm) read `return`
+      as a NAME and its operand as a no-paren call argument; on the multi-line
+      form that scan ran past the statement's Newline and died at the enclosing
+      block's DEDENT. A BARE `return` (no operand) parsed fine, which is what
+      hid it, and so did the same-line form. Fixed by building
+      `Expr::UnwrapOrReturn` — `expr ?? return X` simply IS
+      `expr unwrap or_return: X`, and that node already has diverging semantics
+      wired through the interpreter and every backend. (Building
+      `Expr::DoBlock([Return])` was tried first and is WRONG: a Coalesce default
+      is lazily evaluated, so it arrives as a thunk — "cannot convert function
+      to int".) Both shapes now share the same semantics.
+      **Sub-item, still open:** `??` with a `break`/`continue` fallback. There is
+      no loop-control counterpart to `UnwrapOrReturn`; it parses (as a bare
+      identifier, exactly as before this change) but has no defined runtime
+      behaviour. Deliberately out of scope, not regressed, not claimed fixed.
+    - *Not a grammar defect at all (the 3rd file,*
+      `qrb2210_adreno_vulkan_kernel_transport.spl`*).* Three `val cond_NNN =
+      not f(...)` hoist workarounds were left with a literal unbalanced extra
+      `)` (lines 207, 232, 257). Fixed as source. The trailing-comma theory
+      recorded earlier was correctly disproven — it was never a comma.
+    Gates: `parser/src/coalesce_diverging_fallback_test.rs` (4 tests, incl.
+    must-still-reject cases for `??` before `)` and `,`) and
+    `test/01_unit/language/coalesce_diverging_fallback_spec.spl` (4 green,
+    asserting runtime DIVERGENCE, not just parse acceptance). All three files
+    now parse.
 26. **Free functions of the form `fn treesitter_*(self: TreeSitter)` do not
     resolve as methods across module boundaries.** Method-call syntax on an
     imported type only finds the flattened free fn when it is declared in the
