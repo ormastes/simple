@@ -1647,3 +1647,20 @@ runtime provider. It must be migrated to the scheduler-owned pure-Simple actor
 boundary or a separately generated contract; tagging it alone would be a
 cosmetic and unsafe workaround. No provider artifact is signed/admitted by
 this follow-up.
+
+### Legacy actor-hook ABI retirement (2026-08-27)
+
+The owned Simple source inventory still contains 5,337 `rt_*` declarations, so
+the repository is not globally SFFI-safe, verified, or signed. One especially
+unsafe legacy island was removed: `nogc_sync_mut.concurrent.actor_hooks` used
+an `Any` handler/message plus actor-id ABI that does not match the only Rust
+provider (`function_pointer + context`, current-inbox receive). The module now
+contains no raw actor declaration or call and fails closed with the stable
+`E-SFFI-ACTOR-LEGACY-ABI` diagnostic. Migration is to the scheduler-owned
+pure-Simple `std.actor.spawn`/`ActorRef` API.
+
+The static authority guard and affected-source check pass. Full optimizer
+analysis finds no opportunity in the retired module. The change removes an
+invalid call path; it adds no hot-path allocation, copy, lookup, hash, loop, or
+dispatch. It remains a targeted containment repair, not evidence that the
+remaining inventory has artifact-bound signature or semantic proof.

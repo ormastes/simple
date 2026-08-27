@@ -289,3 +289,8 @@ passing placeholder.
     ranked boundary containment but report every raw provider as unsigned and
     not globally verified; a no-verify convenience switch must not alter this
     classification.
+51. Keep the retired legacy actor-hook facade free of `rt_actor_*` declarations
+    and calls. Its former `Any`/actor-id ABI is incompatible with the runtime;
+    stale compatibility callers must fail closed with
+    `E-SFFI-ACTOR-LEGACY-ABI` and migrate to scheduler-owned pure-Simple actors.
+    The static guard is a ratchet only; it does not count as provider signing.

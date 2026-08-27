@@ -143,3 +143,19 @@ a claim that SFFI v2 is complete.
 - FAIL (global admission): no exact signed provider artifact/evidence job is
   available. This report remains **STATUS: FAIL** for global SFFI safety and
   verification.
+
+## Follow-up: legacy actor-hook ABI retirement (2026-08-27)
+
+- PASS (static/source): the compatibility actor-hook module has no raw
+  `rt_actor_*` declaration or call. The authority guard passes, and the
+  affected-source check accepts both the retired facade and its consumer.
+- PASS (performance review): full optimizer analysis reports no opportunity in
+  the retired module. Removing the invalid foreign call path adds no hot-path
+  allocation, copy, loop, lookup, hash, or dispatch.
+- PASS (fail closed): stale callers get
+  `E-SFFI-ACTOR-LEGACY-ABI` and are directed to scheduler-owned pure-Simple
+  actors rather than passing `Any` values through an incompatible runtime ABI.
+- FAIL (global admission): this removes one unsafe island only. The owned
+  source inventory still has 5,337 `rt_*` declarations, with no exact signed
+  provider artifact/evidence admission for the global set. Overall status is
+  still **FAIL**.
