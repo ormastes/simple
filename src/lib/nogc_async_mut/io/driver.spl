@@ -46,6 +46,15 @@ val _OP_UDP_SEND: i64 = 13
 val _OP_UDP_BIND: i64 = 14
 val _OP_SEND_BYTES: i64 = 15
 
+pub fn io_write_completion_has_progress_v1(result: i64) -> bool:
+    """Only a positive transferred-byte count completes a socket write.
+
+    Readiness is advisory: a non-empty write that returns zero has not consumed
+    the retained payload, so the operation must remain queued for retry.
+    Negative results retain their existing terminal-error handling in Worker.
+    """
+    result > 0
+
 @unsafe(reason: "raw accepted descriptor; negative sentinel conflates timeout and failure", capabilities: [ffi])
 extern fn rt_io_tcp_accept_timeout(fd: i64, ms: i64) -> i64
 @unsafe(reason: "raw connected descriptor; negative sentinel conflates timeout and failure", capabilities: [ffi])
@@ -667,23 +676,26 @@ class IoDriver:
                 continue
 
             elif ot == _OP_SEND:
-                val send_ready = self._ready_contains(ready_fds, fd)
                 val res = unsafe(capabilities: [ffi]):
                     rt_io_tcp_write_text(fd, self._p_data[i])
-                if res > 0 or (ev_has_results and send_ready):
+                # Writability authorizes a retry but is not a write completion:
+                # a zero result must stay pending so the Worker keeps the
+                # retained transport payload and never completes HTTP early.
+                if io_write_completion_has_progress_v1(res):
                     self._ev_complete_fd_interest(fd, oid)
                     self._complete_fd(oid, res, 0, "", fd)
                     i = i + 1
                     continue
 
             elif ot == _OP_SEND_BYTES:
-                val send_ready = self._ready_contains(ready_fds, fd)
                 val bdata = self._load_send_bytes(oid)
                 var bres: i64 = 0
                 if bdata.len() > 0:
                     unsafe(capabilities: [ffi]):
                         bres = rt_io_tcp_write_bytes(fd, bdata)
-                if bres > 0 or (ev_has_results and send_ready):
+                # See text sends above: readiness alone cannot consume the
+                # owned byte buffer or produce a terminal completion.
+                if io_write_completion_has_progress_v1(bres):
                     self._remove_send_bytes(oid)
                     self._ev_complete_fd_interest(fd, oid)
                     self._complete_fd(oid, bres, 0, "", fd)
@@ -748,10 +760,10 @@ class IoDriver:
                         rt_io_tcp_write_text(fd, chunk)
                     # The Worker owns offset/remaining progress and will
                     # submit exactly one successor after a short completion.
-                    # Complete zero only after writable readiness so a
-                    # transient would-block result remains pending instead of
-                    # being mistaken for a terminal short write.
-                    if res > 0 or (ev_has_results and send_ready):
+                    # A transient zero-byte result stays pending even after
+                    # writable readiness.  Only a positive transfer advances
+                    # the Worker's offset/remaining state.
+                    if io_write_completion_has_progress_v1(res):
                         self._ev_complete_fd_interest(fd, oid)
                         self._complete_fd(oid, res, 0, "", fd)
                         i = i + 1
