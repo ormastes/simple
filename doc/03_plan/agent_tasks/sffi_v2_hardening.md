@@ -454,3 +454,8 @@ passing placeholder.
     an empty text fallback: that would make an unreadable baseline/path look
     like valid empty input. Its two direct reads remain lexical with no added
     allocation, copying, lookup, locks, retries, or additional I/O.
+84. Keep bootstrap CLI argument acquisition and seed native-build dispatch as
+    two explicit raw FFI boundaries. Do not add a broader import/facade to the
+    bootstrap closure, allocate/copy arguments, add lookup/locking/retries, or
+    issue another native-build call. These remain unsafe pending exact ABI and
+    artifact-bound provider evidence.

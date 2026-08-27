@@ -558,3 +558,14 @@ a claim that SFFI v2 is complete.
 - FAIL (global admission): the non-optional raw text return has no
   artifact-bound null/error/ownership verification or trusted signature. The
   gate remains explicitly unsafe until an error-preserving facade is available.
+
+## Follow-up: bootstrap CLI containment (2026-08-27)
+
+- PASS (static/source): bootstrap argument-vector acquisition and the Rust
+  seed native-build bridge are explicitly tagged, with their two existing calls
+  lexically scoped.
+- PASS (performance/closure shape): call count and direct dispatch are retained
+  without a broader import, argument copy, lookup, lock, retry, or added native
+  build invocation. No runtime benchmark was run.
+- FAIL (global admission): neither bootstrap provider has artifact-bound ABI,
+  ownership, verification, or trusted-signature evidence. Both remain unsafe.
