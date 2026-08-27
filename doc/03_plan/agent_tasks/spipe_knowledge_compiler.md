@@ -988,6 +988,42 @@ tampered-root, missing/ambiguous alias, and foreign-authority alias cases.
 Merge owner remains `/root`; final acceptance remains owned by an independent
 normal/highest-capability reviewer.
 
+### 10.23 Selected transactional authority-service handoff (2026-08-27)
+
+This supersedes direct-host-CAS P3 assignments. F1/N1 is primary:
+`AuthorityServiceV1` owns durable admission, decision, canonical-open, lease,
+and failover state. F2/N2 is optional only behind a service-owned certified
+backend; Node is fail-closed client, never publisher.
+
+| Lane | Scope | Boundary |
+|---|---|---|
+| A | service request/decision/open/lease schemas and transaction | primary owner; no client/pointer authority |
+| B | auth, tenant/trust, operation capabilities, audit redaction | security sidecar; no store/backend edits |
+| C | fault process harness and W5A-65..93 schedules | test sidecar; no in-process substitute |
+| D | F2 certification matrix and W5A-83..93 denial/parity | native sidecar; no service-interface edits |
+| E | Node client fail-closed adapter | integration sidecar; no filesystem fallback |
+
+Before fan-out, the primary owner freezes `publish`, `resolve`, `open`, the four
+durable record names, `CapabilityDeniedV1`, `ServiceTransportFailureV1`, and helpers
+`startAuthorityService`, `partitionAuthorityService`, `resolvePublication`, and
+`assertNoAdmission`. Sidecars use those names and `fail(...)` for unimplemented
+native commands; they may not add factories/global installers/alternate records.
+Merge owner is `/root`; fresh independent highest-capability review of exact
+diff and W5A-65..93 is required before source work.
+
+**Cycle-1 correction:** The frozen publish ABI also includes `generation`,
+paired raw predecessor bytes/digest, and raw next-pointer bytes/digest; it
+returns only service-preserved `ReplacedV1`, winner `MismatchV1`, or
+`HostReplaceFatalV1(SPK704)` after admission. `CapabilityDeniedV1` is the explicit
+pre-admission result for invalid authenticated capability/scope/trust/authorization;
+`ServiceTransportFailureV1` is pre-admission transport/authentication/availability
+failure only; post-commit reply loss is client-local
+`IndeterminateDeliveryV1` followed by `resolveAccepted`; `NoAdmissionV1` has
+the exact scope/key/request/negative-index proof. The test lane must implement
+W5A-65..93 one boundary at a time and retain the §21.11 queue,
+throughput, P95/P99, RPO/RTO telemetry fixture. Native lane cannot claim F2
+until its full W5A-83..93 certification vector and recertification denial pass.
+
 ### 10.22 P2.5 bridge non-admission and P3 owner boundary (2026-08-27)
 
 This section supersedes every earlier task assignment, including the following

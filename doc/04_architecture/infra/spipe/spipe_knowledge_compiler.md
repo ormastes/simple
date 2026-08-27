@@ -1935,3 +1935,116 @@ Open/recovery applies the identical rule: a durable successor record/terminal
 for `G>0` with absent `current` throws/rejects the same `SPK704
 HostReplaceFatalV1` and publishes, repairs, or acknowledges nothing; it cannot
 be reclassified as a genesis winner.
+
+### 21.11 Superseding P3 transactional authority service (selected F1/N1)
+
+REQ-SPKC-031 and NFR-SPKC-026 supersede §21.8--§21.10 where they make a
+client, a filesystem `current` entry, or a host conditional-replace port the
+publication authority. **AuthorityServiceV1** is the sole mutable owner. The
+existing canonical pointer/proposal/record/terminal grammar remains validation
+evidence, while the service's durable decision store--not a pointer--is the
+linearization authority. A pointer may be an audited post-decision projection
+and is never used to choose a winner or open authority.
+
+```text
+publish(scopeBytes, idempotencyKey, generation,
+        expectedCurrentBytesOrNull, expectedCurrentDigestOrNull,
+        nextPointerBytes, nextPointerDigest, proposalBytes)
+resolveAccepted(scopeBytes, idempotencyKey, requestDigest)
+open(scopeBytes, requiredDecisionDigestOrNull)
+```
+
+Every call has mutually authenticated client/service identity plus a
+short-lived least-privilege operation capability bound to the exact signed
+tenant/workspace/project-or-null/worktree/revision/registry/base/snapshot
+scope. The service validates auth, trust epoch, scope, canonical bytes and
+idempotency-key format before admission. A serializable transaction keyed by
+`(tenantUid, scopeBytes, idempotencyKey)` durably writes immutable
+`RequestV1(requestDigest, proposalBytes)`, `DecisionV1(generation,
+predecessorCurrentBytesOrNull, predecessorCurrentDigestOrNull, terminalBytes,
+terminalDigest, auditSequence,status)`, and `OpenIndexV1(decisionDigest,
+canonicalAuthorityRootDigest)` before a success can respond. The service
+enforces existing P3 algebra: `G=0` predecessor bytes/digest are paired-null
+only; `G>0` both are exact canonical `CurrentPointerV1` bytes/digest for `G-1`;
+next pointer is exact canonical `G`. Equal repeat returns exact stored bytes;
+changed bytes under one key reject. Different valid keys at one scope/generation
+serialize: one commits `ReplacedV1`, a loser receives `MismatchV1` with exactly
+the durable winner pointer/terminal, and a durable successor with absent current
+equivalent is closed `HostReplaceFatalV1(SPK704)`, never genesis/null mismatch.
+This decision digest is the sole linearization identifier.
+
+`CapabilityDeniedV1` is the explicit non-enumerating **pre-admission** result
+for an invalid authenticated operation capability, scope, trust epoch, or
+authorization binding; it proves no request record, decision, mutation,
+terminal, or admission receipt. `ServiceTransportFailureV1` is exclusively a
+pre-admission authentication, availability, or transport failure with the same
+no-admission proof. After a
+durable admission, a lost reply is client-local `IndeterminateDeliveryV1`, not
+a service result/proof of no admission. The client only `resolveAccepted` with
+the same key and request digest. It returns exact durable P3 outcome/terminal,
+or exactly `NoAdmissionV1 {scopeDigest,idempotencyKey,requestDigest,
+observedAdmissionWatermark,proofDigest}` only when a durable quorum-admission
+watermark plus signed negative-index proof proves no matching RequestV1,
+DecisionV1, or OpenIndexV1 was admitted; it cannot be derived from absence in
+one replica/cache.
+It must never return that value for an admitted key. No cache,
+local pointer, rename, lock, write/compare, or provider-selection seam is
+authoritative. Node fails closed when authenticated service admission or response
+verification is unavailable.
+
+`open` reads one committed decision snapshot, deeply validates its canonical
+object/record/terminal graph, and returns sealed `CanonicalAuthorityOpenV1` with
+`{leaseUid,decisionDigest,expiresAt,authEpoch}`. Expiry/revocation requires
+reopen. A leader may fail over only after durable-log/quorum recovery proves the
+same commit index; unavailable quorum makes canonical publication/open
+unavailable, never filesystem/client fallback. Offline search remains separate.
+
+The bounded service profile is: admission queue 1,024 per tenant and 8,192
+global; reject excess before admission; request <=1 MiB; >=500 durable
+decisions/s on qualified three-member deployment; publish P95/P99 <=25/75 ms,
+open P95/P99 <=10/30 ms at 70% admitted capacity; RPO=0 for acknowledged
+decisions; RTO <=60 s after single-member crash with quorum. Instrument queue
+depth/rejections, transaction/fsync latency, commit index/lag, replay,
+lease/revocation failure, certificate state, and failover time. Qualification
+fixes machine, members, storage, load, warmup, samples, and fault injector;
+P95/P99, throughput, RPO/RTO are measured independently. The qualification
+manifest fixes three identical Linux nodes, 8 vCPU, 32 GiB RAM and provisioned
+NVMe; CPU model plus physical/core/thread count and governor/turbo/frequency
+policy; OS distribution and exact kernel build; each storage device/model/
+firmware, filesystem, mountpoint and mount options; and an isolated three-node
+network topology recording NIC/link speed, duplex, MTU, switch/VLAN path and
+measured latency/loss. It pins a 50,000-artifact corpus SHA-256 plus a canonical
+deterministic distribution manifest with generator revision, seed,
+artifact/query allocation and per-node corpus hashes. It also fixes 5-minute
+warmup then 30-minute measured window; 100,000 accepted client operations at
+70% offered capacity with 70% `open`, 20% `publish`, 10% `resolveAccepted`;
+nearest-rank percentile over all completed calls; and one fault run per member.
+RPO measures acknowledged decision loss from injected power-cut instant to
+recovered quorum log; RTO measures monotonic time from that cut to the first
+authenticated `open` of its last acknowledged decision. The fixture stores every
+manifest field, exact service build, and raw metric samples.
+
+#### Optional F2/N2 backend boundary
+
+Only the service composition root may invoke `CertifiedAuthorityBackendV1` after
+a live certification record pins `{providerIdentity,providerVersion,buildDigest,
+protocolVersion,schemaVersion,keyId,keyEpoch,OS,arch,kernel,filesystem,
+fixtureCorpusDigest,vectorDigest,validFrom,expiry,revocationEpoch}`. **Every**
+field must match trusted runtime observations and active key/revocation state.
+The backend receives canonical
+service commands and may propose storage effects; it cannot authenticate,
+select tenants, mint decisions, bypass the transaction, or export a public CAS.
+The service validates byte parity and commits the decision. Missing, expired,
+mismatched, revoked, or failed certification denies before staging/mutation.
+Normal Node fs, environment/argv/global selection, and rename/write-compare/
+user-lock fallbacks are non-certified and unavailable.
+
+Certification proves, for each pinned tuple, golden byte parity for request,
+`ReplacedV1`/`MismatchV1`/`SPK704`, paired-null genesis/non-null successor,
+exclusive contention, parent durability, SIGKILL/recovery, closed errno mapping,
+and service contention/recovery performance. Any mismatch of an above pinned
+field, parity/fault failure, expiry, or revocation event denies and records a
+certificate-revoked audit event, routing to certified service baseline (or deny
+if absent), never filesystem fallback. Any provider identity/version/build,
+protocol/schema, key ID/epoch, OS/arch/kernel/filesystem, corpus/vector, validity
+or revocation change requires a new certification before backend reactivation.

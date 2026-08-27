@@ -2637,3 +2637,53 @@ accepted surface: workspace root/view, artifact, section, trace, diagnostics,
 legacy alias after canonical reauthorization, and the `spipe_search` tool. A
 positive alias case must render only the canonical authorized target; it cannot
 prove success by returning legacy-alias text or an unbound URI echo.
+
+## 20. Selected transactional authority-service detail design (F1/N1)
+
+This supersedes direct host-CAS execution and consumes REQ-SPKC-031/032 and
+NFR-SPKC-026/027; no source is admitted. `AuthorityServiceV1` owns admission,
+decision store, canonical open, leases, and a private certified backend. Clients
+own only `AuthorityClientV1` and cannot construct a store/backend or treat a
+pointer as authority.
+
+1. Authenticate and validate exact scope/capability/trust, bounded key, and
+   canonical proposal before transaction admission.
+2. Validate `G=0` paired-null or `G>0` exact raw predecessor bytes/digest for
+   `G-1`, next canonical pointer `G`, and terminal/object graph. In one
+   serializable transaction, equal `(scope,key)` returns stored bytes; changed
+   bytes rejects; a different contender returns the one durable `MismatchV1`
+   winner; missing successor current is durable `HostReplaceFatalV1(SPK704)`.
+   Otherwise write Request, Decision, and OpenIndex durably.
+3. Commit, then return exact `ReplacedV1`/`MismatchV1`/SPK704 outcome. An invalid
+   authenticated capability/scope/trust/authorization binding before Request
+   admission is explicit non-enumerating `CapabilityDeniedV1`; only
+   authentication/availability/transport failure is payload-free
+   `ServiceTransportFailureV1`;
+   a post-commit lost reply is client-local `IndeterminateDeliveryV1` and
+   resolves only by same key plus request digest. A resolve with no admitted
+   request returns only signed `NoAdmissionV1(scope,key,requestDigest,
+   admissionWatermark,negativeIndexProof)`, never cache absence.
+4. `open` pins the committed index, validates the full graph, then returns a
+   lease-bound immutable view. Tenant UID appears in every primary/secondary
+   key; audit records retain actor/key/capability/scope/request/decision digests,
+   timestamp and code, never private canonical content.
+
+Partitions/unavailable quorum admit no decision. An unexpired lease may serve
+only its proven commit index; stale/revoked lease fails closed. Recovery
+replays the decision log before service. `CertifiedAuthorityBackendV1` has only
+private `certifyTuple`, `prepareEffects`, `commitEffects`, and `verifyEffects`
+commands; certificate/result mismatch, expiry, or native error denies before
+decision commit. Node has no backend chooser and no filesystem fallback.
+
+The qualified deployment uses the §21.11 1,024-tenant/8,192-global queue,
+1-MiB request bound, 500 decisions/s, publish 25/75-ms and open 10/30-ms
+P95/P99, RPO=0, and 60-s single-member RTO. The qualifying fixture is three
+8-vCPU/32-GiB/NVMe Linux nodes, recording CPU model/count and governor/turbo/
+frequency policy, RAM, OS/kernel, isolated network topology/link
+characteristics, and storage device/filesystem/mount options; it pins the
+50,000-artifact corpus SHA-256 and canonical deterministic generator
+revision/seed/distribution manifest. It uses a monotonic raw clock, five-minute
+warmup, 30-minute/100,000-op 70/20/10 open/publish/resolve load at 70% capacity,
+nearest-rank percentiles, and one power-cut per member. Telemetry samples queue,
+commit, fsync, replication, lease, certificate, and failover; RPO/RTO boundaries
+are §22.9's power-cut-to-log/open events.

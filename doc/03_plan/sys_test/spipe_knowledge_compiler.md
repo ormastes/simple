@@ -1768,3 +1768,105 @@ unsupported; every other error is fatal without retry, rename, link/unlink, or
 mutation. `W5A-43` runs normal Node and proves it
 is unsupported before any publication mutation, including `G=0`. These tests
 are P3 evidence, not a portable Node fallback or a P2.5 admission gate.
+
+### 22.7 Selected authority-service scenarios (REQ-SPKC-031/032; NFR-SPKC-026/027)
+
+This first summary matrix is superseded by the one-boundary normative matrix in
+§22.8; its combined alternatives are retained as planning history only.
+
+These supersede direct-host-CAS positive evidence and use two real authenticated
+service clients plus a fault-controllable service process, never an in-process
+lock or client filesystem oracle.
+
+| ID | Forced schedule | Required oracle |
+|---|---|---|
+| W5A-44 | Invalid authenticated capability/scope/schema before transaction admission | explicit non-enumerating `CapabilityDeniedV1`; no request/decision/open-index/audit admission or backend command. |
+| W5A-45 | Break transport after durable commit before response, then resolve same key | exact terminal bytes/digest or definitive no-admission; never cache guess. |
+| W5A-46 | Partition before admission, during transaction, and after commit | no partial decision; post-commit resolves exactly; unavailable quorum admits nothing. |
+| W5A-47 | Two clients submit different valid proposals at one generation; repeat equal/changed bytes under one key | one decision/winner; equal replay byte-identical; changed input rejected; loser gets winner conflict. |
+| W5A-48 | SIGKILL leader at request, decision, index, and response boundaries, then recover quorum | only complete committed decision/open or closed no-admission; no pointer/client reconstruction. |
+| W5A-49 | Open with revoked/expired lease, foreign tenant, stale digest, then valid pinned lease across newer commit | invalid lease fails closed; valid lease returns its exact immutable decision only. |
+| W5A-50 | Request native backend on Node/unlisted/expired/mismatched tuple, then inject certified result-byte mismatch | denial before staging/decision; no filesystem fallback. |
+
+W5A-44..50 separately record transport versus application outcomes and add
+service availability/latency/load receipts before any authority admission claim.
+
+### 22.8 Deterministic authority-service replacement matrix
+
+This section supersedes the bundled alternatives in §22.7. Every case uses
+named barriers, a fresh scope/key, durable-store inspection, and exact bytes;
+each has one boundary and one oracle.
+
+| ID | Fixture / forced boundary | Exact assertion |
+|---|---|---|
+| W5A-51 | `transport_before_admission`: make authenticated service unavailable before `RequestV1` barrier | only `ServiceTransportFailureV1`; zero Request/Decision/OpenIndex/audit/backend records. |
+| W5A-52 | `lost_reply_after_commit`: release Decision+OpenIndex commit barrier, drop reply | client records `IndeterminateDeliveryV1`; `resolveAccepted(same key,digest)` returns exact committed terminal, never no-admission. |
+| W5A-53 | `partition_before_admission`: sever quorum before Request transaction begins | `ServiceTransportFailureV1`; zero durable records. |
+| W5A-54 | `partition_after_commit`: commit then sever response link | same exact outcome as W5A-52 via resolve; no second decision. |
+| W5A-55 | `contend_same_G`: two different valid keys held before one decision-row transaction | one `ReplacedV1`; other exact `MismatchV1` winner; one generation/terminal. |
+| W5A-56 | `idempotency`: replay same canonical bytes then change one proposal byte under same key | byte-identical stored result then closed changed-request rejection; no extra audit decision. |
+| W5A-57 | `genesis_null_pair`: run G=0 null/null, then each mixed-null variant | only null/null reaches transaction; mixed pairs create no decision. |
+| W5A-58 | `successor_exact`: run G=1 with altered predecessor bytes then altered digest | both reject before decision; exact predecessor commits only once. |
+| W5A-59 | `successor_missing_current`: inject durable successor-equivalent with absent current projection | exact `HostReplaceFatalV1(SPK704)`; no null mismatch, repair, acknowledgement, or new decision. |
+| W5A-60 | `kill_at_decision`: SIGKILL after request fsync before decision commit | recovery returns only pre-admission/no-decision state for that key; no open view. |
+| W5A-61 | `kill_after_commit`: SIGKILL after decision/index commit before reply | recovered resolve returns exact committed outcome; open returns complete graph only. |
+| W5A-62 | `lease_scope`: foreign tenant, revoked lease, expired lease, valid old lease after later decision | first three closed; last returns only lease-bound old decision. |
+| W5A-63 | `native_denial`: Node, unlisted, expired, and tuple-mismatch certificates | each denies before backend command/staging/decision; no fallback. |
+| W5A-64 | `native_certified`: one pinned tuple, barriers for raw G=0/G>0, fence, parent fsync, SIGKILL, errno map, byte-parity vector; mutate provider/kernel/vector after pass | parity and recovery match service baseline; every mutation revokes certificate before next command. |
+
+The qualified performance fixture holds 70% admission capacity for a locked
+three-member deployment and reports queue saturation/rejection, durable
+decisions/s, publish/open P95/P99, acknowledged-decision RPO, and single-member
+failover RTO. It fails, rather than averages away, any bound in §21.11.
+
+### 22.9 Final one-boundary service and certification schedules
+
+§22.9 supersedes bundled W5A-51..64 rows. Each ID names exactly one barrier,
+fault, and oracle; reuse of a fixture does not merge schedules.
+
+| ID | Fixture/boundary | Exact oracle |
+|---|---|---|
+| W5A-65 | reject one invalid authenticated capability, scope, trust-epoch, or authorization binding before Request write (one deterministic run per field) | explicit non-enumerating `CapabilityDeniedV1`; zero Request/Decision/OpenIndex/backend. |
+| W5A-66 | drop reply after Decision+OpenIndex durable commit | `IndeterminateDeliveryV1`; same-key/digest resolve returns exact terminal. |
+| W5A-67 | break quorum before Request transaction | `ServiceTransportFailureV1`; zero admitted records. |
+| W5A-68 | break response link after commit only | resolve returns exact terminal; exactly one decision. |
+| W5A-69 | two distinct keys pause at one decision-row lock | one Replaced, one exact Mismatch winner; one generation. |
+| W5A-70 | replay exact request/key | byte-identical stored P3 outcome; no new decision. |
+| W5A-71 | change one proposal byte under admitted key | closed changed-request rejection; no new decision. |
+| W5A-72 | G=0 paired null/null predecessor | exactly one genesis decision is eligible. |
+| W5A-73 | G=0 mixed null/non-null predecessor | reject before Request write. |
+| W5A-74 | G=1 alter predecessor raw bytes | reject before Request write. |
+| W5A-75 | G=1 alter predecessor digest | reject before Request write. |
+| W5A-76 | durable successor with absent current projection | exact SPK704; no repair/ack/new decision. |
+| W5A-77 | SIGKILL after Request fsync before decision commit | quorum resolve returns exact signed `NoAdmissionV1` binding scope/key/request and negative-index proof. |
+| W5A-78 | SIGKILL after Decision+OpenIndex commit | quorum resolve/open returns exact complete committed decision only. |
+| W5A-79 | open foreign-tenant lease | closed authorization result; no existence information. |
+| W5A-80 | open revoked lease | closed revocation result; no newer decision. |
+| W5A-81 | open expired lease | closed expiry result; no newer decision. |
+| W5A-82 | open valid old lease after later commit | old decision only; no implicit upgrade. |
+| W5A-83 | activate normal Node backend | denial before backend command/staging/decision. |
+| W5A-84 | activate unlisted platform tuple | denial before backend command/staging/decision. |
+| W5A-85 | activate expired certificate | denial and certificate audit event before command. |
+| W5A-86 | activate mismatch in provider identity/version/build/protocol/schema/key ID/key epoch/OS/arch/kernel/filesystem/corpus/vector/validity/revocation (one run per field) | each mismatch denies and records revocation; no fallback. |
+| W5A-87 | certified G=0 raw-byte vector | exact paired-null request and golden Replaced bytes. |
+| W5A-88 | certified G>0 raw-byte vector | exact predecessor bytes/digest and golden outcome bytes. |
+| W5A-89 | certified contender fence barrier | exact service-baseline one-winner parity. |
+| W5A-90 | certified parent-fsync fault | no acknowledged decision without durable parent evidence. |
+| W5A-91 | certified SIGKILL/restart boundary | recovered bytes/outcome equal baseline. |
+| W5A-92 | certified errno-map vector | each closed errno/result class equals baseline. |
+| W5A-93 | mutate one certified pinned field after admission | next command denied until recertification; prior decision remains readable. |
+
+Performance run uses the fixed §21.11 qualification manifest: three identical
+nodes recording CPU model, physical/core/thread count, governor/turbo/frequency
+policy, installed RAM, OS distribution and kernel build; an isolated three-node
+network topology with each NIC/link speed, duplex, MTU, switch/VLAN path and
+measured latency/loss; and each storage device/model/firmware, filesystem,
+mountpoint and mount options. It pins one 50,000-artifact corpus SHA-256 and a
+canonical deterministic distribution manifest with generator revision, seed,
+artifact/query allocation and per-node corpus hashes. It uses monotonic
+`CLOCK_MONOTONIC_RAW`, 5-minute warmup, then 30-minute/100,000-operation
+70/20/10 open/publish/resolve mix at 70% capacity. Nearest-rank P95/P99 uses
+all completed calls; queue rejections start at tenant=1,024/global=8,192. RPO
+starts at acknowledged-decision power cut and ends at recovered log comparison;
+RTO starts at that cut and ends at first authenticated open of the last
+acknowledged decision. Raw samples and machine/service builds are retained.
