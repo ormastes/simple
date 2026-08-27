@@ -146,10 +146,10 @@ fn scv_pack_payload_object_hash_ok(kind: text, id: text, raw: [u8]) -> bool:
         return true
     false
 
-fn scv_pack_payload_matches_manifest_bytes(payload: [u8], manifest_text: text) -> (bool, i64):
+fn scv_pack_payload_matches_manifest_bytes(payload: [u8], manifest_text: text) -> (bool, i64, text):
     val header = "format: scv-pack-payload-v1\n".bytes()
     if payload.len() < header.len() or payload[0:header.len()] != header:
-        return (false, 0)
+        return (false, 0, "")
     var pos = header.len()
     var entries = 0
     var seen = ""
@@ -160,34 +160,34 @@ fn scv_pack_payload_matches_manifest_bytes(payload: [u8], manifest_text: text) -
             pos = line_end + 1
             continue
         if not trimmed.starts_with("entry "):
-            return (false, entries)
+            return (false, entries, "")
         val parts = trimmed.split(" ")
         if parts.len() < 4:
-            return (false, entries)
+            return (false, entries, "")
         if not scv_pack_kind_valid(parts[1]):
-            return (false, entries)
+            return (false, entries, "")
         if not scv_pack_id_prefix_valid(parts[1], parts[2]):
-            return (false, entries)
+            return (false, entries, "ERROR unsafe pack object id: {parts[2]}")
         val size = parts[3].to_i64() ?? -1
         if size < 0:
-            return (false, entries)
+            return (false, entries, "")
         val data_start = line_end + 1
         val data_end = data_start + size
         if data_end > payload.len():
-            return (false, entries)
+            return (false, entries, "")
         if not scv_pack_marker_at(payload, data_end):
-            return (false, entries)
+            return (false, entries, "")
         val object_key = "{parts[1]}|{parts[2]}"
         if scv_line_set_contains(seen, object_key):
-            return (false, entries)
+            return (false, entries, "")
         seen = seen + object_key + "\n"
         if not scv_pack_manifest_has_entry(manifest_text, parts[1], parts[2], parts[3]):
-            return (false, entries)
+            return (false, entries, "")
         if not scv_pack_payload_object_hash_ok(parts[1], parts[2], payload[data_start:data_end]):
-            return (false, entries)
+            return (false, entries, "ERROR pack object hash mismatch: {parts[2]}")
         entries = entries + 1
         pos = data_end + "\nendentry\n".bytes().len()
-    (true, entries)
+    (true, entries, "")
 
 fn scv_pack_label_prefix(label: text) -> text:
     if label == "":
@@ -224,7 +224,12 @@ fn scv_pack_verify_dir(pack_dir: text, requested_pack: text, label: text) -> (te
         val header = "format: scv-pack-payload-v1\n".bytes()
         if payload.len() < header.len() or payload[0:header.len()] != header:
             return ("ERROR unsupported {prefix}pack payload: {pack_id}\n", 0, 0, 0, 0)
-        val (payload_ok, payload_entries) = scv_pack_payload_matches_manifest_bytes(payload, manifest_text)
+        val (payload_ok, payload_entries, payload_reason) = scv_pack_payload_matches_manifest_bytes(payload, manifest_text)
+        # Object-level diagnostics must win over the generic pack-level message:
+        # a rejected object also short-counts entries, so checking the count
+        # first would flatten every specific reason away.
+        if not payload_ok and payload_reason != "":
+            return (payload_reason + "\n", 0, 0, 0, 0)
         if scv_pack_manifest_entry_count(manifest_text) != payload_entries:
             return ("ERROR pack manifest payload mismatch: {pack_id}\n", 0, 0, 0, 0)
         if not payload_ok:
