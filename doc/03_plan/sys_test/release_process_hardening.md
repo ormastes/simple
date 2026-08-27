@@ -30,7 +30,7 @@ Run each unchanged passing gate once: focused unit/spec checks, the process-leve
 
 The live GitHub policy baseline is now verified: seven repository rulesets, the
 declared environments, and immutable releases pass
-`scripts/release/github-policy.sh verify-live ormastes/simple`. This proves
+`scripts/release/github-policy.shs verify-live ormastes/simple`. This proves
 configuration only. Real signed beta tag creation, protected publication, and
 registry publication remain external release gates and cannot be counted as
 PASS until exact candidate receipts exist.

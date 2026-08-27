@@ -6,8 +6,32 @@ cd "$ROOT"
 
 fail() { echo "check-github-policy-projection: FAIL — $*" >&2; exit 1; }
 
-sh -n scripts/release/github-policy.sh || fail "github policy tool does not parse"
-sh -n scripts/release/candidate-ref-create.sh || fail "candidate ref tool does not parse"
+workflow_dispatch_input_keys() {
+    awk '
+      $0 == "  workflow_dispatch:" { in_dispatch = 1; next }
+      in_dispatch && $0 == "    inputs:" { in_inputs = 1; next }
+      in_inputs {
+        raw = $0
+        stripped = raw
+        sub(/^ */, "", stripped)
+        if (stripped == "" || stripped ~ /^#/) next
+        indent = length(raw) - length(stripped)
+        if (indent <= 4) exit
+        if (indent == 6) {
+          key = stripped
+          sub(/:.*/, "", key)
+          if (key ~ /^[A-Za-z0-9_-]+$/) print key
+        }
+      }
+      in_dispatch && $0 ~ /^  [^ ]/ { exit }
+    ' "$1"
+}
+
+sh -n scripts/release/github-policy.shs || fail "github policy tool does not parse"
+sh -n scripts/release/candidate-ref-create.shs || fail "candidate ref tool does not parse"
+sh -n scripts/release/converge-reviewed-fix.shs || fail "convergence preparation tool does not parse"
+[ -z "$(find scripts/release -maxdepth 1 -type f \( -name '*.sh' -o -name '*.bash' \) -print)" ] ||
+    fail "release-local shell scripts must use the canonical .shs extension"
 
 for file in .github/rulesets/spipe-vcs-v3-*.json .github/*-environment.json; do
     jq -e . "$file" >/dev/null || fail "invalid JSON: $file"
@@ -32,7 +56,7 @@ jq -e '
 [ "$(find .github -maxdepth 1 -name '*-environment.json' | wc -l)" -eq 3 ] ||
     fail "expected protected-integration, release, and npm-release environments"
 
-rendered=$(scripts/release/github-policy.sh render)
+rendered=$(scripts/release/github-policy.shs render)
 [ "$(printf '%s' "$rendered" | jq 'length')" -eq 7 ] || fail "expected seven rulesets"
 
 for name in candidates version-tags; do
@@ -116,13 +140,24 @@ rg -q 'workflow_dispatch:' .github/workflows/review-admission.yml ||
     fail "server-side review dispatch workflow is missing"
 rg -q 'pull_request_number:' .github/workflows/review-admission.yml ||
     fail "review dispatch does not identify the pull request"
-dispatch_inputs=$(sed -n '/^    inputs:/,/^concurrency:/p' \
-  .github/workflows/review-admission.yml)
-if printf '%s\n' "$dispatch_inputs" | rg -q 'candidate_commit_sha|head_sha:'; then
+positive_fixture=scripts/check/fixtures/github-policy/review-dispatch-inputs-positive.yml
+negative_fixture=scripts/check/fixtures/github-policy/review-dispatch-inputs-negative.yml
+positive_keys=$(workflow_dispatch_input_keys "$positive_fixture")
+[ "$positive_keys" = "pull_request_number
+session_id" ] || fail "positive dispatch-input fixture was not bounded to inputs"
+negative_keys=$(workflow_dispatch_input_keys "$negative_fixture")
+printf '%s\n' "$negative_keys" | rg -qx 'head_sha' ||
+    fail "negative dispatch-input fixture did not expose caller head_sha"
+dispatch_keys=$(workflow_dispatch_input_keys .github/workflows/review-admission.yml)
+printf '%s\n' "$dispatch_keys" | rg -qx 'pull_request_number' ||
+    fail "review dispatch does not declare pull_request_number as an input"
+printf '%s\n' "$dispatch_keys" | rg -qx 'session_id' ||
+    fail "review dispatch does not declare session_id as an input"
+if printf '%s\n' "$dispatch_keys" | rg -q '^candidate_commit_sha$|^head_sha$'; then
     fail "review dispatch must resolve the current PR head instead of accepting a caller SHA"
 fi
 if rg -q 'SPIPE_REVIEW_BROKER_TOKEN|record-review|review_receipt_json' \
-    .github/workflows/review-admission.yml scripts/release/github-policy.sh; then
+    .github/workflows/review-admission.yml scripts/release/github-policy.shs; then
     fail "planner-only review flow must not accept receipts or issue broker PASS"
 fi
 

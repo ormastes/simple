@@ -6,7 +6,7 @@
 ## Evidence
 
 The typed policy now projects seven GitHub rulesets plus protected integration,
-release, and npm environments. `scripts/release/github-policy.sh verify-live`
+release, and npm environments. `scripts/release/github-policy.shs verify-live`
 normalizes and compares live provider state and immutable-release settings.
 
 ## Unblock condition

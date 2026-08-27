@@ -88,7 +88,7 @@ and custom environment protection rule exist. Existing protected-integration, re
 reviewers remain enabled; do not remove them or apply a partial projection to
 escape the sole-owner circularity.
 
-Prepare one selected fix with `scripts/release/converge-reviewed-fix.sh`. The
+Prepare one selected fix with `scripts/release/converge-reviewed-fix.shs`. The
 command requires a create-once `spipe-review-receipt/1` file bound to the exact
 approved commit, change ID, and `kind=fix`; the command snapshots and hashes
 those bytes before fetching. It first fetches bounded source and target refs from the configured
@@ -168,13 +168,13 @@ Use `simple release withdraw-check`. Redeployment may select a prior valid relea
 ## Current verification boundary
 
 The live GitHub configuration baseline passes
-`scripts/release/github-policy.sh verify-live ormastes/simple`: all seven
+`scripts/release/github-policy.shs verify-live ormastes/simple`: all seven
 declared rulesets match their projections, the protected-integration, release,
 and npm-release environments exist with the declared policy, and immutable
 releases are enabled. This is configuration evidence, not release admission.
 The declared environment reviewer is also the sole repository owner, so GitHub
 `prevent_self_review` makes that path circular. The broker projection is not yet
-configured and `github-policy.sh apply-live` consequently fails closed. No
+configured and `github-policy.shs apply-live` consequently fails closed. No
 `SPipe Review Admission` check or environment fallback may be claimed live
 until the dedicated App IDs are installed, pinned, and reverified.
 

@@ -25,7 +25,7 @@ Use [the software-release guide](../../../doc/07_guide/infra/software_release.md
 Use `simple release version-check|beta-prepare|backport-check|candidate-check|promote-check|withdraw-check` for the pure validation boundaries.
 
 For the repository mutation boundary, use
-`scripts/release/converge-reviewed-fix.sh` with one exact commit and its bound
+`scripts/release/converge-reviewed-fix.shs` with one exact commit and its bound
 `spipe-review-receipt/1`. It fetches both remote heads before creating the
 private branch/worktree, emits `spipe-reviewed-fix-preparation/1`, and stops
 before push or protected integration.

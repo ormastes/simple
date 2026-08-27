@@ -61,7 +61,7 @@
   no P0/P1 defect.
 - Live GitHub policy baseline: PASS. Seven projected rulesets, the declared
   protected-integration/release/npm-release environments, and immutable
-  releases pass `scripts/release/github-policy.sh verify-live ormastes/simple`.
+  releases pass `scripts/release/github-policy.shs verify-live ormastes/simple`.
 
 ## Release-blocking evidence gaps
 
