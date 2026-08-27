@@ -7,12 +7,15 @@ use std.js.types.js_types.JsObject
 use std.js.types.js_types.JsProperty
 use std.js.engine.interpreter_types.{Environment, EnvironmentStack, CallFrame, JsFunction, to_number, js_to_string, to_boolean, is_truthy, typeof_value, strict_equals, abstract_equals, RETURN_SIGNAL, _is_array_method, _is_string_method, _get_obj_id, _get_fn_id, f64_to_i64, _digit_val}
 use std.js.engine.vm_object_store.{ObjectStore}
-use std.nogc_sync_mut.js.engine.interpreter.{JsInterpreter, PendingAsyncRequest, PendingPromiseTask, PromiseHandlerRecord, PromiseHandlerRegistration, PendingTimerTask}
+use std.nogc_sync_mut.js.engine.interpreter.{JsInterpreter, PendingAsyncRequest, PendingPromiseTask, PromiseHandlerRecord, PromiseHandlerRegistration, PendingTimerTask, MAX_SCRIPT_EXECUTION_STEPS, js_timer_deadline_ms}
 use std.nogc_sync_mut.js.engine.interpreter.{filter_response_headers_for_script, parse_non_negative_i64_text, text_equals_exact, _simple_fetch_state, _simple_fetch_value}
 use std.nogc_sync_mut.http.types.{status_text}
 use std.js.engine.runtime.{dispatch_native, NATIVE_BLOB_TEXT, NATIVE_FETCH, NATIVE_JSON_PARSE, NATIVE_PROMISE_CATCH, NATIVE_PROMISE_FINALLY, NATIVE_PROMISE_REJECT, NATIVE_PROMISE_RESOLVE, NATIVE_PROMISE_THEN, NATIVE_RESPONSE_ARRAY_BUFFER, NATIVE_RESPONSE_BLOB, NATIVE_RESPONSE_JSON, NATIVE_RESPONSE_TEXT, NATIVE_SET_TIMEOUT, NATIVE_SET_INTERVAL, NATIVE_CLEAR_TIMEOUT, NATIVE_CLEAR_INTERVAL, NATIVE_STORAGE_GET_ITEM, NATIVE_STORAGE_SET_ITEM, NATIVE_STORAGE_REMOVE_ITEM, NATIVE_STORAGE_CLEAR, NATIVE_STORAGE_KEY}
 use std.nogc_sync_mut.js.engine.interpreter_object.{JsInterpreter}
 use std.nogc_sync_mut.js.engine.interpreter_string_methods.{JsInterpreter}
+
+val MAX_PROMISE_CALLBACKS_PER_DRAIN: i64 = 1000
+val MAX_PENDING_PROMISE_HANDLERS: i64 = 4096
 
 impl JsInterpreter:
     me take_pending_async_request() -> i64?:
@@ -25,32 +28,55 @@ impl JsInterpreter:
             rest.push(self.pending_async_requests[i])
             i = i + 1
         self.pending_async_requests = rest
+        self.last_taken_async_cookie_writes = req.script_cookie_writes
         Some(req.request_obj_id)
 
-    me drain_pending_microtasks() -> bool:
-        var ran = false
+    me _drain_pending_microtasks_up_to(callback_limit: i64) -> i64:
         var drain_count = 0
-        while self.pending_promise_tasks.len() > 0:
-            drain_count = drain_count + 1
-            if drain_count > 1000:
+        while self.pending_promise_task_head < self.pending_promise_tasks.len():
+            if drain_count >= callback_limit:
                 self.logger.warn("Promise microtask drain limit reached")
-                self.pending_promise_tasks = []
-                return ran
-            val task = self.pending_promise_tasks[0]
-            var rest: [PendingPromiseTask] = []
-            var i = 1
-            while i < self.pending_promise_tasks.len():
-                rest.push(self.pending_promise_tasks[i])
-                i = i + 1
-            self.pending_promise_tasks = rest
+                self._compact_pending_promise_tasks()
+                return drain_count
+            drain_count = drain_count + 1
+            val task = self.pending_promise_tasks[self.pending_promise_task_head]
+            self.pending_promise_task_head = self.pending_promise_task_head + 1
             self._run_promise_task(task.promise_id, task.handler_id)
-            ran = true
-        ran
+        self.pending_promise_tasks = []
+        self.pending_promise_task_head = 0
+        drain_count
+
+    me _compact_pending_promise_tasks():
+        if self.pending_promise_task_head == 0:
+            return
+        var pending: [PendingPromiseTask] = []
+        var i = self.pending_promise_task_head
+        while i < self.pending_promise_tasks.len():
+            pending.push(self.pending_promise_tasks[i])
+            i = i + 1
+        self.pending_promise_tasks = pending
+        self.pending_promise_task_head = 0
+
+    me drain_pending_microtasks() -> bool:
+        self.execution_steps_remaining = MAX_SCRIPT_EXECUTION_STEPS
+        self.execution_limit_hit = false
+        self._drain_pending_microtasks_up_to(
+            MAX_PROMISE_CALLBACKS_PER_DRAIN
+        ) > 0
 
     me drain_due_timers(current_time_ms: i64) -> i64:
+        self.execution_steps_remaining = MAX_SCRIPT_EXECUTION_STEPS
+        self.execution_limit_hit = false
+        if current_time_ms > self.timer_current_time_ms:
+            self.timer_current_time_ms = current_time_ms
         var ran_count = 0
+        var drained_count = 0
+        var microtask_budget = MAX_PROMISE_CALLBACKS_PER_DRAIN
         var keep_scanning = true
         while keep_scanning:
+            if drained_count >= 1000:
+                self.logger.warn("Timer task drain limit reached")
+                return ran_count
             keep_scanning = false
             var selected_id = -1
             var selected_callback_id = -1
@@ -58,91 +84,93 @@ impl JsInterpreter:
             var selected_delay_ms = 0
             var selected_scheduled_at_ms = 0
             var selected_is_interval = false
-            var rest: [PendingTimerTask] = []
-            var i = 0
-            while i < self.pending_timer_tasks.len():
-                val task = self.pending_timer_tasks[i]
-                var canceled = false
-                var cancel_i = 0
-                while cancel_i < self.canceled_timer_ids.len():
-                    if self.canceled_timer_ids[cancel_i] == task.id:
-                        canceled = true
-                    cancel_i = cancel_i + 1
-                if canceled:
-                    i = i + 1
-                    continue
-                val due_at = task.scheduled_at_ms + task.delay_ms
-                if selected_id < 0 and due_at <= current_time_ms and task.is_next_tick:
+            var selected_is_animation_frame = false
+            if self.pending_timer_tasks.len() > 0:
+                val task = self.pending_timer_tasks[0]
+                if task.is_due_at(current_time_ms):
                     selected_id = task.id
                     selected_callback_id = task.callback_id
                     selected_callback_args = task.callback_args
                     selected_delay_ms = task.delay_ms
-                    selected_scheduled_at_ms = due_at
+                    selected_scheduled_at_ms = task.due_at_ms()
                     selected_is_interval = task.is_interval
-                i = i + 1
+                    selected_is_animation_frame = task.is_animation_frame
             if selected_id < 0:
-                i = 0
-                while i < self.pending_timer_tasks.len():
-                    val task = self.pending_timer_tasks[i]
-                    var canceled = false
-                    var cancel_i = 0
-                    while cancel_i < self.canceled_timer_ids.len():
-                        if self.canceled_timer_ids[cancel_i] == task.id:
-                            canceled = true
-                        cancel_i = cancel_i + 1
-                    if canceled:
-                        i = i + 1
-                        continue
-                    val due_at = task.scheduled_at_ms + task.delay_ms
-                    if selected_id < 0 and due_at <= current_time_ms:
-                        selected_id = task.id
-                        selected_callback_id = task.callback_id
-                        selected_callback_args = task.callback_args
-                        selected_delay_ms = task.delay_ms
-                        selected_scheduled_at_ms = due_at
-                        selected_is_interval = task.is_interval
-                    i = i + 1
+                return ran_count
             if selected_id >= 0:
+                drained_count = drained_count + 1
                 keep_scanning = true
-                if selected_callback_id >= 0:
-                    val ignored = self._invoke_promise_callback(selected_callback_id, selected_callback_args)
-                    ran_count = ran_count + 1
+                var selected_handle_id = -1
                 var handle_i = 0
                 while handle_i < self.timer_handle_ids.len():
                     if self.timer_handle_ids[handle_i] == selected_id:
-                        val handle_id = self.timer_handle_object_ids[handle_i]
-                        var fire_count = 0
-                        match self.get_object_property(handle_id, "fireCount"):
-                            JsValue.Number(v): fire_count = f64_to_i64(v)
-                            _:
-                                pass_dn
-                        fire_count = fire_count + 1
-                        self.set_object_property(handle_id, "fired", JsValue.Boolean(v: true))
-                        self.set_object_property(handle_id, "fireCount", JsValue.Number(v: fire_count.to_f64()))
-                        self.set_object_property(handle_id, "lastFiredAt", JsValue.Number(v: selected_scheduled_at_ms.to_f64()))
-                        if selected_is_interval:
-                            self.set_object_property(handle_id, "scheduledAt", JsValue.Number(v: selected_scheduled_at_ms.to_f64()))
-                            self.set_object_property(handle_id, "dueAt", JsValue.Number(v: (selected_scheduled_at_ms + selected_delay_ms).to_f64()))
-                        if not selected_is_interval:
-                            self.set_object_property(handle_id, "active", JsValue.Boolean(v: false))
-                            self.set_object_property(handle_id, "completed", JsValue.Boolean(v: true))
+                        selected_handle_id = self.timer_handle_object_ids[handle_i]
                     handle_i = handle_i + 1
-            i = 0
-            while i < self.pending_timer_tasks.len():
-                val task = self.pending_timer_tasks[i]
-                if task.id != selected_id:
-                    rest.push(task)
+                if selected_is_interval:
+                    self.pending_timer_tasks[0] = PendingTimerTask.create_with_args(
+                        selected_id, selected_callback_id,
+                        selected_callback_args, selected_delay_ms,
+                        current_time_ms, true
+                    )
+                    self._timer_heap_repair(0)
                 else:
-                    var canceled_after_callback = false
-                    var cancel_i = 0
-                    while cancel_i < self.canceled_timer_ids.len():
-                        if self.canceled_timer_ids[cancel_i] == task.id:
-                            canceled_after_callback = true
-                        cancel_i = cancel_i + 1
-                    if selected_is_interval and not canceled_after_callback:
-                        rest.push(PendingTimerTask.create_with_args(task.id, selected_callback_id, selected_callback_args, selected_delay_ms, selected_scheduled_at_ms, true))
-                i = i + 1
-            self.pending_timer_tasks = rest
+                    self._timer_heap_remove_at(0)
+                if selected_callback_id >= 0:
+                    if selected_is_animation_frame:
+                        var frame_time_ms = (
+                            current_time_ms - self.timer_time_origin_ms
+                        )
+                        if frame_time_ms < 0:
+                            frame_time_ms = 0
+                        selected_callback_args = [
+                            JsValue.Number(v: frame_time_ms.to_f64())
+                        ]
+                    val ignored = self._invoke_promise_callback(selected_callback_id, selected_callback_args)
+                    ran_count = ran_count + 1
+                if selected_handle_id >= 0:
+                    var fire_count = 0
+                    match self.get_object_property(selected_handle_id, "fireCount"):
+                        JsValue.Number(v): fire_count = f64_to_i64(v)
+                        _:
+                            pass_dn
+                    fire_count = fire_count + 1
+                    self.set_object_property(selected_handle_id, "fired", JsValue.Boolean(v: true))
+                    self.set_object_property(selected_handle_id, "fireCount", JsValue.Number(v: fire_count.to_f64()))
+                    val fired_at_ms = if selected_is_animation_frame:
+                        current_time_ms
+                    else:
+                        selected_scheduled_at_ms
+                    self.set_object_property(selected_handle_id, "lastFiredAt", JsValue.Number(v: fired_at_ms.to_f64()))
+                    if selected_is_interval and not to_boolean(self.get_object_property(selected_handle_id, "closed")):
+                        self.set_object_property(selected_handle_id, "scheduledAt", JsValue.Number(v: current_time_ms.to_f64()))
+                        self.set_object_property(selected_handle_id, "dueAt", JsValue.Number(v: js_timer_deadline_ms(current_time_ms, selected_delay_ms).to_f64()))
+                    if not selected_is_interval:
+                        self.set_object_property(selected_handle_id, "active", JsValue.Boolean(v: false))
+                        self.set_object_property(selected_handle_id, "completed", JsValue.Boolean(v: true))
+                if not selected_is_interval:
+                    self._retire_timer_handle_lookup(selected_id)
+                if selected_callback_id >= 0:
+                    var due_next_tick = false
+                    if (
+                        self.node_compat_enabled and
+                        self.pending_timer_tasks.len() > 0
+                    ):
+                        val next_task = self.pending_timer_tasks[0]
+                        due_next_tick = (
+                            next_task.is_next_tick and
+                            next_task.is_due_at(current_time_ms)
+                        )
+                    if not due_next_tick:
+                        val microtasks_ran = (
+                            self._drain_pending_microtasks_up_to(
+                                microtask_budget
+                            )
+                        )
+                        microtask_budget = (
+                            microtask_budget - microtasks_ran
+                        )
+                        if self.pending_promise_tasks.len() > 0:
+                            return ran_count
         ran_count
 
     me resolve_async_fetch_response(
@@ -240,12 +268,21 @@ impl JsInterpreter:
         response_id
 
     me _create_promise_handler(on_fulfilled: i64, on_rejected: i64, next_promise_id: i64, kind: text) -> i64:
+        if self.promise_handlers.len() >= MAX_PENDING_PROMISE_HANDLERS:
+            self._settle_promise(
+                next_promise_id,
+                JsValue.String(v: "Promise handler limit reached"),
+                true
+            )
+            return -1
         val handler_id = self.next_promise_handler_id
         self.next_promise_handler_id = self.next_promise_handler_id + 1
         self.promise_handlers.push(PromiseHandlerRecord.create(handler_id, on_fulfilled, on_rejected, next_promise_id, kind))
         handler_id
 
     me _append_handler(promise_id: i64, handler_id: i64):
+        if handler_id < 0:
+            return
         var on_fulfilled = -1
         var on_rejected = -1
         var next_promise_id = -1
@@ -279,7 +316,37 @@ impl JsInterpreter:
         -1
 
     me _enqueue_promise_task(promise_id: i64, handler_id: i64):
+        if handler_id < 0:
+            return
         self.pending_promise_tasks.push(PendingPromiseTask.create(promise_id, handler_id))
+
+    me _remove_promise_handler(promise_id: i64, handler_id: i64):
+        var handlers: [PromiseHandlerRecord] = []
+        for handler in self.promise_handlers:
+            if handler.id != handler_id:
+                handlers.push(handler)
+        self.promise_handlers = handlers
+
+        var registrations: [PromiseHandlerRegistration] = []
+        for registration in self.promise_handler_registrations:
+            if (
+                registration.promise_id != promise_id or
+                registration.handler_id != handler_id
+            ):
+                registrations.push(registration)
+        self.promise_handler_registrations = registrations
+        self.object_store.remove_property(
+            promise_id, "__simple_handler_on_fulfilled:{handler_id}"
+        )
+        self.object_store.remove_property(
+            promise_id, "__simple_handler_on_rejected:{handler_id}"
+        )
+        self.object_store.remove_property(
+            promise_id, "__simple_handler_next:{handler_id}"
+        )
+        self.object_store.remove_property(
+            promise_id, "__simple_handler_kind:{handler_id}"
+        )
 
     me _invoke_promise_callback(fn_id: i64, arg_vals: [JsValue]) -> BrowserResult<JsValue>:
         if fn_id < 0 or fn_id >= self.functions.len():
@@ -415,6 +482,7 @@ impl JsInterpreter:
                                     next_promise_id = registration.next_promise_id
                                 hi = self.promise_handler_registrations.len()
                             hi = hi + 1
+                        self._remove_promise_handler(promise_id, handler_id)
 
                         var callback_id = -1
                         var propagate_rejection = false
@@ -583,7 +651,6 @@ impl JsInterpreter:
                     ai = ai + 1
                 return result + "]"
             JsValue.Function(id): return "null"
-            JsValue.Symbol(id): return "null"
         "undefined"
 
 export use std.nogc_sync_mut.js.engine.interpreter.{JsInterpreter}

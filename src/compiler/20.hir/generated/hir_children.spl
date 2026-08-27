@@ -8,8 +8,6 @@
 use compiler.hir.hir_definitions.*
 use compiler.hir.hir_types.*
 
-use common.facet_abi.*
-
 enum HirNode:
     """One HIR node of any base carrier kind."""
     Expr(node: HirExpr)
@@ -169,12 +167,10 @@ fn hir_children_of_expr(node: HirExpr) -> [HirNode]:
                 out = _hir_extend(out, hir_children_of_call_arg(it1))
             for it2 in b_type_args:
                 out = out.push(HirNode.Type_(it2))
-        case MethodCall(b_receiver, _, b_args, _, b_type_args):
+        case MethodCall(b_receiver, _, b_args, _):
             out = out.push(HirNode.Expr(b_receiver))
             for it2 in b_args:
                 out = _hir_extend(out, hir_children_of_call_arg(it2))
-            for it4 in b_type_args:
-                out = out.push(HirNode.Type_(it4))
         case StaticCall(b_type_, _, b_args, _):
             out = out.push(HirNode.Type_(b_type_))
             for it2 in b_args:
@@ -274,17 +270,6 @@ fn hir_children_of_expr(node: HirExpr) -> [HirNode]:
                     out = out.push(HirNode.Type_(clause.type_))
                 out = _hir_extend(out, hir_children_of_block(clause.body))
             out = _hir_extend(out, hir_children_of_block(b_finally))
-        case Spawn(b_value): out = out.push(HirNode.Expr(b_value))
-        case DictComprehension(b_key, b_value, b_clauses):
-            out = out.push(HirNode.Expr(b_key)); out = out.push(HirNode.Expr(b_value))
-            for clause in b_clauses: out = _hir_extend(out, hir_children_of_comp_clause(clause))
-        case ArrayLitSuffix(b_elements, _):
-            for element in b_elements: out = out.push(HirNode.Expr(element))
-        case KernelLaunch(b_kernel, b_grid, b_block, b_args):
-            out = out.push(HirNode.Expr(b_kernel)); out = out.push(HirNode.Expr(b_grid)); out = out.push(HirNode.Expr(b_block))
-            for arg in b_args: out = _hir_extend(out, hir_children_of_call_arg(arg))
-        case GpuIntrinsic(_, _, b_args):
-            for arg in b_args: out = out.push(HirNode.Expr(arg))
         case _: unreachable_hir_variant("HirExprKind", "hir_children_of_expr")
     out
 
@@ -305,20 +290,6 @@ fn hir_children_of_stmt(node: HirStmt) -> [HirNode]:
             out = _hir_extend(out, hir_children_of_block(b_block))
         case AsmAssert(_):
             hir_visit_nothing()
-        case SharedVal(_, b_type_, b_has_init, b_init):
-            out = out.push(HirNode.Type_(b_type_))
-            if b_has_init:
-                out = out.push(HirNode.Expr(b_init))
-        case SharedVar(_, b_type_, b_has_init, b_init):
-            out = out.push(HirNode.Type_(b_type_))
-            if b_has_init:
-                out = out.push(HirNode.Expr(b_init))
-        case GpuLaunch(b_config, b_body):
-            for grid_expr in b_config.grid:
-                out = out.push(HirNode.Expr(grid_expr))
-            for block_expr in b_config.block:
-                out = out.push(HirNode.Expr(block_expr))
-            out = _hir_extend(out, hir_children_of_block(b_body))
         case _: unreachable_hir_variant("HirStmtKind", "hir_children_of_stmt")
     out
 
@@ -379,12 +350,6 @@ fn hir_children_of_type(node: HirType) -> [HirNode]:
             out = out.push(HirNode.Type_(b_base))
         case Isolated(b_inner):
             out = out.push(HirNode.Type_(b_inner))
-        case Weak(b_inner):
-            out = out.push(HirNode.Type_(b_inner))
-        case Atomic(b_inner):
-            out = out.push(HirNode.Type_(b_inner))
-        case QualifiedDynTrait(_, _):
-            hir_visit_nothing()
         case Infer(_, _):
             hir_visit_nothing()
         case Error:
@@ -603,123 +568,6 @@ fn hir_children_of_enum_payload(node: HirEnumPayload) -> [HirNode]:
         case _: unreachable_hir_variant("HirEnumPayload", "hir_children_of_enum_payload")
     out
 
-fn hir_children_of_extend_constructor(node: HirExtendConstructor) -> [HirNode]:
-    if node == nil:
-        return []
-    var out: [HirNode] = []
-    out
-
-fn hir_children_of_extend_enum(node: HirExtendEnum) -> [HirNode]:
-    if node == nil:
-        return []
-    var out: [HirNode] = []
-    for it0 in node.constructors:
-        out = _hir_extend(out, hir_children_of_extend_constructor(it0))
-    out
-
-fn hir_children_of_facet_access_mode(node: HirFacetAccessMode) -> [HirNode]:
-    if node == nil:
-        return []
-    var out: [HirNode] = []
-    match node:
-        case PublicReadonly:
-            hir_visit_nothing()
-        case InspectReadonly:
-            hir_visit_nothing()
-        case _: unreachable_hir_variant("HirFacetAccessMode", "hir_children_of_facet_access_mode")
-    out
-
-fn hir_children_of_facet_acquire_mode(node: HirFacetAcquireMode) -> [HirNode]:
-    if node == nil:
-        return []
-    var out: [HirNode] = []
-    match node:
-        case TryResident:
-            hir_visit_nothing()
-        case LoadOptional:
-            hir_visit_nothing()
-        case LoadRequired:
-            hir_visit_nothing()
-        case _: unreachable_hir_variant("HirFacetAcquireMode", "hir_children_of_facet_acquire_mode")
-    out
-
-fn hir_children_of_facet_binding_decl(node: HirFacetBindingDecl) -> [HirNode]:
-    if node == nil:
-        return []
-    var out: [HirNode] = []
-    out = out.push(HirNode.Type_(node.interface_type))
-    out = _hir_extend(out, hir_children_of_type_pointcut(node.target_type_rule))
-    out = out.push(HirNode.Type_(node.implementation_type))
-    out = _hir_extend(out, hir_children_of_facet_binding_mode(node.mode))
-    out
-
-fn hir_children_of_facet_binding_mode(node: HirFacetBindingMode) -> [HirNode]:
-    if node == nil:
-        return []
-    var out: [HirNode] = []
-    match node:
-        case Attached:
-            hir_visit_nothing()
-        case NominalStatic:
-            hir_visit_nothing()
-        case _: unreachable_hir_variant("HirFacetBindingMode", "hir_children_of_facet_binding_mode")
-    out
-
-fn hir_children_of_facet_impl_decl(node: HirFacetImplDecl) -> [HirNode]:
-    if node == nil:
-        return []
-    var out: [HirNode] = []
-    for it0 in node.type_params:
-        out = _hir_extend(out, hir_children_of_type_param(it0))
-    out = out.push(HirNode.Type_(node.base_type))
-    for it2 in node.interfaces:
-        out = out.push(HirNode.Type_(it2))
-    out = _hir_extend(out, hir_children_of_facet_access_mode(node.access_mode))
-    for it4 in node.methods:
-        out = _hir_extend(out, hir_children_of_facet_method(it4))
-    out
-
-fn hir_children_of_facet_interface_decl(node: HirFacetInterfaceDecl) -> [HirNode]:
-    if node == nil:
-        return []
-    var out: [HirNode] = []
-    for it0 in node.type_params:
-        out = _hir_extend(out, hir_children_of_type_param(it0))
-    for it1 in node.composes:
-        out = out.push(HirNode.Type_(it1))
-    for it2 in node.methods:
-        out = _hir_extend(out, hir_children_of_facet_method(it2))
-    out
-
-fn hir_children_of_facet_method(node: HirFacetMethod) -> [HirNode]:
-    if node == nil:
-        return []
-    var out: [HirNode] = []
-    out = _hir_extend(out, hir_children_of_function(node.function))
-    out
-
-fn hir_children_of_facet_requirement_decl(node: HirFacetRequirementDecl) -> [HirNode]:
-    if node == nil:
-        return []
-    var out: [HirNode] = []
-    out = out.push(HirNode.Type_(node.interface_type))
-    out = _hir_extend(out, hir_children_of_type_pointcut(node.target_type_rule))
-    out
-
-fn hir_children_of_function(node: HirFunction) -> [HirNode]:
-    if node == nil:
-        return []
-    var out: [HirNode] = []
-    for it0 in node.type_params:
-        out = _hir_extend(out, hir_children_of_type_param(it0))
-    for it1 in node.params:
-        out = _hir_extend(out, hir_children_of_param(it1))
-    out = out.push(HirNode.Type_(node.return_type))
-    out = _hir_extend(out, hir_children_of_block(node.body))
-    for it4 in node.effects:
-        out = _hir_extend(out, hir_children_of_effect(it4))
-    out
-
 fn hir_children_of_if_arm(node: HirIfArm) -> [HirNode]:
     if node == nil:
         return []
@@ -745,22 +593,6 @@ fn hir_children_of_match_arm(node: HirMatchArm) -> [HirNode]:
     out = _hir_extend(out, hir_children_of_block(node.body))
     out
 
-fn hir_children_of_module(node: HirModule) -> [HirNode]:
-    if node == nil:
-        return []
-    var out: [HirNode] = []
-    for it0 in node.extend_enums:
-        out = _hir_extend(out, hir_children_of_extend_enum(it0))
-    for it1 in node.facet_interfaces:
-        out = _hir_extend(out, hir_children_of_facet_interface_decl(it1))
-    for it2 in node.facet_impls:
-        out = _hir_extend(out, hir_children_of_facet_impl_decl(it2))
-    for it3 in node.facet_bindings:
-        out = _hir_extend(out, hir_children_of_facet_binding_decl(it3))
-    for it4 in node.facet_requirements:
-        out = _hir_extend(out, hir_children_of_facet_requirement_decl(it4))
-    out
-
 fn hir_children_of_param(node: HirParam) -> [HirNode]:
     if node == nil:
         return []
@@ -782,39 +614,6 @@ fn hir_children_of_pattern_payload(node: HirPatternPayload) -> [HirNode]:
             for (ka0, kb0) in b_fields:
                 out = out.push(HirNode.Pattern(kb0))
         case _: unreachable_hir_variant("HirPatternPayload", "hir_children_of_pattern_payload")
-    out
-
-fn hir_children_of_type_param(node: HirTypeParam) -> [HirNode]:
-    if node == nil:
-        return []
-    var out: [HirNode] = []
-    for it0 in node.bounds:
-        out = out.push(HirNode.Type_(it0))
-    if node.has_default:
-        out = out.push(HirNode.Type_(node.default))
-    out
-
-fn hir_children_of_type_pointcut(node: HirTypePointcut) -> [HirNode]:
-    if node == nil:
-        return []
-    var out: [HirNode] = []
-    match node:
-        case TypeName(_):
-            hir_visit_nothing()
-        case Implements(b_interface_type):
-            out = out.push(HirNode.Type_(b_interface_type))
-        case Subtype(b_base_type):
-            out = out.push(HirNode.Type_(b_base_type))
-        case And(b_terms):
-            for it0 in b_terms:
-                out = _hir_extend(out, hir_children_of_type_pointcut(it0))
-        case Or(b_terms):
-            for it0 in b_terms:
-                out = _hir_extend(out, hir_children_of_type_pointcut(it0))
-        case Not(b_terms):
-            for it0 in b_terms:
-                out = _hir_extend(out, hir_children_of_type_pointcut(it0))
-        case _: unreachable_hir_variant("HirTypePointcut", "hir_children_of_type_pointcut")
     out
 
 fn hir_children_of_with_item(node: HirWithItem) -> [HirNode]:
@@ -1049,29 +848,6 @@ fn hir_expand_expr_child_frames_reverse(node: HirExpr, sink: HirChildFrameSink):
                 if clause.has_pattern:
                     sink.push_hir_child_frame(HirChildFrame.Pattern(clause.pattern))
             sink.push_hir_child_frame(HirChildFrame.Block(b_body))
-        case Spawn(b_value): sink.push_hir_child_frame(HirChildFrame.Expr(b_value))
-        case DictComprehension(b_key, b_value, b_clauses):
-            var clause_i = b_clauses.len()
-            while clause_i > 0:
-                clause_i = clause_i - 1
-                sink.push_hir_child_frame(HirChildFrame.CompClause(b_clauses[clause_i]))
-            sink.push_hir_child_frame(HirChildFrame.Expr(b_value)); sink.push_hir_child_frame(HirChildFrame.Expr(b_key))
-        case ArrayLitSuffix(b_elements, _):
-            var element_i = b_elements.len()
-            while element_i > 0:
-                element_i = element_i - 1
-                sink.push_hir_child_frame(HirChildFrame.Expr(b_elements[element_i]))
-        case KernelLaunch(b_kernel, b_grid, b_block, b_args):
-            var arg_i = b_args.len()
-            while arg_i > 0:
-                arg_i = arg_i - 1
-                sink.push_hir_child_frame(HirChildFrame.CallArg(b_args[arg_i]))
-            sink.push_hir_child_frame(HirChildFrame.Expr(b_block)); sink.push_hir_child_frame(HirChildFrame.Expr(b_grid)); sink.push_hir_child_frame(HirChildFrame.Expr(b_kernel))
-        case GpuIntrinsic(_, _, b_args):
-            var gpu_arg_i = b_args.len()
-            while gpu_arg_i > 0:
-                gpu_arg_i = gpu_arg_i - 1
-                sink.push_hir_child_frame(HirChildFrame.Expr(b_args[gpu_arg_i]))
         case _: unreachable_hir_variant("HirExprKind", "hir_expand_expr_child_frames_reverse")
     if node.has_type_:
         sink.push_hir_child_frame(HirChildFrame.Type_(node.type_))
@@ -1092,24 +868,6 @@ fn hir_expand_stmt_child_frames_reverse(node: HirStmt, sink: HirChildFrameSink):
             sink.push_hir_child_frame(HirChildFrame.Block(b_block))
         case AsmAssert(_):
             hir_visit_nothing()
-        case SharedVal(_, b_type_, b_has_init, b_init):
-            if b_has_init:
-                sink.push_hir_child_frame(HirChildFrame.Expr(b_init))
-            sink.push_hir_child_frame(HirChildFrame.Type_(b_type_))
-        case SharedVar(_, b_type_, b_has_init, b_init):
-            if b_has_init:
-                sink.push_hir_child_frame(HirChildFrame.Expr(b_init))
-            sink.push_hir_child_frame(HirChildFrame.Type_(b_type_))
-        case GpuLaunch(b_config, b_body):
-            sink.push_hir_child_frame(HirChildFrame.Block(b_body))
-            var block_i = b_config.block.len()
-            while block_i > 0:
-                block_i = block_i - 1
-                sink.push_hir_child_frame(HirChildFrame.Expr(b_config.block[block_i]))
-            var grid_i = b_config.grid.len()
-            while grid_i > 0:
-                grid_i = grid_i - 1
-                sink.push_hir_child_frame(HirChildFrame.Expr(b_config.grid[grid_i]))
         case _: unreachable_hir_variant("HirStmtKind", "hir_expand_stmt_child_frames_reverse")
 
 fn hir_expand_type_child_frames_reverse(node: HirType, sink: HirChildFrameSink):
@@ -1186,12 +944,6 @@ fn hir_expand_type_child_frames_reverse(node: HirType, sink: HirChildFrameSink):
             sink.push_hir_child_frame(HirChildFrame.Type_(b_base))
         case Isolated(b_inner):
             sink.push_hir_child_frame(HirChildFrame.Type_(b_inner))
-        case Weak(b_inner):
-            sink.push_hir_child_frame(HirChildFrame.Type_(b_inner))
-        case Atomic(b_inner):
-            sink.push_hir_child_frame(HirChildFrame.Type_(b_inner))
-        case QualifiedDynTrait(_, _):
-            hir_visit_nothing()
         case Infer(_, _):
             hir_visit_nothing()
         case Error:

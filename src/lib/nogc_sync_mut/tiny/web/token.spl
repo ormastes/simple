@@ -13,92 +13,9 @@ class TinyHtmlToken:
     offset: i32
     self_closing: bool
 
-    static fn empty() -> TinyHtmlToken:
-        TinyHtmlToken(kind: 0, name: "", value: "", offset: 0, self_closing: false)
-
 class TinyHtmlTokenResult:
     status: TinyStatus
     tokens: [TinyHtmlToken]
-    token_count: i32
-
-class TinyHtmlTokenArena:
-    tokens: [TinyHtmlToken]
-    token_count: i32
-    capacity: i32
-    allocation_count: i32
-    reuse_count: i32
-
-    static fn bounded(capacity: i32) -> TinyHtmlTokenArena:
-        var slots: [TinyHtmlToken] = []
-        var index = 0
-        while index < capacity:
-            slots.push(TinyHtmlToken.empty())
-            index = index + 1
-        TinyHtmlTokenArena(
-            tokens: slots, token_count: 0, capacity: capacity,
-            allocation_count: 1, reuse_count: 0,
-        )
-
-    me reset():
-        self.token_count = 0
-        self.reuse_count = self.reuse_count + 1
-
-    me append(token: TinyHtmlToken) -> TinyStatus:
-        if self.token_count >= self.capacity:
-            return TinyStatus.error(TINY_ERR_CAPACITY, self.token_count)
-        self.tokens[self.token_count] = token
-        self.token_count = self.token_count + 1
-        TinyStatus.ok()
-
-    me tokenize(source: text, max_text_bytes: i32) -> TinyHtmlTokenResult:
-        self.reset()
-        var cursor = 0
-        var text_bytes = 0
-        while cursor < source.len():
-            if self.token_count >= self.capacity:
-                return TinyHtmlTokenResult(status: TinyStatus.error(TINY_ERR_CAPACITY, self.token_count), tokens: self.tokens, token_count: self.token_count)
-            if source.slice(cursor, cursor + 1) != "<":
-                var finish = cursor
-                while finish < source.len() and source.slice(finish, finish + 1) != "<": finish = finish + 1
-                val value = source.slice(cursor, finish)
-                text_bytes = text_bytes + value.len()
-                if text_bytes > max_text_bytes:
-                    return TinyHtmlTokenResult(status: TinyStatus.error(TINY_ERR_CAPACITY, text_bytes), tokens: self.tokens, token_count: self.token_count)
-                if value.len() > 0:
-                    val appended = self.append(TinyHtmlToken(kind: TINY_HTML_TEXT, name: "", value: value, offset: cursor, self_closing: false))
-                    if not appended.is_ok():
-                        return TinyHtmlTokenResult(status: appended, tokens: self.tokens, token_count: self.token_count)
-                cursor = finish
-            else:
-                var finish = cursor + 1
-                var quote = ""
-                while finish < source.len():
-                    val ch = source.slice(finish, finish + 1)
-                    if ch == "\"" or ch == "'":
-                        if quote == "": quote = ch
-                        else:
-                            if quote == ch: quote = ""
-                    if ch == ">" and quote == "": break
-                    finish = finish + 1
-                if finish >= source.len():
-                    return TinyHtmlTokenResult(status: TinyStatus.error(TINY_ERR_MALFORMED, cursor), tokens: self.tokens, token_count: self.token_count)
-                val raw = source.slice(cursor + 1, finish).trim()
-                if raw.len() == 0:
-                    return TinyHtmlTokenResult(status: TinyStatus.error(TINY_ERR_MALFORMED, cursor), tokens: self.tokens, token_count: self.token_count)
-                if raw.slice(0, 1) == "!":
-                    cursor = finish + 1
-                else:
-                    val ending = raw.slice(0, 1) == "/"
-                    val body = if ending: raw.slice(1, raw.len()) else: raw
-                    val name = _tiny_tag_name(body)
-                    if name.len() == 0:
-                        return TinyHtmlTokenResult(status: TinyStatus.error(TINY_ERR_MALFORMED, cursor), tokens: self.tokens, token_count: self.token_count)
-                    val self_closing = raw.slice(raw.len() - 1, raw.len()) == "/" or name == "input" or name == "br" or name == "hr"
-                    val appended = self.append(TinyHtmlToken(kind: if ending: TINY_HTML_END else: TINY_HTML_START, name: name, value: body, offset: cursor, self_closing: self_closing))
-                    if not appended.is_ok():
-                        return TinyHtmlTokenResult(status: appended, tokens: self.tokens, token_count: self.token_count)
-                    cursor = finish + 1
-        TinyHtmlTokenResult(status: TinyStatus.ok(), tokens: self.tokens, token_count: self.token_count)
 
 fn _tiny_tag_name(raw: text) -> text:
     val clean = raw.trim()
@@ -167,5 +84,47 @@ fn tiny_html_has_attribute(raw: text, wanted_name: text) -> bool:
     false
 
 fn tiny_html_tokenize(source: text, max_tokens: i32, max_text_bytes: i32) -> TinyHtmlTokenResult:
-    var arena = TinyHtmlTokenArena.bounded(max_tokens)
-    arena.tokenize(source, max_text_bytes)
+    var tokens: [TinyHtmlToken] = []
+    var cursor = 0
+    var text_bytes = 0
+    while cursor < source.len():
+        if tokens.len() >= max_tokens:
+            return TinyHtmlTokenResult(status: TinyStatus.error(TINY_ERR_CAPACITY, tokens.len()), tokens: tokens)
+        if source.slice(cursor, cursor + 1) != "<":
+            var finish = cursor
+            while finish < source.len() and source.slice(finish, finish + 1) != "<": finish = finish + 1
+            val value = source.slice(cursor, finish)
+            text_bytes = text_bytes + value.len()
+            if text_bytes > max_text_bytes:
+                return TinyHtmlTokenResult(status: TinyStatus.error(TINY_ERR_CAPACITY, text_bytes), tokens: tokens)
+            if value.len() > 0:
+                tokens.push(TinyHtmlToken(kind: TINY_HTML_TEXT, name: "", value: value, offset: cursor, self_closing: false))
+            cursor = finish
+        else:
+            var finish = cursor + 1
+            var quote = ""
+            while finish < source.len():
+                val ch = source.slice(finish, finish + 1)
+                if (ch == "\"" or ch == "'"):
+                    if quote == "": quote = ch
+                    else:
+                        if quote == ch: quote = ""
+                if ch == ">" and quote == "": break
+                finish = finish + 1
+            if finish >= source.len():
+                return TinyHtmlTokenResult(status: TinyStatus.error(TINY_ERR_MALFORMED, cursor), tokens: tokens)
+            val raw = source.slice(cursor + 1, finish).trim()
+            if raw.len() == 0:
+                return TinyHtmlTokenResult(status: TinyStatus.error(TINY_ERR_MALFORMED, cursor), tokens: tokens)
+            if raw.slice(0, 1) == "!":
+                cursor = finish + 1
+            else:
+                val ending = raw.slice(0, 1) == "/"
+                val body = if ending: raw.slice(1, raw.len()) else: raw
+                val name = _tiny_tag_name(body)
+                if name.len() == 0:
+                    return TinyHtmlTokenResult(status: TinyStatus.error(TINY_ERR_MALFORMED, cursor), tokens: tokens)
+                val self_closing = raw.slice(raw.len() - 1, raw.len()) == "/" or name == "input" or name == "br" or name == "hr"
+                tokens.push(TinyHtmlToken(kind: if ending: TINY_HTML_END else: TINY_HTML_START, name: name, value: body, offset: cursor, self_closing: self_closing))
+                cursor = finish + 1
+    TinyHtmlTokenResult(status: TinyStatus.ok(), tokens: tokens)

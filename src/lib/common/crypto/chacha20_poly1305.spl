@@ -227,3 +227,56 @@ fn chacha20_poly1305_decrypt(key: [u8], nonce: [u8], ciphertext: [u8], aad: [u8]
     val plaintext = chacha20_encrypt(key, 1, nonce, ciphertext)
 
     Chacha20Poly1305Result.Ok(data: plaintext)
+
+# ============================================================================
+# AEAD Seal / Open (split ciphertext and tag)
+# ============================================================================
+#
+# `encrypt`/`decrypt` above speak the concatenated `ciphertext || tag` wire
+# form. Callers that hold the tag separately — every AEAD trait, TLS record
+# layer, and test vector — need the split form with the conventional AEAD
+# argument order (aad before the payload), which is what these two provide.
+
+fn chacha20_poly1305_seal(key: [u8], nonce: [u8], aad: [u8], plaintext: [u8]) -> ([u8], [u8]):
+    """ChaCha20-Poly1305 AEAD encryption returning `(ciphertext, tag)`.
+
+    Args:
+        key: 32-byte key.
+        nonce: 12-byte nonce.
+        aad: Additional authenticated data.
+        plaintext: Data to encrypt.
+
+    Returns: a tuple of the ciphertext (same length as the plaintext) and the
+    16-byte Poly1305 tag.
+    """
+    val sealed = chacha20_poly1305_encrypt(key, nonce, plaintext, aad)
+    val ct_len = sealed.len() - 16
+    var ciphertext: [u8] = []
+    var i: u64 = 0
+    while i < ct_len:
+        ciphertext.push(sealed[i])
+        i = i + 1
+    var tag: [u8] = []
+    i = 0
+    while i < 16:
+        tag.push(sealed[ct_len + i])
+        i = i + 1
+    (ciphertext, tag)
+
+fn chacha20_poly1305_open(key: [u8], nonce: [u8], aad: [u8], ciphertext: [u8], tag: [u8]) -> [u8]?:
+    """ChaCha20-Poly1305 AEAD decryption with a separately supplied tag.
+
+    Args:
+        key: 32-byte key.
+        nonce: 12-byte nonce.
+        aad: Additional authenticated data.
+        ciphertext: Encrypted data (without the tag).
+        tag: 16-byte Poly1305 tag to verify.
+
+    Returns: the plaintext, or nil when authentication fails. Every failure —
+    wrong tag, wrong key, tampered aad or ciphertext — is reported as the same
+    nil, so nothing about the cause leaks to the caller.
+    """
+    match chacha20_poly1305_decrypt(key, nonce, ciphertext, aad, tag):
+        case Chacha20Poly1305Result.Ok(data): data
+        case Chacha20Poly1305Result.Err(msg): nil

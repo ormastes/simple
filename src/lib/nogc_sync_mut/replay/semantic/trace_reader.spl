@@ -3,7 +3,7 @@
 # Reads .sst (Simple Semantic Trace) files produced by TraceWriter.
 # Binary deserialization of fixed 68-byte SemanticEvent records.
 
-use std.io.{shell}
+use std.nogc_sync_mut.io.process_ops.{shell}
 use std.nogc_sync_mut.replay.codec.{decode_i64, decode_i32}
 use std.nogc_sync_mut.replay.semantic.trace_events.{SemanticEvent, SEMANTIC_EVENT_SIZE}
 
@@ -13,14 +13,22 @@ use std.nogc_sync_mut.replay.semantic.trace_events.{SemanticEvent, SEMANTIC_EVEN
 
 fn read_semantic_trace(path: text) -> Result<[SemanticEvent], text>:
     """Read all SemanticEvent records from a .sst file."""
-    if not file_exists(path):
+    val hex_result = shell("xxd -p '{path}' 2>/dev/null | tr -d '\\n'")
+    if hex_result.exit_code != 0:
         return Err("failed to read trace file: {path}")
-    val raw = file_read_bytes(path)
-    if raw.len() == 0:
+
+    val hex_str = hex_result.stdout.trim()
+    if hex_str.len() == 0:
         return Ok([])
+
+    # Decode hex to bytes
     var bytes: [i32] = []
-    for byte in raw:
-        bytes.push(byte as i32)
+    var i = 0
+    while i + 1 < hex_str.len():
+        val hi = hex_value(hex_str[i])
+        val lo = hex_value(hex_str[i + 1])
+        bytes.push(hi * 16 + lo)
+        i = i + 2
 
     # Decode fixed-size records
     var events: [SemanticEvent] = []
@@ -76,3 +84,33 @@ fn decode_semantic_event(bytes: [i32], offset: i64) -> Result<SemanticEvent, tex
         payload_a: payload_a,
         payload_b: payload_b
     ))
+
+# ============================================================================
+# Hex helpers
+# ============================================================================
+
+fn hex_value(ch: text) -> i32:
+    match ch:
+        case "0": 0
+        case "1": 1
+        case "2": 2
+        case "3": 3
+        case "4": 4
+        case "5": 5
+        case "6": 6
+        case "7": 7
+        case "8": 8
+        case "9": 9
+        case "a": 10
+        case "A": 10
+        case "b": 11
+        case "B": 11
+        case "c": 12
+        case "C": 12
+        case "d": 13
+        case "D": 13
+        case "e": 14
+        case "E": 14
+        case "f": 15
+        case "F": 15
+        case _: 0

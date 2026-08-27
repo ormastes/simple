@@ -47,10 +47,15 @@ fn text_char_at_mode(s: text, idx: i64) -> text:
     while pos < bytes.len():
         if cp_idx == idx:
             val seq_len = utf8_seq_len(bytes[pos])
-            val end_pos = pos + seq_len
+            val end_pos = pos + (if seq_len > 0: seq_len else: 1)
+            if end_pos > bytes.len():
+                return ""
             return s[pos:end_pos]
         val seq_len = utf8_seq_len(bytes[pos])
-        pos = pos + seq_len
+        if seq_len <= 0:
+            pos = pos + 1
+        else:
+            pos = pos + seq_len
         cp_idx = cp_idx + 1
     ""
 
@@ -89,7 +94,10 @@ fn text_slice_mode(s: text, start: i64, end_idx: i64) -> text:
         if pos >= bytes.len():
             break
         val seq_len = utf8_seq_len(bytes[pos])
-        pos = pos + seq_len
+        if seq_len <= 0:
+            pos = pos + 1
+        else:
+            pos = pos + seq_len
         cp_idx = cp_idx + 1
 
     # Handle end-of-string cases
@@ -103,8 +111,14 @@ fn text_slice_mode(s: text, start: i64, end_idx: i64) -> text:
 
 fn strip_utf8_bom(s: text) -> text:
     """Remove one leading UTF-8 BOM codepoint (U+FEFF), if present."""
-    if s.len() > 0 and s.char_code_at(0) == 65279:
-        return s.slice(1, s.len())
+    # `char_code_at` is CHARACTER-indexed but `slice` is BYTE-indexed, so
+    # slicing from 1 dropped only the BOM's lead byte and returned the two
+    # orphaned continuation bytes EF->BB BF as the head of the result: invalid
+    # UTF-8, and 2 bytes longer than the caller asked for. U+FEFF is exactly 3
+    # bytes in UTF-8, so the byte offset past it is 3. Found by the
+    # SIMPLE_UTF8_SLICE_AUDIT counting mode (`start=1 end=14 outlen=13`).
+    if s.len() > 2 and s.char_code_at(0) == 65279:
+        return s.slice(3, s.len())
     s
 
 # ============================================================================
@@ -129,9 +143,10 @@ fn text_chars_mode(s: text) -> [text]:
     var pos: i64 = 0
     while pos < bytes.len():
         val seq_len = utf8_seq_len(bytes[pos])
-        val end_pos = pos + seq_len
-        result.push(s[pos:end_pos])
-        pos = end_pos
+        val end_pos = pos + (if seq_len > 0: seq_len else: 1)
+        val actual_end = if end_pos > bytes.len(): bytes.len() else: end_pos
+        result.push(s[pos:actual_end])
+        pos = actual_end
     result
 
 # ============================================================================
@@ -238,7 +253,10 @@ fn text_display_width(s: text) -> i64:
         val cp = decoded[0]
         val consumed = decoded[1]
         width = width + codepoint_display_width(cp)
-        pos = pos + consumed
+        if consumed <= 0:
+            pos = pos + 1
+        else:
+            pos = pos + consumed
     width
 
 # ============================================================================

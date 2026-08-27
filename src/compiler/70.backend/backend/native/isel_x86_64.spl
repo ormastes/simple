@@ -6,7 +6,7 @@
 #
 # Pipeline: MIR -> ISel (this module) -> RegAlloc -> Encode -> ELF
 
-use compiler.mir.mir_data.{MirModule, MirFunction, MirBlock, MirInst, MirInstKind, MirBinOp, MirUnaryOp, MirOperand, MirOperandKind, MirConstValue, MirTerminator, MirType, MirTypeKind, LocalId, LocalKind, BlockId, SwitchCase}
+use compiler.mir.mir_data.{MirModule, MirFunction, MirBlock, MirInst, MirInstKind, MirBinOp, MirUnaryOp, MirOperand, MirOperandKind, MirConstValue, MirTerminator, MirType, MirTypeKind, MirStatic, LocalId, LocalKind, BlockId, SwitchCase}
 use compiler.mir.intrinsics.{BIT_ROTATE_LEFT, BIT_ROTATE_RIGHT, BIT_POPCOUNT, BIT_BSWAP}
 use compiler.backend.native.mach_inst.{MachReg, virtual_reg, physical_reg, reg_id, Operand, OperandKind, op_reg, op_phys, op_virt, op_imm, op_mem, op_label, op_sym, operand_get_reg, MachInst, new_mach_inst, MachBlock, new_mach_block, mach_block_add_inst, MachFunction, new_mach_function, mach_func_add_block, mach_func_set_frame_size, MachModule, DataEntry, new_mach_module, mach_module_add_func, mach_module_add_data, mach_module_add_extern}
 use compiler.backend.common.isel_common.{LoweredOperand, ISelFuncResult, ISelBlockResult, ISelInstResult, local_to_vreg, local_vreg_op, isel_fresh_dest, isel_emit_one}
@@ -32,10 +32,10 @@ fn lower_operand(ctx: ISelContext, operand: MirOperand) -> LoweredOperand:
             LoweredOperand(insts: [], result: local_vreg_op(local.id), ctx: ctx)
         case Move(local):
             LoweredOperand(insts: [], result: local_vreg_op(local.id), ctx: ctx)
-        case Const(value, type_):
-            x64_lower_const(ctx, value, type_)
+        case Const(const_value, const_type):
+            x64_lower_const(ctx, const_value, const_type)
 
-fn lower_const(ctx: ISelContext, value: MirConstValue, type_: MirType) -> LoweredOperand:
+fn x64_lower_const(ctx: ISelContext, value: MirConstValue, type_: MirType) -> LoweredOperand:
     match value:
         case Int(v):
             isel_emit_one(ctx, X86_OP_MOV_REG_IMM, [op_imm(v)])
@@ -64,6 +64,46 @@ fn isel_module_with_avx2_capability(module: MirModule, capability: NativeAvx2Cap
     var mach_module = new_mach_module(module.name)
     var ctx = new_isel_context()
 
+    # Materialize module statics once, before functions.  Stable SymbolId order
+    # makes bytes and relocation symbol indices reproducible across Dict seeds.
+    var static_ids: [i64] = []
+    var static_by_id: Dict<i64, MirStatic> = {}
+    for symbol in module.statics.keys():
+        static_ids.push(symbol.id)
+        static_by_id[symbol.id] = module.statics[symbol]
+    static_ids.sort()
+    var global_names: Dict<i64, text> = {}
+    var global_sizes: Dict<i64, i64> = {}
+    var global_signed: Dict<i64, bool> = {}
+    var global_mutable: Dict<i64, bool> = {}
+    var static_entries: [DataEntry] = []
+    for symbol_id in static_ids:
+        val static_ = static_by_id[symbol_id]
+        if not x86_static_type_supported(static_.type_):
+            panic("x86_64 native static '{static_.name}' has unsupported non-scalar object type")
+        val size = static_.type_.size_bytes()
+        if size != 1 and size != 2 and size != 4 and size != 8:
+            panic("x86_64 native static '{static_.name}' has unsupported {size}-byte object representation")
+        val natural_align = static_.type_.alignment()
+        val align = if static_.alignment > 0: static_.alignment else: natural_align
+        if not x86_static_alignment_valid(static_.type_, static_.alignment):
+            panic("x86_64 native static '{static_.name}' alignment {align} is invalid for natural alignment {natural_align}")
+        val bytes = x86_static_initializer_bytes(static_, size)
+        static_entries.push(DataEntry(name: static_.name, data: bytes, is_readonly: not static_.is_mutable, alignment: align, is_global: static_.visibility.is_public()))
+        global_names[symbol_id] = static_.name
+        global_sizes[symbol_id] = size
+        match static_.type_.kind:
+            case I8 | I16 | I32: global_signed[symbol_id] = true
+            case _: global_signed[symbol_id] = false
+        global_mutable[symbol_id] = static_.is_mutable
+    ctx = ISelContext(
+        next_vreg: ctx.next_vreg, frame_slots: ctx.frame_slots,
+        next_frame_offset: ctx.next_frame_offset, extern_symbols: ctx.extern_symbols,
+        data_entries: static_entries, string_counter: ctx.string_counter,
+        global_names: global_names, global_sizes: global_sizes,
+        global_signed: global_signed, global_mutable: global_mutable
+    )
+
     val func_keys = module.functions.keys()
     for key in func_keys:
         val func = module.functions[key]
@@ -80,6 +120,49 @@ fn isel_module_with_avx2_capability(module: MirModule, capability: NativeAvx2Cap
         mach_module = mach_module_add_extern(mach_module, sym)
 
     mach_module
+
+fn x86_static_integer_bytes(value: i64, size: i64) -> [i64]:
+    var bytes: [i64] = []
+    var remaining = value
+    for _ in 0..size:
+        var byte = remaining % 256
+        if byte < 0: byte = byte + 256
+        bytes.push(byte)
+        remaining = (remaining - byte) / 256
+    bytes
+
+fn x86_is_power_of_two(value: i64) -> bool:
+    if value <= 0: return false
+    var remaining = value
+    while remaining > 1:
+        if remaining % 2 != 0: return false
+        remaining = remaining / 2
+    true
+
+fn x86_static_type_supported(type_: MirType) -> bool:
+    match type_.kind:
+        case I8 | I16 | I32 | I64 | U8 | U16 | U32 | U64 | Bool | Char | Ptr(_, _) | Ref(_, _) | FuncPtr(_): true
+        case _: false
+
+fn x86_static_alignment_valid(type_: MirType, explicit_alignment: i64) -> bool:
+    if explicit_alignment < 0: return false
+    val natural = type_.alignment()
+    val effective = if explicit_alignment > 0: explicit_alignment else: natural
+    x86_is_power_of_two(effective) and effective >= natural
+
+fn x86_static_write_admitted(is_mutable: bool, requests_write: bool) -> bool:
+    not requests_write or is_mutable
+
+fn x86_static_initializer_bytes(static_: MirStatic, size: i64) -> [i64]:
+    if static_.init == nil:
+        return x86_static_integer_bytes(0, size)
+    val constant = static_.init.unwrap()
+    match constant.value:
+        case Int(value): x86_static_integer_bytes(value, size)
+        case Bool(value): x86_static_integer_bytes(if value: 1 else: 0, size)
+        case Zero: x86_static_integer_bytes(0, size)
+        case _:
+            panic("x86_64 native static '{static_.name}' initializer is not a scalar integer/boolean/zero constant")
 
 fn isel_function(ctx: ISelContext, func: MirFunction) -> ISelFuncResult:
     isel_function_with_avx2_capability(ctx, func, native_avx2_denied_v1())
@@ -99,7 +182,11 @@ fn isel_function_with_avx2_capability(ctx: ISelContext, func: MirFunction, capab
         next_frame_offset: 0,
         extern_symbols: ctx.extern_symbols,
         data_entries: ctx.data_entries,
-        string_counter: ctx.string_counter
+        string_counter: ctx.string_counter,
+        global_names: ctx.global_names,
+        global_sizes: ctx.global_sizes,
+        global_signed: ctx.global_signed,
+        global_mutable: ctx.global_mutable
     )
 
     # Allocate frame slots for locals that need stack space
@@ -127,6 +214,9 @@ fn isel_function_with_avx2_capability(ctx: ISelContext, func: MirFunction, capab
 
     mach_func = mach_func_add_block(mach_func, prologue_block)
 
+    var next_trampoline_id = 0
+    for block in func.blocks:
+        if block.id.id >= next_trampoline_id: next_trampoline_id = block.id.id + 1
     # Translate each MIR block
     for block in func.blocks:
         var trampoline_id = -1
@@ -142,6 +232,12 @@ fn isel_function_with_avx2_capability(ctx: ISelContext, func: MirFunction, capab
         var result = isel_block_with_simd(local_ctx, block, simd_plan.registers, trampoline_id)
         local_ctx = result.ctx
         mach_func = mach_func_add_block(mach_func, result.block)
+        if trampoline_id >= 0:
+            var trampoline = new_mach_block("exc.tag.{block.id.id}", trampoline_id)
+            trampoline = mach_block_add_inst(trampoline, new_mach_inst(X86_OP_CALL, [op_sym("rt_exception_caught_type_tag")]))
+            trampoline = mach_block_add_inst(trampoline, new_mach_inst(X86_OP_MOV_REG_REG, [local_vreg_op(trampoline_tag_dest), op_phys(X86_RAX)]))
+            trampoline = mach_block_add_inst(trampoline, new_mach_inst(X86_OP_JMP, [op_label(trampoline_target)]))
+            mach_func = mach_func_add_block(mach_func, trampoline)
 
     # Set frame size (aligned to 16)
     var frame_size = local_ctx.next_frame_offset
@@ -156,7 +252,11 @@ fn isel_function_with_avx2_capability(ctx: ISelContext, func: MirFunction, capab
         next_frame_offset: ctx.next_frame_offset,
         extern_symbols: local_ctx.extern_symbols,
         data_entries: local_ctx.data_entries,
-        string_counter: local_ctx.string_counter
+        string_counter: local_ctx.string_counter,
+        global_names: local_ctx.global_names,
+        global_sizes: local_ctx.global_sizes,
+        global_signed: local_ctx.global_signed,
+        global_mutable: local_ctx.global_mutable
     )
 
     ISelFuncResult(func: mach_func, ctx: out_ctx)
@@ -177,7 +277,7 @@ fn isel_block_with_simd(ctx: ISelContext, block: MirBlock, simd_regs: Dict<i64, 
             mach_block = mach_block_add_inst(mach_block, mi)
 
     # Lower terminator
-    var term_result = isel_terminator(current_ctx, block.terminator)
+    var term_result = isel_terminator(current_ctx, block.terminator, unwind_trampoline_id)
     current_ctx = term_result.ctx
     for mi in term_result.insts:
         mach_block = mach_block_add_inst(mach_block, mi)
@@ -187,6 +287,22 @@ fn isel_block_with_simd(ctx: ISelContext, block: MirBlock, simd_regs: Dict<i64, 
 # ============================================================================
 # Instruction Selection - Instructions
 # ============================================================================
+
+# Lane C7: render a MIR instruction's source span for a loud backend
+# diagnostic, or a stable placeholder when the instruction carries none.
+fn x86_isel_format_span(span: Span?) -> text:
+    if span.?:
+        val sp = span.unwrap()
+        "{sp.file}:{sp.line}:{sp.col}"
+    else:
+        "unknown location"
+
+fn x86_unsupported_inst(ctx: ISelContext, variant: text, span: Span?) -> ISelInstResult:
+    """NAMED, spanned refusal for a MirInstKind variant x86_64 instruction
+    selection cannot lower (lane C7). `E-BACKEND-X86ISEL-INST-<Variant>` is
+    stable and greppable. This used to be a shared `case _:` that emitted a NOP,
+    i.e. it deleted the instruction and let the program run on regardless."""
+    panic("E-BACKEND-X86ISEL-INST-{variant}: x86_64 instruction selection does not lower {variant} at {x86_isel_format_span(span)}")
 
 fn isel_inst(ctx: ISelContext, inst: MirInst) -> ISelInstResult:
     isel_inst_with_simd(ctx, inst, {})
@@ -229,19 +345,256 @@ fn isel_inst_with_simd(ctx: ISelContext, inst: MirInst, simd_regs: Dict<i64, i64
             isel_avx2_store(ctx, value, ptr, aligned, simd_regs)
         case MirSimdBinop(dest, lhs, rhs, op):
             isel_avx2_binop(ctx, dest, lhs, rhs, op, simd_regs)
-        case DecisionProbe(_, semantic_id, _, _, _, _, _, _, _, _):
+        case DecisionProbe(_, semantic_id, _, _, _, _):
             panic("x86_64 isel: unlowered DecisionProbe '{semantic_id}' reached instruction selection")
         case ConditionProbe(_, semantic_id, _, _, _, _, _, _):
             panic("x86_64 isel: unlowered ConditionProbe '{semantic_id}' reached instruction selection")
-        case DynamicDecisionProbe(_, semantic_id, _, _, _, _, _, _, _, _):
-            panic("x86_64 isel: unlowered DynamicDecisionProbe '{semantic_id}' reached instruction selection")
-        case DynamicConditionProbe(_, semantic_id, _, _, _, _, _, _):
-            panic("x86_64 isel: unlowered DynamicConditionProbe '{semantic_id}' reached instruction selection")
         case Nop:
             ISelInstResult(insts: [new_mach_inst(X86_OP_NOP, [])], ctx: ctx)
-        case _:
-            # Unsupported instruction - emit NOP
+        # --------------------------------------------------------------------
+        # Lane C7 (backend coverage, hardening plan 2026-08-21 sections
+        # 11.3-11.6). EXPLICIT arms for the 105 MirInstKind variants that used to
+        # reach the terminal `case _:` below, which emitted a NOP -- the
+        # instruction was silently DELETED from the generated machine code and
+        # execution ran on with whatever the missing computation never wrote.
+        # Each now raises a stable, spanned E-BACKEND-X86ISEL-INST-<Variant>.
+        # Universe: spec/compiler_schema/registry/compiler.mir.MirInstKind.sdn
+        # Table:    spec/compiler_schema/transitions/mir_inst_to_native_isel.sdn
+        # --------------------------------------------------------------------
+        case AcquireSnapshot(_, _):
+            x86_unsupported_inst(ctx, "AcquireSnapshot", inst.span)
+        case Await(_, _):
+            x86_unsupported_inst(ctx, "Await", inst.span)
+        case Bitcast(_, _, _):
+            x86_unsupported_inst(ctx, "Bitcast", inst.span)
+        case CallIndirect(_, _, _, _):
+            x86_unsupported_inst(ctx, "CallIndirect", inst.span)
+        case CheckedBinOp(_, _, _, _):
+            x86_unsupported_inst(ctx, "CheckedBinOp", inst.span)
+        case CommitUpdates(_, _, _):
+            x86_unsupported_inst(ctx, "CommitUpdates", inst.span)
+        case Compose(_, _, _, _):
+            x86_unsupported_inst(ctx, "Compose", inst.span)
+        case CreatePromise(_, _, _):
+            x86_unsupported_inst(ctx, "CreatePromise", inst.span)
+        case DebugValue(_, _):
+            # Deliberate no-op: DebugValue is a MIR-level marker with no machine
+            # code. A real NOP encoding is the correct lowering, unlike the
+            # blanket wildcard this replaces. Recorded `implemented`.
             ISelInstResult(insts: [new_mach_inst(X86_OP_NOP, [])], ctx: ctx)
+        case Drop(_):
+            # Deliberate no-op: Drop is a MIR-level marker with no machine
+            # code. A real NOP encoding is the correct lowering, unlike the
+            # blanket wildcard this replaces. Recorded `implemented`.
+            ISelInstResult(insts: [new_mach_inst(X86_OP_NOP, [])], ctx: ctx)
+        case FreezeRegion(_):
+            x86_unsupported_inst(ctx, "FreezeRegion", inst.span)
+        case GpuAtomicCas(_, _, _, _):
+            x86_unsupported_inst(ctx, "GpuAtomicCas", inst.span)
+        case GpuAtomicOp(_, _, _, _):
+            x86_unsupported_inst(ctx, "GpuAtomicOp", inst.span)
+        case GpuBarrier(_):
+            x86_unsupported_inst(ctx, "GpuBarrier", inst.span)
+        case GpuBlockDim(_, _):
+            x86_unsupported_inst(ctx, "GpuBlockDim", inst.span)
+        case GpuBlockId(_, _):
+            x86_unsupported_inst(ctx, "GpuBlockId", inst.span)
+        case GpuGlobalId(_, _):
+            x86_unsupported_inst(ctx, "GpuGlobalId", inst.span)
+        case GpuGridDim(_, _):
+            x86_unsupported_inst(ctx, "GpuGridDim", inst.span)
+        case GpuKernelDef(_):
+            x86_unsupported_inst(ctx, "GpuKernelDef", inst.span)
+        case GpuLaunch(_):
+            x86_unsupported_inst(ctx, "GpuLaunch", inst.span)
+        case GpuLocalId(_, _):
+            x86_unsupported_inst(ctx, "GpuLocalId", inst.span)
+        case GpuMemFence(_):
+            x86_unsupported_inst(ctx, "GpuMemFence", inst.span)
+        case GpuSharedAlloc(_, _, _):
+            x86_unsupported_inst(ctx, "GpuSharedAlloc", inst.span)
+        case HostGpuLaneBegin(_, _):
+            x86_unsupported_inst(ctx, "HostGpuLaneBegin", inst.span)
+        case HostGpuLaneEnd(_):
+            x86_unsupported_inst(ctx, "HostGpuLaneEnd", inst.span)
+        case InlineAsm(_, _, _, _, _, _, _):
+            x86_unsupported_inst(ctx, "InlineAsm", inst.span)
+        case LayerConnect(_, _, _):
+            x86_unsupported_inst(ctx, "LayerConnect", inst.span)
+        case LoadGlobal(dest, symbol):
+            x86_isel_load_global(ctx, dest, symbol.id)
+        case GlobalAddr(dest, symbol, mutable):
+            x86_isel_global_addr(ctx, dest, symbol.id, mutable)
+        case MaskFromCmp(_, _, _, _):
+            x86_unsupported_inst(ctx, "MaskFromCmp", inst.span)
+        case MaskedAdd(_, _, _, _):
+            x86_unsupported_inst(ctx, "MaskedAdd", inst.span)
+        case MaskedFma(_, _, _, _, _):
+            x86_unsupported_inst(ctx, "MaskedFma", inst.span)
+        case MaskedMul(_, _, _, _):
+            x86_unsupported_inst(ctx, "MaskedMul", inst.span)
+        case MirSimdCmp(_, _, _, _):
+            x86_unsupported_inst(ctx, "MirSimdCmp", inst.span)
+        case MirSimdGather(_, _, _, _):
+            x86_unsupported_inst(ctx, "MirSimdGather", inst.span)
+        case MirSimdMaskOp(_, _, _, _):
+            x86_unsupported_inst(ctx, "MirSimdMaskOp", inst.span)
+        case MirSimdPermute(_, _, _):
+            x86_unsupported_inst(ctx, "MirSimdPermute", inst.span)
+        case MirSimdReduce(_, _, _):
+            x86_unsupported_inst(ctx, "MirSimdReduce", inst.span)
+        case MirSimdScalableVsetvl(_, _, _):
+            x86_unsupported_inst(ctx, "MirSimdScalableVsetvl", inst.span)
+        case MirSimdScatter(_, _, _):
+            x86_unsupported_inst(ctx, "MirSimdScatter", inst.span)
+        case MirSimdSelect(_, _, _, _):
+            x86_unsupported_inst(ctx, "MirSimdSelect", inst.span)
+        case MirSimdShuffle(_, _, _, _):
+            x86_unsupported_inst(ctx, "MirSimdShuffle", inst.span)
+        case MirSimdSplat(_, _, _):
+            x86_unsupported_inst(ctx, "MirSimdSplat", inst.span)
+        case MirSimdTernop(_, _, _, _, _):
+            x86_unsupported_inst(ctx, "MirSimdTernop", inst.span)
+        case MirSimdUnop(_, _, _):
+            x86_unsupported_inst(ctx, "MirSimdUnop", inst.span)
+        case MirWarpActivesMask(_):
+            x86_unsupported_inst(ctx, "MirWarpActivesMask", inst.span)
+        case MirWarpBallot(_, _, _):
+            x86_unsupported_inst(ctx, "MirWarpBallot", inst.span)
+        case MirWarpReduce(_, _, _, _):
+            x86_unsupported_inst(ctx, "MirWarpReduce", inst.span)
+        case MirWarpShfl(_, _, _, _, _):
+            x86_unsupported_inst(ctx, "MirWarpShfl", inst.span)
+        case MirWarpSync(_):
+            x86_unsupported_inst(ctx, "MirWarpSync", inst.span)
+        case Parallel(_, _):
+            x86_unsupported_inst(ctx, "Parallel", inst.span)
+        case PipeForward(_, _, _):
+            x86_unsupported_inst(ctx, "PipeForward", inst.span)
+        case PredicatedAdd(_, _, _, _, _, _):
+            x86_unsupported_inst(ctx, "PredicatedAdd", inst.span)
+        case PredicatedFma(_, _, _, _, _, _, _):
+            x86_unsupported_inst(ctx, "PredicatedFma", inst.span)
+        case PredicatedMul(_, _, _, _, _, _):
+            x86_unsupported_inst(ctx, "PredicatedMul", inst.span)
+        case Receive(_, _):
+            x86_unsupported_inst(ctx, "Receive", inst.span)
+        case Ref(_, _, _):
+            x86_unsupported_inst(ctx, "Ref", inst.span)
+        case ResultMatchSemantic(_, _, _, _, _, _, _):
+            # Verification WITNESS, not an executable instruction. The whole
+            # Result match -- arm blocks, payload binds, result copies, merge
+            # terminator -- is ALREADY emitted before this marker is appended
+            # into the merge block (50.mir/_MirLoweringExpr/
+            # switch_operators_calls.spl:2848). It exists only so the Lean
+            # backend can recover the match shape (lean_mir_translate.spl:280,
+            # witness_count) and for perf_facts; verification_region_effects.spl
+            # :296 already classes it with Nop. Executable backends must skip
+            # it -- rejecting it made every Result-matching module
+            # native-unbuildable (E-BACKEND-LLVM-INST-ResultMatchSemantic).
+            ()
+        case ScalableVecFence(_):
+            x86_unsupported_inst(ctx, "ScalableVecFence", inst.span)
+        case Send(_, _, _):
+            x86_unsupported_inst(ctx, "Send", inst.span)
+        case SimdAddF32x4(_, _, _):
+            x86_unsupported_inst(ctx, "SimdAddF32x4", inst.span)
+        case SimdAddF32x8(_, _, _):
+            x86_unsupported_inst(ctx, "SimdAddF32x8", inst.span)
+        case SimdAddF64x4(_, _, _):
+            x86_unsupported_inst(ctx, "SimdAddF64x4", inst.span)
+        case SimdAddI32x4(_, _, _):
+            x86_unsupported_inst(ctx, "SimdAddI32x4", inst.span)
+        case SimdAddI32x8(_, _, _):
+            x86_unsupported_inst(ctx, "SimdAddI32x8", inst.span)
+        case SimdAndI32x4(_, _, _):
+            x86_unsupported_inst(ctx, "SimdAndI32x4", inst.span)
+        case SimdAndI32x8(_, _, _):
+            x86_unsupported_inst(ctx, "SimdAndI32x8", inst.span)
+        case SimdDivF32x4(_, _, _):
+            x86_unsupported_inst(ctx, "SimdDivF32x4", inst.span)
+        case SimdDivF32x8(_, _, _):
+            x86_unsupported_inst(ctx, "SimdDivF32x8", inst.span)
+        case SimdDivF64x4(_, _, _):
+            x86_unsupported_inst(ctx, "SimdDivF64x4", inst.span)
+        case SimdFmaF32x4(_, _, _, _):
+            x86_unsupported_inst(ctx, "SimdFmaF32x4", inst.span)
+        case SimdFmaF32x8(_, _, _, _):
+            x86_unsupported_inst(ctx, "SimdFmaF32x8", inst.span)
+        case SimdFmaF64x4(_, _, _, _):
+            x86_unsupported_inst(ctx, "SimdFmaF64x4", inst.span)
+        case SimdHaddF32x4(_, _):
+            x86_unsupported_inst(ctx, "SimdHaddF32x4", inst.span)
+        case SimdHmaxF32x4(_, _):
+            x86_unsupported_inst(ctx, "SimdHmaxF32x4", inst.span)
+        case SimdHminF32x4(_, _):
+            x86_unsupported_inst(ctx, "SimdHminF32x4", inst.span)
+        case SimdMulF32x4(_, _, _):
+            x86_unsupported_inst(ctx, "SimdMulF32x4", inst.span)
+        case SimdMulF32x8(_, _, _):
+            x86_unsupported_inst(ctx, "SimdMulF32x8", inst.span)
+        case SimdMulF64x4(_, _, _):
+            x86_unsupported_inst(ctx, "SimdMulF64x4", inst.span)
+        case SimdMulI32x4(_, _, _):
+            x86_unsupported_inst(ctx, "SimdMulI32x4", inst.span)
+        case SimdMulI32x8(_, _, _):
+            x86_unsupported_inst(ctx, "SimdMulI32x8", inst.span)
+        case SimdOrI32x4(_, _, _):
+            x86_unsupported_inst(ctx, "SimdOrI32x4", inst.span)
+        case SimdOrI32x8(_, _, _):
+            x86_unsupported_inst(ctx, "SimdOrI32x8", inst.span)
+        case SimdShlI32x4(_, _, _):
+            x86_unsupported_inst(ctx, "SimdShlI32x4", inst.span)
+        case SimdShlI32x8(_, _, _):
+            x86_unsupported_inst(ctx, "SimdShlI32x8", inst.span)
+        case SimdShrI32x4(_, _, _):
+            x86_unsupported_inst(ctx, "SimdShrI32x4", inst.span)
+        case SimdShrI32x8(_, _, _):
+            x86_unsupported_inst(ctx, "SimdShrI32x8", inst.span)
+        case SimdSubF32x4(_, _, _):
+            x86_unsupported_inst(ctx, "SimdSubF32x4", inst.span)
+        case SimdSubF32x8(_, _, _):
+            x86_unsupported_inst(ctx, "SimdSubF32x8", inst.span)
+        case SimdSubF64x4(_, _, _):
+            x86_unsupported_inst(ctx, "SimdSubF64x4", inst.span)
+        case SimdSubI32x4(_, _, _):
+            x86_unsupported_inst(ctx, "SimdSubI32x4", inst.span)
+        case SimdSubI32x8(_, _, _):
+            x86_unsupported_inst(ctx, "SimdSubI32x8", inst.span)
+        case SimdXorI32x4(_, _, _):
+            x86_unsupported_inst(ctx, "SimdXorI32x4", inst.span)
+        case SimdXorI32x8(_, _, _):
+            x86_unsupported_inst(ctx, "SimdXorI32x8", inst.span)
+        case Spawn(_, _, _):
+            x86_unsupported_inst(ctx, "Spawn", inst.span)
+        case StoreGlobal(symbol, value):
+            x86_isel_store_global(ctx, symbol.id, value)
+        case TransferIn(_, _, _, _):
+            x86_unsupported_inst(ctx, "TransferIn", inst.span)
+        case TransferOut(_, _, _, _, _, _):
+            x86_unsupported_inst(ctx, "TransferOut", inst.span)
+        case VhdlConcat(_, _):
+            x86_unsupported_inst(ctx, "VhdlConcat", inst.span)
+        case VhdlPortMap(_, _, _):
+            x86_unsupported_inst(ctx, "VhdlPortMap", inst.span)
+        case VhdlProcess(_, _):
+            x86_unsupported_inst(ctx, "VhdlProcess", inst.span)
+        case VhdlResize(_, _, _, _):
+            x86_unsupported_inst(ctx, "VhdlResize", inst.span)
+        case VhdlSignalAssign(_, _, _):
+            x86_unsupported_inst(ctx, "VhdlSignalAssign", inst.span)
+        case VhdlSlice(_, _, _, _):
+            x86_unsupported_inst(ctx, "VhdlSlice", inst.span)
+        case VhdlVarAssign(_, _):
+            x86_unsupported_inst(ctx, "VhdlVarAssign", inst.span)
+        case Yield(_):
+            x86_unsupported_inst(ctx, "Yield", inst.span)
+        case _:
+            # Not a variant: every MirInstKind now has an arm above, so this is
+            # reachable only by a NEW upstream variant with no arm here, or by a
+            # mis-decoded enum handle. It used to lower to a silent NOP.
+            val unknown_isel_disc = rt_enum_discriminant(inst.kind)
+            panic("E-BACKEND-X86ISEL-INST-Unknown: no x86_64 instruction-selection arm for MIR instruction kind (discriminant {unknown_isel_disc}) at {x86_isel_format_span(inst.span)}")
 
 struct X86Avx2FunctionPlanV1:
     ok: bool
@@ -380,7 +733,7 @@ fn isel_avx2_binop(ctx: ISelContext, dest: LocalId, lhs: MirOperand, rhs: MirOpe
     ISelInstResult(insts: [new_mach_inst(opcode, [op_phys(simd_regs[dest.id]), op_phys(simd_regs[left_id]), op_phys(simd_regs[right_id])])], ctx: ctx)
 
 fn isel_const(ctx: ISelContext, dest: LocalId, value: MirConstValue, type_: MirType) -> ISelInstResult:
-    val lowered = lower_const(ctx, value, type_)
+    val lowered = x64_lower_const(ctx, value, type_)
     val dest_op = local_vreg_op(dest.id)
     # Move the const result to the destination vreg
     var insts = lowered.insts
@@ -499,6 +852,54 @@ fn isel_load(ctx: ISelContext, dest: LocalId, ptr: MirOperand) -> ISelInstResult
     insts.push(new_mach_inst(X86_OP_MOV_REG_MEM, [dest_op, op_mem(operand_get_reg(low.result), 0)]))
     ISelInstResult(insts: insts, ctx: low.ctx)
 
+fn x86_global_name(ctx: ISelContext, symbol_id: i64) -> text:
+    if not ctx.global_names.contains(symbol_id):
+        panic("x86_64 native global references unknown MIR symbol {symbol_id}")
+    ctx.global_names[symbol_id]
+
+fn x86_global_width(ctx: ISelContext, symbol_id: i64) -> i64:
+    if not ctx.global_sizes.contains(symbol_id):
+        panic("x86_64 native global has no storage width for MIR symbol {symbol_id}")
+    ctx.global_sizes[symbol_id]
+
+fn x86_global_load_opcode(width: i64, signed: bool) -> i64:
+    if width == 1 and signed: return X86_OP_MOVSX_REG_MEM8
+    if width == 1 and not signed: return X86_OP_MOVZX_REG_MEM8
+    if width == 2 and signed: return X86_OP_MOVSX_REG_MEM16
+    if width == 2 and not signed: return X86_OP_MOVZX_REG_MEM16
+    if width == 4 and signed: return X86_OP_MOVSX_REG_MEM32
+    if width == 4 and not signed: return X86_OP_MOV_REG_MEM32
+    if width == 8: return X86_OP_MOV_REG_MEM
+    panic("x86_64 native global load has unsupported width {width}")
+
+fn x86_global_store_opcode(width: i64) -> i64:
+    if width == 1: return X86_OP_MOV_MEM8_REG
+    if width == 2: return X86_OP_MOV_MEM16_REG
+    if width == 4: return X86_OP_MOV_MEM32_REG
+    if width == 8: return X86_OP_MOV_MEM_REG
+    panic("x86_64 native global store has unsupported width {width}")
+
+fn x86_isel_global_addr(ctx: ISelContext, dest: LocalId, symbol_id: i64, mutable: bool) -> ISelInstResult:
+    val is_mutable = ctx.global_mutable.contains(symbol_id) and ctx.global_mutable[symbol_id]
+    if not x86_static_write_admitted(is_mutable, mutable):
+        panic("x86_64 native mutable address requested for immutable global '{x86_global_name(ctx, symbol_id)}'")
+    val inst = new_mach_inst(X86_OP_LEA, [local_vreg_op(dest.id), op_sym(x86_global_name(ctx, symbol_id))])
+    ISelInstResult(insts: [inst], ctx: ctx)
+
+fn x86_isel_load_global(ctx: ISelContext, dest: LocalId, symbol_id: i64) -> ISelInstResult:
+    val signed = if ctx.global_signed.contains(symbol_id): ctx.global_signed[symbol_id] else: false
+    val inst = new_mach_inst(x86_global_load_opcode(x86_global_width(ctx, symbol_id), signed), [local_vreg_op(dest.id), op_sym(x86_global_name(ctx, symbol_id))])
+    ISelInstResult(insts: [inst], ctx: ctx)
+
+fn x86_isel_store_global(ctx: ISelContext, symbol_id: i64, value: MirOperand) -> ISelInstResult:
+    val is_mutable = ctx.global_mutable.contains(symbol_id) and ctx.global_mutable[symbol_id]
+    if not x86_static_write_admitted(is_mutable, true):
+        panic("x86_64 native store rejected for immutable global '{x86_global_name(ctx, symbol_id)}'")
+    val lowered = lower_operand(ctx, value)
+    var insts = lowered.insts
+    insts.push(new_mach_inst(x86_global_store_opcode(x86_global_width(ctx, symbol_id)), [op_sym(x86_global_name(ctx, symbol_id)), lowered.result]))
+    ISelInstResult(insts: insts, ctx: lowered.ctx)
+
 fn isel_store(ctx: ISelContext, ptr: MirOperand, value: MirOperand) -> ISelInstResult:
     val ptr_low = lower_operand(ctx, ptr)
     val val_low = lower_operand(ptr_low.ctx, value)
@@ -508,7 +909,7 @@ fn isel_store(ctx: ISelContext, ptr: MirOperand, value: MirOperand) -> ISelInstR
     insts.push(new_mach_inst(X86_OP_MOV_MEM_REG, [op_mem(operand_get_reg(ptr_low.result), 0), val_low.result]))
     ISelInstResult(insts: insts, ctx: val_low.ctx)
 
-fn isel_call(ctx: ISelContext, dest: LocalId, func_op: MirOperand, args: [MirOperand]) -> ISelInstResult:
+fn isel_call(ctx: ISelContext, dest: LocalId?, func_op: MirOperand, args: [MirOperand]) -> ISelInstResult:
     var insts: [MachInst] = []
     var current_ctx = ctx
 
@@ -527,10 +928,23 @@ fn isel_call(ctx: ISelContext, dest: LocalId, func_op: MirOperand, args: [MirOpe
 
     # Emit call
     match func_op.kind:
-        case Const(mirconstvalue_Str(name), _):
-            # Direct call to named function
-            current_ctx = isel_add_extern(current_ctx, name)
-            insts.push(new_mach_inst(X86_OP_CALL, [op_sym(name)]))
+        case Const(const_value, _):
+            # `mirconstvalue_Str(name)` was written here as a nested pattern.
+            # No such symbol exists anywhere in the tree -- and even the
+            # correct spelling `MirConstValue.Str(name)` would be wrong in a
+            # payload position, because a nested enum sub-pattern always
+            # matches and never binds on the native/JIT lanes. Destructure the
+            # constant with a second, top-level match.
+            match const_value:
+                case Str(name):
+                    # Direct call to named function
+                    current_ctx = isel_add_extern(current_ctx, name)
+                    insts.push(new_mach_inst(X86_OP_CALL, [op_sym(name)]))
+                case _:
+                    # A non-symbol constant callee has no call lowering.
+                    # Emitting a NOP here would silently drop the call and
+                    # then read whatever stale value rax holds as the result.
+                    panic("x86_64 isel: call through non-symbol constant callee has no lowering")
         case Copy(local):
             # Indirect call through register
             insts.push(new_mach_inst(X86_OP_CALL_INDIRECT, [local_vreg_op(local.id)]))
@@ -660,8 +1074,13 @@ fn isel_cast(ctx: ISelContext, dest: LocalId, operand: MirOperand, target: MirTy
     ISelInstResult(insts: insts, ctx: low.ctx)
 
 fn isel_intrinsic(ctx: ISelContext, dest: LocalId?, name: text, args: [MirOperand]) -> ISelInstResult:
+    val supported = (name == BIT_ROTATE_LEFT or name == BIT_ROTATE_RIGHT or
+        name == BIT_POPCOUNT or name == BIT_BSWAP or
+        name == MIR_STORAGE_PROJECT_ADDRESS_V1)
+    if not supported:
+        panic("E-BACKEND-X86ISEL-INTRINSIC-Unsupported: x86_64 instruction selection does not lower intrinsic '{name}'")
     if not dest.?:
-        return ISelInstResult(insts: [], ctx: ctx)
+        panic("E-BACKEND-X86ISEL-INTRINSIC-MissingDest: x86_64 intrinsic '{name}' requires a destination")
 
     if name == BIT_ROTATE_LEFT:
         return isel_rotate(ctx, dest.unwrap(), args, true)
@@ -790,7 +1209,7 @@ fn isel_rotate(ctx: ISelContext, dest: LocalId, args: [MirOperand], is_left: boo
 # Instruction Selection - Terminators
 # ============================================================================
 
-fn isel_terminator(ctx: ISelContext, term: MirTerminator) -> ISelInstResult:
+fn isel_terminator(ctx: ISelContext, term: MirTerminator, unwind_trampoline_id: i64) -> ISelInstResult:
     match term:
         case Goto(target):
             val inst = new_mach_inst(X86_OP_JMP, [op_label(target.id)])
@@ -832,21 +1251,73 @@ fn isel_terminator(ctx: ISelContext, term: MirTerminator) -> ISelInstResult:
             # then ran straight on into whatever block was laid out next, with
             # exactly the corrupt state the abort existed to stop. INT3 traps.
             ISelInstResult(insts: [new_mach_inst(X86_OP_INT3, [])], ctx: ctx)
-        case CallTerminator(dest, func, args, normal, unwind):
+        case Throw(payload, type_tag):
+            val payload_low = lower_operand(ctx, payload)
+            val tag_low = lower_operand(payload_low.ctx, type_tag)
+            var throw_ctx = isel_add_extern(tag_low.ctx, "rt_exception_throw")
+            var insts = payload_low.insts
+            for tag_inst in tag_low.insts:
+                insts.push(tag_inst)
+            insts.push(new_mach_inst(X86_OP_MOV_REG_REG, [op_phys(X86_RDI), payload_low.result]))
+            insts.push(new_mach_inst(X86_OP_MOV_REG_REG, [op_phys(X86_RSI), tag_low.result]))
+            insts.push(new_mach_inst(X86_OP_CALL, [op_sym("rt_exception_throw")]))
+            insts.push(new_mach_inst(X86_OP_INT3, []))
+            ISelInstResult(insts: insts, ctx: throw_ctx)
+        case Resume(payload, type_tag):
+            val payload_low = lower_operand(ctx, payload)
+            val tag_low = lower_operand(payload_low.ctx, type_tag)
+            var resume_ctx = isel_add_extern(tag_low.ctx, "rt_exception_resume")
+            var insts = payload_low.insts
+            for tag_inst in tag_low.insts:
+                insts.push(tag_inst)
+            insts.push(new_mach_inst(X86_OP_MOV_REG_REG, [op_phys(X86_RDI), payload_low.result]))
+            insts.push(new_mach_inst(X86_OP_MOV_REG_REG, [op_phys(X86_RSI), tag_low.result]))
+            insts.push(new_mach_inst(X86_OP_CALL, [op_sym("rt_exception_resume")]))
+            insts.push(new_mach_inst(X86_OP_INT3, []))
+            ISelInstResult(insts: insts, ctx: resume_ctx)
+        case CallTerminator(dest, func, args, normal, unwind, unwind_payload_dest, unwind_type_tag_dest):
             # Contract (mir_interpreter.spl `case CallTerminator`): perform the
             # call, bind the return value into `dest` when present, then
             # transfer to `normal`. The NOP this used to emit dropped both the
             # call and the edge.
             if unwind.?:
-                # The native backend has no landing pads. Silently discarding
-                # the unwind edge would send an unwinding call into `normal`.
-                panic("x86_64 isel: CallTerminator with an unwind edge has no lowering (native backend has no exception handling)")
+                var unwind_ctx = isel_add_extern(ctx, "rt_exception_frame_push")
+                unwind_ctx = isel_add_extern(unwind_ctx, "_setjmp")
+                unwind_ctx = isel_add_extern(unwind_ctx, "rt_exception_frame_capture")
+                unwind_ctx = isel_add_extern(unwind_ctx, "rt_exception_caught_type_tag")
+                unwind_ctx = isel_add_extern(unwind_ctx, "rt_exception_frame_pop")
+                unwind_ctx = isel_alloc_vreg(unwind_ctx)
+                val frame = op_reg(virtual_reg(isel_get_vreg(unwind_ctx)))
+                unwind_ctx = isel_alloc_vreg(unwind_ctx)
+                val capture_status = op_reg(virtual_reg(isel_get_vreg(unwind_ctx)))
+                var insts: [MachInst] = []
+                insts.push(new_mach_inst(X86_OP_CALL, [op_sym("rt_exception_frame_push")]))
+                insts.push(new_mach_inst(X86_OP_MOV_REG_REG, [frame, op_phys(X86_RAX)]))
+                insts.push(new_mach_inst(X86_OP_MOV_REG_REG, [op_phys(X86_RDI), frame]))
+                insts.push(new_mach_inst(X86_OP_CALL, [op_sym("_setjmp")]))
+                insts.push(new_mach_inst(X86_OP_MOV_REG_REG, [op_phys(X86_RDI), op_phys(X86_RAX)]))
+                # SysV returns the two-word capture as payload/status in
+                # RAX/RDX, so no value must survive another call.
+                insts.push(new_mach_inst(X86_OP_CALL, [op_sym("rt_exception_frame_capture")]))
+                match unwind_payload_dest:
+                    case Some(d): insts.push(new_mach_inst(X86_OP_MOV_REG_REG, [local_vreg_op(d.id), op_phys(X86_RAX)]))
+                    case None: ()
+                insts.push(new_mach_inst(X86_OP_MOV_REG_REG, [capture_status, op_phys(X86_RDX)]))
+                insts.push(new_mach_inst(X86_OP_TEST, [capture_status, capture_status]))
+                val exceptional_target = if unwind_trampoline_id >= 0: unwind_trampoline_id else: unwind.unwrap().id
+                insts.push(new_mach_inst(X86_OP_JNZ, [op_label(exceptional_target)]))
+                val call_res = isel_call(unwind_ctx, dest, func, args)
+                for call_inst in call_res.insts:
+                    insts.push(call_inst)
+                insts.push(new_mach_inst(X86_OP_CALL, [op_sym("rt_exception_frame_pop")]))
+                insts.push(new_mach_inst(X86_OP_JMP, [op_label(normal.id)]))
+                return ISelInstResult(insts: insts, ctx: call_res.ctx)
             val call_res = isel_call(ctx, dest, func, args)
             var insts = call_res.insts
             insts.push(new_mach_inst(X86_OP_JMP, [op_label(normal.id)]))
             ISelInstResult(insts: insts, ctx: call_res.ctx)
         case _:
-            # All seven MirTerminator variants are handled above. A NOP here
+            # All nine MirTerminator variants are handled above. A NOP here
             # would silently delete a terminator; fail loudly instead.
             panic("x86_64 isel: unhandled MirTerminator variant -- terminator lowered to nothing")
 

@@ -14,8 +14,137 @@ use common.io.window_event.{
     WINDOW_MOD_SUPER,
 }
 
-@allow(star_import) # reason: exact canonical SDL2 ABI aliases; provider exports no product policy
-use std.nogc_sync_mut.sffi.window_abi.*
+# ============================================================================
+# Tier 1: Extern Declarations (Raw SFFI to C runtime_sdl2.c)
+# ============================================================================
+
+# --- Initialization ---
+@unsafe(reason: "raw SDL2 initialization status ABI; zero sentinel means provider or owner initialization failure", capabilities: [ffi])
+extern fn rt_sdl2_init() -> i64
+@unsafe(reason: "raw SDL2 owner shutdown status ABI; false sentinel means unavailable provider or wrong owner", capabilities: [ffi])
+extern fn rt_sdl2_quit() -> bool
+
+# --- Window Management ---
+@unsafe(reason: "raw SDL2 owned generation-handle ABI; zero sentinel means invalid title, dimensions, provider, owner, or capacity", capabilities: [ffi])
+extern fn rt_sdl2_create_window(title: text, width: i64, height: i64) -> i64
+@unsafe(reason: "raw SDL2 owned generation-handle release status ABI; false sentinel means stale handle or wrong owner", capabilities: [ffi])
+extern fn rt_sdl2_destroy_window(handle: i64) -> bool
+@unsafe(reason: "raw SDL2 generation-checked size ABI; negative sentinel means invalid handle", capabilities: [ffi])
+extern fn rt_sdl2_get_window_width(handle: i64) -> i64
+@unsafe(reason: "raw SDL2 generation-checked size ABI; negative sentinel means invalid handle", capabilities: [ffi])
+extern fn rt_sdl2_get_window_height(handle: i64) -> i64
+@unsafe(reason: "raw SDL2 borrowed title status ABI; false sentinel means invalid handle or title", capabilities: [ffi])
+extern fn rt_sdl2_set_window_title(handle: i64, title: text) -> bool
+
+# --- Framebuffer Present ---
+# pixels is [i64] (SplArray* of packed RGBA i64 values)
+@unsafe(reason: "raw SDL2 borrowed pixel-array status ABI; false sentinel means invalid handle, bounds, descriptor, allocation, or presentation", capabilities: [ffi])
+extern fn rt_sdl2_present_rgba(window_handle: i64, pixels: [i64], width: i64, height: i64) -> bool
+
+# --- Event Polling ---
+# Returns event type: 0=none, 1=quit, 2=keydown, 3=keyup,
+#   4=mousemotion, 5=mousedown, 6=mouseup, 7=mousewheel,
+#   8=windowevent, 9=textinput
+@unsafe(reason: "raw SDL2 provider ABI; negative status sentinel means unavailable provider and zero means no supported event", capabilities: [ffi])
+extern fn rt_sdl2_poll_event() -> i64
+@unsafe(reason: "raw SDL2 provider ABI; negative status sentinel means unavailable provider and zero means timeout or no supported event", capabilities: [ffi])
+extern fn rt_sdl2_wait_event(timeout_ms: i64) -> i64
+@unsafe(reason: "raw SDL2 provider ABI; zero sentinel requires the cached event to be keyboard input", capabilities: [ffi])
+extern fn rt_sdl2_event_key_code() -> i64
+@unsafe(reason: "raw SDL2 provider ABI; zero sentinel requires the cached event to be keyboard input", capabilities: [ffi])
+extern fn rt_sdl2_event_key_sym() -> i64
+@unsafe(reason: "raw SDL2 provider ABI; zero sentinel requires the cached event to be keyboard input", capabilities: [ffi])
+extern fn rt_sdl2_event_key_mod() -> i64
+@unsafe(reason: "raw SDL2 provider ABI; nonnull borrowed text is valid until the next event poll", capabilities: [ffi])
+extern fn rt_sdl2_event_text() -> text
+@unsafe(reason: "raw SDL2 provider ABI; zero sentinel requires the cached event to be mouse input", capabilities: [ffi])
+extern fn rt_sdl2_event_mouse_x() -> i64
+@unsafe(reason: "raw SDL2 provider ABI; zero sentinel requires the cached event to be mouse input", capabilities: [ffi])
+extern fn rt_sdl2_event_mouse_y() -> i64
+@unsafe(reason: "raw SDL2 provider ABI; zero sentinel requires the cached event to be a mouse button event", capabilities: [ffi])
+extern fn rt_sdl2_event_mouse_button() -> i64
+@unsafe(reason: "raw SDL2 provider ABI; zero sentinel requires the cached event to be mouse wheel input", capabilities: [ffi])
+extern fn rt_sdl2_event_wheel_x() -> i64
+@unsafe(reason: "raw SDL2 provider ABI; zero sentinel requires the cached event to be mouse wheel input", capabilities: [ffi])
+extern fn rt_sdl2_event_wheel_y() -> i64
+
+# --- Keyboard State (polled) ---
+@unsafe(reason: "raw SDL2 provider ABI; negative status sentinel means unavailable provider or invalid scancode", capabilities: [ffi])
+extern fn rt_sdl2_is_key_pressed(scancode: i64) -> i64
+
+# --- Mouse State (polled) ---
+@unsafe(reason: "raw SDL2 provider ABI; INT64_MIN sentinel means unavailable provider", capabilities: [ffi])
+extern fn rt_sdl2_get_mouse_x() -> i64
+@unsafe(reason: "raw SDL2 provider ABI; INT64_MIN sentinel means unavailable provider", capabilities: [ffi])
+extern fn rt_sdl2_get_mouse_y() -> i64
+@unsafe(reason: "raw SDL2 provider ABI; negative status sentinel means unavailable provider or invalid button", capabilities: [ffi])
+extern fn rt_sdl2_is_mouse_button_pressed(button: i64) -> i64
+
+# --- Time ---
+@unsafe(reason: "raw SDL2 provider ABI; negative status sentinel means unavailable provider", capabilities: [ffi])
+extern fn rt_sdl2_get_ticks_ms() -> i64
+@unsafe(reason: "raw SDL2 provider ABI; negative status sentinel means unavailable counter and INT64_MAX is saturation", capabilities: [ffi])
+extern fn rt_sdl2_get_ticks_ns() -> i64
+
+# --- Window State ---
+@unsafe(reason: "raw SDL2 owner-thread quit-state ABI; negative sentinel means unavailable owner", capabilities: [ffi])
+extern fn rt_sdl2_window_should_close() -> i64
+@unsafe(reason: "raw SDL2 owner-thread quit-state status ABI; false sentinel means unavailable owner", capabilities: [ffi])
+extern fn rt_sdl2_clear_quit() -> bool
+
+# --- Window Events ---
+@unsafe(reason: "raw SDL2 provider ABI; zero sentinel requires the cached event to be a window event", capabilities: [ffi])
+extern fn rt_sdl2_event_window_event_id() -> i64
+@unsafe(reason: "raw SDL2 provider ABI; zero sentinel requires the cached event to be a window event", capabilities: [ffi])
+extern fn rt_sdl2_event_window_data1() -> i64
+@unsafe(reason: "raw SDL2 provider ABI; zero sentinel requires the cached event to be a window event", capabilities: [ffi])
+extern fn rt_sdl2_event_window_data2() -> i64
+
+# --- Window Properties ---
+@unsafe(reason: "raw SDL2 generation-checked status ABI; false sentinel means invalid handle", capabilities: [ffi])
+extern fn rt_sdl2_set_window_resizable(handle: i64, resizable: i64) -> bool
+@unsafe(reason: "raw SDL2 generation-checked fullscreen status ABI; false status sentinel reports stale handle or SDL failure", capabilities: [ffi])
+extern fn rt_sdl2_set_window_fullscreen_checked(handle: i64, fullscreen: i64) -> bool
+@unsafe(reason: "raw SDL2 generation-checked status ABI; false sentinel means invalid handle or size", capabilities: [ffi])
+extern fn rt_sdl2_set_window_size(handle: i64, width: i64, height: i64) -> bool
+@unsafe(reason: "raw SDL2 generation-checked status ABI; false sentinel means invalid handle or coordinate", capabilities: [ffi])
+extern fn rt_sdl2_set_window_position(handle: i64, x: i64, y: i64) -> bool
+@unsafe(reason: "raw SDL2 generation-checked position ABI; INT64_MIN sentinel means invalid handle", capabilities: [ffi])
+extern fn rt_sdl2_get_window_position_x(handle: i64) -> i64
+@unsafe(reason: "raw SDL2 generation-checked position ABI; INT64_MIN sentinel means invalid handle", capabilities: [ffi])
+extern fn rt_sdl2_get_window_position_y(handle: i64) -> i64
+@unsafe(reason: "raw SDL2 generation-checked status ABI; false sentinel means invalid handle", capabilities: [ffi])
+extern fn rt_sdl2_show_window(handle: i64) -> bool
+@unsafe(reason: "raw SDL2 generation-checked status ABI; false sentinel means invalid handle", capabilities: [ffi])
+extern fn rt_sdl2_hide_window(handle: i64) -> bool
+@unsafe(reason: "raw SDL2 generation-checked minimum-size status ABI; false status sentinel reports stale handle or invalid bounds", capabilities: [ffi])
+extern fn rt_sdl2_set_window_minimum_size(handle: i64, width: i64, height: i64) -> bool
+@unsafe(reason: "raw SDL2 generation-checked maximum-size status ABI; false status sentinel reports stale handle or invalid bounds", capabilities: [ffi])
+extern fn rt_sdl2_set_window_maximum_size(handle: i64, width: i64, height: i64) -> bool
+@unsafe(reason: "raw SDL2 generation-checked minimize status ABI; false status sentinel reports stale handle", capabilities: [ffi])
+extern fn rt_sdl2_minimize_window(handle: i64) -> bool
+@unsafe(reason: "raw SDL2 generation-checked maximize status ABI; false status sentinel reports stale handle", capabilities: [ffi])
+extern fn rt_sdl2_maximize_window(handle: i64) -> bool
+@unsafe(reason: "raw SDL2 generation-checked restore status ABI; false status sentinel reports stale handle", capabilities: [ffi])
+extern fn rt_sdl2_restore_window(handle: i64) -> bool
+@unsafe(reason: "raw SDL2 generation-checked border status ABI; false status sentinel reports stale handle", capabilities: [ffi])
+extern fn rt_sdl2_set_window_bordered(handle: i64, bordered: i64) -> bool
+@unsafe(reason: "raw SDL2 generation-checked always-on-top status ABI; false status sentinel reports stale handle or unavailable provider capability", capabilities: [ffi])
+extern fn rt_sdl2_set_window_always_on_top(handle: i64, on_top: i64) -> bool
+@unsafe(reason: "raw SDL2 generation-checked focus status ABI; false status sentinel reports stale handle or focus refusal", capabilities: [ffi])
+extern fn rt_sdl2_focus_window(handle: i64) -> bool
+@unsafe(reason: "raw SDL2 generation-checked flag ABI; negative sentinel means stale handle or wrong owner", capabilities: [ffi])
+extern fn rt_sdl2_window_flags(handle: i64) -> i64
+@unsafe(reason: "raw SDL2 nonnull borrowed error text ABI; storage remains provider-owned", capabilities: [ffi])
+extern fn rt_sdl2_last_error() -> text
+
+# --- Cursor ---
+@unsafe(reason: "raw SDL2 owner-thread cursor visibility status ABI; false sentinel means provider, owner, or SDL failure", capabilities: [ffi])
+extern fn rt_sdl2_set_cursor_visible(visible: i64) -> bool
+@unsafe(reason: "raw SDL2 generation-checked cursor grab status ABI; false sentinel means stale handle or wrong owner", capabilities: [ffi])
+extern fn rt_sdl2_set_cursor_grab(handle: i64, grab: i64) -> bool
+@unsafe(reason: "raw SDL2 generation-checked cursor warp status ABI; false sentinel means stale handle, wrong owner, or invalid coordinate", capabilities: [ffi])
+extern fn rt_sdl2_warp_mouse(handle: i64, x: i64, y: i64) -> bool
 
 # ============================================================================
 # Tier 2: Simple-Friendly Wrapper Functions
@@ -30,36 +159,105 @@ struct EventLoop:
     is_valid: bool
 
 fn window_create_event_loop() -> EventLoop:
-    val result = sdl2_native_init()
+    var result: i64 = 0
+    unsafe(capabilities: [ffi]):
+        result = rt_sdl2_init()
     EventLoop(handle: result, is_valid: result > 0)
 
 fn window_destroy_event_loop(event_loop: EventLoop) -> bool:
     if event_loop.is_valid:
-        sdl2_native_quit()
-    true
+        var stopped = false
+        unsafe(capabilities: [ffi]):
+            stopped = rt_sdl2_quit()
+        stopped
+    else:
+        true
 
 fn window_run_event_loop(event_loop: EventLoop) -> bool:
     # SDL2 does not have a blocking run loop; polling is done per-frame.
     event_loop.is_valid
 
+fn window_should_close() -> bool?:
+    var state: i64 = -1
+    unsafe(capabilities: [ffi]):
+        state = rt_sdl2_window_should_close()
+    if state < 0:
+        return nil
+    state != 0
+
+fn window_clear_quit() -> bool:
+    var cleared = false
+    unsafe(capabilities: [ffi]):
+        cleared = rt_sdl2_clear_quit()
+    cleared
+
+# Polled input preserves provider/argument failure as typed absence. Each
+# wrapper performs exactly the same single SDL query as the raw ABI.
+fn window_is_key_pressed(scancode: i64) -> bool?:
+    var state: i64 = -1
+    unsafe(capabilities: [ffi]):
+        state = rt_sdl2_is_key_pressed(scancode)
+    if state < 0:
+        return nil
+    state != 0
+
+fn window_is_mouse_button_pressed(button: i64) -> bool?:
+    var state: i64 = -1
+    unsafe(capabilities: [ffi]):
+        state = rt_sdl2_is_mouse_button_pressed(button)
+    if state < 0:
+        return nil
+    state != 0
+
+fn window_ticks_ms() -> i64?:
+    var ticks: i64 = -1
+    unsafe(capabilities: [ffi]):
+        ticks = rt_sdl2_get_ticks_ms()
+    if ticks < 0:
+        return nil
+    ticks
+
+fn window_ticks_ns() -> i64?:
+    var ticks: i64 = -1
+    unsafe(capabilities: [ffi]):
+        ticks = rt_sdl2_get_ticks_ns()
+    if ticks < 0:
+        return nil
+    ticks
+
 struct EventBatch:
     handle: i64
     count: i64
     event_loop: EventLoop
+    is_valid: bool
 
 fn window_poll_events(event_loop: EventLoop, max_events: i64) -> EventBatch:
     if not event_loop.is_valid or max_events <= 0:
-        EventBatch(handle: 0, count: 0, event_loop: event_loop)
+        EventBatch(handle: 0, count: 0, event_loop: event_loop, is_valid: false)
     else:
-        val handle = sdl2_native_poll_event()
-        EventBatch(handle: handle, count: if handle == 0: 0 else: 1, event_loop: event_loop)
+        var handle: i64 = -1
+        unsafe(capabilities: [ffi]):
+            handle = rt_sdl2_poll_event()
+        EventBatch(
+            handle: if handle < 0: 0 else: handle,
+            count: if handle < 0: 0 elif handle == 0: 0 else: 1,
+            event_loop: event_loop,
+            is_valid: handle >= 0
+        )
 
 fn window_wait_events(event_loop: EventLoop, timeout_ms: i64) -> EventBatch:
     if not event_loop.is_valid:
-        EventBatch(handle: 0, count: 0, event_loop: event_loop)
+        EventBatch(handle: 0, count: 0, event_loop: event_loop, is_valid: false)
     else:
-        val handle = sdl2_native_wait_event(timeout_ms)
-        EventBatch(handle: handle, count: if handle == 0: 0 else: 1, event_loop: event_loop)
+        var handle: i64 = -1
+        unsafe(capabilities: [ffi]):
+            handle = rt_sdl2_wait_event(timeout_ms)
+        EventBatch(
+            handle: if handle < 0: 0 else: handle,
+            count: if handle < 0: 0 elif handle == 0: 0 else: 1,
+            event_loop: event_loop,
+            is_valid: handle >= 0
+        )
 
 # --- Window Configuration ---
 
@@ -108,29 +306,44 @@ fn window_create(event_loop: EventLoop, width: i64, height: i64, title: text) ->
     if not event_loop.is_valid:
         Window(handle: 0, event_loop: event_loop, is_valid: false)
     else:
-        val handle = sdl2_native_create_window(title, width, height)
+        var handle: i64 = 0
+        unsafe(capabilities: [ffi]):
+            handle = rt_sdl2_create_window(title, width, height)
         Window(handle: handle, event_loop: event_loop, is_valid: handle > 0)
 
+@unsafe(reason: "minimal direct SDL2 provider call", capabilities: [ffi])
 fn window_create_with_config(event_loop: EventLoop, config: WindowConfig) -> Window:
     if not event_loop.is_valid:
         Window(handle: 0, event_loop: event_loop, is_valid: false)
     else:
-        val handle = sdl2_native_create_window(config.title, config.width, config.height)
+        val handle = rt_sdl2_create_window(config.title, config.width, config.height)
         if handle > 0:
             if not config.resizable:
-                sdl2_native_set_window_resizable(handle, 0)
+                rt_sdl2_set_window_resizable(handle, 0)
             if config.fullscreen:
-                rt_sdl2_set_window_fullscreen(handle, 1)
+                rt_sdl2_set_window_fullscreen_checked(handle, 1)
+            if config.maximized:
+                rt_sdl2_maximize_window(handle)
+            if config.min_width > 0 and config.min_height > 0:
+                rt_sdl2_set_window_minimum_size(handle, config.min_width, config.min_height)
+            if config.max_width > 0 and config.max_height > 0:
+                rt_sdl2_set_window_maximum_size(handle, config.max_width, config.max_height)
+            if not config.decorations:
+                rt_sdl2_set_window_bordered(handle, 0)
+            if config.always_on_top:
+                rt_sdl2_set_window_always_on_top(handle, 1)
             if not config.visible:
-                sdl2_native_hide_window(handle)
+                rt_sdl2_hide_window(handle)
         Window(handle: handle, event_loop: event_loop, is_valid: handle > 0)
 
 fn window_destroy(window: Window) -> bool:
     if not window.is_valid:
         true
     else:
-        sdl2_native_destroy_window(window.handle)
-        true
+        var destroyed = false
+        unsafe(capabilities: [ffi]):
+            destroyed = rt_sdl2_destroy_window(window.handle)
+        destroyed
 
 # --- Window Properties ---
 
@@ -142,41 +355,67 @@ struct Position:
     x: i64
     y: i64
 
-fn window_get_size(window: Window) -> Size:
+fn window_mouse_position() -> Position?:
+    val invalid_coordinate: i64 = -9223372036854775807 - 1
+    var x: i64 = invalid_coordinate
+    var y: i64 = invalid_coordinate
+    unsafe(capabilities: [ffi]):
+        x = rt_sdl2_get_mouse_x()
+        y = rt_sdl2_get_mouse_y()
+    if x == invalid_coordinate or y == invalid_coordinate:
+        return nil
+    Position(x: x, y: y)
+
+fn window_get_size(window: Window) -> Size?:
     if not window.is_valid:
-        Size(width: 0, height: 0)
+        nil
     else:
-        val w = sdl2_native_get_window_width(window.handle)
-        val h = sdl2_native_get_window_height(window.handle)
+        var w: i64 = -1
+        var h: i64 = -1
+        unsafe(capabilities: [ffi]):
+            w = rt_sdl2_get_window_width(window.handle)
+            h = rt_sdl2_get_window_height(window.handle)
+        if w < 0 or h < 0:
+            return nil
         Size(width: w, height: h)
 
 fn window_set_size(window: Window, size: Size) -> bool:
     if not window.is_valid:
         false
     else:
-        sdl2_native_set_window_size(window.handle, size.width, size.height)
-        true
+        var ok = false
+        unsafe(capabilities: [ffi]):
+            ok = rt_sdl2_set_window_size(window.handle, size.width, size.height)
+        ok
 
-fn window_get_position(window: Window) -> Position:
+fn window_get_position(window: Window) -> Position?:
     if not window.is_valid:
-        Position(x: 0, y: 0)
+        nil
     else:
-        val px = sdl2_native_get_window_position_x(window.handle)
-        val py = sdl2_native_get_window_position_y(window.handle)
+        val invalid_coordinate: i64 = -9223372036854775807 - 1
+        var px: i64 = invalid_coordinate
+        var py: i64 = invalid_coordinate
+        unsafe(capabilities: [ffi]):
+            px = rt_sdl2_get_window_position_x(window.handle)
+            py = rt_sdl2_get_window_position_y(window.handle)
+        if px == invalid_coordinate or py == invalid_coordinate:
+            return nil
         Position(x: px, y: py)
 
 fn window_set_position(window: Window, pos: Position) -> bool:
     if not window.is_valid:
         false
     else:
-        sdl2_native_set_window_position(window.handle, pos.x, pos.y)
-        true
+        var ok = false
+        unsafe(capabilities: [ffi]):
+            ok = rt_sdl2_set_window_position(window.handle, pos.x, pos.y)
+        ok
 
-fn window_get_inner_size(window: Window) -> Size:
+fn window_get_inner_size(window: Window) -> Size?:
     # SDL2 window size is the client area (inner size)
     window_get_size(window)
 
-fn window_get_outer_size(window: Window) -> Size:
+fn window_get_outer_size(window: Window) -> Size?:
     # SDL2 does not distinguish outer size easily; return inner size
     window_get_size(window)
 
@@ -184,13 +423,19 @@ fn window_set_min_size(window: Window, size: Size) -> bool:
     if not window.is_valid:
         false
     else:
-        sdl2_native_set_window_minimum_size(window.handle, size.width, size.height) != 0
+        var ok = false
+        unsafe(capabilities: [ffi]):
+            ok = rt_sdl2_set_window_minimum_size(window.handle, size.width, size.height)
+        ok
 
 fn window_set_max_size(window: Window, size: Size) -> bool:
     if not window.is_valid:
         false
     else:
-        sdl2_native_set_window_maximum_size(window.handle, size.width, size.height) != 0
+        var ok = false
+        unsafe(capabilities: [ffi]):
+            ok = rt_sdl2_set_window_maximum_size(window.handle, size.width, size.height)
+        ok
 
 # --- Window State ---
 
@@ -198,76 +443,122 @@ fn window_set_title(window: Window, title: text) -> bool:
     if not window.is_valid:
         false
     else:
-        sdl2_native_set_window_title(window.handle, title)
-        true
+        var ok = false
+        unsafe(capabilities: [ffi]):
+            ok = rt_sdl2_set_window_title(window.handle, title)
+        ok
 
 fn window_set_visible(window: Window, visible: bool) -> bool:
     if not window.is_valid:
         false
     else:
+        var ok = false
         if visible:
-            sdl2_native_show_window(window.handle)
+            unsafe(capabilities: [ffi]):
+                ok = rt_sdl2_show_window(window.handle)
         else:
-            sdl2_native_hide_window(window.handle)
-        true
+            unsafe(capabilities: [ffi]):
+                ok = rt_sdl2_hide_window(window.handle)
+        ok
 
-fn window_is_visible(window: Window) -> bool:
-    window.is_valid and (sdl2_native_window_flags(window.handle) & 4) != 0
+fn window_is_visible(window: Window) -> bool?:
+    if not window.is_valid:
+        return nil
+    var flags: i64 = -1
+    unsafe(capabilities: [ffi]):
+        flags = rt_sdl2_window_flags(window.handle)
+    if flags < 0:
+        return nil
+    (flags & 4) != 0
 
 fn window_set_resizable(window: Window, resizable: bool) -> bool:
     if not window.is_valid:
         false
     else:
-        sdl2_native_set_window_resizable(window.handle, if resizable: 1 else: 0)
-        true
+        var ok = false
+        unsafe(capabilities: [ffi]):
+            ok = rt_sdl2_set_window_resizable(window.handle, if resizable: 1 else: 0)
+        ok
 
 fn window_set_minimized(window: Window, minimized: bool) -> bool:
     if not window.is_valid:
         false
     else:
-        if minimized:
-            sdl2_native_minimize_window(window.handle) != 0
-        else:
-            sdl2_native_restore_window(window.handle) != 0
+        var ok = false
+        unsafe(capabilities: [ffi]):
+            if minimized:
+                ok = rt_sdl2_minimize_window(window.handle)
+            else:
+                ok = rt_sdl2_restore_window(window.handle)
+        ok
 
 fn window_set_maximized(window: Window, maximized: bool) -> bool:
     if not window.is_valid:
         false
     else:
-        if maximized:
-            sdl2_native_maximize_window(window.handle) != 0
-        else:
-            sdl2_native_restore_window(window.handle) != 0
+        var ok = false
+        unsafe(capabilities: [ffi]):
+            if maximized:
+                ok = rt_sdl2_maximize_window(window.handle)
+            else:
+                ok = rt_sdl2_restore_window(window.handle)
+        ok
 
-fn window_is_maximized(window: Window) -> bool:
-    window.is_valid and (sdl2_native_window_flags(window.handle) & 128) != 0
+fn window_is_maximized(window: Window) -> bool?:
+    if not window.is_valid:
+        return nil
+    var flags: i64 = -1
+    unsafe(capabilities: [ffi]):
+        flags = rt_sdl2_window_flags(window.handle)
+    if flags < 0:
+        return nil
+    (flags & 128) != 0
 
 fn window_set_fullscreen(window: Window, fullscreen: bool) -> bool:
     if not window.is_valid:
         false
     else:
-        sdl2_native_set_window_fullscreen_checked(window.handle, if fullscreen: 1 else: 0) != 0
+        var ok = false
+        unsafe(capabilities: [ffi]):
+            ok = rt_sdl2_set_window_fullscreen_checked(window.handle, if fullscreen: 1 else: 0)
+        ok
 
-fn window_is_fullscreen(window: Window) -> bool:
-    window.is_valid and (sdl2_native_window_flags(window.handle) & 4097) != 0
+fn window_is_fullscreen(window: Window) -> bool?:
+    if not window.is_valid:
+        return nil
+    var flags: i64 = -1
+    unsafe(capabilities: [ffi]):
+        flags = rt_sdl2_window_flags(window.handle)
+    if flags < 0:
+        return nil
+    (flags & 4097) != 0
 
 fn window_set_decorations(window: Window, decorations: bool) -> bool:
     if not window.is_valid:
         false
     else:
-        sdl2_native_set_window_bordered(window.handle, if decorations: 1 else: 0) != 0
+        var ok = false
+        unsafe(capabilities: [ffi]):
+            ok = rt_sdl2_set_window_bordered(window.handle, if decorations: 1 else: 0)
+        ok
 
 fn window_set_always_on_top(window: Window, on_top: bool) -> bool:
     if not window.is_valid:
         false
     else:
-        sdl2_native_set_window_always_on_top(window.handle, if on_top: 1 else: 0) != 0
+        var ok = false
+        unsafe(capabilities: [ffi]):
+            ok = rt_sdl2_set_window_always_on_top(window.handle, if on_top: 1 else: 0)
+        ok
 
 fn window_focus(window: Window) -> bool:
     if not window.is_valid:
         false
     else:
-        sdl2_native_focus_window(window.handle) != 0
+        var ok = false
+        unsafe(capabilities: [ffi]):
+            ok = rt_sdl2_focus_window(window.handle)
+        ok
 
 fn window_request_redraw(window: Window) -> bool:
     # SDL2 does not have a redraw request concept; rendering is immediate
@@ -280,7 +571,10 @@ fn window_present_rgba(window: Window, width: i64, height: i64, pixels: [i64]) -
         # Pass the pixel array directly to the C runtime.
         # The C function receives the SplArray* and iterates the packed
         # RGBA i64 values to build the SDL surface.
-        sdl2_native_present_rgba(window.handle, pixels, width, height)
+        var presented = false
+        unsafe(capabilities: [ffi]):
+            presented = rt_sdl2_present_rgba(window.handle, pixels, width, height)
+        presented
 
 # --- Window Information ---
 
@@ -290,33 +584,34 @@ fn window_id(window: Window) -> i64:
     else:
         window.handle
 
-fn window_scale_factor(window: Window) -> f64:
-    # SDL2: could use SDL_GetWindowDisplayScale in SDL3, for SDL2 return 1.0
-    val ignored_window = window
-    1.0
-
 # --- Cursor ---
 
 fn window_set_cursor_visible(window: Window, visible: bool) -> bool:
     if not window.is_valid:
         false
     else:
-        sdl2_native_set_cursor_visible(if visible: 1 else: 0)
-        true
+        var ok = false
+        unsafe(capabilities: [ffi]):
+            ok = rt_sdl2_set_cursor_visible(if visible: 1 else: 0)
+        ok
 
 fn window_set_cursor_grab(window: Window, grab: bool) -> bool:
     if not window.is_valid:
         false
     else:
-        sdl2_native_set_cursor_grab(window.handle, if grab: 1 else: 0)
-        true
+        var ok = false
+        unsafe(capabilities: [ffi]):
+            ok = rt_sdl2_set_cursor_grab(window.handle, if grab: 1 else: 0)
+        ok
 
 fn window_set_cursor_position(window: Window, pos: Position) -> bool:
     if not window.is_valid:
         false
     else:
-        sdl2_native_warp_mouse(window.handle, pos.x, pos.y)
-        true
+        var ok = false
+        unsafe(capabilities: [ffi]):
+            ok = rt_sdl2_warp_mouse(window.handle, pos.x, pos.y)
+        ok
 
 # --- Events ---
 # SDL2 event types mapped to the same codes as the engine expects.
@@ -369,7 +664,9 @@ fn event_parse_type(type_code: i64) -> EventType:
     elif type_code == 7:
         EventType.MouseWheel
     elif type_code == 8:
-        val window_event = sdl2_native_event_window_event_id()
+        var window_event: i64 = 0
+        unsafe(capabilities: [ffi]):
+            window_event = rt_sdl2_event_window_event_id()
         if window_event == 4:
             EventType.WindowMoved
         elif window_event == 5 or window_event == 6:
@@ -391,10 +688,8 @@ fn event_parse_type(type_code: i64) -> EventType:
     else:
         EventType.Unknown
 
-fn event_destroy(event: Event) -> bool:
-    # SDL2 events are stack-allocated in C; no free needed
-    val ignored_event = event
-    true
+fn event_destroy(event: Event):
+    pass_do_nothing("SDL2 event data is provider-owned stack/cache state and requires no release")
 
 # --- Window Event Detail Wrappers ---
 
@@ -402,16 +697,22 @@ fn event_window_resized(event: Event) -> Size:
     if not event.is_valid:
         Size(width: 0, height: 0)
     else:
-        val w = sdl2_native_event_window_data1()
-        val h = sdl2_native_event_window_data2()
+        var w: i64 = 0
+        var h: i64 = 0
+        unsafe(capabilities: [ffi]):
+            w = rt_sdl2_event_window_data1()
+            h = rt_sdl2_event_window_data2()
         Size(width: w, height: h)
 
 fn event_window_moved(event: Event) -> Position:
     if not event.is_valid:
         Position(x: 0, y: 0)
     else:
-        val px = sdl2_native_event_window_data1()
-        val py = sdl2_native_event_window_data2()
+        var px: i64 = 0
+        var py: i64 = 0
+        unsafe(capabilities: [ffi]):
+            px = rt_sdl2_event_window_data1()
+            py = rt_sdl2_event_window_data2()
         Position(x: px, y: py)
 
 fn event_window_focused(event: Event) -> bool:
@@ -419,11 +720,10 @@ fn event_window_focused(event: Event) -> bool:
         false
     else:
         # SDL_WINDOWEVENT_FOCUS_GAINED = 12
-        sdl2_native_event_window_event_id() == 12
-
-fn event_window_scale_factor(event: Event) -> f64:
-    val ignored_event = event
-    1.0
+        var event_id: i64 = 0
+        unsafe(capabilities: [ffi]):
+            event_id = rt_sdl2_event_window_event_id()
+        event_id == 12
 
 # --- Keyboard Event Detail Wrappers ---
 
@@ -431,17 +731,25 @@ fn event_keyboard_input(event: Event) -> KeyboardEvent:
     if not event.is_valid:
         KeyboardEvent(scancode: 0, virtual_key: VirtualKey.Unknown, state: KeyState.Released, modifiers: 0)
     else:
-        val scancode = sdl2_native_event_key_code()
-        val keysym = sdl2_native_event_key_sym()
+        var scancode: i64 = 0
+        var keysym: i64 = 0
+        var raw_modifiers: i64 = 0
+        unsafe(capabilities: [ffi]):
+            scancode = rt_sdl2_event_key_code()
+            keysym = rt_sdl2_event_key_sym()
+            raw_modifiers = rt_sdl2_event_key_mod()
         val vkey = parse_virtual_key(keysym)
         # event.handle stores the SDL2 event type code (2=keydown, 3=keyup)
         val state = if event.handle == 2: KeyState.Pressed else: KeyState.Released
-        val mods = sdl2_normalize_modifiers(sdl2_native_event_key_mod())
+        val mods = sdl2_normalize_modifiers(raw_modifiers)
         KeyboardEvent(scancode: scancode, virtual_key: vkey, state: state, modifiers: mods)
 
 fn event_received_character(event: Event) -> text:
     if event.is_valid and event.handle == 9:
-        sdl2_native_event_text()
+        var value = ""
+        unsafe(capabilities: [ffi]):
+            value = rt_sdl2_event_text()
+        value
     else:
         ""
 
@@ -451,7 +759,9 @@ fn event_mouse_button(event: Event) -> MouseButtonEvent:
     if not event.is_valid:
         MouseButtonEvent(button: MouseButton.Left, state: KeyState.Released)
     else:
-        val btn_code = sdl2_native_event_mouse_button()
+        var btn_code: i64 = 0
+        unsafe(capabilities: [ffi]):
+            btn_code = rt_sdl2_event_mouse_button()
         val button = if btn_code == 0:
             MouseButton.Left
         elif btn_code == 1:
@@ -468,16 +778,22 @@ fn event_mouse_moved(event: Event) -> MousePosition:
     if not event.is_valid:
         MousePosition(x: 0.0, y: 0.0)
     else:
-        val mx = sdl2_native_event_mouse_x()
-        val my = sdl2_native_event_mouse_y()
+        var mx: i64 = 0
+        var my: i64 = 0
+        unsafe(capabilities: [ffi]):
+            mx = rt_sdl2_event_mouse_x()
+            my = rt_sdl2_event_mouse_y()
         MousePosition(x: mx * 1.0, y: my * 1.0)
 
 fn event_mouse_wheel(event: Event) -> MouseWheel:
     if not event.is_valid:
         MouseWheel(delta_x: 0.0, delta_y: 0.0)
     else:
-        val wx = sdl2_native_event_wheel_x()
-        val wy = sdl2_native_event_wheel_y()
+        var wx: i64 = 0
+        var wy: i64 = 0
+        unsafe(capabilities: [ffi]):
+            wx = rt_sdl2_event_wheel_x()
+            wy = rt_sdl2_event_wheel_y()
         MouseWheel(delta_x: wx * 1.0, delta_y: wy * 1.0)
 
 # --- Keyboard Events ---
@@ -569,19 +885,57 @@ struct Monitor:
     position: Position
     scale_factor: f64
 
-fn window_get_monitor_count() -> i64:
-    sdl2_native_get_num_displays()
+@unsafe(reason: "raw SDL2 owner-thread display-count ABI; negative sentinel reports provider failure", capabilities: [ffi])
+extern fn rt_sdl2_get_num_displays() -> i64
+@unsafe(reason: "raw SDL2 owner-thread display-name ABI; nullable borrowed text reports invalid index or provider failure", capabilities: [ffi])
+extern fn rt_sdl2_get_display_name(index: i64) -> text?
+@unsafe(reason: "raw SDL2 owner-thread display-bounds ABI; INT64_MIN sentinel reports invalid index or provider failure", capabilities: [ffi])
+extern fn rt_sdl2_get_display_bounds_x(index: i64) -> i64
+@unsafe(reason: "raw SDL2 owner-thread display-bounds ABI; INT64_MIN sentinel reports invalid index or provider failure", capabilities: [ffi])
+extern fn rt_sdl2_get_display_bounds_y(index: i64) -> i64
+@unsafe(reason: "raw SDL2 owner-thread display-bounds ABI; negative sentinel reports invalid index or provider failure", capabilities: [ffi])
+extern fn rt_sdl2_get_display_bounds_w(index: i64) -> i64
+@unsafe(reason: "raw SDL2 owner-thread display-bounds ABI; negative sentinel reports invalid index or provider failure", capabilities: [ffi])
+extern fn rt_sdl2_get_display_bounds_h(index: i64) -> i64
+@unsafe(reason: "raw SDL2 owner-thread display-DPI ABI; negative sentinel reports invalid index or provider failure", capabilities: [ffi])
+extern fn rt_sdl2_get_display_dpi(index: i64) -> f64
+@unsafe(reason: "raw SDL2 owner-thread usable-bounds ABI; INT64_MIN sentinel reports invalid index or provider failure", capabilities: [ffi])
+extern fn rt_sdl2_get_display_usable_x(index: i64) -> i64
+@unsafe(reason: "raw SDL2 owner-thread usable-bounds ABI; INT64_MIN sentinel reports invalid index or provider failure", capabilities: [ffi])
+extern fn rt_sdl2_get_display_usable_y(index: i64) -> i64
+@unsafe(reason: "raw SDL2 owner-thread usable-bounds ABI; negative sentinel reports invalid index or provider failure", capabilities: [ffi])
+extern fn rt_sdl2_get_display_usable_w(index: i64) -> i64
+@unsafe(reason: "raw SDL2 owner-thread usable-bounds ABI; negative sentinel reports invalid index or provider failure", capabilities: [ffi])
+extern fn rt_sdl2_get_display_usable_h(index: i64) -> i64
 
-fn window_get_monitor_info(monitor_id: i64) -> Monitor:
-    val w = sdl2_native_get_display_bounds_w(monitor_id)
-    val h = sdl2_native_get_display_bounds_h(monitor_id)
-    val x = sdl2_native_get_display_bounds_x(monitor_id)
-    val y = sdl2_native_get_display_bounds_y(monitor_id)
-    val dpi = sdl2_native_get_display_dpi(monitor_id)
+fn window_get_monitor_count() -> i64?:
+    var count: i64 = -1
+    unsafe(capabilities: [ffi]):
+        count = rt_sdl2_get_num_displays()
+    if count < 0:
+        return nil
+    count
+
+fn window_get_monitor_info(monitor_id: i64) -> Monitor?:
+    var w: i64 = -1
+    var h: i64 = -1
+    var x: i64 = -9223372036854775808
+    var y: i64 = -9223372036854775808
+    var dpi: f64 = -1.0
+    var name: text? = nil
+    unsafe(capabilities: [ffi]):
+        w = rt_sdl2_get_display_bounds_w(monitor_id)
+        h = rt_sdl2_get_display_bounds_h(monitor_id)
+        x = rt_sdl2_get_display_bounds_x(monitor_id)
+        y = rt_sdl2_get_display_bounds_y(monitor_id)
+        dpi = rt_sdl2_get_display_dpi(monitor_id)
+        name = rt_sdl2_get_display_name(monitor_id)
+    if w < 0 or h < 0 or x == -9223372036854775808 or y == -9223372036854775808 or dpi < 0.0 or name == nil:
+        return nil
     val scale = dpi / 96.0
     Monitor(
         id: monitor_id,
-        name: sdl2_native_get_display_name(monitor_id),
+        name: name.?,
         size: Size(width: w, height: h),
         position: Position(x: x, y: y),
         scale_factor: scale
@@ -589,35 +943,58 @@ fn window_get_monitor_info(monitor_id: i64) -> Monitor:
 
 # --- Clipboard ---
 
-fn window_clipboard_get() -> text:
-    sdl2_native_clipboard_get()
+@unsafe(reason: "raw SDL2 provider ABI; nullable borrowed text reports provider failure", capabilities: [ffi])
+extern fn rt_sdl2_clipboard_get() -> text?
+@unsafe(reason: "raw SDL2 provider ABI; false status sentinel reports provider failure", capabilities: [ffi])
+extern fn rt_sdl2_clipboard_set(content: text) -> bool
+@unsafe(reason: "raw SDL2 provider ABI; negative status sentinel reports provider failure", capabilities: [ffi])
+extern fn rt_sdl2_clipboard_has_text() -> i64
+
+fn window_clipboard_get() -> text?:
+    var value: text? = nil
+    unsafe(capabilities: [ffi]):
+        value = rt_sdl2_clipboard_get()
+    value
 
 fn window_clipboard_set(content: text) -> bool:
-    sdl2_native_clipboard_set(content)
+    var ok = false
+    unsafe(capabilities: [ffi]):
+        ok = rt_sdl2_clipboard_set(content)
+    ok
 
-fn window_clipboard_has_text() -> bool:
-    sdl2_native_clipboard_has_text()
+fn window_clipboard_has_text() -> bool?:
+    var state: i64 = -1
+    unsafe(capabilities: [ffi]):
+        state = rt_sdl2_clipboard_has_text()
+    if state < 0:
+        return nil
+    state != 0
 
 # --- Utilities ---
 
 fn window_last_error() -> text:
-    sdl2_native_last_error()
+    var message = ""
+    unsafe(capabilities: [ffi]):
+        message = rt_sdl2_last_error()
+    message
 
 # ============================================================================
-# SDL2-specific helpers for winit-shaped compatibility
+# SDL2-specific helpers for InputManager compatibility
 # ============================================================================
-# These pure-Simple mappings preserve the retired winit event/status/handle
-# contract without pretending to own a native `rt_*` boundary.
+# The InputManager calls rt_winit_* functions directly. We provide
+# compatibility aliases that map to the new rt_sdl2_* functions.
+# These are thin wrappers, not extern aliases.
 
-# Poll events: InputManager calls winit_compat_event_loop_poll_events(handle, 1)
+# Poll events: InputManager calls rt_winit_event_loop_poll_events(handle, 1)
 # which returns an event handle (0 = no events).
 # In SDL2, we poll one event and return the event type code as the "handle".
-fn winit_compat_event_loop_poll_events(event_loop_handle: i64, max_events: i64) -> i64:
-    sdl2_native_poll_event()
+@unsafe(reason: "minimal direct SDL2 provider call", capabilities: [ffi])
+fn rt_winit_event_loop_poll_events(event_loop_handle: i64, max_events: i64) -> i64:
+    rt_sdl2_poll_event()
 
-# Event type: InputManager calls winit_compat_event_get_type(event_handle)
+# Event type: InputManager calls rt_winit_event_get_type(event_handle)
 # In SDL2, the event_handle IS the event type code already.
-fn winit_compat_event_get_type(event_handle: i64) -> i64:
+fn rt_winit_event_get_type(event_handle: i64) -> i64:
     # Map SDL2 event codes to winit event codes:
     # SDL2: 1=quit(3 in winit), 2=keydown(10), 3=keyup(10),
     #        4=mousemotion(21), 5=mousedown(20), 6=mouseup(20), 7=mousewheel(22)
@@ -636,15 +1013,17 @@ fn winit_compat_event_get_type(event_handle: i64) -> i64:
 
 # Keyboard input: returns (scancode, keycode, pressed)
 # InputManager reads kb_result.1 (keycode) and kb_result.2 (pressed)
-fn winit_compat_event_keyboard_input(event_handle: i64) -> (i64, i64, bool):
-    val scancode = sdl2_native_event_key_code()
-    val keysym = sdl2_native_event_key_sym()
+@unsafe(reason: "minimal direct SDL2 provider call", capabilities: [ffi])
+fn rt_winit_event_keyboard_input(event_handle: i64) -> (i64, i64, bool):
+    val scancode = rt_sdl2_event_key_code()
+    val keysym = rt_sdl2_event_key_sym()
     # event_handle 2 = keydown, 3 = keyup
     val pressed = event_handle == 2
     (scancode, keysym, pressed)
 
-fn winit_compat_event_keyboard_virtual_keycode(event_handle: i64) -> i64:
-    sdl2_native_event_key_sym()
+@unsafe(reason: "minimal direct SDL2 provider call", capabilities: [ffi])
+fn rt_winit_event_keyboard_virtual_keycode(event_handle: i64) -> i64:
+    rt_sdl2_event_key_sym()
 
 fn sdl2_normalize_modifiers(raw: i64) -> i64:
     var normalized = 0
@@ -658,44 +1037,39 @@ fn sdl2_normalize_modifiers(raw: i64) -> i64:
         normalized = normalized + WINDOW_MOD_SUPER
     normalized
 
-fn winit_compat_event_keyboard_modifiers(event_handle: i64) -> i64:
-    sdl2_normalize_modifiers(sdl2_native_event_key_mod())
+@unsafe(reason: "minimal direct SDL2 provider call", capabilities: [ffi])
+fn rt_winit_event_keyboard_modifiers(event_handle: i64) -> i64:
+    sdl2_normalize_modifiers(rt_sdl2_event_key_mod())
 
 # Mouse button: returns (button_code, pressed)
-fn winit_compat_event_mouse_button(event_handle: i64) -> (i64, bool):
-    val button = sdl2_native_event_mouse_button()
+@unsafe(reason: "minimal direct SDL2 provider call", capabilities: [ffi])
+fn rt_winit_event_mouse_button(event_handle: i64) -> (i64, bool):
+    val button = rt_sdl2_event_mouse_button()
     # event_handle 5 = mousedown, 6 = mouseup
     val pressed = event_handle == 5
     (button, pressed)
 
 # Mouse moved: returns (x, y) as f64
-fn winit_compat_event_mouse_moved(event_handle: i64) -> (f64, f64):
-    val mx = sdl2_native_event_mouse_x()
-    val my = sdl2_native_event_mouse_y()
+@unsafe(reason: "minimal direct SDL2 provider call", capabilities: [ffi])
+fn rt_winit_event_mouse_moved(event_handle: i64) -> (f64, f64):
+    val mx = rt_sdl2_event_mouse_x()
+    val my = rt_sdl2_event_mouse_y()
     (mx * 1.0, my * 1.0)
 
 # Mouse wheel: returns (delta_x, delta_y) as f64
-fn winit_compat_event_mouse_wheel(event_handle: i64) -> (f64, f64):
-    val wx = sdl2_native_event_wheel_x()
-    val wy = sdl2_native_event_wheel_y()
+@unsafe(reason: "minimal direct SDL2 provider call", capabilities: [ffi])
+fn rt_winit_event_mouse_wheel(event_handle: i64) -> (f64, f64):
+    val wx = rt_sdl2_event_wheel_x()
+    val wy = rt_sdl2_event_wheel_y()
     (wx * 1.0, wy * 1.0)
 
 # Window close requested
-fn winit_compat_event_window_close_requested(event_handle: i64) -> bool:
+fn rt_winit_event_window_close_requested(event_handle: i64) -> bool:
     event_handle == 1
 
 # Event free: no-op in SDL2 (events are stack-allocated)
-fn winit_compat_event_free(event_handle: i64):
-    val ignored_event_handle = event_handle
-
-# Window present: InputManager doesn't call this, but keep for completeness
-fn winit_compat_window_present_rgba(window: i64, width: i64, height: i64, pixels: [i64]) -> bool:
-    sdl2_native_present_rgba(window, pixels, width, height)
-
-# Window request redraw: no-op in SDL2
-fn winit_compat_window_request_redraw(window: i64) -> bool:
-    val ignored_window = window
-    true
+fn rt_winit_event_free(event_handle: i64):
+    pass_do_nothing("SDL2 event data is provider-owned stack/cache state and requires no release")
 
 # ============================================================================
 # Exports
@@ -704,9 +1078,19 @@ fn winit_compat_window_request_redraw(window: i64) -> bool:
 export EventLoop, EventBatch, WindowConfig, Window, Size, Position
 export Event, KeyboardEvent, MouseButtonEvent, MousePosition, MouseWheel, Monitor
 export sdl2_normalize_modifiers
-export winit_compat_event_loop_poll_events, winit_compat_event_get_type
-export winit_compat_event_keyboard_input, winit_compat_event_keyboard_virtual_keycode
-export winit_compat_event_keyboard_modifiers, winit_compat_event_mouse_button
-export winit_compat_event_mouse_moved, winit_compat_event_mouse_wheel
-export winit_compat_event_window_close_requested, winit_compat_event_free
-export winit_compat_window_present_rgba, winit_compat_window_request_redraw
+export window_is_key_pressed, window_mouse_position, window_is_mouse_button_pressed
+export window_ticks_ms, window_ticks_ns
+export window_should_close, window_clear_quit
+export rt_sdl2_init, rt_sdl2_quit
+export rt_sdl2_create_window, rt_sdl2_destroy_window
+export rt_sdl2_get_window_width, rt_sdl2_get_window_height, rt_sdl2_set_window_title
+export rt_sdl2_present_rgba
+export rt_sdl2_poll_event, rt_sdl2_wait_event, rt_sdl2_event_key_code, rt_sdl2_event_key_sym, rt_sdl2_event_key_mod, rt_sdl2_event_text
+export rt_sdl2_event_mouse_x, rt_sdl2_event_mouse_y, rt_sdl2_event_mouse_button
+export rt_sdl2_event_wheel_x, rt_sdl2_event_wheel_y
+export rt_sdl2_is_key_pressed, rt_sdl2_get_mouse_x, rt_sdl2_get_mouse_y
+export rt_sdl2_is_mouse_button_pressed
+export rt_sdl2_get_ticks_ms, rt_sdl2_get_ticks_ns
+export rt_sdl2_window_should_close, rt_sdl2_clear_quit
+export rt_sdl2_event_window_event_id, rt_sdl2_event_window_data1, rt_sdl2_event_window_data2
+export rt_sdl2_set_window_resizable

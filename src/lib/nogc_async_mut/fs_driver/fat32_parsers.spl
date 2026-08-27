@@ -1,6 +1,7 @@
 # FAT32 — 8.3 directory entry parsing helpers (module-level utilities).
 
 use common.string_core.{str_char_at, char_from_code}
+use common.encoding.utf16.{utf16_decode_one}
 
 fn _to_lower_byte(b: u8) -> u8:
     if b >= 0x41 and b <= 0x5A:
@@ -46,16 +47,19 @@ fn _parse_short_name(entry: [u8], offset: i32) -> text:
             i = i + 1
     result
 
-fn _decode_lfn_code_unit(entry: [u8], offset: i32) -> text:
-    val lo = entry[offset]
-    val hi = entry[offset + 1]
-    if hi == 0x00u8 and lo == 0x00u8:
-        return ""
-    if hi == 0xFFu8 and lo == 0xFFu8:
-        return ""
-    if hi != 0x00u8:
-        return "?"
-    char_from_code(lo.to_i64())
+fn _parse_lfn_slot_units(entry: [u8], offset: i32) -> [i64]:
+    val positions: [i32] = [1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30]
+    var units: [i64] = []
+    var i = 0
+    var terminated = false
+    while i < positions.len():
+        val unit = _read_u16_le(entry, offset + positions[i]).to_i64()
+        if unit == 0 or unit == 0xFFFF:
+            terminated = true
+        else if not terminated:
+            units.push(unit)
+        i = i + 1
+    units
 
 fn _decode_lfn_units(units: [i64]) -> text?:
     if units.len() == 0:
@@ -124,9 +128,9 @@ fn _lfn_short_name_checksum(entry: [u8], offset: i32) -> u8:
 fn _lower_text(s: text) -> text:
     var result = ""
     for ch in s.chars():
-        val code = ch.ord()
+        val code = ch.char_code_at(0)
         if code >= 0x41 and code <= 0x5A:
-            result = result + (code + 32).chr()
+            result = result + char_from_code(code + 32)
         else:
             result = result + ch
     result

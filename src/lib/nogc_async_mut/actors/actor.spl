@@ -16,6 +16,8 @@
 #   val worker = spawn_actor(handlers)
 #   worker.send("increment", [])
 
+use std.log.{log_context_snapshot, log_context_restore, log_context_set_actor}
+
 # ================================================================
 # Core Types
 # ================================================================
@@ -409,24 +411,30 @@ impl ActorRuntime:
 
         Returns true if the mailbox still has more messages after processing.
         """
-        val context = self.actors.get(actor_id)
-        if context == nil:
+        # NOTE: contains_key + index read, not .get() — Dict<K, class> .get()
+        # returns a corrupt payload under native codegen.
+        if not self.actors.contains_key(actor_id):
             return false
 
-        val ctx = self.actors[actor_id]
-        val msg = ctx.mailbox.pop()
-        if msg == nil:
-            return false
+        # ActorContext is a struct, so this binding is a COPY on every engine.
+        # Every mutation below (mailbox.pop, counters, last_error) must be
+        # written back to self.actors or it is silently discarded.
+        var ctx = self.actors[actor_id]
 
-        val the_msg = msg
-
-        # Guard: do not dispatch to stopped actors
+        # Guard: do not dispatch to stopped actors. Checked BEFORE the pop so a
+        # stopped actor's message is not consumed and thrown away.
         val is_stopped = ctx.state == ActorState.Stopped
         val is_stopping = ctx.state == ActorState.Stopping
         if is_stopped:
             return false
         if is_stopping:
             return false
+
+        val msg = ctx.mailbox.pop()
+        if msg == nil:
+            return false
+
+        val the_msg = msg
 
         # Dispatch: look up method in handler table and invoke. Wrap with
         # std.log's current-context so any logging the handler does is
@@ -435,6 +443,7 @@ impl ActorRuntime:
         val _log_ctx_snap = log_context_snapshot()
         log_context_set_actor(actor_id)
         val dispatch_result = ctx.handlers.dispatch(the_msg.method, the_msg.args)
+        log_context_restore(_log_ctx_snap)
 
         if dispatch_result.is_ok():
             ctx.processed_count = ctx.processed_count + 1
@@ -447,6 +456,9 @@ impl ActorRuntime:
         else:
             ctx.error_count = ctx.error_count + 1
             ctx.last_error = dispatch_result.error_msg
+
+        # Write the mutated copy back (see struct note above)
+        self.actors[actor_id] = ctx
 
         # Return whether more messages remain
         val is_empty = ctx.mailbox.is_empty()
@@ -484,11 +496,12 @@ impl ActorRuntime:
             already_queued.push(id)
 
         for key in self.actors.keys():
-            val ctx = self.actors.get(key)
-            if ctx == nil:
+            # NOTE: contains_key + index read, not .get() — Dict<K, class> .get()
+            # returns a corrupt payload under native codegen.
+            if not self.actors.contains_key(key):
                 pass
             else:
-                val the_ctx = ctx
+                val the_ctx = self.actors[key]
                 val has_messages = not the_ctx.mailbox.is_empty()
                 if has_messages:
                     # Check not already in ready queue
@@ -508,18 +521,12 @@ impl ActorRuntime:
     me stop_actor(actor_id: i64):
         """Stop an actor gracefully.
 
-        Sets state to Stopping, drains remaining messages, then
-        sets state to Stopped and removes from the runtime.
+        Removes the actor and its remaining messages from the runtime.
         """
-        # NOTE: contains_key + index read, not .get() — Dict<K, class> .get()
-        # returns a corrupt payload under native codegen.
-        if self.actors.contains_key(actor_id):
-            val ctx = self.actors[actor_id]
-            ctx.state = ActorState.Stopping
-            # Drain remaining messages
-            while not ctx.mailbox.is_empty():
-                ctx.mailbox.pop()
-            ctx.state = ActorState.Stopped
+        # ActorContext is a struct, so a `val ctx = self.actors[actor_id]`
+        # binding here would be a COPY: the old Stopping/drain/Stopped sequence
+        # mutated that copy and was discarded, and the entry is dropped
+        # immediately anyway. Removing the entry drops the mailbox with it.
         self.actors.remove(actor_id)
 
     fn get_reply(reply_id: ActorId) -> text?:
@@ -545,10 +552,11 @@ impl ActorRuntime:
 
     fn get_actor_stats(actor_id: i64) -> text:
         """Return stats string for a single actor."""
-        val context = self.actors.get(actor_id)
-        if context == nil:
+        # NOTE: contains_key + index read, not .get() — Dict<K, class> .get()
+        # returns a corrupt payload under native codegen.
+        if not self.actors.contains_key(actor_id):
             return "Actor {actor_id}: not found"
-        val ctx = context
+        val ctx = self.actors[actor_id]
         val methods = ctx.handlers.method_names()
         var method_str = methods.join(", ")
         "Actor {actor_id}: processed={ctx.processed_count}, errors={ctx.error_count}, pending={ctx.mailbox.len()}, methods=[{method_str}]"

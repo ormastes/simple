@@ -29,38 +29,74 @@ struct CommandPalette:
 fn _empty_palette_entry() -> PaletteEntry:
     PaletteEntry(description: "", name: "", command_name: "", command_payload: "")
 
+# End offset of the UTF-8 sequence that starts at byte `i`, clamped to `n`.
+# A stray continuation byte (0x80..0xBF) advances by 1 so the scan resyncs
+# instead of running off the end.
+fn _palette_seq_end(s: text, i: i64, n: i64) -> i64:
+    val lead = s.byte_at(i)
+    var e = i + 1
+    if lead >= 240:
+        e = i + 4
+    elif lead >= 224:
+        e = i + 3
+    elif lead >= 192:
+        e = i + 2
+    if e > n:
+        e = n
+    e
+
 fn fuzzy_match(query: text, candidate: text) -> bool:
+    # INDEX SPACE: BYTE-indexed throughout. `q.len()` counts BYTES while
+    # `char_at` counts CHARACTERS, so the previous loop advanced `qi` once per
+    # matched CHARACTER and then compared it to a BYTE length. For any query
+    # holding a non-ASCII character `qi` could never reach `q.len()`, so the
+    # query could NEVER match anything -- the palette silently returned no
+    # results. Comparing whole UTF-8 sequences keeps both cursors in bytes.
     val q = query.lower()
     val c = candidate.lower()
     if q == "":
         return true
+    val qn = q.len()
+    val cn = c.len()
     var qi = 0
     var ci = 0
-    while qi < q.len() and ci < c.len():
-        if q.char_at(qi) == c.char_at(ci):
-            qi = qi + 1
-        ci = ci + 1
-    qi == q.len()
+    while qi < qn and ci < cn:
+        val qe = _palette_seq_end(q, qi, qn)
+        val ce = _palette_seq_end(c, ci, cn)
+        if q.slice(qi, qe) == c.slice(ci, ce):
+            qi = qe
+        ci = ce
+    qi == qn
 
 fn fuzzy_score(query: text, candidate: text) -> i64:
+    # Same BYTE/CHARACTER mix as `fuzzy_match` above, and the same consequence:
+    # `qi < q.len()` was a character counter tested against a byte length, so a
+    # non-ASCII query always fell into the `-1` (no match) branch. Scores are
+    # awarded per matched CHARACTER, not per byte, so a multi-byte character
+    # counts once -- otherwise ranking would favour non-ASCII candidates purely
+    # for being wider.
     val q = query.lower()
     val c = candidate.lower()
     if q == "":
         return 0
+    val qn = q.len()
+    val cn = c.len()
     var score: i64 = 0
     var qi = 0
     var ci = 0
     var streak: i64 = 0
-    while qi < q.len() and ci < c.len():
-        if q.char_at(qi) == c.char_at(ci):
+    while qi < qn and ci < cn:
+        val qe = _palette_seq_end(q, qi, qn)
+        val ce = _palette_seq_end(c, ci, cn)
+        if q.slice(qi, qe) == c.slice(ci, ce):
             streak = streak + 1
             score = score + 10 + streak
-            qi = qi + 1
+            qi = qe
         else:
             streak = 0
             score = score - 1
-        ci = ci + 1
-    if qi < q.len():
+        ci = ce
+    if qi < qn:
         return -1
     score
 

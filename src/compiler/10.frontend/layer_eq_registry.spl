@@ -26,26 +26,21 @@
 # cannot leak the previous parse's `@layer_eq` facts.
 
 var layer_eq_registry_views: [text] = []
-var layer_eq_registry_view_count: i64 = 0
 var layer_eq_registry_targets: Dict<text, text> = {}
 var layer_eq_registry_renames: Dict<text, text> = {}
 
+@unsafe(reason: "raw transient-owner promotion; false is provider failure", capabilities: [ffi])
 extern fn rt_transient_heap_promote(value: Any) -> bool
 
-fn layer_eq_registry_prepare_persistent_globals():
-    if layer_eq_registry_views == nil:
-        layer_eq_registry_views = []
-    if layer_eq_registry_targets == nil:
-        layer_eq_registry_targets = {}
-    if layer_eq_registry_renames == nil:
-        layer_eq_registry_renames = {}
-    if layer_field_pending_renames == nil:
-        layer_field_pending_renames = []
+@always_inline
+fn _layer_eq_registry_promote_raw(value: Any) -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_transient_heap_promote(value)
 
 fn layer_eq_registry_reset():
-    layer_eq_registry_views.clear()
-    layer_eq_registry_targets.clear()
-    layer_eq_registry_renames.clear()
+    layer_eq_registry_views = []
+    layer_eq_registry_targets = {}
+    layer_eq_registry_renames = {}
 
 # Per-parse scoped reset: drop only the claims recorded for `path`, keeping
 # every OTHER module's claims alive.
@@ -58,38 +53,27 @@ fn layer_eq_registry_reset():
 # green. Scoping the reset to the module being (re-)parsed keeps repeat parses
 # of one path idempotent without discarding siblings.
 fn layer_eq_registry_reset_module(path: text):
-    # Native bootstrap codegen can corrupt an empty global array's iterator
-    # after repeatedly replacing that global with another empty array. Keep an
-    # authoritative scalar count and avoid constructing/reassigning an empty
-    # registry on the overwhelmingly common unannotated-module path.
-    if layer_eq_registry_view_count == 0:
-        return
     val prefix = path + "|"
     var kept: [text] = []
     var kept_targets: Dict<text, text> = {}
     var kept_renames: Dict<text, text> = {}
     for key in layer_eq_registry_views:
         if key.starts_with(prefix):
-            # Dict.remove mutates the durable outer shell in place.  Leaving
-            # these rows behind would keep a failed parse's scoped key/value
-            # payloads reachable even after the claim-key array was filtered.
-            layer_eq_registry_targets.remove(key)
-            layer_eq_registry_renames.remove(key)
             continue
         kept.push(key)
-    layer_eq_registry_views.clear()
-    for key in kept:
-        layer_eq_registry_views.push(key)
+        if layer_eq_registry_targets.contains_key(key):
+            kept_targets[key] = layer_eq_registry_targets[key]
+        if layer_eq_registry_renames.contains_key(key):
+            kept_renames[key] = layer_eq_registry_renames[key]
+    layer_eq_registry_views = kept
+    layer_eq_registry_targets = kept_targets
+    layer_eq_registry_renames = kept_renames
 
-fn layer_eq_registry_promote_transient_graph() -> bool:
-    var ok = true
-    if not rt_transient_heap_promote(layer_eq_registry_views):
-        ok = false
-    if not rt_transient_heap_promote(layer_eq_registry_targets):
-        ok = false
-    if not rt_transient_heap_promote(layer_eq_registry_renames):
-        ok = false
-    ok
+fn layer_eq_registry_promote_transient_owner() -> bool:
+    val views_ok = _layer_eq_registry_promote_raw(layer_eq_registry_views)
+    val targets_ok = _layer_eq_registry_promote_raw(layer_eq_registry_targets)
+    val renames_ok = _layer_eq_registry_promote_raw(layer_eq_registry_renames)
+    views_ok and targets_ok and renames_ok
 
 # Claims are keyed "<module path>|<view type name>" so two modules can each
 # declare a view of the same name without one silently overwriting the other.
@@ -131,7 +115,6 @@ fn layer_eq_registry_declare(path: text, view: text, target: text, renames_csv: 
     val key = layer_eq_claim_key(path, view)
     if not layer_eq_registry_views.contains(key):
         layer_eq_registry_views.push(key)
-        layer_eq_registry_view_count = layer_eq_registry_view_count + 1
     layer_eq_registry_targets[key] = target
     layer_eq_registry_renames[key] = renames_csv
 
@@ -187,14 +170,12 @@ var layer_field_pending_renames: [text] = []
 var layer_field_pending_seen: bool = false
 
 fn layer_field_pending_reset():
-    layer_field_pending_renames.clear()
+    layer_field_pending_renames = []
     layer_field_pending_seen = false
 
 # Publish the just-parsed struct's full, declaration-order rename slot list.
 fn layer_field_pending_set(renames: [text], saw_any: bool):
-    layer_field_pending_renames.clear()
-    for rename in renames:
-        layer_field_pending_renames.push(rename)
+    layer_field_pending_renames = renames
     layer_field_pending_seen = saw_any
 
 fn layer_field_pending_get() -> [text]:
@@ -207,8 +188,6 @@ fn layer_field_pending_any() -> bool:
     layer_field_pending_seen
 
 export layer_eq_registry_reset, layer_eq_registry_reset_module, layer_eq_registry_declare
-export layer_eq_registry_promote_transient_graph
-export layer_eq_registry_prepare_persistent_globals
 export layer_eq_registry_claim_keys, layer_eq_claim_key, layer_eq_claim_path, layer_eq_claim_view
 export layer_eq_registry_promote_transient_owner
 export layer_eq_is_declared, layer_eq_registry_target_of, layer_eq_registry_renames_of

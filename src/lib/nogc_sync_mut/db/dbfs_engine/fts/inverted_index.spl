@@ -19,6 +19,11 @@ struct FtsPostingList:
     postings: [FtsPosting]
     doc_freq: i64
 
+struct FtsCorpusStats:
+    document_count: i64
+    total_tokens: i64
+    average_document_length_fixed: i64
+
 # ── Inverted Index ─────────────────────────────────────────────────────────────
 
 struct FtsInvertedIndex:
@@ -37,6 +42,11 @@ impl FtsInvertedIndex:
         )
 
     me fn index_document(doc_id: i64, content: text):
+        # Indexing an existing id is replacement, not an additional corpus
+        # document.  Remove its postings/statistics before installing the new
+        # token stream so N, avgdl, and df stay exact.
+        if self.contains_document(doc_id):
+            self.remove_document(doc_id)
         val tokens = fts_tokenize(content)
         val doc_key = "{doc_id}"
         self._doc_lengths[doc_key] = tokens.len() as i64
@@ -49,7 +59,7 @@ impl FtsInvertedIndex:
         while ti < tokens.len() as i32:
             val tok = tokens[ti]
             if term_positions.contains_key(tok.term):
-                var plist = term_positions[tok.term]
+                var plist: [i64] = term_positions[tok.term]
                 plist.push(tok.position)
                 term_positions[tok.term] = plist
             else:
@@ -58,7 +68,7 @@ impl FtsInvertedIndex:
 
         # Update the inverted index
         for term in term_positions.keys():
-            val positions = term_positions[term]
+            val positions: [i64] = term_positions[term]
             val posting = FtsPosting(
                 doc_id: doc_id,
                 term_freq: positions.len() as i64,
@@ -106,10 +116,39 @@ impl FtsInvertedIndex:
     me fn doc_count() -> i64:
         self._total_docs
 
+    me fn contains_document(doc_id: i64) -> bool:
+        val doc_key = "{doc_id}"
+        if not self._doc_lengths.contains_key(doc_key):
+            return false
+        self._doc_lengths[doc_key] >= 0
+
+    me fn doc_length(doc_id: i64) -> i64:
+        val doc_key = "{doc_id}"
+        if not self._doc_lengths.contains_key(doc_key):
+            return 0
+        val length = self._doc_lengths[doc_key]
+        if length < 0:
+            return 0
+        length
+
     me fn avg_doc_length() -> i64:
         if self._total_docs == 0:
             return 0
         self._total_tokens / self._total_docs
+
+    me fn avg_doc_length_fixed() -> i64:
+        # Canonical common-search BM25 consumes avgdl at 1e6 fixed-point
+        # precision.  Compute from corpus totals so fractional means survive.
+        if self._total_docs == 0:
+            return 0
+        self._total_tokens * 1000000 / self._total_docs
+
+    me fn corpus_stats() -> FtsCorpusStats:
+        FtsCorpusStats(
+            document_count: self._total_docs,
+            total_tokens: self._total_tokens,
+            average_document_length_fixed: self.avg_doc_length_fixed()
+        )
 
     me fn doc_freq(term: text) -> i64:
         val lower_term = term.to_lower()

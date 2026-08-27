@@ -37,27 +37,22 @@
 # `layer_eq_registry.spl` duplicates no checker constants.
 val EFFECT_REGISTRY_BUDGET_UNSET: i64 = 0 - 1
 
+@unsafe(reason: "raw transient-owner promotion; false is provider failure", capabilities: [ffi])
 extern fn rt_transient_heap_promote(value: Any) -> bool
 
+@always_inline
+fn _effect_registry_promote_raw(value: Any) -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_transient_heap_promote(value)
+
 var effect_registry_fns: [text] = []
-var effect_registry_fn_count: i64 = 0
 var effect_registry_budgets: Dict<text, i64> = {}
 var effect_registry_bounded: Dict<text, bool> = {}
 
-extern fn rt_transient_heap_promote(value: Any) -> bool
-
-fn effect_registry_prepare_persistent_globals():
-    if effect_registry_fns == nil:
-        effect_registry_fns = []
-    if effect_registry_budgets == nil:
-        effect_registry_budgets = {}
-    if effect_registry_bounded == nil:
-        effect_registry_bounded = {}
-
 fn effect_registry_reset():
-    effect_registry_fns.clear()
-    effect_registry_budgets.clear()
-    effect_registry_bounded.clear()
+    effect_registry_fns = []
+    effect_registry_budgets = {}
+    effect_registry_bounded = {}
 
 # Per-parse scoped reset: drop only the claims recorded for `path`, keeping
 # every OTHER module's claims alive.
@@ -68,31 +63,27 @@ fn effect_registry_reset():
 # leave only the LAST-parsed module's annotations to check and every earlier
 # module's obligations would go unproven while still reporting green.
 fn effect_registry_reset_module(path: text):
-    if effect_registry_fn_count == 0:
-        return
     val prefix = path + "|"
     var kept: [text] = []
     var kept_budgets: Dict<text, i64> = {}
     var kept_bounded: Dict<text, bool> = {}
     for key in effect_registry_fns:
         if key.starts_with(prefix):
-            effect_registry_budgets.remove(key)
-            effect_registry_bounded.remove(key)
             continue
         kept.push(key)
-    effect_registry_fns.clear()
-    for key in kept:
-        effect_registry_fns.push(key)
+        if effect_registry_budgets.contains_key(key):
+            kept_budgets[key] = effect_registry_budgets[key]
+        if effect_registry_bounded.contains_key(key):
+            kept_bounded[key] = effect_registry_bounded[key]
+    effect_registry_fns = kept
+    effect_registry_budgets = kept_budgets
+    effect_registry_bounded = kept_bounded
 
-fn effect_registry_promote_transient_graph() -> bool:
-    var ok = true
-    if not rt_transient_heap_promote(effect_registry_fns):
-        ok = false
-    if not rt_transient_heap_promote(effect_registry_budgets):
-        ok = false
-    if not rt_transient_heap_promote(effect_registry_bounded):
-        ok = false
-    ok
+fn effect_registry_promote_transient_owner() -> bool:
+    val fns_ok = _effect_registry_promote_raw(effect_registry_fns)
+    val budgets_ok = _effect_registry_promote_raw(effect_registry_budgets)
+    val bounded_ok = _effect_registry_promote_raw(effect_registry_bounded)
+    fns_ok and budgets_ok and bounded_ok
 
 fn effect_claim_key(path: text, fn_name: text) -> text:
     path + "|" + fn_name
@@ -156,7 +147,6 @@ fn effect_registry_declare(path: text, fn_name: text, budget_text: text, bounded
     val key = effect_claim_key(path, fn_name)
     if not effect_registry_fns.contains(key):
         effect_registry_fns.push(key)
-        effect_registry_fn_count = effect_registry_fn_count + 1
     effect_registry_budgets[key] = effect_parse_budget(budget_text)
     effect_registry_bounded[key] = bounded
 
@@ -218,8 +208,6 @@ fn effect_pending_bounded_flag() -> bool:
 
 export EFFECT_REGISTRY_BUDGET_UNSET
 export effect_registry_reset, effect_registry_reset_module, effect_registry_declare
-export effect_registry_promote_transient_graph
-export effect_registry_prepare_persistent_globals
 export effect_registry_claim_keys, effect_claim_key, effect_claim_path, effect_claim_fn
 export effect_registry_promote_transient_owner
 export effect_is_declared, effect_parse_budget

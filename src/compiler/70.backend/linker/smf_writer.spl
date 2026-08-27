@@ -13,10 +13,18 @@ use compiler.common.assurance.policy_names.{normalize_profile_name}
 # Constants
 # ============================================================================
 
-val SMF_MAGIC: i64 = 0x534D4600      # "SMF\0"
+# SMF_MAGIC / SMF_FLAG_EXECUTABLE are deliberately NOT declared here.
+# `compiler.backend.linker.smf_header` (imported above) already defines both,
+# and its SMF_MAGIC is `[u8] = [83, 77, 70, 0]` while the copy that used to sit
+# here was `i64 = 0x534D4600`. Two same-named top-level `val`s in one compile
+# closure resolve by last-definition-wins, so the i64 consumer could receive the
+# array and die with `type mismatch: cannot convert array to int`. Both copies
+# here were dead (declared, never referenced), so removing them is the whole
+# fix. Use smf_header's definitions if this module ever needs them.
+# See doc/08_tracking/bug/native_build_broken_at_tip_cannot_convert_array_to_int_2026-08-25.md
+
 val SMF_VERSION_MAJOR: i64 = 1
 val SMF_VERSION_MINOR: i64 = 1
-val SMF_FLAG_EXECUTABLE: i64 = 0x1
 
 val SECTION_FLAG_READ: i64 = 0x1
 val SECTION_FLAG_WRITE: i64 = 0x2
@@ -66,6 +74,9 @@ enum SectionType:
     # Startup launch metadata section. Payload is the same SDN text used by
     # native sidecars, embedded for SMF/script launchers. Wire byte = 15.
     LaunchMeta
+    # Aspect-facet dynload design §12.1. Payload is an uncompressed SMFAPK1
+    # container; wire byte 16 matches the authoritative runtime enum.
+    AspectPackDirectory
 
 impl SectionType:
     fn name() -> text:
@@ -81,6 +92,7 @@ impl SectionType:
             case Debug: ".debug"
             case DrvManifest: ".drv_manifest"
             case LaunchMeta: ".launch_meta"
+            case AspectPackDirectory: ".aspect_pack"
 
     """Map to wire byte value (Rust-runtime compatible)."""
     fn to_wire_u8() -> u8:
@@ -96,8 +108,9 @@ impl SectionType:
             case SymTab: 9
             case DrvManifest: 14
             case LaunchMeta: 15
+            case AspectPackDirectory: 16
 
-enum SymbolBinding:
+enum SmfWriterSymbolBinding:
     Local
     Global
     Weak
@@ -162,10 +175,10 @@ impl SmfWriteError:
 # Structs
 # ============================================================================
 
-struct SmfSymbol:
+struct SmfWriterSymbol:
     name: text
-    binding: SymbolBinding
-    sym_type: SymbolType
+    binding: SmfWriterSymbolBinding
+    sym_type: SmfWriterSymbolType
     section_index: i64
     value: i64
     size: i64
@@ -193,7 +206,7 @@ struct SmfSection:
 class SmfWriter:
     """Creates SMF files from compiled code."""
     sections: [SmfSection]
-    symbols: [SmfSymbol]
+    symbols: [SmfWriterSymbol]
     relocations: [SmfRelocation]
     string_table: [i64]         # Byte array
     string_offsets: {text: i64}
@@ -238,7 +251,7 @@ impl SmfWriter:
         self.sections = self.sections.push(section)
         self.sections.len() - 1
 
-    me add_symbol(symbol: SmfSymbol) -> i64:
+    me add_symbol(symbol: SmfWriterSymbol) -> i64:
         self.symbols = self.symbols.push(symbol)
         self.symbols.len() - 1
 
@@ -254,10 +267,8 @@ impl SmfWriter:
     me add_driver_manifest_section(data: [u8]) -> i64:
         """Add the `.drv_manifest` section carrying a DRVS manifest record."""
         var payload: [i64] = []
-        var data_index = 0
-        while data_index < data.len():
-            payload.push(data[data_index] as i64)
-            data_index = data_index + 1
+        for b in data:
+            payload.push(b as i64)
         val section = SmfSection(
             name: SectionType.DrvManifest.name(),
             section_type: SectionType.DrvManifest,
@@ -271,10 +282,8 @@ impl SmfWriter:
     me add_launch_metadata_section(data: [u8]) -> i64:
         """Add the `.launch_meta` section carrying startup launch metadata."""
         var payload: [i64] = []
-        var data_index = 0
-        while data_index < data.len():
-            payload.push(data[data_index] as i64)
-            data_index = data_index + 1
+        for b in data:
+            payload.push(b as i64)
         val section = SmfSection(
             name: SectionType.LaunchMeta.name(),
             section_type: SectionType.LaunchMeta,
@@ -292,10 +301,8 @@ impl SmfWriter:
         header and section table consistent by construction.
         """
         var payload: [i64] = []
-        var data_index = 0
-        while data_index < data.len():
-            payload.push(data[data_index] as i64)
-            data_index = data_index + 1
+        for b in data:
+            payload.push(b as i64)
         val section = SmfSection(
             name: SectionType.AspectPackDirectory.name(),
             section_type: SectionType.AspectPackDirectory,
@@ -314,10 +321,8 @@ impl SmfWriter:
         SectionType.Note attachment point rather than adding a new wire type."""
         val bytes = note.to_bytes()
         var payload: [i64] = []
-        var byte_index = 0
-        while byte_index < bytes.len():
-            payload.push(bytes[byte_index] as i64)
-            byte_index = byte_index + 1
+        for b in bytes:
+            payload.push(b as i64)
         self.add_note_section(".assurance_note", payload)
 
     fn section_count() -> i64:
@@ -326,7 +331,7 @@ impl SmfWriter:
     fn symbol_count() -> i64:
         self.symbols.len()
 
-    me write() -> Result<[u8], SmfWriteError>:
+    me write() -> Result<[i64], SmfWriteError>:
         """Serialize to real SMF v1.1 binary bytes, pure Simple, no SFFI.
 
         Byte layout matches the already-proven, in-tree pure-Simple pair:
@@ -426,7 +431,7 @@ impl SmfWriter:
                 exported_count = exported_count + 1
             eci = eci + 1
 
-        var buf: [u8] = []
+        var buf: [i64] = []
 
         # 3. Section payloads.
         var pos: i64 = 0
@@ -439,10 +444,7 @@ impl SmfWriter:
                 pos = pos + 1
             var di = 0
             while di < section.data.len():
-                val byte = section.data[di]
-                if byte < 0 or byte > 255:
-                    return Err(SmfWriteError.InvalidData("section byte is outside 0..255"))
-                buf.push(byte as u8)
+                buf.push(section.data[di])
                 di = di + 1
             pos = pos + section.data.len()
             wsi = wsi + 1
@@ -453,7 +455,7 @@ impl SmfWriter:
                 pos = pos + 1
             var rbi = 0
             while rbi < reloc_bytes.len():
-                buf.push(reloc_bytes[rbi])
+                buf.push(reloc_bytes[rbi] as i64)
                 rbi = rbi + 1
             pos = pos + reloc_bytes.len()
 
@@ -466,7 +468,7 @@ impl SmfWriter:
                 section_offsets[tsi], section.data.len(), section.alignment, section.name)
             var tei = 0
             while tei < entry.len():
-                buf.push(entry[tei])
+                buf.push(entry[tei] as i64)
                 tei = tei + 1
             tsi = tsi + 1
 
@@ -475,7 +477,7 @@ impl SmfWriter:
                 SectionType.RelTab.to_wire_u8(), 0, reloc_offset, reloc_bytes.len(), 8, ".rela")
             var rei = 0
             while rei < entry.len():
-                buf.push(entry[rei])
+                buf.push(entry[rei] as i64)
                 rei = rei + 1
 
         # 5. Symbol table (56-byte entries).
@@ -484,17 +486,14 @@ impl SmfWriter:
             val entry = smf_build_symbol_entry_bytes(self.symbols[symi], name_offsets[symi])
             var sei = 0
             while sei < entry.len():
-                buf.push(entry[sei])
+                buf.push(entry[sei] as i64)
                 sei = sei + 1
             symi = symi + 1
 
         # 6. String table (already real bytes, offset 0 = empty string).
         var sti = 0
         while sti < self.string_table.len():
-            val byte = self.string_table[sti]
-            if byte < 0 or byte > 255:
-                return Err(SmfWriteError.InvalidData("string-table byte is outside 0..255"))
-            buf.push(byte as u8)
+            buf.push(self.string_table[sti])
             sti = sti + 1
 
         # 7. Header, written as a 128-byte trailer (v1.1 design, matches
@@ -519,14 +518,10 @@ impl SmfWriter:
         val header_bytes = header.to_bytes()
         var hi = 0
         while hi < header_bytes.len():
-            buf.push(header_bytes[hi])
+            buf.push(header_bytes[hi] as i64)
             hi = hi + 1
 
         Ok(buf)
-
-    me write_bytes() -> Result<[u8], SmfWriteError>:
-        """Explicit admitted-byte alias for dynamic loader callers."""
-        self.write()
 
     """Serialize relocations to a byte array for the Reloc section.
 
@@ -535,15 +530,13 @@ impl SmfWriter:
     """
     fn serialize_relocations() -> [u8]:
         var buf: [u8] = []
-        var reloc_index = 0
-        while reloc_index < self.relocations.len():
-            val reloc = self.relocations[reloc_index]
+        for reloc in self.relocations:
             # offset (u64, 8 bytes)
-            val offset_bytes = u64_to_bytes_u8(reloc.offset)
-            buf = smf_append_u8_bytes(buf, offset_bytes)
+            for b in u64_to_bytes_u8(reloc.offset):
+                buf.push(b)
             # symbol_index (u32, 4 bytes)
-            val symbol_index_bytes = u32_to_bytes_u8(reloc.symbol_index)
-            buf = smf_append_u8_bytes(buf, symbol_index_bytes)
+            for b in u32_to_bytes_u8(reloc.symbol_index):
+                buf.push(b)
             # reloc_type (u8, 1 byte)
             buf.push(reloc.reloc_type.to_wire_u8())
             # padding (3 bytes)
@@ -551,60 +544,72 @@ impl SmfWriter:
             buf.push(0)
             buf.push(0)
             # addend (i64, 8 bytes)
-            val addend_bytes = u64_to_bytes_u8(reloc.addend)
-            buf = smf_append_u8_bytes(buf, addend_bytes)
-            reloc_index = reloc_index + 1
+            for b in u64_to_bytes_u8(reloc.addend):
+                buf.push(b)
         buf
 
 # ============================================================================
 # Byte serialization helpers (u8 output)
 # ============================================================================
 
-fn smf_sections_have_aspect_pack(sections: [SmfSection]) -> bool:
-    var section_index = 0
-    while section_index < sections.len():
-        if sections[section_index].section_type.to_wire_u8() as i64 == 16:
-            return true
-        section_index = section_index + 1
-    false
-
+"""Build a standalone SMF image around one SMFAPK1 aspect-pack payload."""
 fn smf_build_aspect_pack_image(pack: [u8]) -> Result<[u8], text>:
     if pack.len() == 0:
         return Err("aspect pack payload is empty")
-    var buf: [u8] = []
-    buf = smf_append_u8_bytes(buf, pack)
-    while buf.len() % 8 != 0:
-        buf.push(0)
-    val section_table_offset = buf.len()
-    val apk_type = SectionType.AspectPackDirectory
-    val entry = smf_build_section_entry_bytes(apk_type.to_wire_u8(), SECTION_FLAG_READ, 0, pack.len(), 8, apk_type.name())
-    buf = smf_append_u8_bytes(buf, entry)
-    val symbol_table_offset = buf.len()
-    buf.push(0)
-    buf = smf_append_u8_bytes(buf, smf_aspect_pack_header_bytes(section_table_offset, symbol_table_offset))
-    Ok(buf)
 
-fn smf_aspect_pack_header_bytes(section_table_offset: i64, symbol_table_offset: i64) -> [u8]:
-    var h: [u8] = []
-    h.push(83 as u8)
-    h.push(77 as u8)
-    h.push(70 as u8)
-    h.push(0 as u8)
-    h.push(1 as u8)
-    h.push(1 as u8)
-    h.push(0 as u8)
-    h.push(1 as u8)
-    h = smf_append_u8_bytes(h, u32_to_bytes_u8(SMF_WRITER_FLAG_EXECUTABLE + SMF_WRITER_FLAG_ASPECT_PACK))
-    h = smf_append_u8_bytes(h, u32_to_bytes_u8(0))
-    h = smf_append_u8_bytes(h, u32_to_bytes_u8(1))
-    h = smf_append_u8_bytes(h, u64_to_bytes_u8(section_table_offset))
-    h = smf_append_u8_bytes(h, u64_to_bytes_u8(symbol_table_offset))
-    h = smf_append_u8_bytes(h, u32_to_bytes_u8(0))
-    h = smf_append_u8_bytes(h, u32_to_bytes_u8(0))
-    h = smf_append_u8_bytes(h, u64_to_bytes_u8(0))
-    while h.len() < 128:
-        h.push(0 as u8)
-    h
+    # The general SmfWriter stores section data as [i64]. Keep pack emission on
+    # the existing direct-byte primitives instead of converting the potentially
+    # large payload [u8] -> [i64] -> [i64] -> [u8].
+    var image: [u8] = []
+    for byte in pack:
+        image.push(byte)
+    while image.len() % 8 != 0:
+        image.push(0)
+
+    val section_table_offset = image.len()
+    val section_type = SectionType.AspectPackDirectory
+    val section_entry = smf_build_section_entry_bytes(
+        section_type.to_wire_u8(), SECTION_FLAG_READ, 0, pack.len(), 8,
+        section_type.name())
+    for byte in section_entry:
+        image.push(byte)
+
+    # A zero-symbol image still carries the implicit one-byte string table used
+    # by SmfReaderMemory's fallback string-table bounds.
+    val symbol_table_offset = image.len()
+    image.push(0)
+
+    val header_bytes = smf_aspect_pack_header_bytes(
+        section_table_offset, symbol_table_offset)
+    for byte in header_bytes:
+        image.push(byte)
+    Ok(image)
+
+fn smf_aspect_pack_header_bytes(
+    section_table_offset: i64,
+    symbol_table_offset: i64
+) -> [u8]:
+    var header: [u8] = [83u8, 77u8, 70u8, 0u8, 1u8, 1u8, 1u8, 0u8]
+    for byte in u32_to_bytes_u8(SMF_FLAG_ASPECT_PACK as i64):
+        header.push(byte)
+    # compression, compression_level, and two reserved compression bytes
+    for byte in u32_to_bytes_u8(0):
+        header.push(byte)
+    for byte in u32_to_bytes_u8(1):
+        header.push(byte)
+    for byte in u64_to_bytes_u8(section_table_offset):
+        header.push(byte)
+    for byte in u64_to_bytes_u8(symbol_table_offset):
+        header.push(byte)
+    for byte in u32_to_bytes_u8(0):
+        header.push(byte)
+    for byte in u32_to_bytes_u8(0):
+        header.push(byte)
+    for byte in u64_to_bytes_u8(0):
+        header.push(byte)
+    while header.len() < 128:
+        header.push(0)
+    header
 
 fn u32_to_bytes_u8(value: i64) -> [u8]:
     [
@@ -625,15 +630,6 @@ fn u64_to_bytes_u8(value: i64) -> [u8]:
         ((value >> 48) & 0xFF) as u8,
         ((value >> 56) & 0xFF) as u8
     ]
-
-fn smf_append_u8_bytes(target: [u8], source: [u8]) -> [u8]:
-    """Append bytes with bounded indexing; `[u8]` has no iterator here."""
-    var out = target
-    var index = 0
-    while index < source.len():
-        out.push(source[index])
-        index = index + 1
-    out
 
 # ============================================================================
 # write() helpers
@@ -671,16 +667,16 @@ fn smf_build_section_entry_bytes(section_type_byte: u8, flags: i64, offset: i64,
     buf.push(0)
     buf.push(0)
     buf.push(0)
-    val flags_bytes = u32_to_bytes_u8(flags)
-    buf = smf_append_u8_bytes(buf, flags_bytes)
-    val offset_bytes = u64_to_bytes_u8(offset)
-    buf = smf_append_u8_bytes(buf, offset_bytes)
-    val size_bytes = u64_to_bytes_u8(size)
-    buf = smf_append_u8_bytes(buf, size_bytes)
-    val virtual_size_bytes = u64_to_bytes_u8(size)
-    buf = smf_append_u8_bytes(buf, virtual_size_bytes)
-    val alignment_bytes = u64_to_bytes_u8(alignment)
-    buf = smf_append_u8_bytes(buf, alignment_bytes)
+    for b in u32_to_bytes_u8(flags):
+        buf.push(b)
+    for b in u64_to_bytes_u8(offset):
+        buf.push(b)
+    for b in u64_to_bytes_u8(size):
+        buf.push(b)
+    for b in u64_to_bytes_u8(size):
+        buf.push(b)
+    for b in u64_to_bytes_u8(alignment):
+        buf.push(b)
     val name_bytes = name.bytes()
     var i = 0
     while i < 16:
@@ -702,10 +698,10 @@ fn smf_build_section_entry_bytes(section_type_byte: u8, flags: i64, offset: i64,
 """
 fn smf_build_symbol_entry_bytes(symbol: SmfWriterSymbol, name_offset: i64) -> [u8]:
     var buf: [u8] = []
-    val name_offset_bytes = u32_to_bytes_u8(name_offset)
-    buf = smf_append_u8_bytes(buf, name_offset_bytes)
-    val name_hash_bytes = u32_to_bytes_u8(smf_fnv1a_hash_u32(symbol.name))
-    buf = smf_append_u8_bytes(buf, name_hash_bytes)
+    for b in u32_to_bytes_u8(name_offset):
+        buf.push(b)
+    for b in u32_to_bytes_u8(smf_fnv1a_hash_u32(symbol.name)):
+        buf.push(b)
     buf.push(symbol.sym_type.to_wire_u8())
     buf.push(symbol.binding.to_wire_u8())
     val visibility: i64 = if symbol.section_index != 0: 1 else: 0
@@ -720,14 +716,14 @@ fn smf_build_symbol_entry_bytes(symbol: SmfWriterSymbol, name_offset: i64) -> [u
     buf.push(0)
     buf.push(0)
     buf.push(0)
-    val value_bytes = u64_to_bytes_u8(symbol.value)
-    buf = smf_append_u8_bytes(buf, value_bytes)
-    val size_bytes = u64_to_bytes_u8(symbol.size)
-    buf = smf_append_u8_bytes(buf, size_bytes)
-    val type_id_bytes = u32_to_bytes_u8(0)
-    buf = smf_append_u8_bytes(buf, type_id_bytes)
-    val version_bytes = u32_to_bytes_u8(0)
-    buf = smf_append_u8_bytes(buf, version_bytes)
+    for b in u64_to_bytes_u8(symbol.value):
+        buf.push(b)
+    for b in u64_to_bytes_u8(symbol.size):
+        buf.push(b)
+    for b in u32_to_bytes_u8(0):
+        buf.push(b)
+    for b in u32_to_bytes_u8(0):
+        buf.push(b)
     buf.push(0)
     buf.push((symbol.section_index & 0xff) as u8)
     buf.push(((symbol.section_index >> 8) & 0xff) as u8)
@@ -736,8 +732,8 @@ fn smf_build_symbol_entry_bytes(symbol: SmfWriterSymbol, name_offset: i64) -> [u
     buf.push(0)
     buf.push(0)
     buf.push(0)
-    val template_offset_bytes = u64_to_bytes_u8(0)
-    buf = smf_append_u8_bytes(buf, template_offset_bytes)
+    for b in u64_to_bytes_u8(0):
+        buf.push(b)
     buf
 
 # ============================================================================
@@ -824,15 +820,24 @@ impl AssuranceObjectNoteV1:
         out.push(79)   # 'O'
         out.push(78)   # 'N'
         out.push(49)   # '1'
-        out = smf_append_u8_bytes(out, u32_to_bytes_u8(1))
+        for b in u32_to_bytes_u8(1):
+            out.push(b)
         val hash_bytes = self.artifact_sha256_hex.bytes()
-        out = smf_append_u8_bytes(out, u32_to_bytes_u8(hash_bytes.len()))
-        out = smf_append_u8_bytes(out, hash_bytes)
+        for b in u32_to_bytes_u8(hash_bytes.len()):
+            out.push(b)
+        for b in hash_bytes:
+            out.push(b)
         val profile_bytes = self.assurance_profile.bytes()
-        out = smf_append_u8_bytes(out, u32_to_bytes_u8(profile_bytes.len()))
-        out = smf_append_u8_bytes(out, profile_bytes)
-        out = smf_append_u8_bytes(out, u64_to_bytes_u8(self.build_timestamp_unix))
-        out = smf_append_u8_bytes(out, u64_to_bytes_u8(self.obligations_checked))
-        out = smf_append_u8_bytes(out, u64_to_bytes_u8(self.obligations_complied))
-        out = smf_append_u8_bytes(out, u64_to_bytes_u8(self.obligations_violated))
+        for b in u32_to_bytes_u8(profile_bytes.len()):
+            out.push(b)
+        for b in profile_bytes:
+            out.push(b)
+        for b in u64_to_bytes_u8(self.build_timestamp_unix):
+            out.push(b)
+        for b in u64_to_bytes_u8(self.obligations_checked):
+            out.push(b)
+        for b in u64_to_bytes_u8(self.obligations_complied):
+            out.push(b)
+        for b in u64_to_bytes_u8(self.obligations_violated):
+            out.push(b)
         out

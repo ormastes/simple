@@ -69,13 +69,30 @@ module rejects unknown names up front rather than letting that happen.
 """
 
 extern fn rt_process_run_bounded(cmd: text, args: [text], timeout_ms: i64, max_output_bytes: i64) -> (text, text, i64)
-extern fn rt_env_set(key: text, value_str: text) -> bool
-extern fn rt_env_get(key: text) -> text
-extern fn rt_file_exists(path: text) -> bool
+use std.io_runtime.{env_get, env_set}
+use std.io_runtime.{file_exists}
 extern fn rt_path_absolute(path: text) -> text
 
 val PROBE_TIMEOUT_MS: i64 = 120000
 val PROBE_MAX_OUTPUT: i64 = 262144
+
+# Reentrancy guard. `simple_binary()` may resolve to /proc/self/exe, which is
+# only a COMPILER when the spec is being interpreted by one. `native-build` a
+# spec into a standalone binary and /proc/self/exe becomes the SPEC, so the
+# spawn re-runs the spec, which spawns again -- unbounded, and orphaned once
+# the parent's timeout fires. That is not hypothetical: it reached 61,838
+# processes and load 19,272 on 2026-08-24, see
+# doc/08_tracking/bug/engine_probe_self_exe_fork_bomb_2026-08-24.md
+#
+# A probe program never calls run_under_engine, so depth 1 is the only depth
+# any legitimate caller needs. Refusing to spawn past it bounds EVERY such
+# cycle, whatever resolved the binary.
+val PROBE_DEPTH_VAR: text = "SIMPLE_ENGINE_PROBE_ACTIVE"
+
+pub fn probe_spawn_is_reentrant() -> bool:
+    """True when we are already inside a probe child -- spawning again cycles."""
+    val active = env_get(PROBE_DEPTH_VAR) ?? ""
+    active != ""
 
 pub fn is_known_engine(engine: text) -> bool:
     """An unrecognised SIMPLE_EXECUTION_MODE silently means JIT — reject it."""
@@ -88,13 +105,13 @@ pub fn simple_binary() -> text:
     probe runs on the SAME build the spec is running on, not a stale
     bin/simple), then bin/simple.
     """
-    val configured = rt_env_get("SIMPLE_BINARY")
-    if configured != nil and configured != "" and rt_file_exists(configured):
+    val configured = env_get("SIMPLE_BINARY")
+    if configured != nil and configured != "" and file_exists(configured):
         return configured
     val self_path = rt_path_absolute("/proc/self/exe") ?? ""
-    if self_path.len() > 0 and self_path != "/proc/self/exe" and rt_file_exists(self_path):
+    if self_path.len() > 0 and self_path != "/proc/self/exe" and file_exists(self_path):
         return self_path
-    if rt_file_exists("bin/simple"):
+    if file_exists("bin/simple"):
         return "bin/simple"
     "./bin/simple"
 
@@ -106,19 +123,25 @@ pub fn run_under_engine(spl_path: text, engine: text) -> (text, text, i64):
     """
     if not is_known_engine(engine):
         return ("", "engine_probe: unknown engine '{engine}' (use jit, interpret or interpreter)", -1)
-    if not rt_file_exists(spl_path):
+    if not file_exists(spl_path):
         return ("", "engine_probe: probe program not found: {spl_path}", -1)
+    if probe_spawn_is_reentrant():
+        return ("", "engine_probe: refusing to spawn from inside a probe child ({PROBE_DEPTH_VAR} is set) -- a spec whose /proc/self/exe is itself would fork unboundedly", -1)
 
     val binary = simple_binary()
-    val previous = rt_env_get("SIMPLE_EXECUTION_MODE") ?? ""
-    rt_env_set("SIMPLE_EXECUTION_MODE", engine)
+    val previous = env_get("SIMPLE_EXECUTION_MODE") ?? ""
+    env_set("SIMPLE_EXECUTION_MODE", engine)
     # SIMPLE_RUNTIME_MODE is the older spelling the runner also pins; leaving
     # it on "interpreter" would fight the engine we are trying to select.
     val previous_runtime = env_get("SIMPLE_RUNTIME_MODE") ?? ""
     env_set("SIMPLE_RUNTIME_MODE", engine)
+    # Inherited by the child, so a child that somehow re-enters this function
+    # hits the reentrancy guard above instead of spawning a grandchild.
+    env_set(PROBE_DEPTH_VAR, "1")
 
     val result = rt_process_run_bounded(binary, ["run", spl_path], PROBE_TIMEOUT_MS, PROBE_MAX_OUTPUT)
 
+    env_set(PROBE_DEPTH_VAR, "")
     env_set("SIMPLE_EXECUTION_MODE", previous)
     env_set("SIMPLE_RUNTIME_MODE", previous_runtime)
     result

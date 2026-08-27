@@ -19,19 +19,40 @@ use std.gpu.engine2d.backend_emu_math.{_emu_min, _emu_max, _emu_overlay_ch}
 # Scaled Image — Nearest-neighbor resample
 # ============================================================================
 
-fn emu_draw_image_scaled(mut core: RenderBackend, dst_x: i32, dst_y: i32, dst_w: i32, dst_h: i32, src_w: i32, src_h: i32, pixels: [u32]):
-    if dst_w <= 0 or dst_h <= 0 or src_w <= 0 or src_h <= 0:
-        return
-    var result: [u32] = [0u32; dst_w * dst_h]
+fn _emu_scale_image_pixels(dst_w: i32, dst_h: i32, src_w: i32, src_h: i32, pixels: [u32]) -> [u32]:
+    val src_count = src_w.to_i64() * src_h.to_i64()
+    val dst_count = dst_w.to_i64() * dst_h.to_i64()
+    if (dst_w <= 0 or dst_h <= 0 or src_w <= 0 or src_h <= 0 or
+        src_count <= 0 or pixels.len().to_i64() != src_count or
+        dst_count <= 0 or dst_count > 2147483647 or
+        (dst_w.to_i64() - 1) * src_w.to_i64() > 2147483647 or
+        (dst_h.to_i64() - 1) * src_h.to_i64() > 2147483647):
+        return []
+    var result: [u32] = [0u32; dst_count]
     var dy: i32 = 0
     while dy < dst_h:
-        val sy = dy * src_h / dst_h
+        val sy = dy.to_i64() * src_h.to_i64() / dst_h.to_i64()
         var dx: i32 = 0
         while dx < dst_w:
-            val sx = dx * src_w / dst_w
-            result[dy * dst_w + dx] = pixels[sy * src_w + sx]
+            val sx = dx.to_i64() * src_w.to_i64() / dst_w.to_i64()
+            val dst_index = dy.to_i64() * dst_w.to_i64() + dx.to_i64()
+            val src_index = sy * src_w.to_i64() + sx
+            result[dst_index] = pixels[src_index]
             dx = dx + 1
         dy = dy + 1
+    result
+
+fn _emu_scaled_image_destination_valid(dst_x: i32, dst_y: i32, dst_w: i32, dst_h: i32) -> bool:
+    val right = dst_x.to_i64() + dst_w.to_i64()
+    val bottom = dst_y.to_i64() + dst_h.to_i64()
+    right - 1 <= 2147483647 and bottom - 1 <= 2147483647
+
+fn emu_draw_image_scaled(mut core: RenderBackend, dst_x: i32, dst_y: i32, dst_w: i32, dst_h: i32, src_w: i32, src_h: i32, pixels: [u32]):
+    if not _emu_scaled_image_destination_valid(dst_x, dst_y, dst_w, dst_h):
+        return
+    val result = _emu_scale_image_pixels(dst_w, dst_h, src_w, src_h, pixels)
+    if result.len() == 0:
+        return
     core.draw_image(dst_x, dst_y, dst_w, dst_h, result)
 
 fn emu_draw_image_scaled_blend(mut core: RenderBackend, dst_x: i32, dst_y: i32, dst_w: i32, dst_h: i32, src_w: i32, src_h: i32, pixels: [u32]):
@@ -45,13 +66,18 @@ fn emu_draw_image_scaled_blend(mut core: RenderBackend, dst_x: i32, dst_y: i32, 
 fn emu_draw_image_blend(mut core: RenderBackend, x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
     if w <= 0 or h <= 0:
         return
+    if core.name() == "cpu":
+        core.draw_image_blend(x, y, w, h, pixels)
+        return
     val fb: [u32] = core.read_pixels()
     val fb_w = core.width()
     val fb_h = core.height()
     var result: [u32] = [0u32; w * h]
     var py: i32 = 0
+    # cpu-lane-loop-ok: image blend scanline walk: one iteration per destination row
     while py < h:
         var px: i32 = 0
+        # cpu-lane-loop-ok: image blend per-pixel column walk; designated CPU lane reference body per design section 6
         while px < w:
             val src = pixels[py * w + px]
             val sa = color_a(src)
@@ -248,7 +274,10 @@ fn emu_draw_image_transform(mut core: RenderBackend, dst_x: i32, dst_y: i32, src
 
 # ============================================================================
 # Blend Mode Rect — Read + compute + write with mode selection
-# mode: 0=src-over, 1=multiply, 2=screen, 3=overlay
+# mode: 0=src-over, 1=multiply, 2=screen, 3=overlay, 4=additive
+# NOTE 4 (additive) is clamped saturating add and is NOT the same as 2 (screen):
+# additive clips at 255, screen approaches it asymptotically. Do not substitute
+# one for the other - game additive blending relies on the clipping behaviour.
 # ============================================================================
 
 fn emu_draw_rect_blend_mode(mut core: RenderBackend, x: i32, y: i32, w: i32, h: i32, color: u32, mode: i32):
@@ -263,8 +292,10 @@ fn emu_draw_rect_blend_mode(mut core: RenderBackend, x: i32, y: i32, w: i32, h: 
     val sa = color_a(color)
     var result: [u32] = [0u32; w * h]
     var py: i32 = 0
+    # cpu-lane-loop-ok: blend-mode rect scanline walk: one iteration per destination row
     while py < h:
         var px: i32 = 0
+        # cpu-lane-loop-ok: blend-mode rect per-pixel column walk; CPU lane reference body for the GPU blend-mode shader
         while px < w:
             val fx = x + px
             val fy = y + py
@@ -289,6 +320,10 @@ fn emu_draw_rect_blend_mode(mut core: RenderBackend, x: i32, y: i32, w: i32, h: 
                     rr = _emu_overlay_ch(sr, dr)
                     rg = _emu_overlay_ch(sg, dg)
                     rb = _emu_overlay_ch(sb, db)
+                else if mode == 4:
+                    rr = _emu_min(255, sr + dr)
+                    rg = _emu_min(255, sg + dg)
+                    rb = _emu_min(255, sb + db)
                 val out_r = dr + (rr - dr) * sa / 255
                 val out_g = dg + (rg - dg) * sa / 255
                 val out_b = db + (rb - db) * sa / 255

@@ -1,11 +1,31 @@
 # Test Runner Argument Parsing
 #
 # Parses command-line arguments and creates TestOptions.
+#
+# Flag reference (this file is the parser, not a help renderer -- the rendered
+# `simple test --help` / `simple help test` text lives in
+# `src/compiler_rust/driver/src/cli/help.rs`, `src/app/cli/cli_helpers.spl` and
+# `src/compiler_rust/lib/std/src/tooling/help.spl`, and must stay in sync with
+# what is parsed below):
+#
+#   --unstable      Run each unit in its own process for BOTH the build and the
+#                   test, run to the END of the source list and the test list
+#                   rather than stopping at the first bad unit, and classify
+#                   every unit into one of six outcomes:
+#                   OK / ERROR / CRASHED / TERMINATED / TIMEOUT / NOT_RUN.
+#                   TERMINATED (signal, e.g. rc 143) and TIMEOUT are UNVERIFIED
+#                   -- they are never counted as failures.
+#   --no-unstable   Force unstable mode off.
+#
+# Default when NEITHER flag is given (`unstable_mode_set` stays false, and
+# `src/app/test_runner_new/test_runner_main.spl` applies the default):
+# ON for the bootstrap path (`SIMPLE_BOOTSTRAP=1`), OFF for ordinary
+# interactive runs. Either flag overrides the default in both directions.
 
 use std.test_runner.test_runner_types.{TestExecutionMode, TestLevel, TestOptions}
 use compiler.common.assurance.policy_names.{normalize_profile_name, valid_profile_names_help}
 
-extern fn rt_file_exists(path: text) -> bool
+use std.io_runtime.{file_exists}
 
 # =========================================================================
 # Mode String Parsing
@@ -95,7 +115,8 @@ fn test_args_validation_error(args: [text]) -> text:
             arg == "--batch-size" or arg == "--session-kind" or
             arg == "--max-sessions" or arg == "--session-reset" or
             arg == "--sdoctest-env" or arg == "--tag" or arg == "--format" or
-            arg == "--mode" or arg == "--timeout" or arg == "--seed"
+            arg == "--mode" or arg == "--timeout" or arg == "--seed" or
+            arg == "--profile"
         )
         if needs_value:
             if i + 1 >= args.len():
@@ -106,6 +127,8 @@ fn test_args_validation_error(args: [text]) -> text:
                 return "missing value for {arg}"
             if arg == "--format" and value != "text" and value != "json" and value != "doc":
                 return "invalid value for --format: {value}"
+            if arg == "--profile" and normalize_profile_name(value) == "":
+                return "invalid value for --profile: {value} (valid: {valid_profile_names_help()})"
             i = i + 2
             continue
 
@@ -130,6 +153,7 @@ fn test_args_validation_error(args: [text]) -> text:
             arg == "--gc-log" or arg == "--gc=off" or arg == "--gc=OFF" or
             arg == "--safe-mode" or arg == "--safe" or arg == "--force-rebuild" or
             arg == "--keep-artifacts" or arg == "--all" or arg == "--whole" or
+            arg == "--unstable" or arg == "--no-unstable" or
             arg == "--list-skip-features" or arg == "--skip-features" or
             arg == "--planned-only" or arg == "--pending" or arg == "--no-limits" or
             arg == "--no-db" or arg == "--verbose" or arg == "-v" or
@@ -171,6 +195,10 @@ fn test_args_validation_error(args: [text]) -> text:
 
 fn parse_test_args(args: [text]) -> TestOptions:
     var path = ""
+    # Every positional target, in order. `path` keeps the first one for the
+    # many call sites that still reason about a single base path; `paths`
+    # carries the full set so nothing requested is silently discarded.
+    var paths: [text] = []
     var path_explicit = false
     var level = TestLevel.All
     var tag = ""
@@ -190,6 +218,12 @@ fn parse_test_args(args: [text]) -> TestOptions:
     var force_rebuild = false
     var keep_artifacts = false
     var run_all = false
+    # --unstable / --no-unstable: run each unit in its own process and continue
+    # to the end of the list, classifying outcomes (OK/ERROR/CRASHED/
+    # TERMINATED/TIMEOUT/NOT_RUN). Default: ON for the bootstrap path, OFF for
+    # interactive runs; the default only applies when unstable_mode_set is false.
+    var unstable_mode = false
+    var unstable_mode_set = false
     var format = "text"
     var list_skip_features = false
     var planned_only = false
@@ -206,8 +240,8 @@ fn parse_test_args(args: [text]) -> TestOptions:
     var resume = false
     var cpu_threshold = 75.0  # Stop at 75% CPU usage (= less than 25% free)
     var mem_threshold = 75.0  # Stop at 75% RAM usage (= less than 25% free)
-    var parallel = true
-    var sequential = false
+    var parallel = false
+    var sequential = true
     var max_workers = 0
     var parallel_timeout = 300
     var closure_warnings = false
@@ -229,8 +263,14 @@ fn parse_test_args(args: [text]) -> TestOptions:
     var security_supply_chain = false
     var spl_doctest = false
     var max_mem_gb = 16
+    # RLIMIT_NPROC (ulimit -u) is a per-UID cap counting ALL of the user's
+    # processes on macOS and Linux, not just this test's subtree — a low cap
+    # blocks every fork for the whole session once the user already runs more
+    # processes than the cap. 4096 keeps fork-bomb protection without tripping
+    # on normal desktop sessions (hundreds of pre-existing processes).
+    var max_procs = 4096
     var mem_check = false
-    var fork_mode = _is_fork_available()
+    var fork_mode = false
     var resource_limit_pct = 75
     var no_cache = false
     var refresh_manifest = false
@@ -238,13 +278,17 @@ fn parse_test_args(args: [text]) -> TestOptions:
     var clean = false
     var no_cover_check = false
     # Session sharing options
-    var session_share = false
-    var session_daemon = false
+    var session_share = true
+    var session_daemon = true
     var session_kind = ""
     var max_sessions = 0
     var session_debug = false
     var session_reset = ""
     var assert_ran = false
+    var batch_size = 0
+    var batch_manifest = ""
+    var batch_result = ""
+    var profile = ""
 
     var i = 0
     while i < args.len():
@@ -280,6 +324,12 @@ fn parse_test_args(args: [text]) -> TestOptions:
             keep_artifacts = true
         elif arg == "--all":
             run_all = true
+        elif arg == "--unstable":
+            unstable_mode = true
+            unstable_mode_set = true
+        elif arg == "--no-unstable":
+            unstable_mode = false
+            unstable_mode_set = true
         elif arg == "--whole":
             run_all = true
             sdoctest = true
@@ -295,9 +345,9 @@ fn parse_test_args(args: [text]) -> TestOptions:
         elif arg == "--max-mem":
             i = i + 1
             if i < args.len():
-                max_mem_gb = to_int(args[i])
+                max_mem_gb = args[i].to_int() ?? 0
         elif arg.starts_with("--max-mem="):
-            max_mem_gb = to_int(arg[10:])
+            max_mem_gb = arg[10:].to_int() ?? 0
         elif arg == "--no-db":
             no_db = true
         elif arg == "--verbose" or arg == "-v":
@@ -344,21 +394,21 @@ fn parse_test_args(args: [text]) -> TestOptions:
         elif arg == "--resource-limit":
             i = i + 1
             if i < args.len():
-                resource_limit_pct = to_int(args[i])
+                resource_limit_pct = args[i].to_int() ?? 0
         elif arg.starts_with("--resource-limit="):
-            resource_limit_pct = to_int(arg[17:])
+            resource_limit_pct = arg[17:].to_int() ?? 0
         elif arg == "--max-workers":
             i = i + 1
             if i < args.len():
-                max_workers = to_int(args[i])
+                max_workers = args[i].to_int() ?? 0
         elif arg.starts_with("--max-workers="):
-            max_workers = to_int(arg[14:])
+            max_workers = arg[14:].to_int() ?? 0
         elif arg == "--parallel-timeout":
             i = i + 1
             if i < args.len():
-                parallel_timeout = to_int(args[i])
+                parallel_timeout = args[i].to_int() ?? 0
         elif arg.starts_with("--parallel-timeout="):
-            parallel_timeout = to_int(arg[19:])
+            parallel_timeout = arg[19:].to_int() ?? 0
         elif arg == "--closure-warnings":
             closure_warnings = true
         elif arg == "--ci":
@@ -370,9 +420,9 @@ fn parse_test_args(args: [text]) -> TestOptions:
         elif arg == "--fuzz-time":
             i = i + 1
             if i < args.len():
-                fuzz_time_secs = to_int(args[i])
+                fuzz_time_secs = args[i].to_int() ?? 0
         elif arg.starts_with("--fuzz-time="):
-            fuzz_time_secs = to_int(arg[12:])
+            fuzz_time_secs = arg[12:].to_int() ?? 0
         elif arg == "--fuzz-corpus":
             i = i + 1
             if i < args.len():
@@ -388,15 +438,15 @@ fn parse_test_args(args: [text]) -> TestOptions:
         elif arg == "--chaos-trials":
             i = i + 1
             if i < args.len():
-                chaos_trials = to_int(args[i])
+                chaos_trials = args[i].to_int() ?? 0
         elif arg.starts_with("--chaos-trials="):
-            chaos_trials = to_int(arg[15:])
+            chaos_trials = arg[15:].to_int() ?? 0
         elif arg == "--chaos-fault-rate":
             i = i + 1
             if i < args.len():
-                chaos_fault_rate = to_int(args[i])
+                chaos_fault_rate = args[i].to_int() ?? 0
         elif arg.starts_with("--chaos-fault-rate="):
-            chaos_fault_rate = to_int(arg[19:])
+            chaos_fault_rate = arg[19:].to_int() ?? 0
         elif arg == "--deploy":
             deploy_mode = true
         elif arg == "--deploy-platform":
@@ -434,9 +484,9 @@ fn parse_test_args(args: [text]) -> TestOptions:
         elif arg == "--batch-size":
             i = i + 1
             if i < args.len():
-                batch_size = to_int(args[i])
+                batch_size = args[i].to_int() ?? 0
         elif arg.starts_with("--batch-size="):
-            batch_size = to_int(arg[13:])
+            batch_size = arg[13:].to_int() ?? 0
         elif arg.starts_with("--batch-manifest="):
             batch_manifest = arg[17:]
         elif arg.starts_with("--batch-result="):
@@ -448,6 +498,9 @@ fn parse_test_args(args: [text]) -> TestOptions:
         elif arg == "--session-daemon":
             session_daemon = true
             session_share = true
+        elif arg == "--no-session-daemon":
+            session_daemon = false
+            session_share = false
         elif arg == "--session-kind":
             i = i + 1
             if i < args.len():
@@ -457,9 +510,9 @@ fn parse_test_args(args: [text]) -> TestOptions:
         elif arg == "--max-sessions":
             i = i + 1
             if i < args.len():
-                max_sessions = to_int(args[i])
+                max_sessions = args[i].to_int() ?? 0
         elif arg.starts_with("--max-sessions="):
-            max_sessions = to_int(arg[15:])
+            max_sessions = arg[15:].to_int() ?? 0
         elif arg == "--session-debug":
             session_debug = true
         elif arg == "--session-reset":
@@ -483,12 +536,16 @@ fn parse_test_args(args: [text]) -> TestOptions:
             if i < args.len():
                 tag = args[i]
         elif arg == "--doc":
-            format = OutputFormat.Doc
+            format = "doc"
         elif arg == "--format":
             i = i + 1
             if i < args.len():
-                if args[i] == "doc":
-                    format = "doc"
+                if args[i] == "text" or args[i] == "json" or args[i] == "doc":
+                    format = args[i]
+        elif arg.starts_with("--format="):
+            val fmt = arg.substring(9)
+            if fmt == "text" or fmt == "json" or fmt == "doc":
+                format = fmt
         elif arg == "--compile":
             mode = TestExecutionMode.Compile
         elif arg == "--mode":
@@ -501,24 +558,55 @@ fn parse_test_args(args: [text]) -> TestOptions:
         elif arg == "--timeout":
             i = i + 1
             if i < args.len():
-                timeout = to_int(args[i])
+                timeout = args[i].to_int() ?? 0
+        elif arg.starts_with("--timeout="):
+            # `--timeout=N` was accepted by the single-file runner
+            # (test_runner_single.spl) but rejected here as "unknown option",
+            # so `simple test --timeout=800 <dir>` aborted with exit 2 while the
+            # same flag worked on a single spec. Both spellings now parse.
+            # The intermediate `val` is load-bearing: `arg.substring(10).to_int()`
+            # chained directly returns a raw pointer under the JIT (see
+            # doc/08_tracking/bug/jit_substring_chained_to_int_returns_pointer_2026-08-04.md).
+            val timeout_value: text = arg.substring(10)
+            timeout = timeout_value.to_int() ?? 0
         elif arg == "--seed":
             i = i + 1
             if i < args.len():
-                seed = to_int(args[i])
+                seed = args[i].to_int() ?? 0
                 seed_set = true
-        elif not arg.starts_with("-") and path == "":
-            path = arg
+        elif arg.starts_with("--seed="):
+            val seed_value: text = arg.substring(7)
+            seed = seed_value.to_int() ?? 0
+            seed_set = true
+        elif arg == "--profile":
+            i = i + 1
+            if i < args.len():
+                profile = normalize_profile_name(args[i])
+        elif arg.starts_with("--profile="):
+            profile = normalize_profile_name(arg.substring(10))
+        elif not arg.starts_with("-"):
+            # Accumulate every positional target. Previously this arm was
+            # guarded by `and not path_explicit`, so the second and later
+            # targets matched no branch at all and vanished with no
+            # diagnostic — `simple test a.spl b.spl` silently ran only a.spl.
+            paths.push(arg)
+            if not path_explicit:
+                path = arg
+                path_explicit = true
         i = i + 1
 
     if path == "":
         path = "test/"
+    if paths.len() == 0:
+        paths = [path]
 
     if no_limits:
         max_mem_gb = 0
+        max_procs = 0
 
     TestOptions(
         path: path,
+        paths: paths,
         path_explicit: path_explicit,
         level: level,
         tag: tag,
@@ -538,6 +626,8 @@ fn parse_test_args(args: [text]) -> TestOptions:
         force_rebuild: force_rebuild,
         keep_artifacts: keep_artifacts,
         run_all: run_all,
+        unstable_mode: unstable_mode,
+        unstable_mode_set: unstable_mode_set,
         format: format,
         list_skip_features: list_skip_features,
         planned_only: planned_only,
@@ -576,6 +666,7 @@ fn parse_test_args(args: [text]) -> TestOptions:
         security_supply_chain: security_supply_chain,
         spl_doctest: spl_doctest,
         max_mem_gb: max_mem_gb,
+        max_procs: max_procs,
         mem_check: mem_check,
         fork_mode: fork_mode,
         resource_limit_pct: resource_limit_pct,
@@ -590,7 +681,11 @@ fn parse_test_args(args: [text]) -> TestOptions:
         session_debug: session_debug,
         session_reset: session_reset,
         assert_ran: assert_ran,
-        no_cover_check: no_cover_check
+        no_cover_check: no_cover_check,
+        batch_size: batch_size,
+        batch_manifest: batch_manifest,
+        batch_result: batch_result,
+        profile: profile
     )
 
 # =========================================================================
@@ -638,7 +733,7 @@ fn parse_f64(s: text) -> f64:
 fn _is_fork_available() -> bool:
     """Auto-detect fork availability. fork() is Linux-only.
     Uses /proc/stat existence check instead of spawning uname subprocess."""
-    rt_file_exists("/proc/stat")
+    file_exists("/proc/stat")
 
 # =========================================================================
 # Exports

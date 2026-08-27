@@ -4,8 +4,7 @@ use std.nogc_sync_mut.io.time_ops.{current_time_ms}
 use std.crypto.hmac.{hmac_sha256_bytes}
 use std.common.crypto.constant_time.{constant_time_compare}
 use std.common.crypto.types.{bytes_to_hex, crypto_text_to_bytes as text_to_bytes}
-
-extern fn rt_random_hex(length: i64) -> text
+use std.nogc_sync_mut.io.crypto_sffi.{random_hex as checked_random_hex}
 
 ## Security event types for audit logging.
 enum SecurityEvent:
@@ -122,11 +121,12 @@ class PermissionSnapshot:
         self.scopes.contains(scope)
 
     fn can_show(key: text) -> bool:
-        val maybe_allowed = self.ui_hints.get(key)
-        if val allowed = maybe_allowed:
-            allowed
-        else:
-            false
+        # NOTE: contains_key + index read, not `.get()` — under native codegen a
+        # Dict<_, bool> hit storing `true` reads as nil, so the optional binding
+        # failed and every allowed hint collapsed to `false`.
+        if not self.ui_hints.contains_key(key):
+            return false
+        self.ui_hints[key]
 
 ## Remote request headers that are safe to propagate into context assembly.
 ##
@@ -235,21 +235,21 @@ class RemoteSecuritySigningKeyRing:
         )
 
     me add_key(key_id: text, signing_key: text):
-        self.keys = self.keys.set(key_id, signing_key)
+        self.keys[key_id] = signing_key
 
     me rotate_key(key_id: text, signing_key: text):
-        self.keys = self.keys.set(key_id, signing_key)
+        self.keys[key_id] = signing_key
         self.active_key_id = key_id
 
     me retire_key(key_id: text):
         if self.keys.has(key_id):
-            self.keys = self.keys.set(key_id, "")
+            self.keys[key_id] = ""
         if self.active_key_id == key_id:
             self.active_key_id = ""
 
     me merge_from(peer: RemoteSecuritySigningKeyRing):
         for key_id in peer.keys.keys():
-            self.keys = self.keys.set(key_id, peer.keys[key_id])
+            self.keys[key_id] = peer.keys[key_id]
         if peer.active_key_id != "":
             self.active_key_id = peer.active_key_id
 
@@ -272,7 +272,7 @@ class RemoteSecuritySigningKeyRing:
             elif line.starts_with("key|"):
                 val parts = line.split("|")
                 if parts.len() >= 3:
-                    self.keys = self.keys.set(parts[1], parts[2])
+                    self.keys[parts[1]] = parts[2]
 
     fn active_key() -> text:
         if self.keys.has(self.active_key_id):
@@ -311,16 +311,16 @@ class RemoteSecuritySessionStore:
         RemoteSecuritySessionStore(sessions: empty_sessions)
 
     me create_session(session_id: text, user_id: text, capabilities: List<text>, expires_at_ms: i64):
-        self.sessions = self.sessions.set(session_id, RemoteSecuritySession(
+        self.sessions[session_id] = RemoteSecuritySession(
             session_id: session_id,
             user_id: user_id,
             capabilities: capabilities,
             expires_at_ms: expires_at_ms,
             revoked: false
-        ))
+        )
 
     me save_session(session: RemoteSecuritySession):
-        self.sessions = self.sessions.set(session.session_id, session)
+        self.sessions[session.session_id] = session
 
     fn export_sdn() -> text:
         var lines: [text] = ["remote_security_sessions:"]
@@ -363,7 +363,11 @@ class RemoteSecuritySessionStore:
                     self.save_session(incoming)
 
     fn lookup_session(session_id: text) -> RemoteSecuritySession?:
-        self.sessions.get(session_id)
+        # Native codegen: Dict.get() corrupts struct payloads. Index-read instead.
+        if self.sessions.has(session_id):
+            Some(self.sessions[session_id])
+        else:
+            nil
 
     fn lookup_active_session(session_id: text, now_ms: i64) -> RemoteSecuritySession?:
         if self.sessions.has(session_id):
@@ -376,20 +380,20 @@ class RemoteSecuritySessionStore:
         if self.sessions.has(session_id):
             val session = self.sessions[session_id]
             if not session.revoked:
-                self.sessions = self.sessions.set(session_id, session.refreshed(expires_at_ms))
+                self.sessions[session_id] = session.refreshed(expires_at_ms)
                 return true
         false
 
     me revoke_session(session_id: text) -> bool:
         if self.sessions.has(session_id):
             val session = self.sessions[session_id]
-            self.sessions = self.sessions.set(session_id, RemoteSecuritySession(
+            self.sessions[session_id] = RemoteSecuritySession(
                 session_id: session.session_id,
                 user_id: session.user_id,
                 capabilities: session.capabilities,
                 expires_at_ms: session.expires_at_ms,
                 revoked: true
-            ))
+            )
             return true
         false
 
@@ -489,7 +493,7 @@ class RemoteSecurityKeyRolloutProvider:
         provider
 
     me add_key(key_id: text, key_handle: text):
-        self.key_handles = self.key_handles.set(key_id, key_handle)
+        self.key_handles[key_id] = key_handle
 
     me rotate_key(key_id: text, key_handle: text):
         self.add_key(key_id, key_handle)
@@ -497,7 +501,7 @@ class RemoteSecurityKeyRolloutProvider:
 
     me retire_key(key_id: text):
         if self.key_handles.has(key_id):
-            self.key_handles = self.key_handles.set(key_id, "")
+            self.key_handles[key_id] = ""
         if self.active_key_id == key_id:
             self.active_key_id = ""
 
@@ -510,12 +514,18 @@ class RemoteSecurityKeyRolloutProvider:
         "{key_id}|{payload}|{signature}"
 
     me allow_external_signature(key_id: text, payload: text, signature: text):
-        self.accepted_signatures = self.accepted_signatures.set(self.signature_key(key_id, payload, signature), true)
+        self.accepted_signatures[self.signature_key(key_id, payload, signature)] = true
 
     fn verify_external_signature(key_id: text, payload: text, signature: text) -> bool:
         if self.key_handle_for(key_id) == "":
             return false
-        self.accepted_signatures.get(self.signature_key(key_id, payload, signature)) ?? false
+        # NOTE: contains_key + index read, not `.get() ?? false` — under native
+        # codegen a Dict<_, bool> hit storing `true` reads as nil, so `??`
+        # replaced every accepted signature with `false`.
+        val sig_key = self.signature_key(key_id, payload, signature)
+        if not self.accepted_signatures.contains_key(sig_key):
+            return false
+        self.accepted_signatures[sig_key]
 
     fn export_sdn() -> text:
         var lines: [text] = ["remote_security_key_rollout_provider:", "  active: {self.active_key_id}"]
@@ -701,7 +711,14 @@ fn validate_remote_security_token_with_adapters(headers: RemoteSecurityContextHe
     val session = session_adapter.lookup_active_session(token_session_id, now_ms)
     if session == nil:
         return RemoteSecurityValidatedIdentity.invalid()
-    val active = session
+    # `val active = session` does NOT narrow `RemoteSecuritySession?` to
+    # `RemoteSecuritySession` -- the nil guard above is not propagated through a
+    # plain rebind, so every field access below raised
+    # "unknown property or method 'user_id' on Option" and the whole adapter
+    # validation path aborted. That silently downgraded adapter-backed auth to
+    # anonymous: the session/token user-binding check never ran. Force-unwrap
+    # after the explicit nil guard is the narrowing the guard was meant to give.
+    val active = session!
     if active.user_id != user_id:
         return RemoteSecurityValidatedIdentity.invalid()
     RemoteSecurityValidatedIdentity(
@@ -817,13 +834,11 @@ fn severity_for_event(event: SecurityEvent) -> SecuritySeverity:
 ## Generate a unique correlation ID for request tracing.
 fn generate_correlation_id() -> text:
     val ts = time_now_ms()
-    val rand = random_hex(8)
+    # Correlation IDs must not degrade to timestamp-only values. The checked
+    # CSPRNG owner returns nil for absent/malformed entropy; `!` fails closed.
+    val rand = checked_random_hex(8)!
     "{ts}-{rand}"
 
 ## Time helper (delegates to runtime).
 fn time_now_ms() -> i64:
     current_time_ms()
-
-## Random hex helper (delegates to crypto SFFI).
-fn random_hex(bytes: i64) -> text:
-    rt_random_hex(bytes)

@@ -51,7 +51,11 @@ impl ImportGraph:
                 if not self.edges.has(from):
                     self.edges[from] = []
                 if not self.edges[from].contains(to):
-                    self.edges[from].push(to)
+                    # Workaround for Dict mutation bug: write-back required.
+                    # See doc/08_tracking/bug/mutate_through_index_loses_write_2026-07-31.md
+                    var bucket = self.edges[from]
+                    bucket.push(to)
+                    self.edges[from] = bucket
                 if not self.edges.has(to):
                     self.edges[to] = []
 
@@ -67,7 +71,11 @@ impl ImportGraph:
 
     # Get all modules that a module imports
     fn imports_of(module: text) -> [text]:
-        self.edges.get(module) ?? []
+        # Native codegen: Dict.get() on non-scalar values is unsafe. Index-read.
+        if self.edges.contains_key(module):
+            self.edges[module]
+        else:
+            []
 
     # Get all modules in the graph
     fn modules() -> [text]:
@@ -90,13 +98,20 @@ impl ImportGraph:
     fn dfs_cycle(module: text, visited: mut Dict<text, bool>,
                  in_stack: mut Dict<text, bool>,
                  path: mut [text]) -> CyclicDependencyError?:
-        if in_stack.get(module) ?? false:
+        # NOTE: contains_key + index read, not `.get() ?? false` — under native
+        # codegen a Dict<_, bool> hit storing `true` compares `== nil` as true,
+        # so `?? false` collapses every present `true` to `false` and this cycle
+        # branch never fires (bug: native_dict_get_miss_returns_zero_not_nil).
+        if in_stack.contains_key(module) and in_stack[module]:
             # Found a cycle - extract it from path
-            val cycle_start = path.index_of(module) ?? 0
+            # index_of returns a plain i64 with -1 for not-found, not an
+            # Option, so `?? 0` never coalesced and `-1` sliced from the end.
+            val found_at = path.index_of(module)
+            val cycle_start = if found_at >= 0: found_at else: 0
             val cycle = path[cycle_start:] + [module]
             return Some(CyclicDependencyError(cycle: cycle))
 
-        if visited.get(module) ?? false:
+        if visited.contains_key(module) and visited[module]:
             return nil
 
         visited[module] = true
@@ -122,14 +137,24 @@ impl ImportGraph:
         # For each module's imports, the TARGET gets an incoming edge
         for module in self.modules():
             for dep in self.imports_of(module):
-                in_degree[dep] = (in_degree.get(dep) ?? 0) + 1
+                # contains_key + index read, not `.get() ?? 0` — native Dict.get
+                # is unreliable (see NOTE above); this file uses index reads
+                # everywhere else (e.g. line below in this same fn).
+                val cur = if in_degree.has(dep): in_degree[dep] else: 0
+                in_degree[dep] = cur + 1
 
         # Start with modules that have no incoming edges (no dependencies ON them)
-        var queue: [text] = [for m in self.modules() if (in_degree.get(m) ?? 0) == 0: m]
+        # every module() is pre-seeded into in_degree above, so an index read is
+        # safe and correct here — avoid the unreliable native Dict.get + `?? 0`.
+        var queue: [text] = [for m in self.modules() if in_degree[m] == 0: m]
         var result: [text] = []
 
-        while queue.len() > 0:
-            val module = queue.pop_front()
+        # `queue` is a plain [text] array, which has no `pop_front`; walk it with
+        # a head index instead (also O(1) per step, no front-shift).
+        var head: i64 = 0
+        while head < queue.len():
+            val module = queue[head]
+            head = head + 1
             result.push(module)
             for dep in self.imports_of(module):
                 in_degree[dep] = in_degree[dep] - 1
@@ -179,7 +204,7 @@ impl ImportGraph:
                 val dep_low = lowlinks[dep]
                 if dep_low < lowlinks[module]:
                     lowlinks[module] = dep_low
-            elif on_stack.get(dep) ?? false:
+            elif on_stack.contains_key(dep) and on_stack[dep]:
                 val dep_idx = indices[dep]
                 if dep_idx < lowlinks[module]:
                     lowlinks[module] = dep_idx
@@ -204,7 +229,7 @@ impl ImportGraph:
 
     fn collect_transitive(module: text, visited: mut Dict<text, bool>, result: mut [text]):
         for dep in self.imports_of(module):
-            if not (visited.get(dep) ?? false):
+            if not (visited.contains_key(dep) and visited[dep]):
                 visited[dep] = true
                 result.push(dep)
                 self.collect_transitive(dep, visited, result)

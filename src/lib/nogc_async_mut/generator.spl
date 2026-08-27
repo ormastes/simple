@@ -23,15 +23,32 @@ use std.iterator.reduce.{iter_collect}
 # Create a generator from an initial state and a step function.
 # step_fn receives current state, returns (next_state, should_continue).
 fn generator(initial, step_fn):
+    generator_from_step(initial, step_fn)
+
+# Same as `generator`, under a name that does NOT collide with the interpreter's
+# `generator` BUILTIN.  The builtin only steps aside when a user `fn generator`
+# is present in the interpreter's function table, and a function reached through
+# `use std.generator.{...}` is not always registered there -- so the builtin won
+# and every call died with "semantic: generator expects a lambda".  Internal
+# callers below must use this name; `generator` stays exported for API
+# compatibility.
+fn generator_from_step(initial, step_fn):
     iter_from_function(initial, step_fn)
 
 # Create a generator that yields integers from start up to (not including) end_val.
 fn generate_range(start, end_val):
-    generator(start, fn(n): (n + 1, n < end_val))
+    # The continue flag must be tested on the state that would be yielded NEXT
+    # (n + 1), not on the one already yielded (n).  With `n < end_val` the
+    # sequence ran one element long: generate_range(0, 3) collected [0,1,2,3].
+    #
+    # Known limit of this protocol: the initial state is always yielded, so an
+    # EMPTY range (start >= end_val) still produces one element.  Callers that
+    # need a possibly-empty range must bound it with `take`.
+    generator_from_step(start, fn(n): (n + 1, n + 1 < end_val))
 
 # Create an infinite generator that always yields the same value.
 fn generate_repeat(value):
-    generator(value, fn(v): (v, true))
+    generator_from_step(value, fn(v): (v, true))
 
 # Collect the first n values from a generator into an array.
 fn take(generator, n):

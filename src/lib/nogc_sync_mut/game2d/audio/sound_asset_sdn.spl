@@ -7,7 +7,7 @@
 #     source: { type: "tone", wave: "sine" | "square" | "noise", freq_hz: 440, duration_ms: 200, seed: 0 }
 #     envelope: { attack_ms: 0, decay_ms: 0, sustain: 1.0, release_ms: 0 }
 #     effects: [ { type: "lowpass", cutoff_hz: 800 }, { type: "delay", time_ms: 120, feedback: 0.3 },
-#                { type: "reverb", room_size: 0.5, wet: 0.3 } ]
+#                { type: "reverb", room_size: 0.5, wet: 0.3 }, { type: "pitch", pitch: 1.25 } ]
 #     events: [ { at_ms: 0, clip: "kick.wav", gain: 1.0 } ]   # "sequence" kind only
 #     pattern:                                                # "pattern" kind only
 #       bpm: 120
@@ -75,6 +75,7 @@ class SoundEffectSpec:
     feedback: f64
     room_size: f64
     wet: f64
+    pitch: f64
 
 class SoundEvent:
     at_ms: i64
@@ -220,13 +221,14 @@ fn _parse_effect(v: SdnValue, idx: i64) -> Result<SoundEffectSpec, text>:
             kind = s
     else:
         return Err("{what}: missing required field `type`")
-    if (kind != "lowpass" and kind != "highpass" and kind != "delay" and kind != "reverb"):
-        return Err("{what}: unsupported effect type \"{kind}\" (supported: lowpass, highpass, delay, reverb)")
+    if (kind != "lowpass" and kind != "highpass" and kind != "delay" and kind != "reverb" and kind != "pitch"):
+        return Err("{what}: unsupported effect type \"{kind}\" (supported: lowpass, highpass, delay, reverb, pitch)")
     var cutoff_hz = 1000.0
     var time_ms = 100.0
     var feedback = 0.3
     var room_size = 0.5
     var wet = 0.3
+    var pitch = 1.0
     if val Some(cv) = v.get("cutoff_hz"):
         val r = _f64_of(cv, "{what}.cutoff_hz", cutoff_hz)
         if val Err(e) = r:
@@ -261,7 +263,15 @@ fn _parse_effect(v: SdnValue, idx: i64) -> Result<SoundEffectSpec, text>:
             if (f < 0.0 or f > 1.0):
                 return Err("{what}.wet: must be in [0,1] (got {f})")
             wet = f
-    Ok(SoundEffectSpec(kind: kind, cutoff_hz: cutoff_hz, time_ms: time_ms, feedback: feedback, room_size: room_size, wet: wet))
+    if val Some(pv) = v.get("pitch"):
+        val r = _f64_of(pv, "{what}.pitch", pitch)
+        if val Err(e) = r:
+            return Err(e)
+        if val Ok(f) = r:
+            if f <= 0.0:
+                return Err("{what}.pitch: must be > 0 (got {f})")
+            pitch = f
+    Ok(SoundEffectSpec(kind: kind, cutoff_hz: cutoff_hz, time_ms: time_ms, feedback: feedback, room_size: room_size, wet: wet, pitch: pitch))
 
 fn _parse_event(v: SdnValue, idx: i64) -> Result<SoundEvent, text>:
     val what = "events[{idx}]"

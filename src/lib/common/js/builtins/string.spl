@@ -1,21 +1,55 @@
 # String and RegExp built-ins for the JS engine.
 # Operates on Simple text type (maps to JS string).
 
+use std.common.encoding.utf8.{text_codepoints, utf8_codepoint_byte_len}
+
 fn string_length(s: text) -> i64:
     s.len()
 
+# `index` here is a JS-style CHARACTER index, not a byte index -- so this
+# walks codepoints (text_codepoints + utf8_codepoint_byte_len, both already
+# byte-consistent) to find the right byte range, then does one plain
+# byte-indexed bracket-slice. Never char_at (character-indexed, the exact
+# mismatch this survey hunts -- doc/08_tracking/bug/
+# bracket_slice_byte_index_survey_2026-07-29.md) and never a
+# tuple-returning helper (aggregate returns across a call boundary are a
+# separate, independently-documented corruption class on this seed --
+# doc/08_tracking/bug/native_tuple_spill_clobber_across_call_2026-07-19.md
+# -- confirmed by hand here: an earlier version of this fix split the byte-
+# range lookup into a `(i64, i64)`-returning helper and it silently
+# produced the right answer for a 2-byte codepoint but an empty string for
+# 3-byte codepoints (CJK, em-dash); inlining the walk removed the call
+# boundary and fixed it). Old behavior: `s[index:index+1]` treated `index`
+# as a byte offset, so for any character after a multi-byte one it read a
+# stray continuation byte (invalid, partial UTF-8) instead of the
+# requested character.
 fn string_charAt(s: text, index: i64) -> text:
-    val len = s.len()
-    if index < 0 or index >= len:
+    if index < 0:
         return ""
-    s[index:index + 1]
+    val cps = text_codepoints(s)
+    if index >= cps.len():
+        return ""
+    var byte_pos = 0
+    var ci = 0
+    while ci < index:
+        val cp = cps[ci]
+        val cp_len = utf8_codepoint_byte_len(cp)
+        byte_pos = byte_pos + cp_len
+        ci = ci + 1
+    val this_cp = cps[index]
+    val this_len = utf8_codepoint_byte_len(this_cp)
+    val end_pos = byte_pos + this_len
+    s[byte_pos:end_pos]
 
 fn string_charCodeAt(s: text, index: i64) -> i64:
-    val ch = string_charAt(s, index)
-    if ch == "":
+    val cps = text_codepoints(s)
+    if index < 0 or index >= cps.len():
         return -1
-    # Return the byte value of the first character
-    ch.byte_at(0)
+    # Return the Unicode codepoint value of the character (JS charCodeAt
+    # semantics), not a raw UTF-8 lead byte -- for multi-byte input the
+    # lead byte alone (e.g. 0xC3, the first byte of "é"'s 2-byte encoding)
+    # is not the character's numeric value (233).
+    cps[index]
 
 fn string_indexOf(s: text, search: text) -> i64:
     val s_len = s.len()
@@ -116,13 +150,27 @@ fn string_trimEnd(s: text) -> text:
 
 fn string_split(s: text, separator: text) -> [text]:
     if separator == "":
-        # Split into individual characters
+        # Split into individual characters (codepoints, not bytes -- a
+        # multi-byte character must produce exactly one array element,
+        # matching JS split('') semantics for BMP text). Old code pushed
+        # one BYTE per element (`s[i:i+1]` stepping `i` by 1 always), so a
+        # multi-byte character was shredded into multiple invalid,
+        # partial-UTF-8 single-byte elements instead of one real element.
         var chars: [text] = []
-        var i = 0
-        val len = s.len()
-        while i < len:
-            chars.push(s[i:i + 1])
-            i = i + 1
+        val cps = text_codepoints(s)
+        var byte_pos = 0
+        val blen = s.len()
+        var ci = 0
+        val cps_len = cps.len()
+        while ci < cps_len:
+            val cp = cps[ci]
+            val seqlen = utf8_codepoint_byte_len(cp)
+            var end = byte_pos + seqlen
+            if end > blen:
+                end = blen
+            chars.push(s[byte_pos:end])
+            byte_pos = end
+            ci = ci + 1
         return chars
     s.split(separator)
 

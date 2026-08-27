@@ -4,9 +4,9 @@
 # See those files for pattern implementations.
 
 use compiler.mir.mir_data.*
-use compiler.mir.mir.*
+use compiler.mir.mir_data.*
 use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock}
-use compiler.mir_opt.mir_opt.loop_detect.{LoopInfo, LoopDetector, loop_detector_detect_loops}
+use compiler.mir_opt.mir_opt.loop_detect.{LoopInfo, LoopDetector}
 use compiler.mir_opt.mir_opt.pattern.rule_engine.{
     OptimizationRuleProvider, OptimizerProviderKind, OptimizerRuleLookupKind,
     optimization_rule_provider_builtin_with_contract
@@ -35,7 +35,6 @@ impl CollectionOptimization:
         if self.detector.loops.len() > 0:
             for loop_info in self.detector.loops:
                 optimized_blocks = colopt_optimize_concat_in_loop(self, optimized_blocks, loop_info, func)
-                optimized_blocks = self.hoist_pure_calls(optimized_blocks, loop_info)
         optimized_blocks = colopt_optimize_concat_all_blocks(self, optimized_blocks, func)
         optimized_blocks = self.canonicalize_collection_len_queries(optimized_blocks)
         optimized_blocks = self.canonicalize_collection_pure_queries(optimized_blocks)
@@ -68,31 +67,12 @@ fn collection_optimization_provider() -> OptimizationRuleProvider:
         OptimizerRuleLookupKind.PipelinePass,
         true,
         ["typed_mir", "loop_bounds", "collection_layout"],
-        ["canonical_collection_loops", "hoisted_collection_queries", "append_fusion", "runtime_collection_read_cse", "loop_invariant_scalar_ops"],
+        ["canonical_collection_loops", "append_fusion", "runtime_collection_read_cse"],
         "pure"
     )
 
-fn collection_opt_run_on_function(func: MirFunction, collection_pass: CollectionOptimization) -> MirFunction:
-    # Keep the public free-function entry native-safe. Calling the extension
-    # me-method above from native code can swap the class receiver and the
-    # MirFunction argument across this module boundary.
-    var detector = LoopDetector.new()
-    val loops = loop_detector_detect_loops(func)
-    detector.loops = loops
-    collection_pass.detector = detector
-    var optimized_blocks = func.blocks
-    if loops.len() > 0:
-        for loop_info in loops:
-            optimized_blocks = colopt_optimize_concat_in_loop(collection_pass, optimized_blocks, loop_info, func)
-            optimized_blocks = collection_pass.hoist_pure_calls(optimized_blocks, loop_info)
-    optimized_blocks = colopt_optimize_concat_all_blocks(collection_pass, optimized_blocks, func)
-    optimized_blocks = collection_pass.canonicalize_collection_len_queries(optimized_blocks)
-    optimized_blocks = collection_pass.canonicalize_collection_pure_queries(optimized_blocks)
-    optimized_blocks = collection_pass.specialize_typed_array_index_gets(optimized_blocks, func)
-    optimized_blocks = collection_pass.elide_dead_append_only_capacity_arrays(optimized_blocks)
-    var result = func
-    result.blocks = optimized_blocks
-    result
+fn collection_opt_run_on_function(collection_pass: CollectionOptimization, func: MirFunction) -> MirFunction:
+    collection_pass.optimize_function(func)
 
 # ============================================================================
 # Exports

@@ -92,7 +92,8 @@ impl McpState:
         self.progress_tokens.remove(token)
 
     fn has_progress_token(token: String) -> Bool:
-        self.progress_tokens.get(token).?
+        # Native codegen: never infer presence from .get(); use contains_key().
+        self.progress_tokens.contains_key(token)
 
     # --- In-flight request tracking ---
 
@@ -103,7 +104,8 @@ impl McpState:
         self.in_flight.remove(request_id)
 
     fn is_in_flight(request_id: String) -> Bool:
-        self.in_flight.get(request_id).?
+        # Native codegen: never infer presence from .get(); use contains_key().
+        self.in_flight.contains_key(request_id)
 
     # --- Cancellation ---
 
@@ -111,7 +113,8 @@ impl McpState:
         self.cancelled_requests[request_id] = reason
 
     fn is_cancelled(request_id: String) -> Bool:
-        self.cancelled_requests.get(request_id).?
+        # Native codegen: never infer presence from .get(); use contains_key().
+        self.cancelled_requests.contains_key(request_id)
 
     me clear_cancelled(request_id: String):
         self.cancelled_requests.remove(request_id)
@@ -125,7 +128,8 @@ impl McpState:
         self.subscriptions.remove(uri)
 
     fn is_subscribed(uri: String) -> Bool:
-        self.subscriptions.get(uri).?
+        # Native codegen: never infer presence from .get(); use contains_key().
+        self.subscriptions.contains_key(uri)
 
     fn get_subscribed_uris() -> [String]:
         var result: [String] = []
@@ -173,8 +177,12 @@ impl SessionManager:
         id
 
     # Get a session by id
+    # NOTE: index read + contains_key, not .get() — Dict<K, class> .get()
+    # returns a corrupt payload under native codegen.
     fn get_session(id: String) -> Option<DebugSession>:
-        self.sessions.get(id)
+        if self.sessions.contains_key(id):
+            return Some(self.sessions[id])
+        nil
 
     # List all sessions
     fn list_sessions() -> [DebugSession]:
@@ -185,39 +193,36 @@ impl SessionManager:
 
     # Remove a session
     me remove_session(id: String) -> Bool:
-        match self.sessions.get(id):
-            case Some(_):
-                self.sessions.remove(id)
-                true
-            case nil:
-                false
+        if self.sessions.contains_key(id):
+            self.sessions.remove(id)
+            true
+        else:
+            false
 
     # Add breakpoint to session
     me add_breakpoint(session_id: String, file: String, line: Int) -> Option<Int>:
-        match self.sessions.get(session_id):
-            case Some(session):
-                val bp_id = self.next_bp_id
-                self.next_bp_id = self.next_bp_id + 1
-                val bp = SessionBreakpoint.at_line(bp_id, file, line)
-                session.breakpoints.push(bp)
-                Some(bp_id)
-            case nil:
-                nil
+        if self.sessions.contains_key(session_id):
+            val session = self.sessions[session_id]
+            val bp_id = self.next_bp_id
+            self.next_bp_id = self.next_bp_id + 1
+            val bp = SessionBreakpoint.at_line(bp_id, file, line)
+            session.breakpoints.push(bp)
+            Some(bp_id)
+        else:
+            nil
 
     # Remove breakpoint from session
     fn remove_breakpoint(session_id: String, bp_id: Int) -> Bool:
-        match self.sessions.get(session_id):
-            case Some(session):
-                val initial_len = session.breakpoints.len()
-                session.breakpoints = session.breakpoints.filter(_1.id != bp_id)
-                session.breakpoints.len() < initial_len
-            case nil:
-                false
+        if self.sessions.contains_key(session_id):
+            val session = self.sessions[session_id]
+            val initial_len = session.breakpoints.len()
+            session.breakpoints = session.breakpoints.filter(_1.id != bp_id)
+            session.breakpoints.len() < initial_len
+        else:
+            false
 
     # Update session state
     me set_state(session_id: String, new_state: SessionState):
-        match self.sessions.get(session_id):
-            case Some(session):
-                session.state = new_state
-            case nil:
-                pass
+        if self.sessions.contains_key(session_id):
+            val session = self.sessions[session_id]
+            session.state = new_state

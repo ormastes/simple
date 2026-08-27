@@ -1,11 +1,15 @@
-# Privilege Store — in-memory registry of issued and revoked authority tokens.
+# Privilege Store — in-memory registry of minted authority tokens.
 #
-# Provides: PrivilegeStore — tracks issued tokens and supports revocation checks.
+# Provides: PrivilegeStore — mints authority tokens for principals, looks them
+# up by (principal, id_path), revokes them by issuer signature, and expands
+# group declarations to their member id_paths. Supports SDN-style round-trip
+# via `privilege_store_encode` / `privilege_store_decode`.
 
 use std.common.privilege.authority_token.{AuthorityToken, AuthorityLevel, TrustSource, Scope, authority_level_name, authority_level_from_name}
 use std.common.privilege.id_path.{IdPath, id_path_intern}
 use std.common.privilege.principal.{Principal, PrincipalKind}
 use std.common.privilege.group.{GroupDecl, group_expand_nested}
+use std.common.binary_inspect.{bytes_to_hex as _bi_bytes_to_hex}
 
 # --------------------------------------------------------------------------
 # Result shims (match spec field access: .ok / .value, .present)
@@ -24,7 +28,7 @@ class LookupResult:
 # Byte helpers
 # --------------------------------------------------------------------------
 
-fn _bytes_equal(a: [u8], b: [u8]) -> bool:
+fn _store_bytes_equal(a: [u8], b: [u8]) -> bool:
     if a.len() != b.len():
         return false
     var i = 0
@@ -34,18 +38,13 @@ fn _bytes_equal(a: [u8], b: [u8]) -> bool:
         i = i + 1
     true
 
-fn _hex_digit(v: i64) -> text:
-    val digits = "0123456789abcdef"
-    digits[v:v + 1]
-
 fn _bytes_to_hex(bs: [u8]) -> text:
-    var out = ""
+    var ints: [i64] = []
     var i = 0
     while i < bs.len():
-        val b = bs[i] as i64
-        out = out + _hex_digit(b / 16) + _hex_digit(b % 16)
+        ints.push(bs[i] as i64)
         i = i + 1
-    out
+    _bi_bytes_to_hex(ints)
 
 fn _hex_val(c: text) -> i64:
     if c == "0": return 0
@@ -98,29 +97,35 @@ fn _principal_kind_from_name(name: text) -> PrincipalKind:
 # --------------------------------------------------------------------------
 
 class PrivilegeStore:
-    issued: [text]
-    revoked: [text]
+    tokens: [AuthorityToken]
+    groups: [GroupDecl]
 
 impl PrivilegeStore:
     static fn new() -> PrivilegeStore:
-        PrivilegeStore(issued: [], revoked: [])
+        PrivilegeStore(tokens: [], groups: [])
 
-    fn register(self, token: AuthorityToken) -> PrivilegeStore:
-        val key = token.id_path.path + ":" + token.principal.id
-        val new_issued = self.issued.push(key)
-        PrivilegeStore(issued: new_issued, revoked: self.revoked)
+    # Mint a child authority token under `parent` for `child_path` at `level`.
+    # The token is bound to the parent's principal and stored. Returns the
+    # minted token so callers can later revoke it via its issuer_sig.
+    me mint(parent: AuthorityToken, child_path: IdPath, level: AuthorityLevel) -> MintResult:
+        val sig = ("mint:" + parent.principal.id + ":" + child_path.path + ":" + authority_level_name(level) + ":" + self.tokens.len().to_string()).bytes()
+        val token = AuthorityToken(
+            id_path: child_path,
+            level: level,
+            principal: parent.principal,
+            trust_source: TrustSource.SystemTrusted,
+            scope: Scope.persistent(),
+            issuer_sig: sig)
+        self.tokens = self.tokens.push(token)
+        MintResult(ok: true, value: token, error: "")
 
-    fn revoke(self, token: AuthorityToken) -> PrivilegeStore:
-        val key = token.id_path.path + ":" + token.principal.id
-        val new_revoked = self.revoked.push(key)
-        PrivilegeStore(issued: self.issued, revoked: new_revoked)
-
-    fn is_revoked(self, token: AuthorityToken) -> bool:
-        val key = token.id_path.path + ":" + token.principal.id
+    # Find an active (non-revoked) token bound to `principal` for `path`.
+    fn lookup(self, principal: Principal, path: IdPath) -> LookupResult:
         var i = 0
-        while i < self.revoked.len():
-            if self.revoked[i] == key:
-                return true
+        while i < self.tokens.len():
+            val t = self.tokens[i]
+            if t.principal.id == principal.id and t.id_path.path == path.path:
+                return LookupResult(present: true, value: t)
             i = i + 1
         LookupResult(present: false, value: AuthorityToken.public())
 
@@ -131,7 +136,7 @@ impl PrivilegeStore:
         var i = 0
         while i < self.tokens.len():
             val t = self.tokens[i]
-            if _bytes_equal(t.issuer_sig, sig):
+            if _store_bytes_equal(t.issuer_sig, sig):
                 removed = true
             else:
                 kept = kept.push(t)
@@ -158,30 +163,39 @@ class DecodeResult:
     value: PrivilegeStore
     error: text
 
+# --------------------------------------------------------------------------
+# SDN-style round-trip (token registry only; groups are rebuilt at runtime)
+# --------------------------------------------------------------------------
+
 fn privilege_store_encode(store: PrivilegeStore) -> text:
     var lines: [text] = []
     var i = 0
-    while i < store.issued.len():
-        lines = lines.push("issued:" + store.issued[i])
+    while i < store.tokens.len():
+        val t = store.tokens[i]
+        val parts = "token\t" + t.id_path.path + "\t" + authority_level_name(t.level) + "\t" + _principal_kind_name(t.principal.kind) + "\t" + t.principal.id + "\t" + _bytes_to_hex(t.issuer_sig)
+        lines = lines.push(parts)
         i = i + 1
-    var j = 0
-    while j < store.revoked.len():
-        lines = lines.push("revoked:" + store.revoked[j])
-        j = j + 1
     lines.join("\n")
 
 fn privilege_store_decode(data: text) -> DecodeResult:
     val lines = data.split("\n")
-    var issued: [text] = []
-    var revoked: [text] = []
+    var tokens: [AuthorityToken] = []
     var i = 0
     while i < lines.len():
-        val line = lines[i].trim()
-        if line.starts_with("issued:"):
-            issued = issued.push(line[7:line.len()])
-        elif line.starts_with("revoked:"):
-            revoked = revoked.push(line[8:line.len()])
+        val line = lines[i]
+        if line.starts_with("token\t"):
+            val fields = line.split("\t")
+            if fields.len() >= 6:
+                val token = AuthorityToken(
+                    id_path: id_path_intern(fields[1]),
+                    level: authority_level_from_name(fields[2]),
+                    principal: Principal(kind: _principal_kind_from_name(fields[3]), id: fields[4]),
+                    trust_source: TrustSource.SystemTrusted,
+                    scope: Scope.persistent(),
+                    issuer_sig: _hex_to_bytes(fields[5]))
+                tokens = tokens.push(token)
         i = i + 1
-    DecodeResult(ok: true, value: PrivilegeStore(issued: issued, revoked: revoked), error: "")
+    DecodeResult(ok: true, value: PrivilegeStore(tokens: tokens, groups: []), error: "")
 
-export PrivilegeStore, DecodeResult, privilege_store_encode, privilege_store_decode
+export PrivilegeStore, MintResult, LookupResult, DecodeResult
+export privilege_store_encode, privilege_store_decode

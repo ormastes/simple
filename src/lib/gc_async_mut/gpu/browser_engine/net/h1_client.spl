@@ -2,11 +2,14 @@
 #![allow(REQC004)]
 #![allow(unnamed_duplicate_typed_args)]
 # HTTP/1.1 client for the Simple Browser Platform.
-# Implements connection pooling, request serialization, and response parsing
-# including chunked transfer encoding and keep-alive management.
+# Implements request serialization and response parsing including chunked
+# transfer encoding.
 # Plain HTTP socket I/O delegates to hosted TCP primitives.
 
-use std.gc_async_mut.gpu.browser_engine.net.entity.request_types.{FetchRequest, FetchResponse, HttpMethod}
+use std.gc_async_mut.gpu.browser_engine.net.entity.request_types.{
+    FetchRequest, FetchResponse, BROWSER_MAX_RESOURCE_BYTES,
+    request_header_is_transport_owned
+}
 use std.gc_async_mut.gpu.browser_engine.net.entity.url_types.Url
 use std.gc_async_mut.gpu.browser_engine.net.entity.tls_types.{TlsConfig, TlsVersion}
 use std.gc_async_mut.gpu.browser_engine.net.tls.{TlsManager, TlsConnection}
@@ -15,15 +18,24 @@ use std.gc_async_mut.gpu.browser_engine.shared.error.{BrowserResult, BrowserErro
 use std.gc_async_mut.gpu.browser_engine.shared.logging.{Logger, BrowserLogLevel}
 use std.string_core.{char_from_code}
 use std.js.types.pair.{Pair}
+use std.nogc_sync_mut.io.browser_net_runtime.{browser_monotonic_ms, browser_runtime_string_free}
 
+@unsafe(reason: "raw connected descriptor; negative sentinel conflates timeout and failure", capabilities: [ffi])
 extern fn rt_io_tcp_connect_timeout(addr: text, ms: i64) -> i64
-extern fn rt_io_tcp_read(fd: i64, size: i64) -> [u8]
+@unsafe(reason: "raw nullable TCP bytes; nil is read failure and empty is EOF", capabilities: [ffi])
+extern fn rt_io_tcp_read(fd: i64, size: i64) -> [u8]?
+@unsafe(reason: "raw TCP text-write count; negative sentinel or short count means failure", capabilities: [ffi])
 extern fn rt_io_tcp_write_text(fd: i64, data: text) -> i64
+@unsafe(reason: "raw descriptor flush status; false means flush failed", capabilities: [ffi])
 extern fn rt_io_tcp_flush(fd: i64) -> bool
+@unsafe(reason: "raw descriptor close consumes one live descriptor; false means close failed", capabilities: [ffi])
 extern fn rt_io_tcp_close(fd: i64) -> bool
+@unsafe(reason: "raw descriptor option status; false means mutation failed", capabilities: [ffi])
 extern fn rt_io_tcp_set_nodelay(fd: i64, enabled: bool) -> bool
-extern fn rt_io_tcp_set_read_timeout(fd: i64, ms: i64?) -> bool
-extern fn rt_io_tcp_set_write_timeout(fd: i64, ms: i64?) -> bool
+@unsafe(reason: "raw scalar timeout status; non-positive milliseconds clear the timeout", capabilities: [ffi])
+extern fn rt_io_tcp_set_read_timeout(fd: i64, ms: i64) -> bool
+@unsafe(reason: "raw scalar timeout status; non-positive milliseconds clear the timeout", capabilities: [ffi])
+extern fn rt_io_tcp_set_write_timeout(fd: i64, ms: i64) -> bool
 use std.common.string_core.{text_to_bytes}
 
 val H1_TOTAL_TIMEOUT_MS: i64 = 5000
@@ -62,6 +74,7 @@ class MockResponseEntry:
     status_text: text
     headers: [Pair<text, text>]
     body: text
+    delay_ms: i64
 
     static fn create(url_pattern: text, status: i64, body: text) -> MockResponseEntry:
         MockResponseEntry(
@@ -69,14 +82,20 @@ class MockResponseEntry:
             status: status,
             status_text: status_text_for_code(status),
             headers: [],
-            body: body
+            body: body,
+            delay_ms: 0
         )
 
 class MockResponseRegistry:
     entries: [MockResponseEntry]
+    observed_requests: [FetchRequest]
+    now_ms: i64
 
     static fn create() -> MockResponseRegistry:
-        MockResponseRegistry(entries: [])
+        MockResponseRegistry(entries: [], observed_requests: [], now_ms: 0)
+
+    static fn create_at(now_ms: i64) -> MockResponseRegistry:
+        MockResponseRegistry(entries: [], observed_requests: [], now_ms: now_ms)
 
     me register(url_pattern: text, status: i64, body: text):
         val entry = MockResponseEntry.create(url_pattern, status, body)
@@ -85,6 +104,15 @@ class MockResponseRegistry:
     me register_with_headers(url_pattern: text, status: i64, headers: [Pair<text, text>], body: text):
         var entry = MockResponseEntry.create(url_pattern, status, body)
         entry.headers = headers
+        self.entries.push(entry)
+
+    me register_slow(
+        url_pattern: text, status: i64, headers: [Pair<text, text>],
+        body: text, delay_ms: i64
+    ):
+        var entry = MockResponseEntry.create(url_pattern, status, body)
+        entry.headers = headers
+        entry.delay_ms = delay_ms
         self.entries.push(entry)
 
     fn lookup(url: text) -> MockResponseEntry?:
@@ -100,11 +128,20 @@ class MockResponseRegistry:
 var _global_mock_registry: MockResponseRegistry? = nil
 
 fn get_mock_registry() -> MockResponseRegistry:
-    if _global_mock_registry.?:
-        return _global_mock_registry.unwrap()
-    var reg = MockResponseRegistry.create()
-    _global_mock_registry = reg
-    return reg
+    # match instead of `.?` + `.unwrap()`: the seed interpreter's semantic
+    # pass narrows `_global_mock_registry` inside the `.?` branch and then
+    # cannot resolve `.unwrap()` on the narrowed class ("method `unwrap` not
+    # found on class `MockResponseRegistry`"), which killed every live fetch
+    # under `bin/simple run`. Match on the optional is the dominant idiom in
+    # this tree and works under both the seed and the self-hosted compiler.
+    match _global_mock_registry:
+        Some(reg):
+            return reg
+        nil:
+            ()
+    var created = MockResponseRegistry.create()
+    _global_mock_registry = created
+    return created
 
 fn set_mock_registry(registry: MockResponseRegistry):
     _global_mock_registry = registry
@@ -134,8 +171,20 @@ fn h1_mock_response_until(
 ) -> Result<FetchResponse, BrowserError>?:
     var registry = get_mock_registry()
     registry.observed_requests.push(req)
-    _global_mock_registry = registry
     if val Some(mock) = registry.lookup(req.url.to_text()):
+        if deadline_ms > 0 and mock.delay_ms > 0:
+            if registry.now_ms <= 0:
+                registry.now_ms = browser_monotonic_ms()
+            if mock.delay_ms >= h1_deadline_remaining_ms(
+                registry.now_ms, deadline_ms
+            ):
+                registry.now_ms = deadline_ms
+                _global_mock_registry = registry
+                return Some(Err(network_error(
+                    "h1: aggregate request deadline exceeded"
+                )))
+            registry.now_ms = registry.now_ms + mock.delay_ms
+        _global_mock_registry = registry
         if not h1_response_size_allowed(0, mock.body.len()):
             return Some(Err(network_error(
                 "h1: response exceeds 50 MiB limit"
@@ -143,7 +192,8 @@ fn h1_mock_response_until(
         var headers: [Pair<text, text>] = []
         for header in mock.headers:
             headers.push(header)
-        if find_header(headers, "content-type").? == false:
+        # `== nil`, not `.? == false` — same seed divergence as the TLS guard.
+        if find_header(headers, "content-type") == nil:
             headers.push(Pair("Content-Type", "text/html; charset=utf-8"))
         headers.push(Pair("Content-Length", "{mock.body.len()}"))
         headers.push(Pair("Connection", "close"))
@@ -151,8 +201,9 @@ fn h1_mock_response_until(
         return Some(Ok(FetchResponse(
             status: mock.status,
             headers: serialize_headers(headers),
-            body: rt_text_to_bytes(mock.body)
+            body: text_to_bytes(mock.body)
         )))
+    _global_mock_registry = registry
     nil
 
 fn h1_deadline_now_ms() -> i64:
@@ -173,7 +224,6 @@ class H1Connection:
     is_tls: bool
     tls_conn: TlsConnection?
     tcp_fd: i64
-    is_keep_alive: bool
     logger: Logger
 
     static fn create(host: text, port: i64, is_tls: bool, logger: Logger) -> H1Connection:
@@ -183,17 +233,12 @@ class H1Connection:
             is_tls: is_tls,
             tls_conn: nil,
             tcp_fd: -1,
-            is_keep_alive: true,
             logger: logger
         )
 
     fn description() -> text:
         val scheme = if self.is_tls: "https" else: "http"
-        val alive = if self.is_keep_alive: "keep-alive" else: "close"
-        "{scheme}://{self.host}:{self.port} ({alive})"
-
-    fn matches(host: text, port: i64, is_tls: bool) -> bool:
-        self.host == host and self.port == port and self.is_tls == is_tls
+        "{scheme}://{self.host}:{self.port} (one-shot)"
 
 # --- H1Client ---
 
@@ -201,16 +246,12 @@ class H1Client:
     logger: Logger
     dns: DnsResolver
     tls: TlsManager
-    connections: [H1Connection]
-    max_connections_per_host: i64
 
     static fn new(logger: Logger, dns: DnsResolver, tls: TlsManager) -> H1Client:
         H1Client(
             logger: logger,
             dns: dns,
-            tls: tls,
-            connections: [],
-            max_connections_per_host: 6
+            tls: tls
         )
 
     # Send an HTTP/1.1 request and return the parsed response.
@@ -229,17 +270,29 @@ class H1Client:
         val port = get_port(req.url)
         val is_tls = req.url.scheme == "https"
 
-        self.logger.info("h1: {method_to_text(req.method)} {req.url.to_text()}")
+        self.logger.info("h1: {req.method.to_upper()} {req.url.to_text()}")
 
-        # Step 1: Get or create a connection (connection pooling)
-        var conn = self.get_connection(host, port, is_tls)?
+        # Canned responses must not touch DNS, TCP, or TLS.
+        if val Some(mock_result) = h1_mock_response_until(
+            req, request_deadline_ms
+        ):
+            self.logger.debug("h1: mock response for {req.url.to_text()}")
+            return mock_result
 
         # ponytail: one-shot connections until response framing can preserve a
         # live socket; both response readers currently consume-to-EOF and close.
-        val deadline_ms = browser_monotonic_ms() + H1_TOTAL_TIMEOUT_MS
-        var conn = self.get_connection(host, port, is_tls, deadline_ms)?
+        var conn = self.get_connection(
+            host, port, is_tls, request_deadline_ms
+        )?
 
-        if is_tls and conn.tls_conn.? == false:
+        # `== nil`, NOT `.? == false`: under the seed interpreter `.?` yields
+        # the unwrapped value or nil rather than a bool, so `nil == false` is
+        # false and this guard silently never fired — the handshake was
+        # skipped precisely when no TLS connection existed yet, and every
+        # https fetch died at the "missing TLS connection" fallthrough below
+        # even with a real TLS runtime linked. Probe + 43-site census:
+        # doc/08_tracking/bug/seed_optional_query_comparison_divergence_2026-08-16.md
+        if is_tls and conn.tls_conn == nil:
             var service_identity = host
             var addresses: [text] = []
             if val identity = h1_tls_ipv6_literal_identity(host):
@@ -250,12 +303,12 @@ class H1Client:
             var tls_conn: TlsConnection? = nil
             for address in addresses:
                 val remaining = h1_deadline_remaining_ms(
-                    browser_monotonic_ms(), deadline_ms
+                    browser_monotonic_ms(), request_deadline_ms
                 )
                 if remaining == 0:
                     break
                 match self.tls.handshake_address(
-                    address, host, port, remaining
+                    address, service_identity, port, remaining
                 ):
                     Ok(connected):
                         tls_conn = Some(connected)
@@ -268,60 +321,34 @@ class H1Client:
                 ))
             val established = tls_conn.unwrap()
             if h1_deadline_remaining_ms(
-                browser_monotonic_ms(), deadline_ms
+                browser_monotonic_ms(), request_deadline_ms
             ) == 0:
                 val _ = established.close()
                 return Err(network_error("h1: TLS handshake deadline exceeded"))
             conn.tls_conn = Some(established)
             self.logger.debug("h1: TLS established for {host}:{port}")
 
-        # Step 3: Build request bytes
         val request_bytes = build_request_bytes(req)
         self.logger.trace("h1: sending request:\n{request_bytes}")
 
-        # Step 4: Check mock registry for a canned response
-        val mock_reg = get_mock_registry()
-        val url_text = req.url.to_text()
-        if mock_reg.size() > 0 and mock_reg.lookup(url_text).?:
-            val entry = mock_reg.lookup(url_text).unwrap()
-            self.logger.debug("h1: mock response for {url_text} -> {entry.status}")
-            var mock_headers: [Pair<text, text>] = []
-            for mh in entry.headers:
-                mock_headers.push(mh)
-            if find_header(mock_headers, "content-type").? == false:
-                mock_headers.push(Pair("Content-Type", "text/html; charset=utf-8"))
-            mock_headers.push(Pair("Content-Length", "{entry.body.len()}"))
-            mock_headers.push(Pair("Connection", "keep-alive"))
-            mock_headers.push(Pair("X-Simple-Browser", "mock-response"))
-            return Ok(FetchResponse(
-                status: entry.status,
-                status_text: entry.status_text,
-                headers: mock_headers,
-                body: entry.body,
-                url: req.url,
-                redirected: false
-            ))
-
-        # Step 5: No mock — use real transport.
         if is_tls:
-            return self.execute_tls_http(req, conn, request_bytes)
-        return self.execute_plain_http(req, conn, request_bytes)
+            return self.execute_tls_http(
+                req, conn, request_bytes, request_deadline_ms
+            )
+        return self.execute_plain_http(
+            req, conn, request_bytes, request_deadline_ms
+        )
 
-    # Look up an existing pooled connection or create a new one.
-    me get_connection(host: text, port: i64, is_tls: bool) -> Result<H1Connection>:
-        # Check pool for a reusable keep-alive connection
-        var idx = 0
-        while idx < self.connections.len():
-            val conn = self.connections.get(idx)
-            if conn.matches(host, port, is_tls) and conn.is_keep_alive:
-                self.logger.debug("h1: reusing pooled connection to {host}:{port}")
-                return Ok(conn)
-            idx = idx + 1
-
-        # Count existing connections to this host
-        val host_count = self.count_connections(host, port)
-        if host_count >= self.max_connections_per_host:
-            return Err(network_error("h1: max connections ({self.max_connections_per_host}) reached for {host}:{port}"))
+    # Create a one-shot connection.
+    me get_connection(
+        host: text, port: i64, is_tls: bool, deadline_ms: i64
+    ) -> Result<H1Connection>:
+        var conn = H1Connection.create(host, port, is_tls, self.logger)
+        if is_tls:
+            # The request path resolves once, then passes each numeric address
+            # to TLS while retaining `host` for SNI/certificate identity.
+            self.logger.debug("h1: deferring DNS and encrypted socket setup to TLS for {host}:{port}")
+            return Ok(conn)
 
         # DNS resolve
         val addresses = self.dns.resolve(host)?
@@ -339,7 +366,8 @@ class H1Client:
             self.logger.debug(
                 "h1: opening TCP stream to {connect_addr} for host {host}"
             )
-            fd = rt_io_tcp_connect_timeout(connect_addr, remaining)
+            fd = unsafe(capabilities: [ffi]):
+                rt_io_tcp_connect_timeout(connect_addr, remaining)
             if fd >= 0:
                 break
         if fd < 0:
@@ -348,11 +376,15 @@ class H1Client:
             browser_monotonic_ms(), deadline_ms
         )
         if remaining == 0:
-            val _ = rt_io_tcp_close(fd)
+            val _ = unsafe(capabilities: [ffi]):
+                rt_io_tcp_close(fd)
             return Err(network_error("h1: TCP connect deadline exceeded"))
-        val _ = rt_io_tcp_set_nodelay(fd, true)
-        val _ = rt_io_tcp_set_read_timeout(fd, Some(remaining))
-        val _ = rt_io_tcp_set_write_timeout(fd, Some(remaining))
+        val _ = unsafe(capabilities: [ffi]):
+            rt_io_tcp_set_nodelay(fd, true)
+        val _ = unsafe(capabilities: [ffi]):
+            rt_io_tcp_set_read_timeout(fd, remaining)
+        val _ = unsafe(capabilities: [ffi]):
+            rt_io_tcp_set_write_timeout(fd, remaining)
         conn.tcp_fd = fd
 
         Ok(conn)
@@ -367,92 +399,67 @@ class H1Client:
             browser_monotonic_ms(), deadline_ms
         )
         if write_budget == 0:
-            val _ = rt_io_tcp_close(conn.tcp_fd)
+            val _ = unsafe(capabilities: [ffi]):
+                rt_io_tcp_close(conn.tcp_fd)
             return Err(network_error("h1: TCP write deadline exceeded"))
-        val _ = rt_io_tcp_set_write_timeout(
-            conn.tcp_fd, Some(write_budget)
-        )
-        val written = rt_io_tcp_write_text(conn.tcp_fd, request_bytes)
+        val _ = unsafe(capabilities: [ffi]):
+            rt_io_tcp_set_write_timeout(conn.tcp_fd, write_budget)
+        val written = unsafe(capabilities: [ffi]):
+            rt_io_tcp_write_text(conn.tcp_fd, request_bytes)
         if not h1_write_complete(written, request_bytes.len()):
-            val _ = rt_io_tcp_close(conn.tcp_fd)
+            val _ = unsafe(capabilities: [ffi]):
+                rt_io_tcp_close(conn.tcp_fd)
             return Err(network_error("h1: incomplete TCP write for {conn.host}:{conn.port}"))
-        val flushed = rt_io_tcp_flush(conn.tcp_fd)
+        val flushed = unsafe(capabilities: [ffi]):
+            rt_io_tcp_flush(conn.tcp_fd)
         if not flushed:
-            val _ = rt_io_tcp_close(conn.tcp_fd)
+            val _ = unsafe(capabilities: [ffi]):
+                rt_io_tcp_close(conn.tcp_fd)
             return Err(network_error("h1: TCP flush failed for {conn.host}:{conn.port}"))
         val read_result = read_tcp_response_bytes(conn.tcp_fd, deadline_ms)
-        val _ = rt_io_tcp_close(conn.tcp_fd)
+        val _ = unsafe(capabilities: [ffi]):
+            rt_io_tcp_close(conn.tcp_fd)
         val raw_response = read_result?
         if raw_response.len() == 0:
             return Err(network_error("h1: TCP read returned no response for {conn.host}:{conn.port}"))
-        val parsed = parse_http_response(raw_response)?
-        return Ok(FetchResponse(
-            status: parsed.status,
-            status_text: parsed.status_text,
-            headers: parsed.headers,
-            body: parsed.body,
-            url: req.url,
-            redirected: parsed.redirected
-        ))
+        val parsed = parse_http_response_bytes(raw_response)?
+        return Ok(parsed)
 
     me execute_tls_http(
         req: FetchRequest, conn: H1Connection, request_bytes: text,
         deadline_ms: i64
     ) -> Result<FetchResponse, BrowserError>:
         if val tls_conn = conn.tls_conn:
-            val written = tls_conn.write_text(request_bytes)
-            if written <= 0:
+            val write_budget = h1_deadline_remaining_ms(
+                browser_monotonic_ms(), deadline_ms
+            )
+            if write_budget == 0:
                 val _ = tls_conn.close()
-                return Err(network_error("h1: TLS write failed for {conn.host}:{conn.port}"))
-            val raw_response = read_tls_response_text(tls_conn)
-            val _ = tls_conn.close()
-            conn.is_keep_alive = false
+                return Err(network_error("h1: TLS write deadline exceeded"))
+            val written = tls_conn.write_text_timeout(
+                request_bytes, write_budget
+            )
+            if not h1_write_complete(written, request_bytes.len()):
+                val _ = tls_conn.close()
+                return Err(network_error("h1: incomplete TLS write for {conn.host}:{conn.port}"))
+            val read_result = read_tls_response_bytes(tls_conn, deadline_ms)
+            val closed = tls_conn.close()
+            if not closed:
+                return Err(network_error(
+                    "h1: TLS read failed or timed out for {conn.host}:{conn.port}"
+                ))
+            val raw_response = read_result?
             if raw_response.len() == 0:
                 return Err(network_error("h1: TLS read returned no response for {conn.host}:{conn.port}"))
-            # NOTE: the pure-Simple TLS transport (rt_tls_client_*) is not yet
-            # wired to a real implementation (see execute_host_https above) so
-            # this path is not exercised against live servers today. It still
-            # goes through rt_text_to_bytes here so any future TLS-transport
-            # fix inherits the same byte-accurate framing as the plain-HTTP
-            # path rather than reintroducing the char/byte mismatch bug.
-            match parse_http_response_bytes(rt_text_to_bytes(raw_response)):
+            # TLS availability is a runtime capability. Stub runtimes fail the
+            # handshake before this point; enabled runtimes use this same
+            # byte-accurate framing as plain HTTP.
+            match parse_http_response_bytes(raw_response):
                 Ok(parsed):
-                    return Ok(FetchResponse(
-                        status: parsed.status,
-                        status_text: parsed.status_text,
-                        headers: parsed.headers,
-                        body: parsed.body,
-                        url: req.url,
-                        redirected: parsed.redirected
-                    ))
+                    return Ok(parsed)
                 Err(e):
                     return Err(e)
         Err(network_error("h1: missing TLS connection for {conn.host}:{conn.port}"))
-
-    # Count active connections to a specific host:port.
-    fn count_connections(host: text, port: i64) -> i64:
-        var count = 0
-        for conn in self.connections:
-            if conn.host == host and conn.port == port:
-                count = count + 1
-        count
-
-    # Remove a connection from the pool.
-    me remove_connection(host: text, port: i64, is_tls: bool):
-        var new_conns: [H1Connection] = []
-        var removed = false
-        for conn in self.connections:
-            if not removed and conn.matches(host, port, is_tls):
-                removed = true
-                self.logger.debug("h1: removed connection to {host}:{port} from pool")
-            else:
-                new_conns.push(conn)
-        self.connections = new_conns
-
-    # Close all pooled connections.
-    me close_all():
-        self.logger.info("h1: closing all {self.connections.len()} pooled connections")
-        self.connections = []
 
 # --- Request serialization ---
 
@@ -464,40 +471,38 @@ fn build_request_bytes(req: FetchRequest) -> text:
     #   [headers]\r\n
     #   \r\n
     #   [body]
-    val method = method_to_text(req.method)
-    val path = if req.url.path.len() > 0: req.url.path else: "/"
-    val query_str = if req.url.query.len() > 0: "?{req.url.query}" else: ""
+    val method = req.method.to_upper()
+    val request_target = req.url.request_target()
 
-    var result = "{method} {path}{query_str} HTTP/1.1\r\n"
-    result = result + "Host: {req.url.host}\r\n"
+    var result = "{method} {request_target} HTTP/1.1\r\n"
+    result = result + "Host: {req.url.authority()}\r\n"
 
     # Add user-provided headers
-    var has_content_length = false
     var has_user_agent = false
     var has_accept = false
-    var has_connection = false
-    for header in req.headers:
-        val name_lower = net_ascii_lower("{header.first}")
-        if name_lower == "content-length":
-            has_content_length = true
+    for raw_header in req.headers.split("\r\n"):
+        val header = raw_header.trim()
+        val colon = header.index_of(":")
+        if colon <= 0:
+            continue
+        val name_lower = net_ascii_lower(header.slice(0, colon).trim())
+        if request_header_is_transport_owned(name_lower):
+            continue
         if name_lower == "user-agent":
             has_user_agent = true
         if name_lower == "accept":
             has_accept = true
-        if name_lower == "connection":
-            has_connection = true
-        result = result + "{header.first}: {header.second}\r\n"
+        result = result + header + "\r\n"
 
     # Add default headers if not already present
     if not has_user_agent:
         result = result + "User-Agent: SimpleBrowser/1.0\r\n"
     if not has_accept:
         result = result + "Accept: */*\r\n"
-    if not has_connection:
-        result = result + "Connection: close\r\n"
+    result = result + "Connection: close\r\n"
 
     # Add Content-Length for methods with bodies
-    if req.body.len() > 0 and not has_content_length:
+    if req.body.len() > 0:
         result = result + "Content-Length: {req.body.len()}\r\n"
 
     # End of headers
@@ -511,7 +516,15 @@ fn build_request_bytes(req: FetchRequest) -> text:
 
 # --- Response parsing ---
 
-fn read_tcp_response_bytes(fd: i64) -> [u8]:
+fn h1_response_size_allowed(current_size: i64, incoming_size: i64) -> bool:
+    current_size >= 0 and incoming_size >= 0 and
+        current_size <= BROWSER_MAX_RESOURCE_BYTES and
+        incoming_size <= BROWSER_MAX_RESOURCE_BYTES - current_size
+
+fn h1_write_complete(written: i64, expected: i64) -> bool:
+    expected >= 0 and written == expected
+
+fn read_tcp_response_bytes(fd: i64, deadline_ms: i64) -> Result<[u8]>:
     var bytes: [u8] = []
     while true:
         val remaining = h1_deadline_remaining_ms(
@@ -519,26 +532,41 @@ fn read_tcp_response_bytes(fd: i64) -> [u8]:
         )
         if remaining == 0:
             return Err(network_error("h1: TCP response deadline exceeded"))
-        val _ = rt_io_tcp_set_read_timeout(fd, Some(remaining))
-        val chunk = rt_io_tcp_read(fd, 8192)
-        if chunk.len() == 0:
+        val _ = unsafe(capabilities: [ffi]):
+            rt_io_tcp_set_read_timeout(fd, remaining)
+        val chunk = unsafe(capabilities: [ffi]):
+            rt_io_tcp_read(fd, 8192)
+        if chunk == nil:
+            return Err(network_error("h1: TCP read failed"))
+        if chunk!.len() == 0:
             if h1_deadline_remaining_ms(
                 browser_monotonic_ms(), deadline_ms
             ) == 0:
                 return Err(network_error("h1: TCP response deadline exceeded"))
             break
-        if not h1_response_size_allowed(bytes.len(), chunk.len()):
+        if not h1_response_size_allowed(bytes.len(), chunk!.len()):
             return Err(network_error("h1: response exceeds 50 MiB limit"))
-        bytes = bytes + chunk
+        bytes = bytes + chunk!
     Ok(bytes)
 
-fn read_tls_response_text(conn: TlsConnection) -> text:
-    var response = ""
+fn read_tls_response_bytes(
+    conn: TlsConnection, deadline_ms: i64
+) -> Result<[u8]>:
+    var response: [u8] = []
     while true:
-        val chunk = conn.read_text(8192)
+        val remaining = h1_deadline_remaining_ms(
+            browser_monotonic_ms(), deadline_ms
+        )
+        if remaining == 0:
+            return Err(network_error("h1: TLS response deadline exceeded"))
+        val chunk = conn.read_text_timeout(8192, remaining)
         if chunk.len() == 0:
+            if h1_deadline_remaining_ms(
+                browser_monotonic_ms(), deadline_ms
+            ) == 0:
+                return Err(network_error("h1: TLS response deadline exceeded"))
             break
-        val chunk_bytes = rt_text_to_bytes(chunk)
+        val chunk_bytes = text_to_bytes(chunk)
         val _ = browser_runtime_string_free(chunk)
         if not h1_response_size_allowed(response.len(), chunk_bytes.len()):
             return Err(network_error("h1: response exceeds 50 MiB limit"))
@@ -564,17 +592,19 @@ fn parse_http_response_bytes(raw: [u8]) -> Result<FetchResponse, BrowserError>:
     var raw_headers = ""
     var i = 1
     while i < header_lines.len():
+        if (header_lines[i].starts_with(" ") or
+            header_lines[i].starts_with("\t")):
+            return Err(parse_error(
+                "h1: obsolete folded response header rejected"
+            ))
         raw_headers = raw_headers + header_lines[i] + "\r\n"
         i = i + 1
     val headers = parse_headers(raw_headers)
-    val body = read_response_body_bytes(parts.second, headers)
+    val body = read_response_body_bytes(parts.second, headers)?
     return Ok(FetchResponse(
         status: status.first,
-        status_text: status.second,
-        headers: headers,
-        body: body,
-        url: Url.create("http", "", 0, ""),
-        redirected: false
+        headers: raw_headers,
+        body: body
     ))
 
 fn parse_status_line(line: text) -> Result<Pair<i64, text>>:
@@ -590,7 +620,7 @@ fn parse_status_line(line: text) -> Result<Pair<i64, text>>:
 
     # Extract status code (3 digits at position 9)
     val code_str = h1_substring(line, 9, 12)
-    val code = _h1_parse_int(code_str)
+    val code = parse_int(code_str)
     if code < 100 or code > 599:
         return Err(parse_error("h1: invalid status code: '{code_str}'"))
 
@@ -631,24 +661,77 @@ fn parse_headers(raw: text) -> [Pair<text, text>]:
                 headers.push(p)
     headers
 
-fn read_response_body_bytes(raw_body: [u8], headers: [Pair<text, text>]) -> [u8]:
-    # Read the response body based on headers.
-    # Supports Content-Length and chunked transfer encoding.
-    val transfer_encoding = find_header(headers, "transfer-encoding")
-    if val te = transfer_encoding:
-        if net_ascii_lower("{te}").contains("chunked"):
-            return parse_chunked_body(raw_body)
+fn h1_content_length(headers: [Pair<text, text>]) -> Result<i64>:
+    var found = false
+    var length: i64 = -1
+    for header in headers:
+        if net_ascii_lower("{header.first}") == "content-length":
+            if found:
+                return Err(parse_error("h1: duplicate Content-Length"))
+            found = true
+            val value = header.second.trim()
+            if value == "":
+                return Err(parse_error("h1: invalid Content-Length"))
+            var parsed: i64 = 0
+            var i = 0
+            while i < value.len():
+                val digit = char_to_digit(value[i])
+                if digit < 0:
+                    return Err(parse_error("h1: invalid Content-Length"))
+                if parsed > BROWSER_MAX_RESOURCE_BYTES / 10:
+                    return Err(parse_error("h1: Content-Length exceeds 50 MiB limit"))
+                parsed = parsed * 10 + digit
+                if parsed > BROWSER_MAX_RESOURCE_BYTES:
+                    return Err(parse_error("h1: Content-Length exceeds 50 MiB limit"))
+                i = i + 1
+            length = parsed
+    Ok(length)
 
-    val content_length_str = find_header(headers, "content-length")
-    if val cl_str = content_length_str:
-        val cl = parse_int(cl_str)
-        if cl >= 0 and cl <= raw_body.len():
-            return h1_substring(raw_body, 0, cl)
+fn read_response_body_bytes(raw_body: [u8], headers: [Pair<text, text>]) -> Result<[u8]>:
+    # Read the response body based on headers.
+    # Supports Content-Length and chunked transfer encoding. Both are BYTE
+    # counts per RFC 7230, so this operates on [u8] directly (see the
+    # byte-vs-char note on parse_http_response_bytes above).
+    val transfer_encoding = find_header(headers, "transfer-encoding")
+    val content_length = h1_content_length(headers)?
+    if val te = transfer_encoding:
+        if content_length >= 0:
+            return Err(parse_error("h1: ambiguous Transfer-Encoding and Content-Length"))
+        if net_ascii_lower("{te}").trim() == "chunked":
+            return parse_chunked_body_bytes(raw_body)
+        return Err(parse_error("h1: unsupported Transfer-Encoding"))
+
+    if content_length >= 0:
+        if content_length > raw_body.len():
+            return Err(parse_error("h1: truncated response body"))
+        return Ok(raw_body.slice(0, content_length))
 
     # Fall back to returning the entire body
-    raw_body
+    Ok(raw_body)
 
-fn parse_chunked_body_bytes(raw: [u8]) -> [u8]:
+fn h1_chunk_size_value(value: text) -> i64:
+    val extension = value.index_of(";")
+    val digits = if extension >= 0:
+        value.slice(0, extension).trim()
+    else:
+        value.trim()
+    if digits == "":
+        return -1
+    var result: i64 = 0
+    var i = 0
+    while i < digits.len():
+        val digit = hex_char_to_digit(net_ascii_lower(digits[i]))
+        if digit < 0:
+            return -1
+        if result > BROWSER_MAX_RESOURCE_BYTES / 16:
+            return -1
+        result = result * 16 + digit
+        if result > BROWSER_MAX_RESOURCE_BYTES:
+            return -1
+        i = i + 1
+    result
+
+fn parse_chunked_body_bytes(raw: [u8]) -> Result<[u8]>:
     # Decode a chunked transfer-encoded body.
     # Format:
     #   <chunk-size-hex>\r\n
@@ -656,14 +739,14 @@ fn parse_chunked_body_bytes(raw: [u8]) -> [u8]:
     #   ...
     #   0\r\n
     #   \r\n
-    var result: [u8] = []
+    var body_acc: [u8] = []
     var pos = 0
 
     while pos < raw.len():
         # Find end of chunk size line
-        val line_end = h1_find_crlf(raw, pos)
+        val line_end = bytes_find_crlf(raw, pos)
         if line_end < 0:
-            break
+            return Err(parse_error("h1: incomplete chunk-size line"))
 
         # Parse chunk size (hex) — the size line is pure ASCII
         val size_str = h1_bytes_to_text(raw.slice(pos, line_end)).trim()
@@ -673,7 +756,7 @@ fn parse_chunked_body_bytes(raw: [u8]) -> [u8]:
         if chunk_size == 0:
             if line_end + 4 > raw.len() or raw[line_end + 2] != 13 or raw[line_end + 3] != 10:
                 return Err(parse_error("h1: incomplete terminal chunk"))
-            return Ok(result)
+            return Ok(body_acc)
 
         # Read chunk data
         val data_start = line_end + 2  # Skip \r\n after size
@@ -683,15 +766,15 @@ fn parse_chunked_body_bytes(raw: [u8]) -> [u8]:
             return Err(parse_error("h1: truncated chunk data"))
         if raw[data_end] != 13 or raw[data_end + 1] != 10:
             return Err(parse_error("h1: missing chunk terminator"))
-        if not h1_response_size_allowed(result.len(), chunk_size):
+        if not h1_response_size_allowed(body_acc.len(), chunk_size):
             return Err(parse_error("h1: decoded body exceeds 50 MiB limit"))
 
-        result = result + raw.slice(data_start, data_end)
+        body_acc = body_acc + raw.slice(data_start, data_end)
 
         # Skip \r\n after chunk data
         pos = data_end + 2
 
-    result
+    Err(parse_error("h1: missing terminal chunk"))
 
 # --- URL and header helpers ---
 
@@ -704,6 +787,14 @@ fn get_port(url: Url) -> i64:
         return 443
     80
 
+fn serialize_headers(headers: [Pair<text, text>]) -> text:
+    # Serialize a header pair list into the declared FetchResponse raw-text
+    # header form: one "Name: value\r\n" line per header.
+    var out = ""
+    for header in headers:
+        out = out + header.first + ": " + header.second + "\r\n"
+    out
+
 fn find_header(headers: [Pair<text, text>], name: text) -> text?:
     # Find the first header value matching the given name (case-insensitive).
     val name_lower = net_ascii_lower("{name}")
@@ -712,16 +803,6 @@ fn find_header(headers: [Pair<text, text>], name: text) -> text?:
         if header_name == name_lower:
             return header.second
     nil
-
-fn method_to_text(method: HttpMethod) -> text:
-    match method:
-        HttpMethod.Get: "GET"
-        HttpMethod.Post: "POST"
-        HttpMethod.Put: "PUT"
-        HttpMethod.Delete: "DELETE"
-        HttpMethod.Head: "HEAD"
-        HttpMethod.Options: "OPTIONS"
-        HttpMethod.Patch: "PATCH"
 
 fn status_text_for_code(code: i64) -> text:
     # Return the standard reason phrase for common HTTP status codes.
@@ -756,16 +837,6 @@ fn h1_find_char(s: text, ch: text) -> i64:
     var i = 0
     while i < s.len():
         if s[i] == ch:
-            return i
-        i = i + 1
-    -1
-
-fn h1_find_crlf(s: text, start: i64) -> i64:
-    # Find the index of "\r\n" in s starting from the given position.
-    # Returns the index of '\r', or -1 if not found.
-    var i = start
-    while i < s.len() - 1:
-        if s[i] == "\r" and s[i + 1] == "\n":
             return i
         i = i + 1
     -1
@@ -887,14 +958,16 @@ fn net_ascii_lower_char(ch: text) -> text:
     if ch == "Z": return "z"
     ch
 
-fn split_header_body(raw: text) -> Pair<text, text>:
-    # Split an HTTP response into header section and body, separated by \r\n\r\n.
+fn split_header_body_bytes(raw: [u8]) -> Pair<[u8], [u8]>:
+    # Split an HTTP response into header section and body, separated by
+    # \r\n\r\n (bytes 13,10,13,10). Byte-indexed so this stays correct
+    # regardless of multi-byte UTF-8 content later in the body.
     var i = 0
     while i < raw.len() - 3:
-        if (raw[i] == "\r" and raw[i + 1] == "\n"
-            and raw[i + 2] == "\r" and raw[i + 3] == "\n"):
-            val headers = h1_substring(raw, 0, i)
-            val body = h1_substring(raw, i + 4, raw.len())
+        if (raw[i] == 13 and raw[i + 1] == 10
+            and raw[i + 2] == 13 and raw[i + 3] == 10):
+            val headers = raw.slice(0, i)
+            val body = raw.slice(i + 4, raw.len())
             return Pair(headers, body)
         i = i + 1
     # No separator found — treat entire response as headers with empty body
@@ -908,7 +981,7 @@ fn bytes_find_crlf(raw: [u8], start: i64) -> i64:
         if raw[i] == 13 and raw[i + 1] == 10:
             return i
         i = i + 1
-    -1
+    return -1
 
 fn split_lines(s: text) -> [text]:
     # Split a string by \r\n line endings.
@@ -927,7 +1000,7 @@ fn split_lines(s: text) -> [text]:
         lines.push(h1_substring(s, start, s.len()))
     lines
 
-fn _h1_parse_int(s: text) -> i64:
+fn parse_int(s: text) -> i64:
     # Parse a decimal integer string. Returns 0 on invalid input.
     var result = 0
     var negative = false
@@ -947,33 +1020,13 @@ fn _h1_parse_int(s: text) -> i64:
 
     if negative: 0 - result else: result
 
-fn parse_hex(s: text) -> i64:
-    # Parse a hexadecimal integer string. Returns 0 on invalid input.
-    var result = 0
-    var i = 0
-
-    # Skip optional "0x" prefix
-    if s.len() >= 2 and s[0] == "0" and (s[1] == "x" or s[1] == "X"):
-        i = 2
-
-    while i < s.len():
-        val ch = net_ascii_lower(s[i])
-        val digit = hex_char_to_digit(ch)
-        if digit < 0:
-            return result  # Stop at first non-hex character
-        result = result * 16 + digit
-        i = i + 1
-
-    result
-
 # NOTE: the trailing "not found" value below is `return -1`, not a bare
 # `-1` expression. A bare negative-integer literal immediately after a run
 # of single-line `if cond: return X` statements is silently dropped by the
 # interpreter (the function implicitly returns nil instead) — confirmed by
 # isolated repro; see doc/08_tracking/bug/browser_net_real_site_gaps_2026-07-11.md.
 # This is exactly what corrupted chunked-transfer decoding for real sites
-# (parse_hex("d2c") returned 32 instead of 3372 because hex_char_to_digit
-# returned nil/0 for 'd' and 'c').
+# because hex_char_to_digit returned nil/0 for 'd' and 'c'.
 fn char_to_digit(ch: text) -> i64:
     if ch == "0": return 0
     if ch == "1": return 1
@@ -985,7 +1038,7 @@ fn char_to_digit(ch: text) -> i64:
     if ch == "7": return 7
     if ch == "8": return 8
     if ch == "9": return 9
-    -1
+    return -1
 
 fn hex_char_to_digit(ch: text) -> i64:
     val d = char_to_digit(ch)
@@ -997,4 +1050,4 @@ fn hex_char_to_digit(ch: text) -> i64:
     if ch == "d": return 13
     if ch == "e": return 14
     if ch == "f": return 15
-    -1
+    return -1

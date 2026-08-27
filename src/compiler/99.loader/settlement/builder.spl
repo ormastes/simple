@@ -138,9 +138,9 @@ impl SettlementBuilder:
             return Err(BuildError.NoModules)
 
         # Check entry point exists
-        val entry = container.linker.get_export(self.config.entry_point)
-        if not entry.?:
-            return Err(BuildError.NoEntryPoint(self.config.entry_point))
+        val entry = match container.linker.get_export(self.config.entry_point):
+            case Some(found_entry): found_entry
+            case nil: return Err(BuildError.NoEntryPoint(self.config.entry_point))
 
         val load_order = container.get_load_order()
 
@@ -150,19 +150,21 @@ impl SettlementBuilder:
 
         for module_id in load_order:
             val mod_entry = container.get_module(module_id)
-            if mod_entry.?:
-                val m = mod_entry.unwrap()
-                # Add exports to symbol list
-                for sym in m.exports:
-                    if self.config.strip_internals and sym.visibility == SymbolVisibility.Internal:
-                        continue
-                    val name_offset = self.add_string(sym.name)
-                    self.symbols.push(sym)
+            match mod_entry:
+                case Some(m):
+                    # Add exports to symbol list
+                    for sym in m.exports:
+                        if self.config.strip_internals and sym.visibility == SymbolVisibility.Internal:
+                            continue
+                        val name_offset = self.add_string(sym.name)
+                        self.symbols.push(sym)
+                case nil:
+                    pass
 
         debug("settlement", "Build: {self.symbols.len()} symbols, {load_order.len()} modules")
 
         # Phase 2: Serialize to SSMF format
-        val output_bytes = self.serialize_ssmf(entry.unwrap())
+        val output_bytes = self.serialize_ssmf(entry)
 
         val result = BuildResult(
             output_path: self.config.output_path,

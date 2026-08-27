@@ -1,10 +1,19 @@
-# JS Module Loader
-# Resolves and loads JS modules for the Simple Browser JS engine.
+# JavaScript Module Loader — CommonJS require() and ES module support
+# Resolves, loads, and caches JavaScript modules.
+#
+# Moved from src/lib/common/js/engine/module_loader.spl (#35 core-purity): this
+# loader does real fs probes/reads (rt_file_exists / rt_file_read_text), so it
+# lives in the host-I/O tier, not the pure CORE tier. The pure resolution algebra
+# (core-module classification, path helpers, in-memory cache) moved with it since
+# it had no other consumers.
 
-use std.js.types.ast_types.JsStatement
+use std.js.types.pair.{Pair}
+use std.js.types.js_types.{JsValue, JsObject, JsProperty}
+use std.js.types.ast_types.{JsStatement, JsExpression}
+use std.js.engine.js_error.{JsError, script_error, Logger, LogLevel, BrowserResult}
 
 extern fn rt_file_read_text(path: text) -> text
-extern fn rt_file_exists(path: text) -> bool
+use std.io_runtime.{file_exists}
 
 fn _substr(s: text, start: i64, end_idx: i64) -> text:
     """Subscript-based substring that works in interpreter mode."""
@@ -30,20 +39,25 @@ fn is_relative_path(path: text) -> bool:
 
 class CachedModule:
     path: text
-    source: text
-    stmts: [JsStatement]
+    exports: JsValue
     loaded: bool
 
 class JsModuleLoader:
-    base_path: text
-    cache: Dict<text, JsModule>
+    cache: [CachedModule]
+    search_paths: [text]
+    core_modules: [Pair<text, JsValue>]
+    logger: Logger
 
-impl JsModuleLoader:
-    static fn create(base_path: text) -> JsModuleLoader:
-        JsModuleLoader(base_path: base_path, cache: {})
+    static fn new(logger: Logger) -> JsModuleLoader:
+        JsModuleLoader(
+            cache: [],
+            search_paths: [],
+            core_modules: [],
+            logger: logger
+        )
 
-    fn load(path: text) -> Result<JsModule, text>:
-        Err("module loading not implemented: {path}")
+    me register_core(name: text, module_exports: JsValue):
+        self.core_modules.push(Pair(first: name, second: module_exports))
 
     me add_search_path(path: text):
         self.search_paths.push(path)
@@ -127,26 +141,26 @@ fn _resolve_file_path(base_dir: text, relative: text) -> text:
         full = parent + "/" + _substr(relative, 3, relative.len())
     else:
         full = base_dir + "/" + relative
-    if rt_file_exists(full):
+    if file_exists(full):
         return full
-    if rt_file_exists(full + ".js"):
+    if file_exists(full + ".js"):
         return full + ".js"
-    if rt_file_exists(full + ".spl"):
+    if file_exists(full + ".spl"):
         return full + ".spl"
-    if rt_file_exists(full + "/index.js"):
+    if file_exists(full + "/index.js"):
         return full + "/index.js"
     ""
 
 fn _resolve_package_entry(pkg_dir: text) -> text:
-    if rt_file_exists(pkg_dir + "/index.js"):
+    if file_exists(pkg_dir + "/index.js"):
         return pkg_dir + "/index.js"
-    if rt_file_exists(pkg_dir + "/index.spl"):
+    if file_exists(pkg_dir + "/index.spl"):
         return pkg_dir + "/index.spl"
-    if rt_file_exists(pkg_dir + "/main.js"):
+    if file_exists(pkg_dir + "/main.js"):
         return pkg_dir + "/main.js"
-    if rt_file_exists(pkg_dir + "/main.spl"):
+    if file_exists(pkg_dir + "/main.spl"):
         return pkg_dir + "/main.spl"
-    if rt_file_exists(pkg_dir + ".js"):
+    if file_exists(pkg_dir + ".js"):
         return pkg_dir + ".js"
     ""
 

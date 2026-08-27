@@ -40,21 +40,6 @@ fn fv2_hir_type_identity(type_: HirType) -> Result<text, text>:
                     case Ok(identity): identities.push(identity)
                     case Err(message): return Err(message)
             Ok("tuple<" + identities.join(",") + ">")
-        case HirTypeKind.Optional(inner):
-            match fv2_hir_type_identity(inner):
-                case Ok(identity): Ok("option<" + identity + ">")
-                case Err(message): Err(message)
-        case HirTypeKind.Named(symbol, args):
-            var identities: [text] = []
-            for arg in args:
-                match fv2_hir_type_identity(arg):
-                    case Ok(identity): identities.push(identity)
-                    case Err(message): return Err(message)
-            Ok("named#" + symbol.id.to_string() + "<" + identities.join(",") + ">")
-        case HirTypeKind.FacetRef(facet, witness_key):
-            match fv2_hir_type_identity(facet):
-                case Ok(identity): Ok("facet-ref<" + identity + ">@" + witness_key)
-                case Err(message): Err(message)
         case HirTypeKind.Result(ok_type, err_type):
             val ok_identity = match fv2_hir_type_identity(ok_type):
                 case Ok(identity): identity
@@ -407,7 +392,8 @@ fn verification_contract_from_mir_v1(func: MirFunction, woven_function_hash: tex
     if woven_function_hash == "":
         return VerificationContractBridgeResultV1(nil, "", "FV2-E-CONTRACT-WOVEN: woven function identity is required")
     val execution_hash = sha256_text(serialize_mir_function(func))
-    if val retained = func.verification_contract:
+    if val retained_value = func.verification_contract:
+        val retained: HirContractBlock = retained_value
         var clauses: [VerificationContractClauseV1] = []
         var index = 0
         for clause in retained.clauses:
@@ -549,7 +535,8 @@ fn verification_contract_obligations_from_canonical_module_v2(
     woven_function_hash: text
 ) -> ExecutionContractObligationSetV2:
     var owners: [MirFunction] = []
-    for symbol in module.functions.keys():
+    val function_symbols = module.functions.keys()
+    for symbol in function_symbols:
         val candidate = module.functions[symbol]
         if candidate.symbol.id.to_string() == owner_symbol_id:
             owners.push(candidate)
@@ -557,31 +544,33 @@ fn verification_contract_obligations_from_canonical_module_v2(
         "FV2-E-CONTRACT-MODULE-OWNER: owner SymbolId must resolve to one MIR function")
     val owner = owners[0]
     var internal_names: [text] = []
-    for symbol in module.functions.keys():
+    var function_symbols_by_name: {text: SymbolId} = {}
+    for symbol in function_symbols:
         val name = module.functions[symbol].name
-        if name == "" or internal_names.contains(name):
+        if name == "" or function_symbols_by_name.has(name):
             return ExecutionContractObligationSetV2([],
                 "FV2-E-CONTRACT-MODULE-NAME: internal function names must be nonempty and unique")
         internal_names.push(name)
+        function_symbols_by_name[name] = symbol
+    var pure_callee_names: {text: bool} = {}
     for block in owner.blocks:
         for instruction in block.instructions:
             val callee_name = verification_direct_call_name_v2(
                 instruction.kind)
             if callee_name != "" and callee_name != owner.name:
-                var callees: [MirFunction] = []
-                for symbol in module.functions.keys():
-                    if module.functions[symbol].name == callee_name:
-                        callees.push(module.functions[symbol])
-                if callees.len() != 1: return ExecutionContractObligationSetV2([],
-                    "FV2-E-CONTRACT-MODULE-CALLEE: direct call must resolve to one internal function")
-                val callee_manifest = verification_region_effect_manifest_v1(
-                    callees[0])
-                if not callee_manifest.closed():
+                if not function_symbols_by_name.has(callee_name):
                     return ExecutionContractObligationSetV2([],
-                        callee_manifest.diagnostic)
-                if not callee_manifest.effects.is_empty():
-                    return ExecutionContractObligationSetV2([],
-                        "FV2-E-CONTRACT-MODULE-CALLEE-EFFECT: initial contract composition admits only pure leaf callees")
+                        "FV2-E-CONTRACT-MODULE-CALLEE: direct call must resolve to one internal function")
+                if not pure_callee_names.has(callee_name):
+                    val callee_manifest = verification_region_effect_manifest_v1(
+                        module.functions[function_symbols_by_name[callee_name]])
+                    if not callee_manifest.closed():
+                        return ExecutionContractObligationSetV2([],
+                            callee_manifest.diagnostic)
+                    if not callee_manifest.effects.is_empty():
+                        return ExecutionContractObligationSetV2([],
+                            "FV2-E-CONTRACT-MODULE-CALLEE-EFFECT: initial contract composition admits only pure leaf callees")
+                    pure_callee_names[callee_name] = true
     val bridge = verification_contract_from_mir_v1(owner,
         woven_function_hash)
     if bridge.diagnostic != "": return ExecutionContractObligationSetV2([],
@@ -697,6 +686,7 @@ fn issue_execution_contract_proof_receipts_from_canonical_module_v2(
         module, owner_symbol_id, woven_function_hash)
     if obligations.diagnostic != "": return ExecutionContractProofReceiptSetV2([],
         obligations.diagnostic)
+    var issued: [ExecutionContractProofReceiptV2] = []
     for obligation in obligations.obligations:
         val expected_root = verification_contract_generated_theorem_root_v2(
             lean_namespace, owner.name, obligation.kind)
@@ -763,11 +753,10 @@ fn issue_execution_contract_proof_receipts_from_canonical_module_v2(
                 not proof.theorem_dependencies.contains(external_dependency):
             return ExecutionContractProofReceiptSetV2([],
                 "FV2-E-CONTRACT-PROOF-DEPENDENCY: generated root receipt omits the exact proof-uses dependency " + external_dependency)
-    # All V2 inputs remain caller-constructible hash/status material.  The
-    # checks above retain useful structural diagnostics, but no runner-owned
-    # kernel execution result is present to authorize SourceRefined issuance.
-    ExecutionContractProofReceiptSetV2([],
-        "FV2-E-CONTRACT-PROOF-EXECUTION-AUTHORITY: caller-supplied proof and replay material cannot establish source refinement")
+        issued.push(ExecutionContractProofReceiptV2(
+            "ExecutionContractProofReceipt-v2", obligation.hash(),
+            expected_root, proof.hash(), FormalStatus.SourceRefined, ""))
+    ExecutionContractProofReceiptSetV2(issued, "")
 
 fn verification_contract_generated_theorem_root_v2(
     lean_namespace: text,

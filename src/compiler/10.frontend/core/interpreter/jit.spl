@@ -1,9 +1,6 @@
 # Core Interpreter — JIT Engine (runtime-compatible, file-backed state)
 
-extern fn rt_file_write_text(path: text, content: text) -> bool
-extern fn rt_file_read_text(path: text) -> text
-extern fn rt_file_delete(path: text) -> bool
-extern fn rt_getpid() -> i64
+use std.io_runtime.{file_write_exact, file_read_result, file_delete, getpid}
 
 var _jit_enabled_cached: i64 = -1
 
@@ -18,7 +15,7 @@ class JitState:
     used_vals: [i64]
 
 fn _state_path() -> text:
-    val pid = rt_getpid()
+    val pid = getpid()
     "/tmp/simple_jit_{pid}.sdn"
 
 fn _find_idx(keys: [text], key: text) -> i64:
@@ -42,7 +39,7 @@ fn _parse_pairs(line: text) -> ([text], [i64]):
     var vals: [i64] = []
     val items = _split_nonempty(line, ";")
     for item in items:
-        val eq = item.index_of("=") ?? -1
+        val eq = item.index_of("=")
         if eq > 0:
             val k = item.substring(0, eq)
             val v_str = item.substring(eq + 1)
@@ -58,7 +55,9 @@ fn _encode_pairs(keys: [text], vals: [i64]) -> text:
     parts.join(";")
 
 fn _load_state() -> JitState:
-    val raw = rt_file_read_text(_state_path()) ?? ""
+    val raw = match file_read_result(_state_path()):
+        case Ok(content): content
+        case Err(_): ""
     if raw == "":
         return JitState(
             threshold: 10,
@@ -113,7 +112,7 @@ fn _save_state(s: JitState):
         _encode_pairs(s.call_keys, s.call_vals) + "\n" +
         s.compiled.join(",") + "\n" +
         _encode_pairs(s.used_keys, s.used_vals)
-    val ok = rt_file_write_text(_state_path(), content)
+    val ok = file_write_exact(_state_path(), content)
     ok
 
 fn jit_init(threshold: i64, verbose: i64):
@@ -138,7 +137,7 @@ fn jit_init_with_backend(threshold: i64, verbose: i64, backend: text):
     jit_init(threshold, verbose)
 
 fn jit_cleanup():
-    rt_file_delete(_state_path())
+    file_delete(_state_path())
 
 fn jit_record_call(fn_name: text):
     if _jit_enabled_cached == 0:
@@ -262,4 +261,3 @@ fn jit_cleanup_symbol(fn_name: text):
 fn jit_sweep_tracked_count() -> i64:
     val s = _load_state()
     s.used_keys.len()
-

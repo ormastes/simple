@@ -14,8 +14,7 @@ use std.nogc_sync_mut.http_server.types.{
 # constants and content_length_from_text at their historical path.
 export use std.common.net.http_core.{
     MAX_REQUEST_LINE, MAX_HEADER_COUNT, MAX_HEADER_LINE, MAX_BODY_SIZE,
-    content_length_from_text, header_field_line_decision, body_decision,
-    request_authority_error
+    content_length_from_text, body_decision
 }
 
 # The native `read_line` API uses a 4096-byte buffer (4095 payload bytes plus
@@ -118,10 +117,14 @@ fn parse_request_with_policy_limits(stream: TcpStream, max_request_line: i32, ma
                         header_count = header_count + 1
                         if header_count > max_header_count:
                             return Err("431 Too many headers: {header_count}")
-                        val parsed_header = sync_header_field_line_decision(header_payload)
-                        if parsed_header.0 != "":
-                            return Err(parsed_header.0)
-                        headers.push((parsed_header.1, parsed_header.2))
+                        val colon = hl.index_of(":")
+                        if colon <= 0:
+                            return Err("400 Malformed header line")
+                        val name = hl.slice(0, colon).trim()
+                        val value = hl.slice(colon + 1, hl.len()).trim()
+                        if name == "" or name.contains(" ") or name.contains("\t"):
+                            return Err("400 Invalid header name")
+                        headers.push((name, value))
                     Err(_):
                         # EOF before the empty header terminator is incomplete
                         # framing, not an implicit end-of-headers marker.
@@ -130,6 +133,9 @@ fn parse_request_with_policy_limits(stream: TcpStream, max_request_line: i32, ma
             val decision = headers_decision(headers, max_body)
             if decision.0 != "":
                 return Err(decision.0)
+            val host_error = request_host_error(headers, version)
+            if host_error != "":
+                return Err(host_error)
             val content_length = decision.1
 
             var body = ""

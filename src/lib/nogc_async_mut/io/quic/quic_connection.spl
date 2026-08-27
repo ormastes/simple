@@ -6,8 +6,9 @@
 #   - Packet processing: demux incoming packets, produce outgoing actions
 #   - Connection ID management
 #
-# Crypto handshake (TLS 1.3) is STUBBED — this skeleton provides the
-# structural scaffolding for a future crypto module to plug into.
+# Authenticated TLS 1.3 transport is unavailable. Protected Handshake/1-RTT
+# payloads fail closed; this module exposes only bounded structural state until
+# the TLS owner installs and exercises application packet keys.
 #
 # Congestion control and loss detection are also deferred.
 #
@@ -15,9 +16,7 @@
 
 use std.io.quic.quic_packet.{
     QuicPacketType, QuicPacketHeader, QuicHeaderResult,
-    parse_quic_header, encode_quic_header,
-    quic_varint_decode, quic_varint_encode, QuicVarintResult,
-    QUIC_VERSION_1
+    parse_quic_header, quic_varint_decode, QuicVarintResult
 }
 use std.io.quic.quic_stream.{
     QuicStream, StreamState, StreamEvent,
@@ -25,12 +24,10 @@ use std.io.quic.quic_stream.{
     next_client_bidi_stream_id
 }
 use std.io.quic.quic_crypto.{
-    QuicCryptoState, QuicPacketKeys, QuicEncryptionLevel,
-    QuicTlsState, QuicCryptoEvent,
-    derive_initial_secrets, derive_quic_keys,
-    quic_aead_encrypt, quic_aead_decrypt,
+    QuicCryptoState, QuicEncryptionLevel, QuicTlsState,
+    derive_initial_secrets,
     crypto_buffer_append, extract_handshake_messages,
-    TLS_HS_CLIENT_HELLO, TLS_HS_SERVER_HELLO, TLS_HS_FINISHED
+    TLS_HS_CLIENT_HELLO, TLS_HS_SERVER_HELLO
 }
 
 # ============================================================================
@@ -66,7 +63,7 @@ enum QuicAction:
     StreamClosed(stream_id: i64)
     # The connection was closed (graceful or error).
     ConnectionClosed(reason: text)
-    # Crypto handshake data is needed (stub — TLS integration point).
+    # Crypto handshake data is needed from the authenticated TLS owner.
     NeedCryptoHandshake
     # CRYPTO frame data received at a given encryption level.
     CryptoData(level: QuicEncryptionLevel, data: [u8])
@@ -118,7 +115,7 @@ class QuicConnection:
     peer_addr: text
     crypto: QuicCryptoState
 
-    static fn create_client(local_cid: [u8], remote_cid: [u8], peer: text) -> QuicConnection:
+    pub static fn create_client(local_cid: [u8], remote_cid: [u8], peer: text) -> QuicConnection:
         """Create a new client-side connection in Initial state.
 
         Derives Initial packet protection keys from the server's
@@ -140,7 +137,7 @@ class QuicConnection:
             crypto: cs
         )
 
-    static fn create_server(local_cid: [u8], remote_cid: [u8], peer: text) -> QuicConnection:
+    pub static fn create_server(local_cid: [u8], remote_cid: [u8], peer: text) -> QuicConnection:
         """Create a new server-side connection in Initial state.
 
         Derives Initial packet protection keys from the client's
@@ -166,12 +163,11 @@ class QuicConnection:
     # Packet processing
     # ------------------------------------------------------------------
 
-    me on_packet(data: [u8]) -> [QuicAction]:
+    pub me on_packet(data: [u8]) -> [QuicAction]:
         """Process an incoming QUIC packet and return resulting actions.
 
-        Parses the packet header, dispatches by type, processes QUIC
-        frames in the payload, and returns a list of actions for the
-        transport layer.
+        Parses the bounded public header and returns structural actions. It
+        never interprets protected payload bytes before authenticated ingress.
         """
         var actions: [QuicAction] = []
 
@@ -196,7 +192,7 @@ class QuicConnection:
                             reason: "version negotiation received"
                         ))
                     case ZeroRTT:
-                        # 0-RTT: treat like 1-RTT for skeleton
+                        # 0-RTT is protected and remains blocked with 1-RTT.
                         actions = self._handle_one_rtt(header, data)
 
         return actions
@@ -205,12 +201,18 @@ class QuicConnection:
     # Stream management
     # ------------------------------------------------------------------
 
-    me open_stream(stream_type: i64) -> i64:
+    pub me open_stream(stream_type: i64) -> i64:
         """Open a new stream and return its stream ID.
 
         stream_type: 0 = bidirectional, 1 = unidirectional.
         The returned ID follows RFC 9000 §2.1 encoding.
         """
+        if self.state != QuicConnectionState.Connected:
+            return -1
+        if self.streams.len() >= DEFAULT_MAX_STREAMS:
+            return -1
+        if self.next_stream_id < 0 or self.next_stream_id > 4611686018427387899:
+            return -1
         var sid = self.next_stream_id
         # Encode initiator + directionality in low 2 bits
         if self.is_server:
@@ -223,52 +225,29 @@ class QuicConnection:
         self.next_stream_id = self.next_stream_id + 4
         return sid
 
-    me close_stream(stream_id: i64):
+    pub me close_stream(stream_id: i64):
         """Close a stream by ID. Transitions to Closed state."""
         if self.streams.contains(stream_id):
             var stream = self.streams[stream_id]
             stream.apply_event(StreamEvent.LocalFinished)
             stream.apply_event(StreamEvent.RemoteFinished)
 
-    me send_data(stream_id: i64, data: [u8]) -> [u8]:
-        """Enqueue data on a stream and return a QUIC packet to send.
+    pub me send_data(_stream_id: i64, _data: [u8]) -> [u8]:
+        """Return protected application bytes when the live owner exists.
 
-        Builds a STREAM frame containing the data, wraps it in a 1-RTT
-        short-header packet, and returns the raw bytes. Crypto protection
-        is NOT applied (stub).
+        The current provider is blocked, so this method fails closed without
+        mutating the stream or returning plaintext wire material.
         """
-        if not self.streams.contains(stream_id):
+        # The current module has no authenticated 1-RTT packet protection
+        # owner. Never put plaintext application frames on the wire merely
+        # because a TLS message-shaped byte sequence was observed.
+        if self.state != QuicConnectionState.Connected:
             return []
-
-        var stream = self.streams[stream_id]
-        stream.enqueue_send(data)
-
-        # Build STREAM frame: type(1) | stream_id(varint) | offset(varint) | length(varint) | data
-        val frame_data = stream.drain_send(data.len())
-        var frame: [u8] = []
-        # STREAM frame type: 0x08 + flags (OFF=0x04, LEN=0x02, FIN=0x01)
-        # We set OFF + LEN bits: 0x08 | 0x04 | 0x02 = 0x0e
-        frame.push(0x0e)
-        val sid_bytes = quic_varint_encode(stream_id)
-        _frame_append(frame, sid_bytes)
-        val off_bytes = quic_varint_encode(stream.send_offset - frame_data.len())
-        _frame_append(frame, off_bytes)
-        val len_bytes = quic_varint_encode(frame_data.len())
-        _frame_append(frame, len_bytes)
-        _frame_append(frame, frame_data)
-
-        # Wrap in 1-RTT packet
-        val header = QuicPacketHeader(
-            packet_type: QuicPacketType.OneRTT,
-            version: QUIC_VERSION_1,
-            dest_conn_id: self.remote_conn_id,
-            src_conn_id: self.local_conn_id,
-            packet_number: 0,
-            payload_offset: 0
-        )
-        var packet = encode_quic_header(header)
-        _frame_append(packet, frame)
-        return packet
+        if self.crypto.client_app_keys == nil or self.crypto.server_app_keys == nil:
+            return []
+        # Application AEAD/header-protection emission is intentionally blocked
+        # until the tracked TLS/QUIC transport authority is implemented.
+        return []
 
     fn get_stream(stream_id: i64) -> QuicStream?:
         """Look up a stream by ID. Returns nil if not found."""
@@ -296,7 +275,7 @@ class QuicConnection:
     # Internal: packet type handlers
     # ------------------------------------------------------------------
 
-    me _handle_initial(header: QuicPacketHeader, data: [u8]) -> [QuicAction]:
+    me _handle_initial(header: QuicPacketHeader, _data: [u8]) -> [QuicAction]:
         """Handle an Initial packet (crypto handshake start)."""
         var actions: [QuicAction] = []
 
@@ -307,42 +286,26 @@ class QuicConnection:
                 # Signal that crypto handshake data is needed
                 actions.push(QuicAction.NeedCryptoHandshake)
             case _:
-                # Already past Initial — process crypto frames if present
-                actions = self._process_frames(data, header.payload_offset)
+                # Protected payload processing is owned by the future AEAD
+                # ingress. Header parsing alone cannot authenticate CRYPTO.
+                pass
 
         return actions
 
-    me _handle_handshake(header: QuicPacketHeader, data: [u8]) -> [QuicAction]:
+    me _handle_handshake(_header: QuicPacketHeader, _data: [u8]) -> [QuicAction]:
         """Handle a Handshake packet (crypto handshake continuation)."""
         var actions: [QuicAction] = []
 
-        match self.state:
-            case Handshake:
-                # Process CRYPTO frames in payload
-                actions = self._process_frames(data, header.payload_offset)
-                # Check for HANDSHAKE_DONE to transition to Connected
-                # (For skeleton, transition after processing any Handshake packet
-                # if we're the server receiving client's Handshake finished)
-                pass
-            case _:
-                actions = self._process_frames(data, header.payload_offset)
-
+        # Handshake packets are encrypted. A parsed header does not authorize
+        # interpreting the ciphertext as frames.
         return actions
 
-    me _handle_one_rtt(header: QuicPacketHeader, data: [u8]) -> [QuicAction]:
+    me _handle_one_rtt(_header: QuicPacketHeader, _data: [u8]) -> [QuicAction]:
         """Handle a 1-RTT (short header) packet — application data."""
         var actions: [QuicAction] = []
 
-        # If we receive 1-RTT data, handshake must be complete
-        match self.state:
-            case Handshake:
-                self.state = QuicConnectionState.Connected
-            case Initial:
-                self.state = QuicConnectionState.Connected
-            case _:
-                pass
-
-        actions = self._process_frames(data, header.payload_offset)
+        # Short headers are header-protected and application payloads are AEAD
+        # ciphertext. Receipt must never advance TLS or connection state.
         return actions
 
     me _process_frames(data: [u8], offset: i64) -> [QuicAction]:
@@ -452,6 +415,8 @@ class QuicConnection:
         """
         var actions: [QuicAction] = []
         var pos = start
+        if start < 0 or start > data.len():
+            return actions
 
         val has_offset = (frame_type & 0x04) != 0
         val has_length = (frame_type & 0x02) != 0
@@ -488,6 +453,13 @@ class QuicConnection:
                         case Err(msg):
                             return actions
 
+                if frame_len < 0 or frame_len > DEFAULT_STREAM_FLOW_LIMIT:
+                    return actions
+                if pos > data.len() or frame_len > data.len() - pos:
+                    return actions
+                if stream_offset > DEFAULT_STREAM_FLOW_LIMIT - frame_len:
+                    return actions
+
                 # Extract frame data
                 var frame_data: [u8] = []
                 var i = 0
@@ -501,6 +473,8 @@ class QuicConnection:
 
                 # Create stream if it doesn't exist
                 if not self.streams.contains(stream_id):
+                    if self.streams.len() >= DEFAULT_MAX_STREAMS:
+                        return actions
                     val new_stream = QuicStream.create(stream_id, DEFAULT_STREAM_FLOW_LIMIT)
                     self.streams[stream_id] = new_stream
                     actions.push(QuicAction.StreamReady(stream_id: stream_id))
@@ -587,13 +561,8 @@ class QuicConnection:
                                 msg_type: msg_type,
                                 data: msg_data
                             ))
-                            # Finished message completes the handshake
-                            if msg_type == TLS_HS_FINISHED:
-                                self.crypto.tls_state = QuicTlsState.Connected
-                                self.state = QuicConnectionState.Connected
-                                actions.push(QuicAction.KeysReady(
-                                    level: QuicEncryptionLevel.Application
-                                ))
+                            # Finished-shaped bytes are evidence for a TLS owner,
+                            # not authority to derive application keys or connect.
                         case _:
                             pass
                     ei = ei + 1
@@ -606,9 +575,23 @@ class QuicConnection:
 
         return actions
 
-    me close_connection(reason: text):
+    pub me close_connection(_reason: text):
         """Initiate graceful connection close."""
         self.state = QuicConnectionState.Draining
+
+    pub me cancel() -> bool:
+        """Terminally cancel this owner and release all bounded ingress state."""
+        match self.state:
+            case Closed:
+                return false
+            case _:
+                self.state = QuicConnectionState.Closed
+                self.streams = {}
+                self.crypto.initial_crypto_buf = []
+                self.crypto.handshake_crypto_buf = []
+                self.crypto.initial_crypto_consumed = 0
+                self.crypto.handshake_crypto_consumed = 0
+                return true
 
 # ============================================================================
 # Internal helper

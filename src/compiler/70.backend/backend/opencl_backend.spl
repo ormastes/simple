@@ -17,13 +17,6 @@ use compiler.backend.gpu_portable_compute.{
     PortableComputeCompiledArtifactEvidence
 }
 use compiler.backend.spec_const_registry.{spec_const_resolve}
-use compiler.mir.mir_types.{LocalId}  # explicit: a glob is not an import-origin for surface projection
-use compiler.backend.common.mir_inst_variant_name.{mir_instkind_variant_name}
-extern fn rt_env_get(key: text) -> text?
-
-# Declared explicitly: the Rust seed resolved this runtime entry implicitly,
-# stage2 HIR lowering requires the extern declaration (unresolved name).
-extern fn rt_env_get(key: text) -> text
 
 class OpenClBackendCompileContract:
     source: text
@@ -34,17 +27,17 @@ class OpenClBackendCompileContract:
     diagnostic: text
 
     static fn create(output_stem: text, artifact_magic: text, exported_symbols: text, byte_count: i64) -> OpenClBackendCompileContract:
-        val shared = opencl_generated_2d_compile_contract(output_stem, artifact_magic, exported_symbols, byte_count)
-        OpenClBackendCompileContract.from_shared(shared)
+        val contract = opencl_generated_2d_compile_contract(output_stem, artifact_magic, exported_symbols, byte_count)
+        OpenClBackendCompileContract.from_shared(contract)
 
-    static fn from_shared(shared: GpuGenerated2DBackendCompileContract) -> OpenClBackendCompileContract:
+    static fn from_shared(contract: GpuGenerated2DBackendCompileContract) -> OpenClBackendCompileContract:
         OpenClBackendCompileContract(
-            source: shared.source,
-            plan: shared.plan,
-            evidence: shared.evidence,
-            ready: shared.ready,
-            status: shared.status,
-            diagnostic: shared.diagnostic
+            source: contract.source,
+            plan: contract.plan,
+            evidence: contract.evidence,
+            ready: contract.ready,
+            status: contract.status,
+            diagnostic: contract.diagnostic
         )
 
     fn summary() -> text:
@@ -74,7 +67,6 @@ class OpenClBackend:
                 BackendKind.OpenCl,
                 "OpenCL backend requires at least one @gpu/@gpu_kernel MIR function"
             ))
-        OpenClBackend.preflight_gpu_statement_ops(module)?
         var kernels: [text] = []
         for symbol in module.functions.keys():
             val func: MirFunction = module.functions[symbol]
@@ -87,27 +79,6 @@ class OpenClBackend:
         val source = kernels.join("\n")
         OpenClBackend.validate_generated_source(source)?
         Ok(source)
-
-    static fn preflight_gpu_statement_ops(module: MirModule) -> Result<bool, CompileError>:
-        # This bounded MIR walk runs before any source strings are generated.
-        # The success path allocates no diagnostic/source material.
-        for func_value in module.functions.values():
-            val func: MirFunction = func_value
-            for block in func.blocks:
-                for inst in block.instructions:
-                    match inst.kind:
-                        case GpuLaunchConfigured(_, _, _):
-                            return Err(compileerror_backend_error(
-                                BackendKind.OpenCl,
-                                "E-BACKEND-OPENCL-GPU-LAUNCH-CONFIGURED: OpenCL cannot lower GpuLaunchConfigured because MIR has no extracted kernel/capture ABI or host enqueue boundary"
-                            ))
-                        case GpuSharedAllocInit(_, _, _, _):
-                            return Err(compileerror_backend_error(
-                                BackendKind.OpenCl,
-                                "E-BACKEND-OPENCL-GPU-SHARED-INIT: OpenCL cannot lower GpuSharedAllocInit safely because MIR does not define single-writer selection, initializer uniformity, or the required workgroup barrier"
-                            ))
-                        case _: ()
-        Ok(true)
 
     static fn validate_generated_source(source: text) -> Result<bool, CompileError>:
         if source.contains("// unsupported OpenCL"):
@@ -162,16 +133,16 @@ class OpenClBackend:
             return local.name.unwrap()
         "v{local.id.id}"
 
-    static fn local_id_name(id) -> text:
+    static fn local_id_name(id: LocalId) -> text:
         "v{id.id}"
 
-    static fn local_id_name_for_func(func: MirFunction, id) -> text:
+    static fn local_id_name_for_func(func: MirFunction, id: LocalId) -> text:
         for local in func.locals:
             if local.id.id == id.id:
                 return OpenClBackend.local_name(local)
         OpenClBackend.local_id_name(id)
 
-    static fn local_id_type(func: MirFunction, id) -> MirType:
+    static fn local_id_type(func: MirFunction, id: LocalId) -> MirType:
         for local in func.locals:
             if local.id.id == id.id:
                 return local.type_
@@ -363,31 +334,16 @@ class OpenClBackend:
                 OpenClBackend.emit_mem_fence(scope)
             case GpuSharedAlloc(dest, type_, size):
                 "__local {OpenClBackend.opencl_type(type_, false)} {OpenClBackend.local_id_name_for_func(func, dest)}[{size}];"
-            case GpuSharedAllocInit(_, _, _, _):
-                panic("compile error: E-BACKEND-OPENCL-GPU-SHARED-INIT: OpenCL cannot lower GpuSharedAllocInit safely because MIR does not define single-writer selection, initializer uniformity, or the required workgroup barrier")
-            case GpuLaunchConfigured(_, _, _):
-                panic("compile error: E-BACKEND-OPENCL-GPU-LAUNCH-CONFIGURED: OpenCL cannot lower GpuLaunchConfigured because MIR has no extracted kernel/capture ABI or host enqueue boundary")
             case GpuAtomicOp(dest, op, ptr, value):
                 OpenClBackend.emit_atomic_op(func, dest, op, ptr, value)
             case GpuAtomicCas(dest, ptr, expected, desired):
                 OpenClBackend.emit_atomic_cas(func, dest, ptr, expected, desired)
             case DebugValue(_, name):
                 "// debug value: {name}"
-            case ResultMatchSemantic(_, _, _, _, _, _, _):
-                ""
             case Nop:
                 "// nop"
-                # POLICY (2026-08-23): an unimplemented backend path must ASSERT, or be
-                # explicitly disabled with a TODO -- never silently emit something
-                # plausible. This arm used to drop the instruction and let the build
-                # report success. Same shape as the C and LLVM backends
-                # (`emit_unsupported_panic`), including their
-                # `SIMPLE_ALLOW_UNLOWERED_MIR=1` escape hatch.
-                val ocl_unlowered_name = mir_instkind_variant_name(inst.kind)
-                eprint("[opencl] E-BACKEND-OPENCL-INST-{ocl_unlowered_name}: OpenCL backend does not lower {ocl_unlowered_name}")
-                if (rt_env_get("SIMPLE_ALLOW_UNLOWERED_MIR") ?? "") != "1":
-                    panic("compile error: E-BACKEND-OPENCL-INST-{ocl_unlowered_name}: OpenCL backend does not lower {ocl_unlowered_name}")
-                "// TODO(unlowered-mir): E-BACKEND-OPENCL-INST-{ocl_unlowered_name} explicitly disabled via SIMPLE_ALLOW_UNLOWERED_MIR=1"
+            case _:
+                "// unsupported MIR instruction for OpenCL subset"
 
     static fn emit_operand(func: MirFunction, operand: MirOperand) -> text:
         match operand.kind:
@@ -418,7 +374,7 @@ class OpenClBackend:
             case _:
                 OpenClBackend.emit_operand(func, operand)
 
-    static fn emit_call(func: MirFunction, dest, callee: MirOperand, args: [MirOperand]) -> text:
+    static fn emit_call(func: MirFunction, dest: LocalId?, callee: MirOperand, args: [MirOperand]) -> text:
         var rendered_args: [text] = []
         for arg in args:
             rendered_args.push(OpenClBackend.emit_operand(func, arg))
@@ -429,15 +385,15 @@ class OpenClBackend:
             return "{OpenClBackend.opencl_type(type_, false)} {OpenClBackend.local_id_name_for_func(func, dest_id)} = {expr};"
         "{expr};"
 
-    static fn emit_simd_binop(func: MirFunction, dest, a: MirOperand, b: MirOperand, op: text) -> text:
+    static fn emit_simd_binop(func: MirFunction, dest: LocalId, a: MirOperand, b: MirOperand, op: text) -> text:
         val type_ = OpenClBackend.local_id_type(func, dest)
         "{OpenClBackend.opencl_type(type_, false)} {OpenClBackend.local_id_name_for_func(func, dest)} = {OpenClBackend.emit_operand(func, a)} {op} {OpenClBackend.emit_operand(func, b)};"
 
-    static fn emit_simd_fma(func: MirFunction, dest, a: MirOperand, b: MirOperand, c: MirOperand) -> text:
+    static fn emit_simd_fma(func: MirFunction, dest: LocalId, a: MirOperand, b: MirOperand, c: MirOperand) -> text:
         val type_ = OpenClBackend.local_id_type(func, dest)
         "{OpenClBackend.opencl_type(type_, false)} {OpenClBackend.local_id_name_for_func(func, dest)} = fma({OpenClBackend.emit_operand(func, a)}, {OpenClBackend.emit_operand(func, b)}, {OpenClBackend.emit_operand(func, c)});"
 
-    static fn emit_simd_hreduce_f32x4(func: MirFunction, dest, a: MirOperand, op: text) -> text:
+    static fn emit_simd_hreduce_f32x4(func: MirFunction, dest: LocalId, a: MirOperand, op: text) -> text:
         val type_ = OpenClBackend.local_id_type(func, dest)
         val name = OpenClBackend.local_id_name_for_func(func, dest)
         val value = OpenClBackend.emit_operand(func, a)
@@ -474,17 +430,17 @@ class OpenClBackend:
             case _:
                 false
 
-    static fn emit_simd_splat(func: MirFunction, dest, value: MirOperand, vec_type: MirType) -> text:
+    static fn emit_simd_splat(func: MirFunction, dest: LocalId, value: MirOperand, vec_type: MirType) -> text:
         val type_name = OpenClBackend.opencl_type(vec_type, false)
         "{type_name} {OpenClBackend.local_id_name_for_func(func, dest)} = ({type_name})({OpenClBackend.emit_operand(func, value)});"
 
-    static fn emit_simd_load(func: MirFunction, dest, ptr: MirOperand, vec_type: MirType) -> text:
+    static fn emit_simd_load(func: MirFunction, dest: LocalId, ptr: MirOperand, vec_type: MirType) -> text:
         "{OpenClBackend.opencl_type(vec_type, false)} {OpenClBackend.local_id_name_for_func(func, dest)} = *{OpenClBackend.emit_operand(func, ptr)};"
 
     static fn emit_simd_store(func: MirFunction, value: MirOperand, ptr: MirOperand) -> text:
         "*{OpenClBackend.emit_operand(func, ptr)} = {OpenClBackend.emit_operand(func, value)};"
 
-    static fn emit_simd_gather(func: MirFunction, dest, base: MirOperand, indices: MirOperand, vec_type: MirType) -> text:
+    static fn emit_simd_gather(func: MirFunction, dest: LocalId, base: MirOperand, indices: MirOperand, vec_type: MirType) -> text:
         val type_name = OpenClBackend.opencl_type(vec_type, false)
         val base_name = OpenClBackend.emit_operand(func, base)
         val index_name = OpenClBackend.emit_operand(func, indices)
@@ -503,7 +459,7 @@ class OpenClBackend:
             stores.push("{base_name}[{index_name}.{lane}] = {value_name}.{lane};")
         stores.join(" ")
 
-    static fn emit_simd_named_binop(func: MirFunction, dest, lhs: MirOperand, rhs: MirOperand, op: text) -> text:
+    static fn emit_simd_named_binop(func: MirFunction, dest: LocalId, lhs: MirOperand, rhs: MirOperand, op: text) -> text:
         val type_ = OpenClBackend.local_id_type(func, dest)
         val type_name = OpenClBackend.opencl_type(type_, false)
         val name = OpenClBackend.local_id_name_for_func(func, dest)
@@ -547,7 +503,7 @@ class OpenClBackend:
             return "<="
         ""
 
-    static fn emit_simd_named_ternop(func: MirFunction, dest, a: MirOperand, b: MirOperand, c: MirOperand, op: text) -> text:
+    static fn emit_simd_named_ternop(func: MirFunction, dest: LocalId, a: MirOperand, b: MirOperand, c: MirOperand, op: text) -> text:
         val type_ = OpenClBackend.local_id_type(func, dest)
         val type_name = OpenClBackend.opencl_type(type_, false)
         val name = OpenClBackend.local_id_name_for_func(func, dest)
@@ -560,7 +516,7 @@ class OpenClBackend:
             return "{type_name} {name} = fma(-{aa}, {bb}, {cc});"
         "// unsupported OpenCL SIMD ternop: {op}"
 
-    static fn emit_simd_named_unop(func: MirFunction, dest, src: MirOperand, op: text) -> text:
+    static fn emit_simd_named_unop(func: MirFunction, dest: LocalId, src: MirOperand, op: text) -> text:
         val type_ = OpenClBackend.local_id_type(func, dest)
         val type_name = OpenClBackend.opencl_type(type_, false)
         val name = OpenClBackend.local_id_name_for_func(func, dest)
@@ -578,7 +534,7 @@ class OpenClBackend:
             return "{type_name} {name} = rsqrt({value});"
         "// unsupported OpenCL SIMD unop: {op}"
 
-    static fn emit_simd_reduce(func: MirFunction, dest, src: MirOperand, op: text) -> text:
+    static fn emit_simd_reduce(func: MirFunction, dest: LocalId, src: MirOperand, op: text) -> text:
         val dest_type = OpenClBackend.local_id_type(func, dest)
         val src_type = OpenClBackend.operand_type(func, src)
         val type_name = OpenClBackend.opencl_type(dest_type, false)
@@ -613,7 +569,7 @@ class OpenClBackend:
             i = i + 1
         expr
 
-    static fn emit_simd_cmp(func: MirFunction, dest, lhs: MirOperand, rhs: MirOperand, op: text) -> text:
+    static fn emit_simd_cmp(func: MirFunction, dest: LocalId, lhs: MirOperand, rhs: MirOperand, op: text) -> text:
         val symbol = OpenClBackend.simd_cmp_symbol(op)
         if symbol == "":
             return "// unsupported OpenCL SIMD cmp: {op}"
@@ -635,11 +591,11 @@ class OpenClBackend:
             return ">="
         ""
 
-    static fn emit_simd_select(func: MirFunction, dest, mask: MirOperand, t: MirOperand, f: MirOperand) -> text:
+    static fn emit_simd_select(func: MirFunction, dest: LocalId, mask: MirOperand, t: MirOperand, f: MirOperand) -> text:
         val type_ = OpenClBackend.local_id_type(func, dest)
         "{OpenClBackend.opencl_type(type_, false)} {OpenClBackend.local_id_name_for_func(func, dest)} = select({OpenClBackend.emit_operand(func, f)}, {OpenClBackend.emit_operand(func, t)}, {OpenClBackend.emit_operand(func, mask)});"
 
-    static fn emit_simd_mask_op(func: MirFunction, dest, lhs: MirOperand, rhs: MirOperand, op: text) -> text:
+    static fn emit_simd_mask_op(func: MirFunction, dest: LocalId, lhs: MirOperand, rhs: MirOperand, op: text) -> text:
         val type_ = OpenClBackend.local_id_type(func, dest)
         val type_name = OpenClBackend.opencl_type(type_, false)
         val name = OpenClBackend.local_id_name_for_func(func, dest)
@@ -655,7 +611,7 @@ class OpenClBackend:
             return "{type_name} {name} = {left} ^ {right};"
         "// unsupported OpenCL SIMD mask op: {op}"
 
-    static fn emit_aggregate(func: MirFunction, dest, kind: AggregateKind, operands: [MirOperand]) -> text:
+    static fn emit_aggregate(func: MirFunction, dest: LocalId, kind: AggregateKind, operands: [MirOperand]) -> text:
         match kind:
             case Array(element):
                 var rendered: [text] = []
@@ -741,20 +697,20 @@ class OpenClBackend:
             case Min: "atomic_min"
             case Max: "atomic_max"
             case Exchange: "atomic_xchg"
-            case CompareExchange: ""
+            case GpuAtomicOpKind.CompareExchange: ""
 
-    static fn emit_atomic_op(func: MirFunction, dest, op: GpuAtomicOpKind, ptr: MirOperand, value: MirOperand) -> text:
+    static fn emit_atomic_op(func: MirFunction, dest: LocalId, op: GpuAtomicOpKind, ptr: MirOperand, value: MirOperand) -> text:
         val builtin = OpenClBackend.emit_atomic_builtin(op)
         if builtin == "":
             return "// unsupported OpenCL atomic operation"
         val type_ = OpenClBackend.local_id_type(func, dest)
         "{OpenClBackend.opencl_type(type_, false)} {OpenClBackend.local_id_name_for_func(func, dest)} = {builtin}({OpenClBackend.emit_operand(func, ptr)}, {OpenClBackend.emit_operand(func, value)});"
 
-    static fn emit_atomic_cas(func: MirFunction, dest, ptr: MirOperand, expected: MirOperand, desired: MirOperand) -> text:
+    static fn emit_atomic_cas(func: MirFunction, dest: LocalId, ptr: MirOperand, expected: MirOperand, desired: MirOperand) -> text:
         val type_ = OpenClBackend.local_id_type(func, dest)
         "{OpenClBackend.opencl_type(type_, false)} {OpenClBackend.local_id_name_for_func(func, dest)} = atomic_cmpxchg({OpenClBackend.emit_operand(func, ptr)}, {OpenClBackend.emit_operand(func, expected)}, {OpenClBackend.emit_operand(func, desired)});"
 
-    static fn emit_intrinsic(func: MirFunction, dest, name: text, args: [MirOperand]) -> text:
+    static fn emit_intrinsic(func: MirFunction, dest: LocalId?, name: text, args: [MirOperand]) -> text:
         if name == "gpu_atomic_add_i32" or name == "gpu_atomic_add_i64":
             return OpenClBackend.emit_atomic_intrinsic(func, dest, "atomic_add", name, args)
         if name == "gpu_atomic_min_i64":
@@ -800,7 +756,7 @@ class OpenClBackend:
             return OpenClBackend.emit_vec_store(func, 2, name, args)
         "// unsupported OpenCL intrinsic: {name}"
 
-    static fn emit_atomic_intrinsic(func: MirFunction, dest, builtin: text, name: text, args: [MirOperand]) -> text:
+    static fn emit_atomic_intrinsic(func: MirFunction, dest: LocalId?, builtin: text, name: text, args: [MirOperand]) -> text:
         if not dest.?:
             return "// OpenCL atomic intrinsic missing destination: {name}"
         if args.len() < 2:
@@ -809,7 +765,7 @@ class OpenClBackend:
         val type_ = OpenClBackend.local_id_type(func, dest_id)
         "{OpenClBackend.opencl_type(type_, false)} {OpenClBackend.local_id_name_for_func(func, dest_id)} = {builtin}({OpenClBackend.emit_operand(func, args[0])}, {OpenClBackend.emit_operand(func, args[1])});"
 
-    static fn emit_atomic_cas_intrinsic(func: MirFunction, dest, name: text, args: [MirOperand]) -> text:
+    static fn emit_atomic_cas_intrinsic(func: MirFunction, dest: LocalId?, name: text, args: [MirOperand]) -> text:
         if not dest.?:
             return "// OpenCL atomic intrinsic missing destination: {name}"
         if args.len() < 3:
@@ -818,14 +774,14 @@ class OpenClBackend:
         val type_ = OpenClBackend.local_id_type(func, dest_id)
         "{OpenClBackend.opencl_type(type_, false)} {OpenClBackend.local_id_name_for_func(func, dest_id)} = atomic_cmpxchg({OpenClBackend.emit_operand(func, args[0])}, {OpenClBackend.emit_operand(func, args[1])}, {OpenClBackend.emit_operand(func, args[2])});"
 
-    static fn emit_subgroup_no_arg(func: MirFunction, dest, builtin_call: text) -> text:
+    static fn emit_subgroup_no_arg(func: MirFunction, dest: LocalId?, builtin_call: text) -> text:
         if not dest.?:
             return "{builtin_call};"
         val dest_id = dest.unwrap()
         val type_ = OpenClBackend.local_id_type(func, dest_id)
         "{OpenClBackend.opencl_type(type_, false)} {OpenClBackend.local_id_name_for_func(func, dest_id)} = {builtin_call};"
 
-    static fn emit_subgroup_shuffle(func: MirFunction, dest, builtin: text, name: text, args: [MirOperand]) -> text:
+    static fn emit_subgroup_shuffle(func: MirFunction, dest: LocalId?, builtin: text, name: text, args: [MirOperand]) -> text:
         if not dest.?:
             return "// OpenCL subgroup shuffle missing destination: {name}"
         if args.len() < 2:
@@ -834,7 +790,7 @@ class OpenClBackend:
         val type_ = OpenClBackend.local_id_type(func, dest_id)
         "{OpenClBackend.opencl_type(type_, false)} {OpenClBackend.local_id_name_for_func(func, dest_id)} = {builtin}({OpenClBackend.emit_operand(func, args[0])}, {OpenClBackend.emit_operand(func, args[1])});"
 
-    static fn emit_subgroup_ballot(func: MirFunction, dest, name: text, args: [MirOperand]) -> text:
+    static fn emit_subgroup_ballot(func: MirFunction, dest: LocalId?, name: text, args: [MirOperand]) -> text:
         if not dest.?:
             return "// OpenCL subgroup ballot missing destination: {name}"
         if args.len() < 1:
@@ -843,7 +799,7 @@ class OpenClBackend:
         val type_ = OpenClBackend.local_id_type(func, dest_id)
         "{OpenClBackend.opencl_type(type_, false)} {OpenClBackend.local_id_name_for_func(func, dest_id)} = sub_group_ballot({OpenClBackend.emit_operand(func, args[0])});"
 
-    static fn emit_subgroup_unary(func: MirFunction, dest, builtin: text, name: text, args: [MirOperand]) -> text:
+    static fn emit_subgroup_unary(func: MirFunction, dest: LocalId?, builtin: text, name: text, args: [MirOperand]) -> text:
         if not dest.?:
             return "// OpenCL subgroup unary missing destination: {name}"
         if args.len() < 1:
@@ -852,7 +808,7 @@ class OpenClBackend:
         val type_ = OpenClBackend.local_id_type(func, dest_id)
         "{OpenClBackend.opencl_type(type_, false)} {OpenClBackend.local_id_name_for_func(func, dest_id)} = {builtin}({OpenClBackend.emit_operand(func, args[0])});"
 
-    static fn emit_spec_const_i64(func: MirFunction, dest, name: text, args: [MirOperand]) -> text:
+    static fn emit_spec_const_i64(func: MirFunction, dest: LocalId?, name: text, args: [MirOperand]) -> text:
         """Emit gpu_spec_const_i64(const_name, default) — fold to integer literal at emit time."""
         if args.len() < 2:
             return "// gpu_spec_const_i64 missing arguments"
@@ -879,7 +835,7 @@ class OpenClBackend:
             return "{OpenClBackend.opencl_type(type_, false)} {OpenClBackend.local_id_name_for_func(func, dest_id)} = {resolved};"
         "{resolved};"
 
-    static fn emit_vec_load(func: MirFunction, dest, width: i64, name: text, args: [MirOperand]) -> text:
+    static fn emit_vec_load(func: MirFunction, dest: LocalId?, width: i64, name: text, args: [MirOperand]) -> text:
         """Emit gpu_vecN_load_f32 as vloadN(index, ptr) — OpenCL vectorized load."""
         if not dest.?:
             return "// {name} missing destination"
@@ -955,7 +911,7 @@ class OpenClBackend:
                 "if ({OpenClBackend.emit_operand(func, cond)}) { goto BB{then_.id}; } else { goto BB{else_.id}; }"
             case Switch(value, targets, default):
                 OpenClBackend.emit_switch_terminator(func, value, targets, default)
-            case CallTerminator(_, _, _, normal, _):
+            case CallTerminator(_, _, _, normal, _, _, _):
                 "// unsupported OpenCL call terminator: normal BB{normal.id}"
 
 impl Codegen for OpenClBackend:

@@ -80,19 +80,19 @@ class RedisServer:
 
     me remove_at(idx: i64):
         """Remove the entry at idx from all three parallel arrays."""
-        var nk: [text] = []
-        var nv: [text] = []
-        var ne: [i64] = []
-        var i = 0
-        while i < self.skeys.len():
-            if i != idx:
-                nk.push(self.skeys[i])
-                nv.push(self.svals[i])
-                ne.push(self.sexp[i])
-            i = i + 1
-        self.skeys = nk
-        self.svals = nv
-        self.sexp = ne
+        # The supported command surface never exposes storage order. Keep the
+        # three parallel fields aligned by moving the tail entry into the hole
+        # and truncating once, instead of allocating and copying three complete
+        # arrays for every DEL or lazy-expiry purge. Lookup remains O(n), but
+        # removal is O(1) with no entry-proportional temporary memory.
+        val last = self.skeys.len().to_i64() - 1
+        if idx != last:
+            self.skeys[idx] = self.skeys[last]
+            self.svals[idx] = self.svals[last]
+            self.sexp[idx] = self.sexp[last]
+        self.skeys.pop()
+        self.svals.pop()
+        self.sexp.pop()
 
     me set_value(key: text, value: text):
         """Set key=value, clearing any prior expiry (SET semantics)."""
@@ -136,10 +136,10 @@ class RedisServer:
             self.svals.push("1")
             self.sexp.push(-1)
             return Ok(1)
-        val cur = parse_i64(self.svals[idx])
-        if not cur.?:
-            return Err("value is not an integer or out of range")
-        val next = cur.unwrap() + 1
+        val cur = match parse_i64(self.svals[idx]):
+            case Some(v): v
+            case nil: return Err("value is not an integer or out of range")
+        val next = cur + 1
         self.svals[idx] = "{next}"
         Ok(next)
 
@@ -201,18 +201,17 @@ class RedisServer:
             self.set_value(args[1], args[2])
             # Optional EX <seconds> trailer (used by redis-benchmark variants).
             if args.len() >= 5 and ascii_upper(args[3]) == "EX":
-                val secs = parse_i64(args[4])
-                if secs.?:
-                    self.expire_key(args[1], secs.unwrap())
+                match parse_i64(args[4]):
+                    case Some(secs): self.expire_key(args[1], secs)
+                    case nil: pass
             return resp_status("OK")
 
         if cmd == "GET":
             if args.len() < 2:
                 return resp_error("ERR wrong number of arguments for 'get'")
-            val v = self.get_value(args[1])
-            if v.?:
-                return resp_bulk(v.unwrap())
-            return resp_nil()
+            match self.get_value(args[1]):
+                case Some(v): return resp_bulk(v)
+                case nil: return resp_nil()
 
         if cmd == "DEL":
             if args.len() < 2:
@@ -246,10 +245,10 @@ class RedisServer:
         if cmd == "EXPIRE":
             if args.len() < 3:
                 return resp_error("ERR wrong number of arguments for 'expire'")
-            val secs = parse_i64(args[2])
-            if not secs.?:
-                return resp_error("ERR value is not an integer or out of range")
-            val ok = self.expire_key(args[1], secs.unwrap())
+            val secs = match parse_i64(args[2]):
+                case Some(v): v
+                case nil: return resp_error("ERR value is not an integer or out of range")
+            val ok = self.expire_key(args[1], secs)
             if ok:
                 return resp_integer(1)
             return resp_integer(0)
@@ -301,8 +300,9 @@ class RedisServer:
         var buf = ""
         var quit = false
         while not quit:
-            val chunk = rt_io_tcp_read(s.fd, 16384)
-            if chunk.len() == 0:
+            val chunk = unsafe(capabilities: [ffi]):
+                rt_io_tcp_read(s.fd, 16384)
+            if chunk == nil or chunk!.len() == 0:
                 break
             buf = buf + bytes_to_text(chunk!)
             val now_micros = unsafe(capabilities: [ffi]):
@@ -319,7 +319,10 @@ class RedisServer:
                 match parse_next_request(buf):
                     case Some(r):
                         val reply = self.dispatch(r.args)
-                        rt_io_tcp_write_text(s.fd, reply)
+                        val written = unsafe(capabilities: [ffi]):
+                            rt_io_tcp_write_text(s.fd, reply)
+                        if written != reply.len():
+                            quit = true
                         buf = r.rest
                         progressed = true
                         if r.args.len() > 0 and ascii_upper(r.args[0]) == "QUIT":
@@ -355,7 +358,7 @@ fn parse_array_request(buf: text) -> Option<RequestResult>:
     """Parse `*N\\r\\n` followed by N bulk strings into [text] args.
 
     `text.index_of` returns an i64 with -1 sentinel (not Option), so we test
-    against -1 rather than using `.?`/`.unwrap()`.
+    against -1 rather than treating it as optional.
     """
     val header_end = buf.index_of("\r\n")
     if header_end < 0:
@@ -486,8 +489,11 @@ fn resp_empty_array() -> text:
 # SFFI
 # ============================================================================
 
-extern fn rt_io_tcp_read(fd: i64, size: i64) -> [u8]
+@unsafe(reason: "raw nullable TCP bytes; nil is read failure and empty is EOF", capabilities: [ffi])
+extern fn rt_io_tcp_read(fd: i64, size: i64) -> [u8]?
+@unsafe(reason: "raw TCP text-write count; negative sentinel or short count means failure", capabilities: [ffi])
 extern fn rt_io_tcp_write_text(fd: i64, data: text) -> i64
+@unsafe(reason: "raw descriptor close consumes one live descriptor; false means close failed", capabilities: [ffi])
 extern fn rt_io_tcp_close(fd: i64) -> bool
 use std.common.string_core.{bytes_to_text}
 @unsafe(reason: "raw wall-clock microsecond provider; negative i64 sentinel is failure", capabilities: [ffi])

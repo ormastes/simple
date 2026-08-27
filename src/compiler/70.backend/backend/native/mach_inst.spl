@@ -544,6 +544,10 @@ struct MachFunction:
     frame_size: i64
     num_virtual_regs: i64
     used_callee_saved: [i64]
+    # Target-owned bytes required at sp+0 while making a call. Most targets
+    # leave this at zero; RV64 uses it to separate outgoing stack arguments
+    # from allocator-owned nonvolatile-register saves.
+    outgoing_arg_size: i64 = 0
 
 fn new_mach_function(name: text) -> MachFunction:
     MachFunction(
@@ -551,7 +555,8 @@ fn new_mach_function(name: text) -> MachFunction:
         blocks: [],
         frame_size: 0,
         num_virtual_regs: 0,
-        used_callee_saved: []
+        used_callee_saved: [],
+        outgoing_arg_size: 0
     )
 
 fn mach_func_add_block(func: MachFunction, block: MachBlock) -> MachFunction:
@@ -562,7 +567,8 @@ fn mach_func_add_block(func: MachFunction, block: MachBlock) -> MachFunction:
         blocks: new_blocks,
         frame_size: func.frame_size,
         num_virtual_regs: func.num_virtual_regs,
-        used_callee_saved: func.used_callee_saved
+        used_callee_saved: func.used_callee_saved,
+        outgoing_arg_size: func.outgoing_arg_size
     )
 
 fn mach_func_set_frame_size(func: MachFunction, size: i64) -> MachFunction:
@@ -571,7 +577,8 @@ fn mach_func_set_frame_size(func: MachFunction, size: i64) -> MachFunction:
         blocks: func.blocks,
         frame_size: size,
         num_virtual_regs: func.num_virtual_regs,
-        used_callee_saved: func.used_callee_saved
+        used_callee_saved: func.used_callee_saved,
+        outgoing_arg_size: func.outgoing_arg_size
     )
 
 struct MachModule:
@@ -584,6 +591,11 @@ struct DataEntry:
     name: text
     data: [i64]
     is_readonly: bool
+    # Object layout metadata.  String literals retain the defaults; MIR
+    # statics set these explicitly so every object writer consumes the same
+    # alignment and linkage facts as instruction selection.
+    alignment: i64 = 1
+    is_global: bool = false
 
 fn new_mach_module(name: text) -> MachModule:
     MachModule(name: name, functions: [], data_sections: [], extern_symbols: [])
@@ -627,6 +639,7 @@ struct EncodedReloc:
     symbol_name: text
     reloc_type: i64
     addend: i64
+    anchor_offset: i64 = -1
 
 struct EncodedFunction:
     name: text
@@ -664,6 +677,9 @@ export X86_XMM_ALLOCATABLE, X86_YMM_ALLOCATABLE
 
 # x86_64 opcodes
 export X86_OP_MOV_REG_REG, X86_OP_MOV_REG_IMM, X86_OP_MOV_REG_MEM, X86_OP_MOV_MEM_REG
+export X86_OP_MOVZX_REG_MEM8, X86_OP_MOVZX_REG_MEM16, X86_OP_MOV_REG_MEM32
+export X86_OP_MOV_MEM8_REG, X86_OP_MOV_MEM16_REG, X86_OP_MOV_MEM32_REG
+export X86_OP_MOVSX_REG_MEM8, X86_OP_MOVSX_REG_MEM16, X86_OP_MOVSX_REG_MEM32
 export X86_OP_ADD, X86_OP_SUB, X86_OP_IMUL, X86_OP_IDIV, X86_OP_AND, X86_OP_OR, X86_OP_XOR
 export X86_OP_SHL, X86_OP_SAR, X86_OP_SHR, X86_OP_NEG, X86_OP_NOT, X86_OP_BSWAP, X86_OP_POPCNT
 export X86_OP_CMP, X86_OP_TEST
@@ -676,7 +692,18 @@ export X86_OP_ADD_IMM, X86_OP_SUB_IMM
 export X86_OP_VMOVAPS_LOAD_YMM, X86_OP_VMOVAPS_STORE_YMM
 export X86_OP_VADDPS_YMM, X86_OP_VSUBPS_YMM, X86_OP_VMULPS_YMM, X86_OP_VDIVPS_YMM
 
-# AArch64
+# AArch64 registers
+export AARCH64_X0, AARCH64_X1, AARCH64_X2, AARCH64_X3, AARCH64_X4, AARCH64_X5, AARCH64_X6, AARCH64_X7
+export AARCH64_X8, AARCH64_X9, AARCH64_X10, AARCH64_X11, AARCH64_X12, AARCH64_X13, AARCH64_X14, AARCH64_X15
+export AARCH64_X16, AARCH64_X17, AARCH64_X18, AARCH64_X19, AARCH64_X20, AARCH64_X21, AARCH64_X22, AARCH64_X23
+export AARCH64_X24, AARCH64_X25, AARCH64_X26, AARCH64_X27, AARCH64_X28, AARCH64_X29, AARCH64_X30, AARCH64_SP
+export AARCH64_ARG_REGS, AARCH64_CALLEE_SAVED
+export aarch64_reg_name
+
+# AArch64 SIMD Q-registers
+export AARCH64_Q0, AARCH64_Q1, AARCH64_Q2, AARCH64_Q3, AARCH64_Q4, AARCH64_Q5, AARCH64_Q6, AARCH64_Q7
+export AARCH64_Q8, AARCH64_Q9, AARCH64_Q10, AARCH64_Q11, AARCH64_Q12, AARCH64_Q13, AARCH64_Q14, AARCH64_Q15
+export AARCH64_Q_ALLOCATABLE
 
 # AArch64 opcodes
 export A64_OP_MOV, A64_OP_MOVZ, A64_OP_MOVK
@@ -685,8 +712,15 @@ export A64_OP_LSL, A64_OP_ASR, A64_OP_LSR, A64_OP_NEG, A64_OP_CMP, A64_OP_CSET
 export A64_OP_B, A64_OP_BEQ, A64_OP_BNE, A64_OP_BLT, A64_OP_BGE, A64_OP_BGT, A64_OP_BLE
 export A64_OP_BL, A64_OP_RET, A64_OP_LDR, A64_OP_STR, A64_OP_STP, A64_OP_LDP, A64_OP_ADRP
 export A64_OP_ADD_IMM
+export A64_OP_LDR_W, A64_OP_STR_W
 
-# RISC-V
+# RISC-V registers
+export RV_X0, RV_X1, RV_X2, RV_X3, RV_X4, RV_X5, RV_X6, RV_X7
+export RV_X8, RV_X9, RV_X10, RV_X11, RV_X12, RV_X13, RV_X14, RV_X15
+export RV_X16, RV_X17, RV_X18, RV_X19, RV_X20, RV_X21, RV_X22, RV_X23
+export RV_X24, RV_X25, RV_X26, RV_X27, RV_X28, RV_X29, RV_X30, RV_X31
+export RV_ARG_REGS, RV_CALLEE_SAVED
+export rv_reg_name
 
 # RISC-V opcodes
 export RV_OP_ADD, RV_OP_SUB, RV_OP_MUL, RV_OP_DIV, RV_OP_REM
@@ -694,6 +728,8 @@ export RV_OP_AND, RV_OP_OR, RV_OP_XOR, RV_OP_SLL, RV_OP_SRA, RV_OP_SRL
 export RV_OP_SLT, RV_OP_SLTU, RV_OP_ADDI, RV_OP_LUI, RV_OP_AUIPC
 export RV_OP_JAL, RV_OP_JALR, RV_OP_BEQ, RV_OP_BNE, RV_OP_BLT, RV_OP_BGE
 export RV_OP_LD, RV_OP_SD, RV_OP_LW, RV_OP_SW, RV_OP_MV, RV_OP_LI, RV_OP_NOP, RV_OP_RET
+export RV_OP_LWU
 export RV_OP_CALL, RV_OP_NEG
+export A64_OP_BRK, RV_OP_EBREAK
 
 export A64_OP_CBNZ, A64_OP_CBZ, A64_OP_CLZ, A64_OP_NOP, A64_OP_RBIT, A64_OP_REV, A64_OP_SUB_IMM, RV_OP_CLZ, RV_OP_CTZ, RV_OP_NOT, RV_OP_REV8, RV_OP_ROL, RV_OP_ROR, RV_OP_SEQZ, RV_OP_SNEZ, X86_OP_CALL_INDIRECT, X86_OP_CMP_IMM, X86_OP_CQO, X86_OP_INT3, X86_OP_LEA, X86_OP_MOV_REG_IMM32, X86_OP_MOVZX, X86_OP_NOP, X86_OP_SYSCALL

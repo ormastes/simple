@@ -1,18 +1,19 @@
 use compiler.mir.mir_instructions.{MirBlock, MirInst, MirInstKind, MirOperand, MirOperandKind, MirTerminator}
-use compiler.mir.mir_types.{LocalId, MirConstValue, MirType}
+use compiler.mir.mir_types.{BlockId, LocalId, LocalKind, MirConstValue, MirType, MirLocal}
 use compiler.interp.execution.tiered_jit.{JitHotspotSpecializationProvider, jit_hotspot_specialization_provider_from_analysis}
 use compiler.mir_opt.mir_opt.pattern.rule_engine.{OptimizerBackendKind, optimization_backend_kind_from_text, optimization_backend_kind_name}
 use compiler.mir_opt.mir_opt.var_reassign_analysis.{
     analyze_var_reassign_blocks,
+    local_count_index,
+    local_list_contains,
+    local_list_push_unique,
     var_reassign_analysis_hotspot_facts,
-    var_reassign_operand_local,
-    var_reassign_written_local
+    var_reassign_operand_local
 }
-
-extern fn rt_env_get(key: text) -> text
+use std.io_runtime.{env_get_opt}
 
 fn ssa_debug_enabled() -> bool:
-    (rt_env_get("SIMPLE_BOOTSTRAP_DEBUG") ?? "") == "1"
+    (env_get_opt("SIMPLE_BOOTSTRAP_DEBUG") ?? "") == "1"
 
 struct SsaVarTransformResult:
     applied: bool
@@ -46,11 +47,20 @@ struct SsaAllocaRewriteInstResult:
 struct SsaPhiPlan:
     join_block_id: i64
     original_local_id: i64
+    # Legacy binary-view fields (bug #131): kept so existing 2-way callers
+    # and unit tests reading `.then_block_id` etc. keep working unchanged.
+    # Always equal to pred_block_ids[0]/[1] and pred_value_local_ids[0]/[1].
+    # For N > 2 preds these two are just "the first two" and unused by any
+    # N-ary-aware code -- the arrays below are the source of truth.
     then_block_id: i64
     then_value_local_id: i64
     else_block_id: i64
     else_value_local_id: i64
     phi_dest_local_id: i64
+    # N-ary predecessor view: pred_block_ids[i] is the block that supplies
+    # pred_value_local_ids[i] as the incoming value for that predecessor.
+    pred_block_ids: [i64]
+    pred_value_local_ids: [i64]
 
 struct SsaPhiMaterializeResult:
     applied: bool
@@ -70,33 +80,6 @@ struct SsaPhiLoweringPolicy:
     lowering_kind: SsaPhiLoweringKind
     can_lower: bool
     reason: text
-
-fn ssa_phi_lowering_kind_name(kind: SsaPhiLoweringKind) -> text:
-    match kind:
-        case CraneliftBlockParam: "cranelift_block_param"
-        case LlvmPhiNode: "llvm_phi_node"
-        case InterpreterFallback: "interpreter_fallback"
-        case Unsupported: "unsupported"
-
-fn ssa_phi_normalize_backend_name(backend_name: text) -> text:
-    val kind = optimization_backend_kind_from_text(backend_name)
-    if kind == OptimizerBackendKind.Any:
-        backend_name
-    else:
-        optimization_backend_kind_name(kind)
-
-fn ssa_phi_lowering_policy_for_backend(backend_name: text) -> SsaPhiLoweringPolicy:
-    val normalized = ssa_phi_normalize_backend_name(backend_name)
-    if normalized == "cranelift":
-        return SsaPhiLoweringPolicy(normalized, SsaPhiLoweringKind.CraneliftBlockParam, true, "lower_to_block_params")
-    if normalized == "llvm":
-        return SsaPhiLoweringPolicy(normalized, SsaPhiLoweringKind.LlvmPhiNode, true, "lower_to_phi_nodes")
-    if normalized == "interpreter":
-        return SsaPhiLoweringPolicy(normalized, SsaPhiLoweringKind.InterpreterFallback, true, "execute_pseudo_intrinsic_fallback")
-    SsaPhiLoweringPolicy(normalized, SsaPhiLoweringKind.Unsupported, false, "backend_must_reject_pseudo_phi")
-
-fn ssa_phi_backend_can_lower(backend_name: text) -> bool:
-    ssa_phi_lowering_policy_for_backend(backend_name).can_lower
 
 fn ssa_phi_lowering_kind_name(kind: SsaPhiLoweringKind) -> text:
     match kind:
@@ -150,14 +133,11 @@ fn ssa_local_map_set(keys: [i64], values: [i64], local_id: i64, latest_id: i64) 
     if idx < 0:
         (keys.push(local_id), values.push(latest_id))
     else:
-        var updated: [i64] = []
-        var i = 0
-        while i < values.len():
-            if i == idx:
-                updated = updated.push(latest_id)
-            else:
-                updated = updated.push(values[i])
-            i = i + 1
+        # Index-assign, never a push-rebuild loop: `.push()` clones the whole
+        # array every call, so rebuilding N elements is O(N^2) for ONE update
+        # (see local_count_increment in var_reassign_analysis.spl).
+        var updated = values
+        updated[idx] = latest_id
         (keys, updated)
 
 fn ssa_local(local_id: i64) -> LocalId:
@@ -185,21 +165,21 @@ fn ssa_block_id_value(block: BlockId) -> i64:
 fn ssa_rewrite_operand(operand: MirOperand, keys: [i64], values: [i64]) -> MirOperand:
     match operand.kind:
         case Copy(local):
-            MirOperand(kind: MirOperandKind.Copy(ssa_local(ssa_local_map_get(keys, values, local.id))))
+            MirOperand(kind: MirOperandKind.Copy(ssa_local(ssa_local_map_get(keys, values, ssa_local_id_value(local)))))
         case Move(local):
-            MirOperand(kind: MirOperandKind.Move(ssa_local(ssa_local_map_get(keys, values, local.id))))
+            MirOperand(kind: MirOperandKind.Move(ssa_local(ssa_local_map_get(keys, values, ssa_local_id_value(local)))))
         case Const(value, type_):
             MirOperand(kind: MirOperandKind.Const(value, type_))
 
 fn ssa_replace_operand_local(operand: MirOperand, original_id: i64, replacement_id: i64) -> MirOperand:
     match operand.kind:
         case Copy(local):
-            if local.id == original_id:
+            if ssa_local_id_value(local) == original_id:
                 MirOperand(kind: MirOperandKind.Copy(ssa_local(replacement_id)))
             else:
                 operand
         case Move(local):
-            if local.id == original_id:
+            if ssa_local_id_value(local) == original_id:
                 MirOperand(kind: MirOperandKind.Move(ssa_local(replacement_id)))
             else:
                 operand
@@ -207,28 +187,44 @@ fn ssa_replace_operand_local(operand: MirOperand, original_id: i64, replacement_
             operand
 
 fn ssa_max_local_from_operand(current: i64, operand: MirOperand) -> i64:
-    val local = var_reassign_operand_local(operand)
-    if val local_id = local:
-        if local_id > current:
-            local_id
-        else:
+    # NOTE: explicit match (not `if local.?:`) -- local id 0 is a real,
+    # reachable local id and `.? ` truthiness on a boxed `i64?` collapses
+    # `Some(0)` to falsy in the bootstrap seed interpreter, which would
+    # silently drop local 0 from the max-local-id scan (see the detailed
+    # writeup on `ssa_alloca_apply_def_store` below).
+    # Direct operand.kind match (not the cross-module i64? helper): same
+    # bootstrap-seed Option round-trip hazard as ssa_operand_push_local.
+    match operand.kind:
+        case Copy(local):
+            val max_local_id = var_reassign_local_id_value(local)
+            if max_local_id > current:
+                max_local_id
+            else:
+                current
+        case Move(local):
+            val max_local_id = var_reassign_local_id_value(local)
+            if max_local_id > current:
+                max_local_id
+            else:
+                current
+        case Const(_, _):
             current
-    else:
-        current
 
 fn ssa_max_local_from_inst(current: i64, inst: MirInst) -> i64:
     var max_id = current
-    val written = var_reassign_written_local(inst)
-    if val written_id = written:
-        if written_id > max_id:
-            max_id = written_id
+    # NOTE: explicit match, not `if written.?:` -- see ssa_max_local_from_operand.
+    val max_written_id = _ssa_written_local_id(inst)
+    if max_written_id > max_id:
+        max_id = max_written_id
     match inst.kind:
         case Copy(_, src):
-            if src.id > max_id:
-                max_id = src.id
+            val src_id = ssa_local_id_value(src)
+            if src_id > max_id:
+                max_id = src_id
         case Move(_, src):
-            if src.id > max_id:
-                max_id = src.id
+            val src_id = ssa_local_id_value(src)
+            if src_id > max_id:
+                max_id = src_id
         case BinOp(_, _, left, right):
             max_id = ssa_max_local_from_operand(max_id, left)
             max_id = ssa_max_local_from_operand(max_id, right)
@@ -280,13 +276,19 @@ fn ssa_max_local_from_term(current: i64, term: MirTerminator) -> i64:
             ssa_max_local_from_operand(current, cond)
         case Switch(value, _, _):
             ssa_max_local_from_operand(current, value)
-        case CallTerminator(dest, func, args, _, _):
+        case CallTerminator(dest, func, args, _, _, unwind_payload_dest, unwind_type_tag_dest):
             var max_id = current
             if dest.?:
                 val term_dest = dest.unwrap()
                 val term_dest_id = ssa_local_id_value(term_dest)
                 if term_dest_id > max_id:
                     max_id = term_dest_id
+            if unwind_payload_dest.?:
+                val payload_id = ssa_local_id_value(unwind_payload_dest.unwrap())
+                if payload_id > max_id: max_id = payload_id
+            if unwind_type_tag_dest.?:
+                val tag_id = ssa_local_id_value(unwind_type_tag_dest.unwrap())
+                if tag_id > max_id: max_id = tag_id
             max_id = ssa_max_local_from_operand(max_id, func)
             for arg in args:
                 max_id = ssa_max_local_from_operand(max_id, arg)
@@ -306,6 +308,7 @@ fn ssa_var_transform_inst_supported(inst: MirInst) -> bool:
         case GetElementPtr(_, _, _): true
         case Aggregate(_, _, _): true
         case GetField(_, _, _): true
+        case SetField(_, _, _): true
         case Cast(_, _, _): true
         case Bitcast(_, _, _): true
         case Call(_, _, _): true
@@ -318,16 +321,15 @@ fn ssa_var_transform_inst_supported(inst: MirInst) -> bool:
         # writing a module `var` — e.g. _mcp_init_tool_set — plus an if/??
         # expression got the raw invalid SSA).
         case LoadGlobal(_, _): true
+        case GlobalAddr(_, _, _): true
         case StoreGlobal(_, _): true
         case Nop: true
         case DebugValue(_, _): true
         # Probe operand rewriting is intentionally not admitted in this
         # landing. Reject the whole transform instead of preserving a stale
         # local reference after SSA renaming.
-        case DecisionProbe(_, _, _, _, _, _, _, _, _, _): false
+        case DecisionProbe(_, _, _, _, _, _): false
         case ConditionProbe(_, _, _, _, _, _, _, _): false
-        case DynamicDecisionProbe(_, _, _, _, _, _, _, _, _, _): false
-        case DynamicConditionProbe(_, _, _, _, _, _, _, _): false
         case _: false
 
 fn ssa_var_transform_term_supported(term: MirTerminator) -> bool:
@@ -336,7 +338,7 @@ fn ssa_var_transform_term_supported(term: MirTerminator) -> bool:
         case _: false
 
 fn ssa_rewrite_dest(original_dest: LocalId, keys: [i64], values: [i64], next_local_id: i64) -> (LocalId, [i64], [i64], i64, bool):
-    val original_id = original_dest.id
+    val original_id = ssa_local_id_value(original_dest)
     val seen = local_count_index(keys, original_id) >= 0
     val dest_id = if seen: next_local_id else: original_id
     val next_id = if seen: next_local_id + 1 else: next_local_id
@@ -349,11 +351,11 @@ fn ssa_rewrite_inst(inst: MirInst, keys: [i64], values: [i64], next_local_id: i6
             val next = ssa_rewrite_dest(dest, keys, values, next_local_id)
             (MirInst(kind: MirInstKind.Const(next[0], value, type_), span: inst.span), next[1], next[2], next[3], next[4])
         case Copy(dest, src):
-            val rewritten_src = ssa_local(ssa_local_map_get(keys, values, src.id))
+            val rewritten_src = ssa_local(ssa_local_map_get(keys, values, ssa_local_id_value(src)))
             val next = ssa_rewrite_dest(dest, keys, values, next_local_id)
             (MirInst(kind: MirInstKind.Copy(next[0], rewritten_src), span: inst.span), next[1], next[2], next[3], next[4])
         case Move(dest, src):
-            val rewritten_src = ssa_local(ssa_local_map_get(keys, values, src.id))
+            val rewritten_src = ssa_local(ssa_local_map_get(keys, values, ssa_local_id_value(src)))
             val next = ssa_rewrite_dest(dest, keys, values, next_local_id)
             (MirInst(kind: MirInstKind.Move(next[0], rewritten_src), span: inst.span), next[1], next[2], next[3], next[4])
         case BinOp(dest, op, left, right):
@@ -395,13 +397,25 @@ fn ssa_rewrite_inst(inst: MirInst, keys: [i64], values: [i64], next_local_id: i6
         case Bitcast(dest, operand, target):
             val next = ssa_rewrite_dest(dest, keys, values, next_local_id)
             (MirInst(kind: MirInstKind.Bitcast(next[0], ssa_rewrite_operand(operand, keys, values), target), span: inst.span), next[1], next[2], next[3], next[4])
+        case Call(dest, func, args):
+            var new_args: [MirOperand] = []
+            for arg in args:
+                new_args = new_args.push(ssa_rewrite_operand(arg, keys, values))
+            if dest.?:
+                val next = ssa_rewrite_dest(dest.unwrap(), keys, values, next_local_id)
+                (MirInst(kind: MirInstKind.Call(Some(next[0]), ssa_rewrite_operand(func, keys, values), new_args), span: inst.span), next[1], next[2], next[3], next[4])
+            else:
+                (MirInst(kind: MirInstKind.Call(nil, ssa_rewrite_operand(func, keys, values), new_args), span: inst.span), keys, values, next_local_id, false)
+        case SetField(base, field, value):
+            (MirInst(kind: MirInstKind.SetField(ssa_rewrite_operand(base, keys, values), field, ssa_rewrite_operand(value, keys, values)), span: inst.span), keys, values, next_local_id, false)
         case _:
             (inst, keys, values, next_local_id, false)
 
 fn ssa_rewrite_term(term: MirTerminator, keys: [i64], values: [i64]) -> MirTerminator:
     match term:
         case Ret(value):
-            if val ret_value = value:
+            if value.?:
+                val ret_value = value.unwrap()
                 MirTerminator.Ret(Some(ssa_rewrite_operand(ret_value, keys, values)))
             else:
                 term
@@ -411,7 +425,7 @@ fn ssa_rewrite_term(term: MirTerminator, keys: [i64], values: [i64]) -> MirTermi
 fn ssa_replace_inst_dest_for_local(inst: MirInst, original_id: i64, replacement_id: i64) -> MirInst:
     match inst.kind:
         case Const(dest, value, type_):
-            if dest.id == original_id:
+            if ssa_local_id_value(dest) == original_id:
                 MirInst(kind: MirInstKind.Const(ssa_local(replacement_id), value, type_), span: inst.span)
             else:
                 inst
@@ -420,7 +434,7 @@ fn ssa_replace_inst_dest_for_local(inst: MirInst, original_id: i64, replacement_
             val rewritten_src = match new_src.kind:
                 case Copy(local): local
                 case _: src
-            if dest.id == original_id:
+            if ssa_local_id_value(dest) == original_id:
                 MirInst(kind: MirInstKind.Copy(ssa_local(replacement_id), rewritten_src), span: inst.span)
             else:
                 MirInst(kind: MirInstKind.Copy(dest, rewritten_src), span: inst.span)
@@ -429,33 +443,33 @@ fn ssa_replace_inst_dest_for_local(inst: MirInst, original_id: i64, replacement_
             val rewritten_src = match new_src.kind:
                 case Move(local): local
                 case _: src
-            if dest.id == original_id:
+            if ssa_local_id_value(dest) == original_id:
                 MirInst(kind: MirInstKind.Move(ssa_local(replacement_id), rewritten_src), span: inst.span)
             else:
                 MirInst(kind: MirInstKind.Move(dest, rewritten_src), span: inst.span)
         case BinOp(dest, op, left, right):
             val new_left = ssa_replace_operand_local(left, original_id, replacement_id)
             val new_right = ssa_replace_operand_local(right, original_id, replacement_id)
-            if dest.id == original_id:
+            if ssa_local_id_value(dest) == original_id:
                 MirInst(kind: MirInstKind.BinOp(ssa_local(replacement_id), op, new_left, new_right), span: inst.span)
             else:
                 MirInst(kind: MirInstKind.BinOp(dest, op, new_left, new_right), span: inst.span)
         case UnaryOp(dest, op, operand):
             val new_operand = ssa_replace_operand_local(operand, original_id, replacement_id)
-            if dest.id == original_id:
+            if ssa_local_id_value(dest) == original_id:
                 MirInst(kind: MirInstKind.UnaryOp(ssa_local(replacement_id), op, new_operand), span: inst.span)
             else:
                 MirInst(kind: MirInstKind.UnaryOp(dest, op, new_operand), span: inst.span)
         case CheckedBinOp(dest, op, left, right):
             val new_left = ssa_replace_operand_local(left, original_id, replacement_id)
             val new_right = ssa_replace_operand_local(right, original_id, replacement_id)
-            if dest.id == original_id:
+            if ssa_local_id_value(dest) == original_id:
                 MirInst(kind: MirInstKind.CheckedBinOp(ssa_local(replacement_id), op, new_left, new_right), span: inst.span)
             else:
                 MirInst(kind: MirInstKind.CheckedBinOp(dest, op, new_left, new_right), span: inst.span)
         case Load(dest, ptr):
             val new_ptr = ssa_replace_operand_local(ptr, original_id, replacement_id)
-            if dest.id == original_id:
+            if ssa_local_id_value(dest) == original_id:
                 MirInst(kind: MirInstKind.Load(ssa_local(replacement_id), new_ptr), span: inst.span)
             else:
                 MirInst(kind: MirInstKind.Load(dest, new_ptr), span: inst.span)
@@ -464,7 +478,7 @@ fn ssa_replace_inst_dest_for_local(inst: MirInst, original_id: i64, replacement_
             var new_indices: [MirOperand] = []
             for index in indices:
                 new_indices = new_indices.push(ssa_replace_operand_local(index, original_id, replacement_id))
-            if dest.id == original_id:
+            if ssa_local_id_value(dest) == original_id:
                 MirInst(kind: MirInstKind.GetElementPtr(ssa_local(replacement_id), new_base, new_indices), span: inst.span)
             else:
                 MirInst(kind: MirInstKind.GetElementPtr(dest, new_base, new_indices), span: inst.span)
@@ -472,33 +486,64 @@ fn ssa_replace_inst_dest_for_local(inst: MirInst, original_id: i64, replacement_
             var new_operands: [MirOperand] = []
             for operand in operands:
                 new_operands = new_operands.push(ssa_replace_operand_local(operand, original_id, replacement_id))
-            if dest.id == original_id:
+            if ssa_local_id_value(dest) == original_id:
                 MirInst(kind: MirInstKind.Aggregate(ssa_local(replacement_id), kind, new_operands), span: inst.span)
             else:
                 MirInst(kind: MirInstKind.Aggregate(dest, kind, new_operands), span: inst.span)
         case GetField(dest, base, field):
             val new_base = ssa_replace_operand_local(base, original_id, replacement_id)
-            if dest.id == original_id:
+            if ssa_local_id_value(dest) == original_id:
                 MirInst(kind: MirInstKind.GetField(ssa_local(replacement_id), new_base, field), span: inst.span)
             else:
                 MirInst(kind: MirInstKind.GetField(dest, new_base, field), span: inst.span)
         case Cast(dest, operand, target):
             val new_operand = ssa_replace_operand_local(operand, original_id, replacement_id)
-            if dest.id == original_id:
+            if ssa_local_id_value(dest) == original_id:
                 MirInst(kind: MirInstKind.Cast(ssa_local(replacement_id), new_operand, target), span: inst.span)
             else:
                 MirInst(kind: MirInstKind.Cast(dest, new_operand, target), span: inst.span)
         case Bitcast(dest, operand, target):
             val new_operand = ssa_replace_operand_local(operand, original_id, replacement_id)
-            if dest.id == original_id:
+            if ssa_local_id_value(dest) == original_id:
                 MirInst(kind: MirInstKind.Bitcast(ssa_local(replacement_id), new_operand, target), span: inst.span)
             else:
                 MirInst(kind: MirInstKind.Bitcast(dest, new_operand, target), span: inst.span)
+        case Call(dest, func, args):
+            var new_args: [MirOperand] = []
+            for arg in args:
+                new_args = new_args.push(ssa_replace_operand_local(arg, original_id, replacement_id))
+            val new_func = ssa_replace_operand_local(func, original_id, replacement_id)
+            if dest.?:
+                val call_dest = dest.unwrap()
+                if ssa_local_id_value(call_dest) == original_id:
+                    MirInst(kind: MirInstKind.Call(Some(ssa_local(replacement_id)), new_func, new_args), span: inst.span)
+                else:
+                    MirInst(kind: MirInstKind.Call(dest, new_func, new_args), span: inst.span)
+            else:
+                MirInst(kind: MirInstKind.Call(nil, new_func, new_args), span: inst.span)
         case _:
             inst
 
 fn ssa_replace_inst_operands_for_local(inst: MirInst, original_id: i64, replacement_id: i64) -> MirInst:
     match inst.kind:
+        case Copy(dest, src):
+            # Bug #131 fix: a join block can contain a trivial "dest = copy
+            # original_id" (e.g. an outer if-expression re-binding its own
+            # result local to an inner if-expression's already-phi'd value).
+            # Without this case the operand was left unrewritten, the
+            # original local had no reaching def after its own defs got
+            # renamed away, and the LLVM backend silently emitted `undef`.
+            val rewritten = ssa_replace_operand_local(MirOperand(kind: MirOperandKind.Copy(src)), original_id, replacement_id)
+            if val Copy(local) = rewritten.kind:
+                MirInst(kind: MirInstKind.Copy(dest, local), span: inst.span)
+            else:
+                MirInst(kind: MirInstKind.Copy(dest, src), span: inst.span)
+        case Move(dest, src):
+            val rewritten = ssa_replace_operand_local(MirOperand(kind: MirOperandKind.Move(src)), original_id, replacement_id)
+            if val Move(local) = rewritten.kind:
+                MirInst(kind: MirInstKind.Move(dest, local), span: inst.span)
+            else:
+                MirInst(kind: MirInstKind.Move(dest, src), span: inst.span)
         case BinOp(dest, op, left, right):
             MirInst(kind: MirInstKind.BinOp(dest, op, ssa_replace_operand_local(left, original_id, replacement_id), ssa_replace_operand_local(right, original_id, replacement_id)), span: inst.span)
         case UnaryOp(dest, op, operand):
@@ -528,13 +573,19 @@ fn ssa_replace_inst_operands_for_local(inst: MirInst, original_id: i64, replacem
             for arg in args:
                 new_args = new_args.push(ssa_replace_operand_local(arg, original_id, replacement_id))
             MirInst(kind: MirInstKind.Intrinsic(dest, name, new_args), span: inst.span)
+        case Call(dest, func, args):
+            var new_args: [MirOperand] = []
+            for arg in args:
+                new_args = new_args.push(ssa_replace_operand_local(arg, original_id, replacement_id))
+            MirInst(kind: MirInstKind.Call(dest, ssa_replace_operand_local(func, original_id, replacement_id), new_args), span: inst.span)
         case _:
             inst
 
 fn ssa_replace_term_operands_for_local(term: MirTerminator, original_id: i64, replacement_id: i64) -> MirTerminator:
     match term:
         case Ret(value):
-            if val ret_value = value:
+            if value.?:
+                val ret_value = value.unwrap()
                 MirTerminator.Ret(Some(ssa_replace_operand_local(ret_value, original_id, replacement_id)))
             else:
                 term
@@ -547,16 +598,18 @@ fn ssa_replace_term_operands_for_local(term: MirTerminator, original_id: i64, re
 
 fn ssa_block_by_id(blocks: [MirBlock], id: i64) -> MirBlock?:
     for block in blocks:
-        if block.id.id == id:
+        if ssa_block_id_value(block.id) == id:
             return Some(block)
     nil
 
 fn ssa_block_written_locals(block: MirBlock) -> [i64]:
     var locals: [i64] = []
     for inst in block.instructions:
-        val written = var_reassign_written_local(inst)
-        if val written_id = written:
-            locals = local_list_push_unique(locals, written_id)
+        # NOTE: explicit match, not `if written.?:` -- local id 0 landmine,
+        # see ssa_max_local_from_operand.
+        val block_written_id = _ssa_written_local_id(inst)
+        if block_written_id >= 0:
+            locals = local_list_push_unique(locals, block_written_id)
     locals
 
 fn ssa_common_locals(left: [i64], right: [i64]) -> [i64]:
@@ -577,7 +630,7 @@ fn ssa_terminator_successors(term: MirTerminator) -> [i64]:
             for case_ in targets:
                 succs = succs.push(ssa_block_id_value(case_.target))
             succs
-        case CallTerminator(_, _, _, normal, unwind):
+        case CallTerminator(_, _, _, normal, unwind, _, _):
             var succs: [i64] = [ssa_block_id_value(normal)]
             if unwind.?:
                 succs = succs.push(ssa_block_id_value(unwind.unwrap()))
@@ -590,26 +643,42 @@ fn ssa_terminator_successors(term: MirTerminator) -> [i64]:
 # loop backedge (bug #131 generalization must never treat a loop-carried
 # reassignment as a phi merge).
 fn ssa_block_can_reach(blocks: [MirBlock], start_id: i64, target_id: i64, visited: [i64]) -> bool:
+    # Iterative worklist, NOT recursion with a per-branch `visited` copy. The
+    # recursive form threaded `seen = visited.push(start_id)` DOWN each branch,
+    # so sibling successors never saw each other's marks and every distinct
+    # path through the CFG was re-explored: O(2^branches). It still terminated
+    # in principle, which is why it read as a hang rather than a crash --
+    # `process_run_timeout_live` (94 blocks) did not finish in 3600s, while
+    # small functions were unaffected (callers gate on `blocks.len() < 4`).
+    # See doc/08_tracking/bug/native_compile_nonterminating_io_runtime_2026-08-24.md
+    #
+    # Sharing one `seen` set across the WHOLE search is exactly equivalent for a
+    # reachability predicate: a block already expanded without reaching
+    # `target_id` cannot reach it via a different path either.
     if start_id == target_id:
         return true
     if local_list_contains(visited, start_id):
         return false
-    val seen = visited.push(start_id)
-    val start_opt = ssa_block_by_id(blocks, start_id)
-    # NOTE: deliberately `if start_opt.?: ... else: false` rather than
-    # `if not start_opt.?: return false` -- negating `.?` on a MirBlock?
-    # (struct-boxed) optional mis-evaluates in the bootstrap interpreter;
-    # every existing MirBlock? check in this file already uses the
-    # positive form only.
-    if start_opt.?:
-        val start_block = start_opt.unwrap()
-        var reached = false
-        for succ_id in ssa_terminator_successors(start_block.terminator):
-            if ssa_block_can_reach(blocks, succ_id, target_id, seen):
-                reached = true
-        reached
-    else:
-        false
+    var seen = visited.push(start_id)
+    var frontier: [i64] = [start_id]
+    var i = 0
+    while i < frontier.len():
+        val cur_id = frontier[i]
+        i = i + 1
+        val cur_opt = ssa_block_by_id(blocks, cur_id)
+        # NOTE: deliberately `if cur_opt.?:` rather than `if not cur_opt.?:` --
+        # negating `.?` on a MirBlock? (struct-boxed) optional mis-evaluates in
+        # the bootstrap interpreter; every existing MirBlock? check in this
+        # file already uses the positive form only.
+        if cur_opt.?:
+            val cur_block = cur_opt.unwrap()
+            for succ_id in ssa_terminator_successors(cur_block.terminator):
+                if succ_id == target_id:
+                    return true
+                if not local_list_contains(seen, succ_id):
+                    seen = seen.push(succ_id)
+                    frontier = frontier.push(succ_id)
+    false
 
 # Every block whose terminator can transfer control directly to `join_id`,
 # regardless of terminator kind (Goto/If/Switch/CallTerminator). This is the
@@ -679,30 +748,52 @@ fn ssa_safe_join_predecessors(blocks: [MirBlock], join_id: i64) -> [i64]:
 fn ssa_phi_required_locals_for_blocks(blocks: [MirBlock]) -> [i64]:
     if blocks.len() < 4:
         return []
-    val entry = blocks[0]
-    match entry.terminator:
-        case If(_, then_block, else_block):
-            val then_opt = ssa_block_by_id(blocks, then_block.id)
-            val else_opt = ssa_block_by_id(blocks, else_block.id)
-            if val then_body = then_opt:
-                if val else_body = else_opt:
-                    match then_body.terminator:
-                        case Goto(then_join):
-                            match else_body.terminator:
-                                case Goto(else_join):
-                                    if then_join.id != else_join.id:
-                                        return []
-                                    ssa_common_locals(ssa_block_written_locals(then_body), ssa_block_written_locals(else_body))
-                                case _:
-                                    []
-                        case _:
-                            []
-                else:
-                    return []
-            else:
-                return []
-        case _:
-            []
+    var required: [i64] = []
+    for join_id in ssa_all_join_targets(blocks):
+        val pred_ids = ssa_safe_join_predecessors(blocks, join_id)
+        if pred_ids.len() >= 2:
+            var pred_blocks: [MirBlock] = []
+            for pred_id in pred_ids:
+                val pred_opt = ssa_block_by_id(blocks, pred_id)
+                if pred_opt.?:
+                    pred_blocks = pred_blocks.push(pred_opt.unwrap())
+            if pred_blocks.len() == pred_ids.len():
+                for local_id in ssa_common_locals_all(pred_blocks):
+                    required = local_list_push_unique(required, local_id)
+    required
+
+fn ssa_append_phi_plans_for_join(blocks: [MirBlock], join_id: i64, next_local_start: i64, plans_in: [SsaPhiPlan]) -> ([SsaPhiPlan], i64):
+    var plans = plans_in
+    var next_local = next_local_start
+    val pred_ids = ssa_safe_join_predecessors(blocks, join_id)
+    if pred_ids.len() < 2:
+        return (plans, next_local)
+    var pred_blocks: [MirBlock] = []
+    for pred_id in pred_ids:
+        val pred_opt = ssa_block_by_id(blocks, pred_id)
+        if pred_opt.?:
+            pred_blocks = pred_blocks.push(pred_opt.unwrap())
+    if pred_blocks.len() != pred_ids.len():
+        return (plans, next_local)
+    for local_id in ssa_common_locals_all(pred_blocks):
+        var pred_value_ids: [i64] = []
+        for _pred_id in pred_ids:
+            pred_value_ids = pred_value_ids.push(next_local)
+            next_local = next_local + 1
+        val phi_dest = next_local
+        next_local = next_local + 1
+        plans = plans.push(SsaPhiPlan(
+            join_block_id: join_id,
+            original_local_id: local_id,
+            then_block_id: pred_ids[0],
+            then_value_local_id: pred_value_ids[0],
+            else_block_id: pred_ids[1],
+            else_value_local_id: pred_value_ids[1],
+            phi_dest_local_id: phi_dest,
+            pred_block_ids: pred_ids,
+            pred_value_local_ids: pred_value_ids
+        ))
+    (plans, next_local)
 
 fn ssa_max_local_from_blocks(blocks: [MirBlock]) -> i64:
     var max_local = -1
@@ -712,63 +803,68 @@ fn ssa_max_local_from_blocks(blocks: [MirBlock]) -> i64:
         max_local = ssa_max_local_from_term(max_local, block.terminator)
     max_local
 
+# An elif-ladder lowers to a CASCADE of these joins (bug #131): the outer
+# join's predecessor block contains the inner join's already-materialized
+# result. Plans must be *applied* inner-before-outer or the outer rename
+# clobbers the inner phi's consumer before it is wired up. Detection order
+# doesn't matter (each plan is computed from the untouched input blocks), so
+# sort strictly by dependency: plan A before plan B whenever A's join block
+# is one of B's predecessor blocks.
+fn ssa_phi_plan_is_ready(plan: SsaPhiPlan, remaining: [SsaPhiPlan]) -> bool:
+    for other in remaining:
+        if other.join_block_id != plan.join_block_id:
+            if local_list_contains(plan.pred_block_ids, other.join_block_id):
+                return false
+    true
+
+fn ssa_topo_sort_phi_plans(plans: [SsaPhiPlan]) -> [SsaPhiPlan]:
+    var remaining = plans
+    var ordered: [SsaPhiPlan] = []
+    while remaining.len() > 0:
+        var picked = -1
+        var i = 0
+        while i < remaining.len():
+            if picked < 0 and ssa_phi_plan_is_ready(remaining[i], remaining):
+                picked = i
+            i = i + 1
+        if picked < 0:
+            # No dependency-free plan left (shouldn't happen on the
+            # backedge-free joins `ssa_safe_join_predecessors` allows) --
+            # fall back to the remaining detection order instead of looping.
+            for leftover in remaining:
+                ordered = ordered.push(leftover)
+            remaining = []
+        else:
+            ordered = ordered.push(remaining[picked])
+            var next_remaining: [SsaPhiPlan] = []
+            var j = 0
+            while j < remaining.len():
+                if j != picked:
+                    next_remaining = next_remaining.push(remaining[j])
+                j = j + 1
+            remaining = next_remaining
+    ordered
+
 fn ssa_phi_plans_for_blocks(blocks: [MirBlock]) -> [SsaPhiPlan]:
     if blocks.len() < 4:
         return []
-    val entry = blocks[0]
-    match entry.terminator:
-        case If(_, then_block, else_block):
-            val then_opt = ssa_block_by_id(blocks, then_block.id)
-            val else_opt = ssa_block_by_id(blocks, else_block.id)
-            if val then_body = then_opt:
-                if val else_body = else_opt:
-                    match then_body.terminator:
-                        case Goto(then_join):
-                            match else_body.terminator:
-                                case Goto(else_join):
-                                    if then_join.id != else_join.id:
-                                        return []
-                                    val locals = ssa_common_locals(ssa_block_written_locals(then_body), ssa_block_written_locals(else_body))
-                                    var plans: [SsaPhiPlan] = []
-                                    var next_local = ssa_max_local_from_blocks(blocks) + 1
-                                    for local_id in locals:
-                                        val then_value = next_local
-                                        val else_value = next_local + 1
-                                        val phi_dest = next_local + 2
-                                        plans = plans.push(SsaPhiPlan(
-                                            join_block_id: then_join.id,
-                                            original_local_id: local_id,
-                                            then_block_id: then_block.id,
-                                            then_value_local_id: then_value,
-                                            else_block_id: else_block.id,
-                                            else_value_local_id: else_value,
-                                            phi_dest_local_id: phi_dest
-                                        ))
-                                        next_local = next_local + 3
-                                    plans
-                                case _:
-                                    []
-                        case _:
-                            []
-                else:
-                    []
-            else:
-                []
-        case _:
-            []
+    var plans: [SsaPhiPlan] = []
+    var next_local = ssa_max_local_from_blocks(blocks) + 1
+    for join_id in ssa_all_join_targets(blocks):
+        val appended = ssa_append_phi_plans_for_join(blocks, join_id, next_local, plans)
+        plans = appended[0]
+        next_local = appended[1]
+    ssa_topo_sort_phi_plans(plans)
 
 fn ssa_phi_instruction(plan: SsaPhiPlan) -> MirInst:
+    var args: [MirOperand] = []
+    var i = 0
+    while i < plan.pred_block_ids.len():
+        args = args.push(MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(plan.pred_block_ids[i]), MirType.i64())))
+        args = args.push(MirOperand(kind: MirOperandKind.Copy(ssa_local(plan.pred_value_local_ids[i]))))
+        i = i + 1
     MirInst(
-        kind: MirInstKind.Intrinsic(
-            Some(ssa_local(plan.phi_dest_local_id)),
-            "__simple_ssa_phi",
-            [
-                MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(plan.then_block_id), MirType.i64())),
-                MirOperand(kind: MirOperandKind.Copy(ssa_local(plan.then_value_local_id))),
-                MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(plan.else_block_id), MirType.i64())),
-                MirOperand(kind: MirOperandKind.Copy(ssa_local(plan.else_value_local_id)))
-            ]
-        ),
+        kind: MirInstKind.Intrinsic(Some(ssa_local(plan.phi_dest_local_id)), "__simple_ssa_phi", args),
         span: nil
     )
 
@@ -851,6 +947,8 @@ fn ssa_instructions_supported_for_alloca(blocks: [MirBlock]) -> bool:
     reassigned local un-slotted -> duplicate `%lN` SSA defs at llc (#135)."""
     for block in blocks:
         for inst in block.instructions:
+            if not ssa_inst_operand_payloads_valid(inst):
+                return false
             if not ssa_var_transform_inst_supported(inst):
                 match inst.kind:
                     case CallIndirect(_, _, _, _):
@@ -861,7 +959,26 @@ fn ssa_instructions_supported_for_alloca(blocks: [MirBlock]) -> bool:
                         pass_do_nothing
                     case LoadGlobal(_, _):
                         pass_do_nothing
+                    case GlobalAddr(_, _, _):
+                        pass_do_nothing
                     case StoreGlobal(_, _):
+                        pass_do_nothing
+                    # Verification-only witness for the canonical two-arm
+                    # Result match (mir_instruction_kinds.spl: "no runtime
+                    # effect. Backends may erase"). It defines nothing and
+                    # reads nothing at run time, so slotting the function
+                    # around it is sound -- but rejecting the whole function
+                    # over it left the match's own merge destination un-slotted
+                    # and multi-def, which llc rejects outright ("multiple
+                    # definition of local value named 'lN'"). That killed EVERY
+                    # `match r: case Ok(x): ... case Err(_): ...` in value
+                    # position, including std.nogc_sync_mut.io.file_ops.file_read,
+                    # and so every native-build of an io_runtime importer.
+                    # Same defect class, and the same remedy, as the
+                    # CallIndirect admission documented in this gate's
+                    # docstring (#135).
+                    # See doc/08_tracking/bug/native_compile_unresolved_option_result_io_modules_2026-08-24.md
+                    case ResultMatchSemantic(_, _, _, _, _, _, _):
                         pass_do_nothing
                     case _:
                         return false
@@ -876,17 +993,19 @@ fn ssa_phi_plan_pred_value_for_block(plan: SsaPhiPlan, block_id: i64) -> i64?:
     nil
 
 fn ssa_apply_phi_plan_to_block(block: MirBlock, plan: SsaPhiPlan) -> MirBlock:
-    if block.id.id == plan.then_block_id:
-        var new_insts: [MirInst] = []
-        for inst in block.instructions:
-            new_insts = new_insts.push(ssa_replace_inst_dest_for_local(inst, plan.original_local_id, plan.then_value_local_id))
-        return MirBlock(id: block.id, label: block.label, instructions: new_insts, terminator: block.terminator)
-    if block.id.id == plan.else_block_id:
-        var new_insts: [MirInst] = []
-        for inst in block.instructions:
-            new_insts = new_insts.push(ssa_replace_inst_dest_for_local(inst, plan.original_local_id, plan.else_value_local_id))
-        return MirBlock(id: block.id, label: block.label, instructions: new_insts, terminator: block.terminator)
-    if block.id.id == plan.join_block_id:
+    # NOTE: explicit match, not `if pred_value.?:` -- the predecessor's
+    # incoming local id can legitimately be 0 (local id 0 landmine, see
+    # ssa_max_local_from_operand); a truthiness check here would silently
+    # skip rewriting the phi source in that predecessor block.
+    match ssa_phi_plan_pred_value_for_block(plan, ssa_block_id_value(block.id)):
+        case Some(value_local_id):
+            var new_insts: [MirInst] = []
+            for inst in block.instructions:
+                new_insts = new_insts.push(ssa_replace_inst_dest_for_local(inst, plan.original_local_id, value_local_id))
+            return MirBlock(id: block.id, label: block.label, instructions: new_insts, terminator: block.terminator)
+        case nil:
+            pass_do_nothing
+    if ssa_block_id_value(block.id) == plan.join_block_id:
         var join_insts: [MirInst] = [ssa_phi_instruction(plan)]
         for inst in block.instructions:
             join_insts = join_insts.push(ssa_replace_inst_operands_for_local(inst, plan.original_local_id, plan.phi_dest_local_id))
@@ -918,15 +1037,17 @@ fn ssa_var_transform_reject(reason: text, blocks: [MirBlock], phi_locals: [i64])
 fn ssa_var_transform_blocks(blocks: [MirBlock]) -> SsaVarTransformResult:
     if blocks.len() != 1:
         val phi_locals = ssa_phi_required_locals_for_blocks(blocks)
+        if ssa_debug_enabled():
+            print "[ssa-var] blocks={blocks.len()} phi_locals={phi_locals.len()}"
         if phi_locals.len() > 0:
             val analysis = analyze_var_reassign_blocks(blocks)
             if not analysis.ssa_transform_safe and analysis.reason != "escape.reassigned_storage":
                 return ssa_var_transform_reject(analysis.reason, blocks, phi_locals)
-            for block in blocks:
-                for inst in block.instructions:
-                    if not ssa_var_transform_inst_supported(inst):
-                        return ssa_var_transform_reject("unsupported instruction", blocks, phi_locals)
+            if not ssa_instructions_supported_for_phi(blocks):
+                return ssa_var_transform_reject("unsupported instruction", blocks, phi_locals)
             val materialized = ssa_materialize_phi_plans_for_blocks(blocks)
+            if ssa_debug_enabled():
+                print "[ssa-var] materialized applied={materialized.applied} phi={materialized.phi_count} reason={materialized.reason}"
             if materialized.applied:
                 val materialized_analysis = analyze_var_reassign_blocks(materialized.blocks)
                 if not materialized_analysis.ssa_transform_safe:
@@ -1008,13 +1129,11 @@ fn ssa_reassigned_locals_for_blocks(blocks: [MirBlock]) -> [i64]:
             # especially dangerous: it feeds the multi-def/slotting
             # decision, i.e. exactly the class of silent miscompile the
             # landed var_reassign_written_local fix addressed.
-            match var_reassign_written_local(inst):
-                case Some(written_id):
-                    val next_counts = local_count_increment(local_ids, counts, written_id)
-                    local_ids = next_counts[0]
-                    counts = next_counts[1]
-                case nil:
-                    pass_do_nothing
+            val written_id = _ssa_written_local_id(inst)
+            if written_id >= 0:
+                val next_counts = local_count_increment(local_ids, counts, written_id)
+                local_ids = next_counts[0]
+                counts = next_counts[1]
     var reassigned: [i64] = []
     var i = 0
     while i < local_ids.len():
@@ -1101,6 +1220,8 @@ fn _ssa_written_local_id(inst: MirInst) -> i64:
         # global_insts 2026-07-23). StoreGlobal writes no local -> catch-all.
         case LoadGlobal(dest, _):
             var_reassign_local_id_value(dest)
+        case GlobalAddr(dest, _, _):
+            var_reassign_local_id_value(dest)
         case _:
             -1
 
@@ -1182,6 +1303,8 @@ fn ssa_collect_inst_operand_locals(locals: [i64], inst: MirInst) -> [i64]:
         case Intrinsic(_, _, args):
             for arg in args:
                 result = ssa_operand_push_local(result, arg)
+        case StoreGlobal(_, value):
+            result = ssa_operand_push_local(result, value)
         case _:
             pass_do_nothing
     result
@@ -1196,10 +1319,13 @@ fn ssa_collect_term_operand_locals(locals: [i64], term: MirTerminator) -> [i64]:
             result = ssa_operand_push_local(result, cond)
         case Switch(value, _, _):
             result = ssa_operand_push_local(result, value)
-        case CallTerminator(_, func, args, _, _):
+        case CallTerminator(_, func, args, _, _, _, _):
             result = ssa_operand_push_local(result, func)
             for arg in args:
                 result = ssa_operand_push_local(result, arg)
+        case Throw(payload, type_tag) | Resume(payload, type_tag):
+            result = ssa_operand_push_local(result, payload)
+            result = ssa_operand_push_local(result, type_tag)
         case _:
             pass_do_nothing
     result
@@ -1208,12 +1334,8 @@ fn ssa_local_defined_in_block(block: MirBlock, local_id: i64) -> bool:
     for inst in block.instructions:
         # NOTE: explicit match, not `if written.?:` -- local id 0 landmine,
         # see ssa_max_local_from_operand.
-        match var_reassign_written_local(inst):
-            case Some(written_id):
-                if written_id == local_id:
-                    return true
-            case nil:
-                pass_do_nothing
+        if _ssa_written_local_id(inst) == local_id:
+            return true
     false
 
 fn ssa_local_is_param(mir_locals: [MirLocal], local_id: i64) -> bool:
@@ -1229,6 +1351,8 @@ fn ssa_cross_block_live_locals(blocks: [MirBlock], mir_locals: [MirLocal]) -> [i
     """Locals whose use-block set is not a subset of {their def-block}: a use
     appears in some block where the local is not itself defined. Parameters are
     excluded (they are live from entry and dominate every block)."""
+    if blocks.len() < 2:
+        return []
     var result: [i64] = []
     for block in blocks:
         var used: [i64] = []
@@ -1239,6 +1363,23 @@ fn ssa_cross_block_live_locals(blocks: [MirBlock], mir_locals: [MirLocal]) -> [i
             if not ssa_local_is_param(mir_locals, local_id):
                 if not ssa_local_defined_in_block(block, local_id):
                     result = local_list_push_unique(result, local_id)
+    result
+
+fn ssa_reassigned_param_locals(blocks: [MirBlock], mir_locals: [MirLocal]) -> [i64]:
+    """Params (kind Arg) that are ALSO written by some instruction. `var p =
+    param` reuses the param's local id, so a later `p = ...` reassignment emits
+    a second def of the arg SSA value (`%l0`) -> llc `multiple definition of
+    local value named 'l0'`. ssa_cross_block_live_locals excludes params (a
+    pure arg is live from entry and needs no slot), so this class slips through
+    both nets. Slot them like any reassigned local; the driver also seeds the
+    slot with an entry Store of the incoming arg, since a param has no defining
+    instruction for ssa_alloca_apply_def_store to convert into the first store."""
+    var result: [i64] = []
+    for block in blocks:
+        for inst in block.instructions:
+            val written_id = _ssa_written_local_id(inst)
+            if written_id >= 0 and ssa_local_is_param(mir_locals, written_id):
+                result = local_list_push_unique(result, written_id)
     result
 
 # --- read-side: rewrite a use of a possibly-reassigned local into a Load ---
@@ -1427,7 +1568,7 @@ fn ssa_alloca_rename_dest(inst: MirInst, new_id: i64) -> MirInst:
         case _:
             inst
 
-fn ssa_alloca_apply_def_store(inst: MirInst, slot_keys: [i64], slot_values: [i64], next_temp: i64) -> (MirInst, [MirInst], i64):
+fn ssa_alloca_apply_def_store(inst: MirInst, slot_keys: [i64], slot_values: [i64], next_temp: i64) -> SsaAllocaDefStoreResult:
     """If `inst` defines a reassigned local, redirect its dest to a fresh
     temp and append a Store of that temp into the local's stack slot.
 
@@ -1449,10 +1590,9 @@ fn ssa_alloca_apply_def_store(inst: MirInst, slot_keys: [i64], slot_values: [i64
     stack memory. An explicit `match` on the Option's variant tag sidesteps
     the payload-truthiness collapse entirely."""
     val written_sentinel = _ssa_written_local_id(inst)
-    # Statement-form accumulation, single tail tuple: a tuple constructed as a
-    # match-arm TAIL expression came back nil through this fn under the
-    # bootstrap seed (anon-tuple-return landmine), nil-poisoning
-    # ssa_alloca_rewrite_inst's def_step.
+    # Statement-form accumulation plus a named result record: tuple-shaped
+    # transport previously let staged-native execution keep read-side loads
+    # while dropping this defining instruction and its appended Store.
     var out_inst = inst
     var out_stores: [MirInst] = []
     var out_next = next_temp
@@ -1469,9 +1609,9 @@ fn ssa_alloca_apply_def_store(inst: MirInst, slot_keys: [i64], slot_values: [i64
                     span: nil
                 )]
                 out_next = next_temp + 1
-    (out_inst, out_stores, out_next)
+    SsaAllocaDefStoreResult(out_inst, out_stores, out_next)
 
-fn ssa_alloca_rewrite_inst(inst: MirInst, slot_keys: [i64], slot_values: [i64], next_temp: i64) -> ([MirInst], MirInst, [MirInst], i64):
+fn ssa_alloca_rewrite_inst(inst: MirInst, slot_keys: [i64], slot_values: [i64], next_temp: i64) -> SsaAllocaRewriteInstResult:
     """Full per-instruction rewrite: (loads to prepend, core inst, stores to
     append, next free temp id)."""
     val op_step = ssa_alloca_rewrite_inst_operands(inst, slot_keys, slot_values, next_temp)
@@ -1492,13 +1632,49 @@ fn ssa_alloca_rewrite_term(term: MirTerminator, slot_keys: [i64], slot_values: [
         case Switch(value, targets, default):
             val r = ssa_alloca_rewrite_operand(value, slot_keys, slot_values, next_temp)
             (r[1], MirTerminator.Switch(r[0], targets, default), r[2])
-        case CallTerminator(dest, func, args, normal, unwind):
+        case CallTerminator(dest, func, args, normal, unwind, unwind_payload_dest, unwind_type_tag_dest):
             val rf = ssa_alloca_rewrite_operand(func, slot_keys, slot_values, next_temp)
             val ra = ssa_alloca_rewrite_operand_list(args, slot_keys, slot_values, rf[2])
             var prepend = rf[1]
             for p in ra[1]:
                 prepend = prepend.push(p)
-            (prepend, MirTerminator.CallTerminator(dest, rf[0], ra[0], normal, unwind), ra[2])
+            # A recoverable call defines `dest` on both its normal and unwind
+            # edges.  When that local is cross-block-live the alloca transform
+            # has already assigned it a slot; pass the slot to LLVM codegen so
+            # both edge-specific values are stored without creating duplicate
+            # SSA definitions of `%lN`.
+            var rewritten_dest = dest
+            if dest.?:
+                val dest_id = ssa_local_id_value(dest.unwrap())
+                val idx = local_count_index(slot_keys, dest_id)
+                if idx >= 0:
+                    rewritten_dest = Some(ssa_local(slot_values[idx]))
+            var rewritten_payload_dest = unwind_payload_dest
+            if unwind_payload_dest.?:
+                val payload_id = ssa_local_id_value(unwind_payload_dest.unwrap())
+                val payload_idx = local_count_index(slot_keys, payload_id)
+                if payload_idx >= 0:
+                    rewritten_payload_dest = Some(ssa_local(slot_values[payload_idx]))
+            var rewritten_type_tag_dest = unwind_type_tag_dest
+            if unwind_type_tag_dest.?:
+                val tag_id = ssa_local_id_value(unwind_type_tag_dest.unwrap())
+                val tag_idx = local_count_index(slot_keys, tag_id)
+                if tag_idx >= 0:
+                    rewritten_type_tag_dest = Some(ssa_local(slot_values[tag_idx]))
+            (prepend, MirTerminator.CallTerminator(rewritten_dest, rf[0], ra[0], normal, unwind,
+                                                   rewritten_payload_dest, rewritten_type_tag_dest), ra[2])
+        case Throw(payload, type_tag):
+            val rp = ssa_alloca_rewrite_operand(payload, slot_keys, slot_values, next_temp)
+            val rt = ssa_alloca_rewrite_operand(type_tag, slot_keys, slot_values, rp[2])
+            var prep = rp[1]
+            for p in rt[1]: prep = prep.push(p)
+            (prep, MirTerminator.Throw(rp[0], rt[0]), rt[2])
+        case Resume(payload, type_tag):
+            val rp = ssa_alloca_rewrite_operand(payload, slot_keys, slot_values, next_temp)
+            val rt = ssa_alloca_rewrite_operand(type_tag, slot_keys, slot_values, rp[2])
+            var prep = rp[1]
+            for p in rt[1]: prep = prep.push(p)
+            (prep, MirTerminator.Resume(rp[0], rt[0]), rt[2])
         case _:
             ([], term, next_temp)
 
@@ -1510,12 +1686,12 @@ fn ssa_alloca_rewrite_block(block: MirBlock, slot_keys: [i64], slot_values: [i64
     var next_temp = next_temp_start
     for inst in block.instructions:
         val step = ssa_alloca_rewrite_inst(inst, slot_keys, slot_values, next_temp)
-        for p in step[0]:
+        for p in step.prepended:
             new_insts = new_insts.push(p)
-        new_insts = new_insts.push(step[1])
-        for s in step[2]:
+        new_insts = new_insts.push(step.instruction)
+        for s in step.appended:
             new_insts = new_insts.push(s)
-        next_temp = step[3]
+        next_temp = step.next_temp
     val term_step = ssa_alloca_rewrite_term(block.terminator, slot_keys, slot_values, next_temp)
     for p in term_step[0]:
         new_insts = new_insts.push(p)
@@ -1561,9 +1737,12 @@ fn ssa_alloca_transform_blocks(blocks: [MirBlock], mir_locals: [MirLocal], entry
     # single-def locals whose use escapes their defining block.
     val reassigned = ssa_reassigned_locals_for_blocks(blocks)
     val cross_block = ssa_cross_block_live_locals(blocks, mir_locals)
+    val param_reassigned = ssa_reassigned_param_locals(blocks, mir_locals)
     var slotted = reassigned
     for cross_id in cross_block:
         slotted = local_list_push_unique(slotted, cross_id)
+    for param_id in param_reassigned:
+        slotted = local_list_push_unique(slotted, param_id)
     if slotted.len() == 0:
         return ssa_var_transform_reject("no slotted locals", blocks, [])
 
@@ -1578,6 +1757,18 @@ fn ssa_alloca_transform_blocks(blocks: [MirBlock], mir_locals: [MirLocal], entry
         slot_values = slot_values.push(slot_id)
         val elem_type = ssa_local_type_lookup(mir_locals, local_id)
         alloc_insts = alloc_insts.push(MirInst(kind: MirInstKind.Alloc(ssa_local(slot_id), elem_type), span: nil))
+    # Seed each reassigned-param slot with the incoming arg value. These run
+    # AFTER the allocs (append order) so the slot exists, and BEFORE the entry
+    # block's rewritten reads (prepended raw, bypassing operand rewriting) so
+    # the `Copy(param)` reads the arg `%lN`, not a load of the empty slot.
+    for param_id in param_reassigned:
+        val pidx = local_count_index(slot_keys, param_id)
+        if pidx >= 0:
+            val pslot = slot_values[pidx]
+            alloc_insts = alloc_insts.push(MirInst(
+                kind: MirInstKind.Store(MirOperand(kind: MirOperandKind.Copy(ssa_local(pslot))), MirOperand(kind: MirOperandKind.Copy(ssa_local(param_id)))),
+                span: nil
+            ))
 
     val entry_id = ssa_block_id_value(entry_block)
     var next_temp = next_id

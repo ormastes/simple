@@ -10,11 +10,14 @@
 # This replaces the pattern of duplicating extern fn declarations in every
 # test file and compiler module that needs I/O.
 
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+
 
 # ============================================================================
 # Extern Function Declarations (runtime built-ins)
 # ============================================================================
 
+@unsafe(reason: "raw process capture; exit code -1 is the execution-failure sentinel", capabilities: [ffi])
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 @unsafe(reason: "raw owned-child spawn; positive PID is success and -1 is the failure sentinel", capabilities: [ffi])
 extern fn rt_process_spawn_async(cmd: text, args: [text]) -> i64
@@ -25,25 +28,25 @@ extern fn rt_process_kill(pid: i64) -> bool
 @unsafe(reason: "raw timed process capture; exit code -1 is the failure-or-timeout sentinel", capabilities: [ffi])
 extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
 
-@unsafe(reason: "contains the raw process-capture ABI behind a validated result facade", capabilities: [ffi])
 fn _io_runtime_process_run_raw(cmd: text, args: [text]) -> (text, text, i64):
-    rt_process_run(cmd, args)
+    unsafe(capabilities: [ffi]):
+        rt_process_run(cmd, args)
 
-@unsafe(reason: "contains the raw owned-child spawn ABI behind a PID facade", capabilities: [ffi])
 fn _io_runtime_process_spawn_async_raw(cmd: text, args: [text]) -> i64:
-    rt_process_spawn_async(cmd, args)
+    unsafe(capabilities: [ffi]):
+        rt_process_spawn_async(cmd, args)
 
-@unsafe(reason: "contains the raw owned-child liveness ABI behind a boolean facade", capabilities: [ffi])
 fn _io_runtime_process_is_running_raw(pid: i64) -> bool:
-    rt_process_is_running(pid)
+    unsafe(capabilities: [ffi]):
+        rt_process_is_running(pid)
 
-@unsafe(reason: "contains the raw owned-child termination ABI behind PID validation", capabilities: [ffi])
 fn _io_runtime_process_kill_raw(pid: i64) -> bool:
-    rt_process_kill(pid)
+    unsafe(capabilities: [ffi]):
+        rt_process_kill(pid)
 
-@unsafe(reason: "contains the raw timed process-capture ABI behind a result facade", capabilities: [ffi])
 fn _io_runtime_process_run_timeout_raw(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32):
-    rt_process_run_timeout(cmd, args, timeout_ms)
+    unsafe(capabilities: [ffi]):
+        rt_process_run_timeout(cmd, args, timeout_ms)
 
 @unsafe(reason: "raw nullable file read; nil is the invalid, unreadable, or runtime-failure sentinel", capabilities: [ffi])
 extern fn rt_file_read_text(path: text) -> text?
@@ -104,38 +107,50 @@ extern fn rt_file_is_char_device(path: text) -> bool
 extern fn rt_platform_name() -> text?
 @unsafe(reason: "raw blocking thread sleep; unit return has no fabricated value", capabilities: [ffi])
 extern fn rt_thread_sleep(millis: i64)
+@unsafe(reason: "raw runtime hash ABI; algorithm identity and cross-provider stability are unverified", capabilities: [ffi])
 extern fn rt_hash_text(s: text) -> i64
+@unsafe(reason: "raw monotonic clock ABI; negative or unavailable provider result is untyped", capabilities: [ffi])
 extern fn rt_time_now_monotonic_ms() -> i64
+@unsafe(reason: "raw shell command ABI; empty conflates empty output, nonzero exit, launch failure, and runtime failure", capabilities: [ffi])
 extern fn rt_shell_exec(cmd: text) -> text
+@unsafe(reason: "raw file-rename status; false sentinel means the rename did not complete", capabilities: [ffi])
 extern fn rt_file_rename(old_path: text, new_path: text) -> bool
-extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
+@unsafe(reason: "raw cross-filesystem file-move status; false sentinel means neither rename nor copy-delete completed", capabilities: [ffi])
+extern fn rt_file_move(old_path: text, new_path: text) -> bool
 
 # ============================================================================
 # Shell Result
 # ============================================================================
 
-struct ShellResult:
+# Canonical process-result record shared by every `shell` definition
+# (io_runtime, io.process_ops, io.file_shell). ShellResult is an alias kept
+# for existing importers.
+pub struct ProcessResult:
     stdout: text
     stderr: text
     exit_code: i64
+    limit_exceeded: bool
+    limit_type: text
+
+type ShellResult = ProcessResult
 
 # ============================================================================
 # Shell Execution
 # ============================================================================
 
 pub fn shell(command: text) -> ProcessResult:
-    val (stdout, stderr, code) = rt_process_run("/bin/sh", ["-c", command])
+    val (stdout, stderr, code) = _io_runtime_process_run_raw("/bin/sh", ["-c", command])
     ProcessResult(stdout: stdout, stderr: stderr, exit_code: code, limit_exceeded: false, limit_type: "")
 
 pub fn shell_output(command: text) -> text:
-    val (stdout, _stderr, code) = rt_process_run("/bin/sh", ["-c", command])
+    val (stdout, _stderr, code) = _io_runtime_process_run_raw("/bin/sh", ["-c", command])
     if code == 0:
         stdout.trim()
     else:
         ""
 
 pub fn shell_output_trimmed(command: text, default: text) -> text:
-    val (stdout, _stderr, code) = rt_process_run("/bin/sh", ["-c", command])
+    val (stdout, _stderr, code) = _io_runtime_process_run_raw("/bin/sh", ["-c", command])
     if code == 0:
         val trimmed = stdout.trim()
         if trimmed == "":
@@ -144,7 +159,7 @@ pub fn shell_output_trimmed(command: text, default: text) -> text:
     default
 
 pub fn shell_bool(command: text) -> bool:
-    val (_stdout, _stderr, code) = rt_process_run("/bin/sh", ["-c", command])
+    val (_stdout, _stderr, code) = _io_runtime_process_run_raw("/bin/sh", ["-c", command])
     code == 0
 
 # ============================================================================
@@ -152,26 +167,64 @@ pub fn shell_bool(command: text) -> bool:
 # ============================================================================
 
 pub fn file_read(path: text) -> text:
-    val content = file_read_raw(path)
-    content ?? ""
+    match file_read_result(path):
+        case Ok(content): content
+        case Err(_): ""
 
-fn file_write(path: text, content: text) -> bool:
-    val (out, err, code) = rt_process_run("/bin/sh", ["-c", "cat > '{path}' << 'SIMPLE_WRITE_EOF'\n{content}\nSIMPLE_WRITE_EOF"])
-    code == 0
+# Exact nullable transport for compiler/runtime owners that already validate
+# read failure and must not pay for Result construction or empty conversion.
+# One direct ABI call; no allocation, normalization, lookup, or retry.
+@always_inline
+pub fn file_read_nullable(path: text) -> text?:
+    unsafe(capabilities: [ffi]):
+        rt_file_read_text(path)
 
+pub fn file_read_result(path: text) -> Result<text, text>:
+    var content: text? = nil
+    unsafe(capabilities: [ffi]):
+        content = rt_file_read_text(path)
+    if content == nil:
+        Err("file read failed: {path}")
+    else:
+        # Nullable extern transport is a bare payload or nil in interpreter
+        # lanes. The nil check above proves this fallback cannot fabricate a
+        # value; it only removes the optional type wrapper.
+        Ok(content ?? "")
+
+# Do NOT forward these through `file_read`. The name `file_read` has a second
+# co-compiled definition (src/lib/nogc_sync_mut/io/file_ops.spl:76) whose body
+# is `read_file_text(path)`. When cross-module symbol resolution falls back to
+# last-definition-wins (warning
+# `compiler_cross_module_private_symbol_collision`), the call below binds to
+# THAT copy and the pair becomes unbounded mutual recursion with no base case:
+# file_ops.file_read -> read_file_text -> file_read -> ... -> SIGABRT
+# "fatal runtime error: stack overflow" on the very first read of ANY file.
+# Delegating to `file_read_result`, whose name has exactly one definition in
+# the tree, breaks the cycle whichever copy dispatch picks.
+# doc/08_tracking/bug/seed_file_read_infinite_recursion_stack_overflow_2026-08-23.md
 pub fn read_file(path: text) -> text:
-    file_read(path)
+    match file_read_result(path):
+        case Ok(content): content
+        case Err(_): ""
 
 pub fn read_file_text(path: text) -> text:
-    file_read(path)
+    match file_read_result(path):
+        case Ok(content): content
+        case Err(_): ""
+
+pub fn read_file_text_result(path: text) -> Result<text, text>:
+    file_read_result(path)
 
 pub fn file_write(path: text, content: text) -> bool:
-    if file_write_raw(path, content):
+    var wrote = false
+    unsafe(capabilities: [ffi]):
+        wrote = rt_file_write_text(path, content)
+    if wrote:
         return true
     # Writing into a nonexistent directory otherwise no-ops silently
     # (bug interp_examples_dir_f64_zero_and_write_noop_2026-07-03):
     # create the missing parent directory and retry once.
-    val sep_idx = path.rfind("/") ?? 0
+    val sep_idx = path.rfind("/")
     if sep_idx <= 0:
         return false
     val parent = path.substring(0, sep_idx)
@@ -180,105 +233,215 @@ pub fn file_write(path: text, content: text) -> bool:
         parent_exists = rt_file_exists(parent)
     if parent_exists:
         return false
-    rt_dir_create_all(parent)
-    file_write_raw(path, content)
-
-pub fn file_write_raw(path: text, content: text) -> bool:
-    rt_file_write_text(path, content)
+    unsafe(capabilities: [ffi]):
+        rt_dir_create_all(parent)
+    unsafe(capabilities: [ffi]):
+        rt_file_write_text(path, content)
 
 pub fn write_file(path: text, content: text) -> bool:
     file_write(path, content)
 
+# Exact one-call runtime status for cache/temp-file owners that already create
+# their parent directory and must not gain file_write's retry policy.
+pub fn file_write_exact(path: text, content: text) -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_file_write_text(path, content)
+
+@always_inline
 pub fn file_exists(path: text) -> bool:
-    rt_file_exists(path)
+    unsafe(capabilities: [ffi]):
+        rt_file_exists(path)
 
 pub fn file_delete(path: text) -> bool:
-    rt_file_delete(path)
+    unsafe(capabilities: [ffi]):
+        rt_file_delete(path)
 
 pub fn remove_file_if_exists(path: text) -> bool:
     # Idempotent delete: true when the file was removed or did not exist.
-    if not rt_file_exists(path):
+    var exists = false
+    unsafe(capabilities: [ffi]):
+        exists = rt_file_exists(path)
+    if not exists:
         return true
-    rt_file_delete(path)
+    unsafe(capabilities: [ffi]):
+        rt_file_delete(path)
 
 pub fn file_copy(src: text, dst: text) -> bool:
-    rt_file_copy(src, dst)
+    unsafe(capabilities: [ffi]):
+        rt_file_copy(src, dst)
+
+pub fn file_read_bytes_result(path: text) -> Result<[u8], text>:
+    val bytes = unsafe(capabilities: [ffi]):
+        rt_file_read_bytes(path)
+    if bytes == nil:
+        Err("file byte read failed: {path}")
+    else:
+        Ok(bytes ?? [])
 
 pub fn file_read_bytes(path: text) -> [u8]:
-    rt_file_read_bytes(path) ?? []
+    match file_read_bytes_result(path):
+        case Ok(bytes): bytes
+        case Err(_): []
 
 pub fn file_write_bytes(path: text, bytes: [u8]) -> bool:
-    rt_file_write_bytes(path, bytes)
+    unsafe(capabilities: [ffi]):
+        rt_file_write_bytes(path, bytes)
 
 pub fn file_hash_sha256(path: text) -> text:
-    val hash = rt_file_hash_sha256(path)
+    val hash = file_hash_sha256_or_empty(path)
     if hash.len() == 64:
         return hash
     shell_output("sha256sum '" + path + "' 2>/dev/null | awk '{print $1}'")
 
+# Exact one-call cache-key contract: invalid/unavailable digest is an empty
+# miss sentinel. Unlike file_hash_sha256, this never shells out.
+pub fn file_hash_sha256_or_empty(path: text) -> text:
+    val hash = unsafe(capabilities: [ffi]):
+        rt_file_hash_sha256(path)
+    if hash.len() == 64:
+        return hash
+    ""
+
 pub fn file_size(path: text) -> i64:
-    val size = rt_file_size(path)
+    val size = unsafe(capabilities: [ffi]):
+        rt_file_size(path)
     if size < 0:
         return 0
-    var trimmed = out.trim()
-    if trimmed.len() == 0:
-        return 0
-    int(trimmed)
+    size
 
+# Exact signed status for owners that must distinguish an empty file from an
+# unreadable/missing file. One runtime call; no normalization or retry.
+@always_inline
+pub fn file_size_signed(path: text) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_file_size(path)
+
+# Same cycle hazard as read_file_text above: `file_size` has 10 co-compiled
+# definitions in src/lib alone, one of which
+# (src/lib/nogc_sync_mut/io/file_ops.spl:140) forwards straight back to
+# `file_size_raw`. Under last-definition-wins fallback dispatch that pair is
+# unbounded mutual recursion. Inline the body (identical semantics to the
+# `file_size` directly above) so no ambiguous name is on the path.
 pub fn file_size_raw(path: text) -> i64:
-    file_size(path)
+    val size = unsafe(capabilities: [ffi]):
+        rt_file_size(path)
+    if size < 0:
+        return 0
+    size
 
 # ============================================================================
 # Process Execution
 # ============================================================================
 
+# NOTE (process_run_tuple_ambiguity_2026-07-17): tuple positions already
+# disambiguate repeated field types. The Rust checker used to reject this
+# valid signature, while the pure-Simple parser could not parse the labeled
+# workaround. Keep the established positional ABI and fix the checker. See
+# doc/08_tracking/bug/mcp_main_lazy_json_standalone_compile_process_run_tuple_ambiguity_2026-07-17.md
 pub fn process_run(cmd: text, args: [text]) -> (text, text, i64):
-    rt_process_run(cmd, args)
+    _io_runtime_process_run_raw(cmd, args)
 
 # ============================================================================
 # Environment
 # ============================================================================
 
 pub fn env_get(key: text) -> text:
-    val value = rt_env_get(key)
+    val value = unsafe(capabilities: [ffi]):
+        rt_env_get(key)
     if value == nil:
         ""
     else:
         value
 
+# Exact nullable transport for compiler/runtime owners that must distinguish an
+# explicitly empty environment value from an absent/provider-failed value.
+# One direct ABI call; no allocation, normalization, lookup, or retry.
+@always_inline
+pub fn env_get_nullable(key: text) -> text?:
+    unsafe(capabilities: [ffi]):
+        rt_env_get(key)
+
+# NOTE (env_get_nil_coalesce_dead_fallback_2026-07-25): `env_get` above returns
+# a NON-nullable `text`, so the extremely common `env_get(k) ?? default` idiom is
+# a DEAD fallback -- `??` never fires on `""` and the caller silently gets the
+# empty string instead of its default. `env_get` itself cannot change return type
+# without touching ~680 call sites whose imports must each be checked, so the
+# correct-by-construction sibling lives here instead. Prefer it at every new site
+# that wants a default, and migrate old `?? default` sites to it.
+@always_inline
+pub fn env_get_opt(key: text) -> text?:
+    """Environment lookup that is nil (not "") when the variable is unset.
+
+    `env_get_opt(k) ?? default` actually takes the default; `env_get(k) ?? default`
+    does not. An explicitly-empty variable also reports nil here, because the two
+    are indistinguishable through `rt_env_get`.
+    """
+    val value = unsafe(capabilities: [ffi]):
+        rt_env_get(key)
+    if value == nil:
+        return nil
+    if value == "":
+        return nil
+    value
+
+pub fn env_get_or(key: text, default_value: text) -> text:
+    """Environment lookup with an explicit default. Total, no `??` required."""
+    env_get_opt(key) ?? default_value
+
+@always_inline
 pub fn env_set(key: text, value: text) -> bool:
-    rt_env_set(key, value)
+    unsafe(capabilities: [ffi]):
+        rt_env_set(key, value)
 
 pub fn cwd() -> text:
-    shell_output("pwd")
+    val value = unsafe(capabilities: [ffi]):
+        rt_env_cwd()
+    if value == nil or value == "":
+        return "."
+    value!
 
+# TOTAL with the documented default "", matching `env_get` above (which
+# already reports unset as ""). Use `env_get_opt("HOME")` to tell unset
+# apart from empty.
 pub fn home() -> text:
-    rt_env_get("HOME")
+    env_get("HOME")
 
 # ============================================================================
 # System
 # ============================================================================
 
 pub fn getpid() -> i64:
-    rt_getpid()
+    val pid = unsafe(capabilities: [ffi]):
+        rt_getpid()
+    if pid <= 0:
+        panic("E-SFFI-SYSTEM-001: process identifier provider failed")
+    pid
 
 pub fn time_now_unix_micros() -> i64:
-    rt_time_now_unix_micros()
+    val value = unsafe(capabilities: [ffi]):
+        rt_time_now_unix_micros()
+    if value < 0:
+        panic("E-SFFI-TIME-001: wall clock provider failed")
+    value
 
 pub fn get_args() -> [text]:
-    sys_get_args() ?? []
+    unsafe(capabilities: [ffi]):
+        sys_get_args() ?? []
 
 pub fn cli_arg_count() -> i64:
-    (sys_get_args() ?? []).len()
+    unsafe(capabilities: [ffi]):
+        (sys_get_args() ?? []).len()
 
 pub fn cli_arg_at(index: i64) -> text:
-    val args = sys_get_args() ?? []
+    val args = unsafe(capabilities: [ffi]):
+        sys_get_args() ?? []
     if index >= 0 and index < args.len():
         return args[index]
     ""
 
 pub fn exit(code: i64):
-    rt_exit(code)
+    unsafe(capabilities: [ffi]):
+        rt_exit(code)
 
 pub fn thread_sleep(ms: i64):
     unsafe(capabilities: [ffi]):
@@ -293,10 +456,12 @@ pub fn dir_create(path: text, recursive: bool) -> bool:
         unsafe(capabilities: [ffi]):
             rt_dir_create_all(path)
     else:
-        rt_dir_create(path, false)
+        unsafe(capabilities: [ffi]):
+            rt_dir_create(path, false)
 
 pub fn dir_create_all(path: text) -> bool:
-    rt_dir_create_all(path)
+    unsafe(capabilities: [ffi]):
+        rt_dir_create_all(path)
 
 pub fn mkdir_p(path: text) -> bool:
     unsafe(capabilities: [ffi]):
@@ -305,7 +470,7 @@ pub fn mkdir_p(path: text) -> bool:
 pub fn is_dir(path: text) -> bool:
     shell_bool("test -d '{path}'")
 
-fn is_file(path: text) -> bool:
+pub fn is_file(path: text) -> bool:
     shell_bool("test -f '{path}'")
 
 ## No-shell stat(2) probe for whether `path` is a character device (e.g. a
@@ -315,11 +480,11 @@ fn is_file(path: text) -> bool:
 ## don't need `/bin/sh` to be present (baremetal has none). See
 ## doc/08_tracking/bug/vulkan_detect_virtio_gpu_device_is_existence_check_not_device_probe_2026-08-07.md.
 pub fn is_char_device(path: text) -> bool:
-    unsafe:
+    unsafe(capabilities: [ffi]):
         rt_file_is_char_device(path)
 
 pub fn list_dir(path: text) -> [text]:
-    val (stdout, _stderr, code) = rt_process_run("/bin/sh", ["-c", "ls '{path}'"])
+    val (stdout, _stderr, code) = _io_runtime_process_run_raw("/bin/sh", ["-c", "ls '{path}'"])
     if code != 0:
         return []
     val trimmed = stdout.trim()
@@ -335,37 +500,44 @@ pub fn dir_list(path: text) -> [text]:
 # empty directory from provider/read/allocation failure.
 @always_inline
 pub fn dir_list_optional(path: text) -> [text]?:
-    unsafe:
+    unsafe(capabilities: [ffi]):
         rt_dir_list(path)
 
 pub fn dir_walk(path: text) -> [text]:
-    rt_dir_walk(path)
+    unsafe(capabilities: [ffi]):
+        rt_dir_walk(path)
 
 pub fn dir_remove(path: text, recursive: bool) -> bool:
     if recursive:
-        rt_dir_remove_all(path)
+        unsafe(capabilities: [ffi]):
+            rt_dir_remove_all(path)
     else:
-        rt_dir_remove(path, false)
+        unsafe(capabilities: [ffi]):
+            rt_dir_remove(path, false)
 
 pub fn dir_remove_all(path: text) -> bool:
-    rt_dir_remove_all(path)
+    unsafe(capabilities: [ffi]):
+        rt_dir_remove_all(path)
 
+@always_inline
 pub fn file_append_text(path: text, content: text) -> bool:
-    rt_file_append_text(path, content)
+    unsafe(capabilities: [ffi]):
+        rt_file_append_text(path, content)
 
 pub fn dir_exists(path: text) -> bool:
-    rt_dir_exists(path)
+    unsafe(capabilities: [ffi]):
+        rt_dir_exists(path)
 
 pub fn process_spawn_async(cmd: text, args: [text]) -> i64:
-    rt_process_spawn_async(cmd, args)
+    _io_runtime_process_spawn_async_raw(cmd, args)
 
 pub fn process_is_running(pid: i64) -> bool:
-    rt_process_is_running(pid)
+    _io_runtime_process_is_running_raw(pid)
 
 pub fn process_kill(pid: i64) -> bool:
     if pid <= 1:
         return false
-    rt_process_kill(pid)
+    _io_runtime_process_kill_raw(pid)
 
 # ============================================================================
 # Platform Detection
@@ -381,26 +553,31 @@ pub fn host_os() -> text:
         return "freebsd"
     os.lower()
 
+# `rt_platform_name` returns a compiled-in platform string and yields nil only
+# if the runtime bridge produced no value at all. TOTAL with the documented
+# default "unknown" — deliberately NOT a real platform name, so a caller that
+# branches on it cannot be silently misrouted to the wrong platform.
 pub fn platform_name() -> text:
     unsafe(capabilities: [ffi]):
         rt_platform_name() ?? "unknown"
 
 pub fn time_now_monotonic_ms() -> i64:
-    unsafe:
+    unsafe(capabilities: [ffi]):
         rt_time_now_monotonic_ms()
 
 pub fn shell_exec(cmd: text) -> text:
-    unsafe:
+    unsafe(capabilities: [ffi]):
         rt_shell_exec(cmd)
 
 pub fn file_rename(old_path: text, new_path: text) -> bool:
-    _io_runtime_file_rename_raw(old_path, new_path)
+    unsafe(capabilities: [ffi]):
+        rt_file_rename(old_path, new_path)
 
 # Preserve the runtime move contract used by compiler caches: rename first,
 # then copy+delete across filesystems. The unique semantic name also avoids the
 # flattened-unit `file_rename` collision without adding dispatch or lookup.
 pub fn file_move_cross_device(old_path: text, new_path: text) -> bool:
-    unsafe:
+    unsafe(capabilities: [ffi]):
         rt_file_move(old_path, new_path)
 
 @always_inline
@@ -409,7 +586,7 @@ pub fn process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, t
 
 @always_inline
 pub fn hash_text(s: text) -> i64:
-    unsafe:
+    unsafe(capabilities: [ffi]):
         rt_hash_text(s)
 
 pub fn host_arch() -> text:
@@ -418,19 +595,22 @@ pub fn host_arch() -> text:
         return "x86_64"
     if arch == "aarch64" or arch == "arm64":
         return "aarch64"
+    if arch == "armv7l" or arch == "armv7" or arch == "arm":
+        return "armv7"
     arch
 
 # ============================================================================
 # Exports
 # ============================================================================
 
-export shell, shell_output, shell_bool, shell_output_trimmed, ShellResult
-export file_read, file_read_raw, read_file, read_file_text, file_write, file_write_raw, write_file, file_exists
-export file_delete, file_copy, file_size, file_size_raw, file_hash_sha256
+export shell, shell_output, shell_bool, shell_output_trimmed, ShellResult, ProcessResult
+export file_read, file_read_nullable, read_file, read_file_text, file_write, write_file, file_write_exact, file_exists
+export file_delete, file_copy, file_size, file_size_raw, file_size_signed, file_hash_sha256, file_hash_sha256_or_empty
 export file_read_bytes, file_write_bytes, file_append_text, remove_file_if_exists
 export dir_create, dir_create_all, is_dir, is_file, is_char_device, list_dir, mkdir_p
-export dir_list, dir_walk, dir_remove, dir_remove_all, dir_exists
-export env_get, env_set, cwd, home, host_os, host_arch, platform_name, hash_text
+export dir_list, dir_list_optional, dir_walk, dir_remove, dir_remove_all, dir_exists
+export env_get, env_get_nullable, env_set, cwd, home, host_os, host_arch, platform_name, hash_text
 export getpid, process_kill, process_run, process_run_bounded, process_spawn_async, process_is_running
 export time_now_unix_micros, get_args, cli_arg_count, cli_arg_at, exit, thread_sleep
 export time_now_monotonic_ms, shell_exec, file_rename, process_run_timeout
+export file_move_cross_device

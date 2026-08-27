@@ -12,9 +12,9 @@ use compiler.common.dependency.visibility.{Visibility}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 
 impl HirLowering:
-    # Re-entrancy/memo accessors for `imported_type_methods_in_progress`.
+    # Re-entrancy stack accessors for `imported_type_methods_in_progress`.
     #
-    # These keep the guard's push/peek/reset behind the HirLowering extension
+    # These keep the guard's push/peek/pop behind the HirLowering extension
     # boundary. Reading that field directly from `_Items/module_lowering.spl`
     # made native-build's semantic pass abort the whole worker with
     # "class `HirLowering` has no field named
@@ -41,57 +41,37 @@ impl HirLowering:
                 unwound = unwound.push(in_progress)
         self.imported_type_methods_in_progress = unwound
 
-    me registered_import_in_progress_has(key: text) -> bool:
-        for in_progress in self.registered_import_in_progress:
-            if in_progress == key:
-                return true
-        false
-
-    me registered_import_in_progress_push(key: text):
-        self.registered_import_in_progress = self.registered_import_in_progress.push(key)
-
-    me registered_import_in_progress_pop(key: text):
-        var unwound: [text] = []
-        for in_progress in self.registered_import_in_progress:
-            if in_progress != key:
-                unwound = unwound.push(in_progress)
-        self.registered_import_in_progress = unwound
-
     me begin_module(filename: text):
         """Reset transient module state without replacing retained owners."""
         # Diagnostics are stable no-GC owners. Clear them in place.
-        self.errors.clear()
-        self.diagnostic_messages.clear()
-        self.diagnostic_recovered.clear()
+        self.errors = []
+        self.diagnostic_messages = []
+        self.diagnostic_recovered = []
         self.symbols.reset_module()
         self.current_function = nil
         self.loop_depth = 0
         self.module_filename = filename
-        self.debug_direct_tail_current_module = (
-            self.debug_bootstrap_hir_owner and
-            filename.ends_with("bootstrap_main.spl"))
         self.module_resolver = nil
-        self.loaded_modules.clear()
+        self.loaded_modules = []
         self.current_method_self_type = nil
         self.current_method_self_symbol_id = -1
-        self.lowered_impl_functions.clear()
+        self.lowered_impl_functions = {}
         # Trait defaults are consumed only by impls in the module currently
         # being lowered. Retaining full HirTrait values here kept every prior
         # module graph alive across the streaming phase.
-        self.lowered_traits.clear()
+        self.lowered_traits = {}
         # module_surfaces, type_inference_config, re-export root caches,
         # generation, and counters are retained reference-bound state.
-        self.imported_traits.clear()
-        self.imported_enums.clear()
-        self.imported_enum_owners.clear()
-        self.materialized_payload_origins.clear()
-        self.materialized_payload_bindings.clear()
+        self.imported_traits = {}
+        self.imported_enums = {}
+        self.imported_enum_owners = {}
+        self.materialized_payload_origins = {}
+        self.materialized_payload_bindings = {}
         # Must already be empty here (the guard pops what it pushes, and the
         # cycle cannot span a module boundary), so this is belt-and-braces: a
         # stale entry would silently SKIP a needed method registration rather
         # than recurse, which is the quieter and more dangerous failure.
         self.imported_type_methods_in_progress = []
-        self.registered_import_in_progress = []
         # RISDONE (2026-08-21): the completed-registration memo describes ONE
         # importer's symbol table -- the table `reset_module` above just wiped
         # -- so it must not outlive the module it was built for. (The wrapper
@@ -109,11 +89,11 @@ impl HirLowering:
         self.local_tuple_types = {}
         self.enum_variant_names = {}
         self.registering_import_symbols = false
-        self.fn_tuple_returns.clear()
-        self.glob_expand_memo.clear()
-        self.reexport_visit_surface_indices.clear()
-        self.reexport_visit_wanted.clear()
-        self.reexport_visit_depths.clear()
+        self.fn_tuple_returns = {}
+        self.glob_expand_memo = {}
+        self.reexport_visit_surface_indices = []
+        self.reexport_visit_wanted = []
+        self.reexport_visit_depths = []
         self.reexport_walk_complete = true
         self.reexport_walk_valid = true
 
@@ -178,7 +158,7 @@ impl HirLowering:
         self.diagnostic_messages[index]
 
     me compute_visibility(type_name: text, declared_visibility: Visibility) -> Visibility:
-        if (hir_type_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+        if self.ambient_bootstrap_enabled():
             return Visibility.Public
         if declared_visibility != Visibility.Private:
             return declared_visibility

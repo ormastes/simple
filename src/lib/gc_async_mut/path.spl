@@ -20,12 +20,11 @@ pub fn dirname(path: text) -> text:
     var clean_path = path
     while clean_path.ends_with("/") and clean_path.len() > 1:
         clean_path = clean_path.substring(0, clean_path.len() - 1)
-    val last_sep = clean_path.rfind("/")
-    val sep_idx = match last_sep:
-        Some(idx):
-            idx
-        nil:
-            return "."
+    # `rfind` returns a raw i64 sentinel (-1 = not found), NOT an Optional.
+    # Matching Some/nil here bound idx = -1 and returned substring(0, -1).
+    val sep_idx = clean_path.rfind("/")
+    if sep_idx < 0:
+        return "."
     if sep_idx == 0:
         return "/"
     return clean_path.substring(0, sep_idx)
@@ -34,12 +33,10 @@ pub fn extension(path: text) -> text:
     val name = basename(path)
     if name == "":
         return ""
-    val last_dot = name.rfind(".")
-    val dot_idx = match last_dot:
-        Some(idx):
-            idx
-        nil:
-            return ""
+    # `rfind` returns a raw i64 sentinel (-1 = not found), NOT an Optional.
+    val dot_idx = name.rfind(".")
+    if dot_idx < 0:
+        return ""
     if dot_idx == 0:
         return ""
     if dot_idx == name.len() - 1:
@@ -52,6 +49,16 @@ pub fn stem(path: text) -> text:
     if ext == "":
         return name
     return name.substring(0, name.len() - ext.len() - 1)
+
+fn _path_concat_parts(parts: [text], separator: text) -> text:
+    var result = ""
+    var i = 0
+    while i < parts.len():
+        if i > 0:
+            result = result + separator
+        result = result + parts[i]
+        i = i + 1
+    result
 
 pub fn path_join(parts: [text]) -> text:
     if parts.len() == 0:
@@ -69,11 +76,17 @@ pub fn path_join(parts: [text]) -> text:
             segments.push(part.substring(1))
         else:
             segments.push(part)
-    return segments.join("")
+    return _path_concat_parts(segments, "")
 
 # @tag(a=first_segment, b=second_segment)
 pub fn join2(a: text, b: text) -> text:
-    return path_join([a, b])
+    if a == "":
+        return b
+    if b == "":
+        return a
+    if a.ends_with("/"):
+        return a + (if b.starts_with("/") then b.substring(1) else b)
+    return a + (if b.starts_with("/") then b else "/" + b)
 
 pub fn normalize(path: text) -> text:
     if path == "":
@@ -95,7 +108,7 @@ pub fn normalize(path: text) -> text:
         if is_abs:
             return "/"
         return "."
-    val normalized = result_parts.join("/")
+    val normalized = _path_concat_parts(result_parts, "/")
     if is_abs:
         return "/" + normalized
     return normalized
@@ -134,7 +147,7 @@ pub fn relative_to(path: text, base: text) -> text:
         var up_parts: [text] = [".."]
         for x in 1..depth:
             up_parts.push("..")
-        return up_parts.join("/")
+        return _path_concat_parts(up_parts, "/")
     val pp = np.split("/")
     val bp = nb.split("/")
     var c = 0
@@ -152,7 +165,7 @@ pub fn relative_to(path: text, base: text) -> text:
             rel_parts.push(pp[x])
     if rel_parts.len() == 0:
         return "."
-    return rel_parts.join("/")
+    return _path_concat_parts(rel_parts, "/")
 
 # Alias: export 'join' pointing to path_join for backward compatibility
 fn join(parts: [text]) -> text:
@@ -214,7 +227,7 @@ pub fn normalize_path(path: text) -> text:
             norm_parts.push("/")
         else:
             norm_parts.push(c)
-    val normalized = norm_parts.join("")
+    val normalized = _path_concat_parts(norm_parts, "")
     normalize(normalized)
 
 # Deprecated: use is_absolute instead

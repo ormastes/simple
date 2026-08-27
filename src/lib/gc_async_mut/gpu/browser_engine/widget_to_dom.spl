@@ -10,8 +10,24 @@ use common.ui.theme_registry.{ThemeId, theme_id_key}
 use common.string_builder.{StringBuilder}
 use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
 use std.gc_async_mut.gpu.browser_engine.dom_accessors.{be_dom_get_tag, be_dom_add_child}
-use std.gc_async_mut.gpu.browser_engine.css.{StyleProps, CssValue, BoxEdges,
-    BorderProps, be_default_style}
+# =========================================================================
+# Attribute-routed identity/classes
+# =========================================================================
+# BeDomNode has no dedicated `id`/`classes` fields; author identity and CSS
+# classes are routed through the `attributes` dict ("id"/"class"), matching
+# how the rest of browser_engine reads them (be_dom_find_by_id, dom_accessors
+# class lookup, dom_identity_index `_dom_attr`).
+
+fn w2d_set_id(dom: BeDomNode, id_value: text):
+    if id_value.len() > 0:
+        dom.set_attr("id", id_value)
+
+fn w2d_add_class(dom: BeDomNode, cls: text):
+    val existing = dom.get_attr("class")
+    if existing.len() == 0:
+        dom.set_attr("class", cls)
+    else:
+        dom.set_attr("class", existing + " " + cls)
 
 # =========================================================================
 # Widget -> DOM Conversion
@@ -27,7 +43,7 @@ pub fn widget_to_dom(node: WidgetNode, state: UIState) -> BeDomNode:
     val tag = widget_kind_to_tag(kind)
 
     var dom = BeDomNode.element(tag)
-    dom.id = node.id
+    w2d_set_id(dom, node.id)
 
     # Transfer widget properties to DOM
     apply_widget_props(dom, node, kind)
@@ -40,9 +56,12 @@ pub fn widget_to_dom(node: WidgetNode, state: UIState) -> BeDomNode:
     # Apply focus styling
     val is_focused = node.id == state.focused_id
     if is_focused:
-        dom.classes = dom.classes + ["focused"]
+        w2d_add_class(dom, "focused")
         var s = dom.style
-        s.border = BorderProps.solid(2, 0x58A6FFFF)  # blue focus ring
+        # blue focus ring, via StyleProps' native border fields
+        s.border_width = 2.0
+        s.border_color = "#58A6FF"
+        s.border_style = "solid"
         dom.style = s
 
     # Recursively convert children
@@ -59,15 +78,14 @@ pub fn ui_tree_to_dom(tree: UITree, state: UIState) -> BeDomNode:
     """
     val root_widget = tree.root_node()
     var root_dom = BeDomNode.element("div")
-    root_dom.id = "ui-root"
-    root_dom.classes = ["ui-container"]
+    root_dom.set_attr("id", "ui-root")
+    root_dom.set_attr("class", "ui-container")
 
-    # Set root styles
+    # Set root styles. StyleProps width/height are px floats (0 = auto),
+    # so the container keeps auto sizing and fills via flex.
     var s = root_dom.style
     s.display = "flex"
     s.flex_direction = "column"
-    s.width = CssValue.pct(100.0)
-    s.height = CssValue.pct(100.0)
     root_dom.style = s
 
     val content = widget_to_dom(root_widget, state)
@@ -89,7 +107,7 @@ pub fn html_string_to_dom(html: text) -> BeDomNode:
     This is a minimal parser for UI templates, not a full HTML5 parser.
     """
     var root = BeDomNode.element("div")
-    root.id = "html-root"
+    root.set_attr("id", "html-root")
 
     var stack: [BeDomNode] = [root]
     var pos = 0
@@ -211,9 +229,9 @@ fn parse_tag(content: text) -> BeDomNode:
                 value = value.slice(1, value.len() - 1)
 
             if key == "id":
-                node.id = value
+                node.set_attr("id", value)
             elif key == "class":
-                node.classes = split_spaces(value)
+                node.set_attr("class", split_spaces(value).join(" "))
             elif key == "style":
                 apply_inline_style(node, value)
             else:
@@ -357,7 +375,7 @@ fn widget_kind_to_tag(kind: text) -> text:
 fn apply_widget_props(dom: BeDomNode, node: WidgetNode, kind: text):
     """Transfer widget properties to DOM node attributes and styles."""
     # Add the widget kind as a CSS class
-    dom.classes = dom.classes + [kind]
+    w2d_add_class(dom, kind)
 
     # Transfer common properties
     val title = node.get_prop("title")
@@ -460,7 +478,7 @@ fn apply_glass_theme_styles(dom: BeDomNode, kind: text, theme: text):
             dom.set_style("border-radius", "20px")
             dom.set_style("border-width", "1px")
             dom.set_style("color", fg)
-            dom.classes = dom.classes + ["widget-panel"]
+            w2d_add_class(dom, "widget-panel")
 
         "card" =>
             dom.set_style("background-color", surface_bg)
@@ -468,14 +486,14 @@ fn apply_glass_theme_styles(dom: BeDomNode, kind: text, theme: text):
             dom.set_style("border-radius", "16px")
             dom.set_style("border-width", "1px")
             dom.set_style("color", fg)
-            dom.classes = dom.classes + ["widget-card"]
+            w2d_add_class(dom, "widget-card")
 
         "button" =>
             dom.set_style("background-color", accent)
             dom.set_style("border-radius", "16px")
             dom.set_style("color", bg)
             dom.set_style("padding", "10px")
-            dom.classes = dom.classes + ["widget-button"]
+            w2d_add_class(dom, "widget-button")
 
         "input" =>
             dom.set_style("background-color", "rgba(255,255,255,0.05)")
@@ -484,7 +502,7 @@ fn apply_glass_theme_styles(dom: BeDomNode, kind: text, theme: text):
             dom.set_style("border-width", "1px")
             dom.set_style("color", fg)
             dom.set_style("padding", "10px")
-            dom.classes = dom.classes + ["widget-input"]
+            w2d_add_class(dom, "widget-input")
 
         "textfield" =>
             dom.set_style("background-color", "rgba(255,255,255,0.05)")
@@ -493,7 +511,7 @@ fn apply_glass_theme_styles(dom: BeDomNode, kind: text, theme: text):
             dom.set_style("border-width", "1px")
             dom.set_style("color", fg)
             dom.set_style("padding", "10px")
-            dom.classes = dom.classes + ["widget-textfield"]
+            w2d_add_class(dom, "widget-textfield")
 
         "textarea" =>
             dom.set_style("background-color", "rgba(255,255,255,0.05)")
@@ -502,7 +520,7 @@ fn apply_glass_theme_styles(dom: BeDomNode, kind: text, theme: text):
             dom.set_style("border-width", "1px")
             dom.set_style("color", fg)
             dom.set_style("padding", "10px")
-            dom.classes = dom.classes + ["widget-textarea"]
+            w2d_add_class(dom, "widget-textarea")
 
         "statusbar" =>
             dom.set_style("background-color", "rgba(255,255,255,0.06)")
@@ -511,7 +529,7 @@ fn apply_glass_theme_styles(dom: BeDomNode, kind: text, theme: text):
             dom.set_style("border-width", "1px")
             dom.set_style("color", fg)
             dom.set_style("padding", "10px")
-            dom.classes = dom.classes + ["widget-statusbar"]
+            w2d_add_class(dom, "widget-statusbar")
 
         "menubar" =>
             dom.set_style("background-color", "rgba(255,255,255,0.06)")
@@ -520,7 +538,7 @@ fn apply_glass_theme_styles(dom: BeDomNode, kind: text, theme: text):
             dom.set_style("border-width", "1px")
             dom.set_style("color", fg)
             dom.set_style("padding", "10px")
-            dom.classes = dom.classes + ["widget-menubar"]
+            w2d_add_class(dom, "widget-menubar")
 
         "navigation_bar" =>
             dom.set_style("background-color", "rgba(255,255,255,0.06)")
@@ -528,7 +546,7 @@ fn apply_glass_theme_styles(dom: BeDomNode, kind: text, theme: text):
             dom.set_style("border-radius", "18px")
             dom.set_style("border-width", "1px")
             dom.set_style("color", fg)
-            dom.classes = dom.classes + ["widget-navigation-bar"]
+            w2d_add_class(dom, "widget-navigation-bar")
 
         "dialog" =>
             dom.set_style("background-color", panel_bg)
@@ -536,14 +554,14 @@ fn apply_glass_theme_styles(dom: BeDomNode, kind: text, theme: text):
             dom.set_style("border-radius", "22px")
             dom.set_style("border-width", "1px")
             dom.set_style("color", fg)
-            dom.classes = dom.classes + ["widget-dialog"]
+            w2d_add_class(dom, "widget-dialog")
 
         "tabs" =>
             dom.set_style("background-color", "rgba(255,255,255,0.03)")
             dom.set_style("border-color", border_color)
             dom.set_style("border-radius", "18px")
             dom.set_style("color", fg)
-            dom.classes = dom.classes + ["widget-tabs"]
+            w2d_add_class(dom, "widget-tabs")
 
         "dropdown" =>
             dom.set_style("background-color", "rgba(255,255,255,0.06)")
@@ -551,60 +569,60 @@ fn apply_glass_theme_styles(dom: BeDomNode, kind: text, theme: text):
             dom.set_style("border-radius", "12px")
             dom.set_style("border-width", "1px")
             dom.set_style("color", fg)
-            dom.classes = dom.classes + ["widget-dropdown"]
+            w2d_add_class(dom, "widget-dropdown")
 
         "checkbox" =>
             dom.set_style("border-radius", "12px")
             dom.set_style("color", fg)
             dom.set_style("padding", "8px")
-            dom.classes = dom.classes + ["widget-checkbox"]
+            w2d_add_class(dom, "widget-checkbox")
 
         "list" =>
             dom.set_style("color", fg)
             dom.set_style("padding", "4px")
-            dom.classes = dom.classes + ["widget-list"]
+            w2d_add_class(dom, "widget-list")
 
         "text" =>
             dom.set_style("color", fg)
             dom.set_style("padding", "4px")
-            dom.classes = dom.classes + ["widget-text"]
+            w2d_add_class(dom, "widget-text")
 
         "label" =>
             dom.set_style("color", fg)
-            dom.classes = dom.classes + ["widget-text"]
+            w2d_add_class(dom, "widget-text")
 
         "heading" =>
             dom.set_style("color", fg)
             dom.set_style("padding", "8px")
             dom.set_style("border-color", border_color)
-            dom.classes = dom.classes + ["widget-heading"]
+            w2d_add_class(dom, "widget-heading")
 
         "progress" =>
             dom.set_style("color", fg)
-            dom.classes = dom.classes + ["widget-progress"]
+            w2d_add_class(dom, "widget-progress")
 
         "divider" =>
             dom.set_style("border-color", border_color)
-            dom.classes = dom.classes + ["widget-divider"]
+            w2d_add_class(dom, "widget-divider")
 
         "table" =>
             dom.set_style("color", fg)
             dom.set_style("border-color", border_color)
-            dom.classes = dom.classes + ["widget-table"]
+            w2d_add_class(dom, "widget-table")
 
         "tree" =>
             dom.set_style("color", fg)
-            dom.classes = dom.classes + ["widget-tree"]
+            w2d_add_class(dom, "widget-tree")
 
         "tooltip" =>
             dom.set_style("color", fg)
-            dom.classes = dom.classes + ["widget-tooltip"]
+            w2d_add_class(dom, "widget-tooltip")
 
         "scroll" =>
-            dom.classes = dom.classes + ["widget-scroll"]
+            w2d_add_class(dom, "widget-scroll")
 
         "image" =>
-            dom.classes = dom.classes + ["widget-image"]
+            w2d_add_class(dom, "widget-image")
 
         _ =>
             # Default: just set text color
@@ -628,14 +646,13 @@ fn browser_renderer_ui_tree_to_dom(tree: UITree, state: UIState) -> BeDomNode:
     """Local UITree conversion avoids an extra cross-module symbol in standalone SMF runs."""
     val root_widget = tree.root_node()
     var root_dom = BeDomNode.element("div")
-    root_dom.id = "ui-root"
-    root_dom.classes = ["ui-container"]
+    root_dom.set_attr("id", "ui-root")
+    root_dom.set_attr("class", "ui-container")
 
+    # StyleProps width/height are px floats (0 = auto); no percent form.
     var s = root_dom.style
     s.display = "flex"
     s.flex_direction = "column"
-    s.width = CssValue.pct(100.0)
-    s.height = CssValue.pct(100.0)
     root_dom.style = s
 
     val content = browser_renderer_widget_to_dom(root_widget, state)
@@ -647,13 +664,15 @@ fn browser_renderer_widget_to_dom(node: WidgetNode, state: UIState) -> BeDomNode
     val tag = widget_kind_to_tag(kind)
 
     var dom = BeDomNode.element(tag)
-    dom.id = node.id
+    w2d_set_id(dom, node.id)
     browser_renderer_apply_widget_props(dom, node, kind)
 
     if node.id == state.focused_id:
-        dom.classes.push("focused")
+        w2d_add_class(dom, "focused")
         var s = dom.style
-        s.border = BorderProps.solid(2, 0x58A6FFFF)
+        s.border_width = 2.0
+        s.border_color = "#58A6FF"
+        s.border_style = "solid"
         dom.style = s
 
     var wchild_idx = 0
@@ -666,7 +685,7 @@ fn browser_renderer_widget_to_dom(node: WidgetNode, state: UIState) -> BeDomNode
     dom
 
 fn browser_renderer_apply_widget_props(dom: BeDomNode, node: WidgetNode, kind: text):
-    dom.classes.push(kind)
+    w2d_add_class(dom, kind)
     val title = node.get_prop("title")
     if title.len() > 0:
         dom.set_attr("title", title)

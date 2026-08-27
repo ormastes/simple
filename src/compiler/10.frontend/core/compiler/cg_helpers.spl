@@ -9,11 +9,7 @@ use compiler.core.ast.{EXPR_INT_LIT, EXPR_FLOAT_LIT, EXPR_STRING_LIT, EXPR_BOOL_
 use compiler.core.ast.{EXPR_IDENT, EXPR_BINARY, EXPR_UNARY, EXPR_CALL, EXPR_INDEX}
 use compiler.core.ast.{EXPR_FIELD_ACCESS, EXPR_METHOD_CALL, EXPR_ARRAY_LIT}
 use compiler.core.ast.{EXPR_RANGE, EXPR_ASM, EXPR_ASM_MATCH, EXPR_INTERPOLATED_STRING}
-use compiler.core.ast.{EXPR_SLICE, EXPR_STRUCT_LIT, EXPR_IF_CHAIN, EXPR_UNIT}
-use compiler.frontend.core.if_chain_nodes.{ARM_CONDITION}
-use compiler.frontend.core.if_chain_nodes.{flat_if_chain_first_arm_get, flat_if_chain_arm_count_get}
-use compiler.frontend.core.if_chain_nodes.{flat_if_chain_else_expr_get}
-use compiler.frontend.core.if_chain_nodes.{flat_if_arm_next_get, flat_if_arm_kind_get, flat_if_arm_then_expr_get}
+use compiler.core.ast.{EXPR_SLICE, EXPR_STRUCT_LIT}
 use compiler.core.ast.{asm_arm_archs, asm_arm_os, asm_arm_abi, asm_arm_backend}
 use compiler.core.ast.{asm_arm_asm_text, asm_arm_is_compile_error, asm_arm_error_msg, asm_arm_is_wildcard}
 use compiler.core.tokens.{TOK_PLUS, TOK_MINUS, TOK_STAR, TOK_SLASH, TOK_PERCENT, TOK_STAR_STAR}
@@ -23,7 +19,6 @@ use compiler.core.tokens.{TOK_PLUS_EQ, TOK_MINUS_EQ, TOK_STAR_EQ, TOK_SLASH_EQ, 
 use compiler.core.tokens.{TOK_AMPERSAND, TOK_PIPE, TOK_CARET, TOK_TILDE}
 use compiler.core.types.{TYPE_VOID, TYPE_BOOL, TYPE_I64, TYPE_F64, TYPE_TEXT}
 use compiler.core.types.{TYPE_ARRAY_I64, TYPE_ARRAY_TEXT, TYPE_ARRAY_BOOL, TYPE_ARRAY_ANY}
-use compiler.core.types.{is_array_sized_tag, array_sized_type_runtime_tag}
 use compiler.core.types.{TYPE_STRUCT, TYPE_FN, TYPE_ANY, TYPE_NIL}
 use compiler.core.types.{TYPE_OPTION, TYPE_RESULT, TYPE_NAMED_BASE}
 use compiler.core.types.{type_tag_to_c, type_tag_name}
@@ -60,6 +55,22 @@ fn cg_output_get() -> text:
 fn cg_reset():
     cg_output = ""
     cg_indent = 0
+
+# ===== Enum Type Tracking =====
+
+var et_names: [text] = []
+
+fn et_reset():
+    et_names = []
+
+fn et_add(name: text):
+    et_names.push(name)
+
+fn et_has(name: text) -> bool:
+    for enum_name in et_names:
+        if enum_name == name:
+            return true
+    false
 
 # ===== Variable Type Tracking =====
 # Track local variable types for codegen decisions (string vs int operations).
@@ -163,34 +174,14 @@ fn is_text_type(tag: i64) -> bool:
     tag == TYPE_TEXT
 
 fn is_array_type(tag: i64) -> bool:
-    val runtime_tag = array_sized_type_runtime_tag(tag)
-    if runtime_tag == TYPE_ARRAY_I64: return true
-    if runtime_tag == TYPE_ARRAY_TEXT: return true
-    if runtime_tag == TYPE_ARRAY_BOOL: return true
-    if runtime_tag == TYPE_ARRAY_ANY: return true
+    if tag == TYPE_ARRAY_I64: return true
+    if tag == TYPE_ARRAY_TEXT: return true
+    if tag == TYPE_ARRAY_BOOL: return true
+    if tag == TYPE_ARRAY_ANY: return true
     false
 
 fn is_struct_type(tag: i64) -> bool:
     tag == TYPE_STRUCT
-
-# Validate the scalar owner walk before any C is emitted.  The legacy C
-# backend has no scoped pattern-binding representation, so mixed chains are a
-# hard unsupported boundary instead of being weakened to ordinary truth tests.
-fn cg_flat_if_chain_condition_only(chain_id: i64) -> bool:
-    var arm_id = flat_if_chain_first_arm_get(chain_id)
-    var remaining = flat_if_chain_arm_count_get(chain_id)
-    if remaining <= 0:
-        return false
-    while arm_id >= 0 and remaining > 0:
-        if flat_if_arm_kind_get(arm_id) != ARM_CONDITION:
-            return false
-        arm_id = flat_if_arm_next_get(arm_id)
-        remaining = remaining - 1
-    remaining == 0 and arm_id < 0
-
-fn cg_backend_unsupported_expr(feature: text) -> text:
-    val message = cg_escape_string("Simple legacy C backend: " + feature)
-    "([](){ static_assert(false, \"" + message + "\"); return SplValue{}; })()"
 
 # ===== Type Inference for Untyped Declarations =====
 
@@ -277,6 +268,18 @@ fn cg_infer_expr_type(idx: i64) -> i64:
         val fa_field = expr_get_str(idx)
         if expr_get_tag(fa_base) == EXPR_IDENT:
             val fa_var = expr_get_str(fa_base)
+            # Impl emission registers every self field under this exact key.
+            # Consult it before the named-type fallback: bootstrap parsing can
+            # preserve a field's array tag here even when the reconstructed
+            # named-type metadata is incomplete. Without this read,
+            # `self.instructions.is_empty()` fell through as TYPE_I64 and the
+            # method-call codegen tested an array through spl_str_len. An empty
+            # pending MIR list then appeared non-empty and finalize_block
+            # overwrote the already-finalized block with zero instructions.
+            if fa_var == "self":
+                val fa_self_type = vt_find("self_" + fa_field)
+                if fa_self_type >= 0:
+                    return fa_self_type
             val fa_sname = st_find(fa_var)
             if fa_sname != "":
                 val fa_nid = named_type_find(fa_sname)
@@ -301,7 +304,7 @@ fn cg_infer_expr_type(idx: i64) -> i64:
             return TYPE_I64
         if method_name == "replace":
             return TYPE_TEXT
-        if method_name == "trim":
+        if method_name == "trim" or method_name == "strip":
             return TYPE_TEXT
         if method_name == "slice":
             return TYPE_TEXT
@@ -343,30 +346,6 @@ fn cg_infer_expr_type(idx: i64) -> i64:
         return TYPE_I64
     if tag == EXPR_SLICE:
         return TYPE_TEXT
-    if tag == EXPR_IF_CHAIN:
-        val chain_id = expr_get_extra(idx)
-        var arm_id = flat_if_chain_first_arm_get(chain_id)
-        var remaining = flat_if_chain_arm_count_get(chain_id)
-        var branch_type = TYPE_VOID
-        var saw_branch = false
-        while arm_id >= 0 and remaining > 0:
-            val next_type = cg_infer_expr_type(flat_if_arm_then_expr_get(arm_id))
-            if not saw_branch:
-                branch_type = next_type
-                saw_branch = true
-            elif branch_type != next_type:
-                return TYPE_ANY
-            arm_id = flat_if_arm_next_get(arm_id)
-            remaining = remaining - 1
-        if remaining != 0:
-            return TYPE_ANY
-        val else_idx = flat_if_chain_else_expr_get(chain_id)
-        if else_idx < 0 or expr_get_tag(else_idx) == EXPR_UNIT:
-            return TYPE_VOID
-        val else_type = cg_infer_expr_type(else_idx)
-        if saw_branch and branch_type == else_type:
-            return branch_type
-        return TYPE_ANY
     # Default
     TYPE_I64
 
@@ -543,11 +522,12 @@ fn cg_asm_assert(arm_indices: [i64]) -> text:
 
 export cg_emit, cg_emit_line, cg_emit_blank, cg_indent_inc, cg_indent_dec
 export cg_output_get, cg_reset
+export et_reset, et_add, et_has
 export vt_reset, vt_push_scope, vt_pop_scope, vt_add, vt_find
 export st_reset, st_add, st_find
 export sa_reset, sa_add, sa_find
 export is_text_type, is_array_type, is_struct_type
-export cg_infer_expr_type, cg_flat_if_chain_condition_only, cg_backend_unsupported_expr
+export cg_infer_expr_type
 export cg_spl_wrap, cg_spl_access
 export cg_escape_string
 export cg_binop_to_c, cg_compound_op_to_c

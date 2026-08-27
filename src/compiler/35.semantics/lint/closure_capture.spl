@@ -25,23 +25,23 @@
 use compiler.core.ast_expr.{
     EXPR_IDENT, EXPR_ASSIGN, EXPR_COMPOUND_ASSIGN,
     EXPR_CALL, EXPR_METHOD_CALL, EXPR_BINARY, EXPR_UNARY,
-    EXPR_INDEX, EXPR_FIELD_ACCESS, EXPR_ARRAY_LIT, EXPR_IF, EXPR_IF_CHAIN,
+    EXPR_INDEX, EXPR_FIELD_ACCESS, EXPR_ARRAY_LIT, EXPR_IF,
     EXPR_MATCH, EXPR_FOR, EXPR_WHILE, EXPR_BLOCK, EXPR_RETURN,
     EXPR_LAMBDA, EXPR_STRUCT_LIT, EXPR_DO_BLOCK,
     EXPR_DICT_LIT, EXPR_TUPLE, EXPR_SLICE, EXPR_NULL_COALESCE,
     EXPR_OPTIONAL_CHAIN, EXPR_CAST, EXPR_INTERPOLATED_STRING,
     EXPR_RANGE, EXPR_SPREAD, EXPR_LIST_COMP, EXPR_DICT_COMP,
-    expr_tag, expr_s_val, expr_left, expr_right, expr_extra, expr_args, expr_stmts
+    expr_get_tag, expr_get_str, expr_get_left, expr_get_right, expr_get_extra, expr_get_args, expr_get_stmts
 }
 use compiler.frontend.core.ast_stmt.{
     STMT_EXPR, STMT_VAL_DECL, STMT_VAR_DECL, STMT_ASSIGN,
-    STMT_IF, STMT_IF_CHAIN, STMT_FOR, STMT_WHILE, STMT_BLOCK, STMT_MATCH,
+    STMT_IF, STMT_FOR, STMT_WHILE, STMT_BLOCK, STMT_MATCH,
     STMT_COMPOUND_ASSIGN,
-    stmt_tag, stmt_expr, stmt_name, stmt_body
+    stmt_get_tag, stmt_get_expr, stmt_get_name, stmt_get_body
 }
 use compiler.core.ast.{
     DECL_FN, DECL_EXTERN_FN, DECL_VAL, DECL_VAR,
-    decl_tag, decl_name, decl_param_names, decl_body_stmts
+    decl_get_tag, decl_get_name, decl_get_param_names, decl_get_body
 }
 
 # ============================================================================
@@ -76,19 +76,19 @@ fn check_closure_capture(decl_indices: [i64]) -> [ClosureCaptureWarning]:
     # Collect module-level var declarations
     var module_vars: {text: bool} = {}
     for idx in decl_indices:
-        val tag = decl_tag[idx]
+        val tag = decl_get_tag(idx)
         if tag == DECL_VAR:
-            module_vars[decl_name[idx]] = true
+            module_vars[decl_get_name(idx)] = true
 
     # Check each function for closure capture issues
     for idx in decl_indices:
-        val tag = decl_tag[idx]
+        val tag = decl_get_tag(idx)
         if tag != DECL_FN:
             continue
 
-        val fn_name = decl_name[idx]
-        val params = decl_param_names[idx]
-        val body = decl_body_stmts[idx]
+        val fn_name = decl_get_name(idx)
+        val params = decl_get_param_names(idx)
+        val body = decl_get_body(idx)
 
         if body.len() == 0:
             continue
@@ -115,62 +115,15 @@ fn collect_local_var_decls(stmts: [i64], vars: {text: bool}):
     for s in stmts:
         if s < 0:
             continue
-        val tag = stmt_tag[s]
+        val tag = stmt_get_tag(s)
         if tag == STMT_VAL_DECL or tag == STMT_VAR_DECL:
-            val name = stmt_name[s]
+            val name = stmt_get_name(s)
             if name != "":
                 vars[name] = true
 
-        # Chain binding names and declarations are arm-local. They are added
-        # to a copied scope by the chain walker, never leaked into siblings or
-        # the terminal else through this function-wide prepass.
-        if tag == STMT_IF_CHAIN:
-            continue
-
         # Recurse into nested blocks (but NOT nested functions)
         if tag == STMT_IF or tag == STMT_BLOCK or tag == STMT_FOR or tag == STMT_WHILE or tag == STMT_MATCH:
-            collect_local_var_decls(stmt_body[s], vars)
-
-fn copy_capture_scope(source: {text: bool}) -> {text: bool}:
-    var copied: {text: bool} = {}
-    for name in source:
-        copied[name] = source[name]
-    copied
-
-fn add_if_pattern_bindings(e: i64, vars: {text: bool}):
-    if e < 0: return
-    if expr_get_tag(e) == EXPR_IDENT:
-        val name = expr_get_str(e)
-        if name != "" and name != "_": vars[name] = true
-        return
-    # Constructor callee lives in LEFT; only argument positions bind names.
-    for arg in expr_get_args(e): add_if_pattern_bindings(arg, vars)
-
-fn add_if_arm_bindings(arm_id: i64, vars: {text: bool}):
-    val kind = flat_if_arm_kind_get(arm_id)
-    if kind == ARM_VALUE_BIND:
-        val head = flat_if_arm_head_get(arm_id)
-        if head >= 0 and expr_get_tag(head) == EXPR_IDENT:
-            val name = expr_get_str(head)
-            if name != "" and name != "_": vars[name] = true
-    elif kind == ARM_PATTERN_BIND:
-        add_if_pattern_bindings(flat_if_arm_head_get(arm_id), vars)
-
-fn capture_if_arm_body(arm_id: i64) -> [i64]:
-    var body: [i64] = []
-    var i = 0
-    while i < flat_if_arm_body_count_get(arm_id):
-        body.push(flat_if_arm_body_at(arm_id, i))
-        i = i + 1
-    body
-
-fn capture_if_else_body(chain_id: i64) -> [i64]:
-    var body: [i64] = []
-    var i = 0
-    while i < flat_if_chain_else_stmt_count_get(chain_id):
-        body.push(flat_if_chain_else_stmt_at(chain_id, i))
-        i = i + 1
-    body
+            collect_local_var_decls(stmt_get_body(s), vars)
 
 # ============================================================================
 # Nested Capture Detection
@@ -188,36 +141,11 @@ fn check_stmts_for_nested_capture(
     for s in stmts:
         if s < 0:
             continue
-        val tag = stmt_tag[s]
-
-        if tag == STMT_IF_CHAIN:
-            val chain_id = stmt_get_type(s)
-            var arm_id = flat_if_chain_first_arm_get(chain_id)
-            var remaining = flat_if_chain_arm_count_get(chain_id)
-            while arm_id >= 0 and remaining > 0:
-                if flat_if_arm_kind_get(arm_id) == ARM_CONDITION:
-                    val hs = check_expr_for_nested_capture(flat_if_arm_head_get(arm_id), outer_fn, outer_vars, module_vars)
-                    for w in hs: warnings.push(w)
-                val ins = check_expr_for_nested_capture(flat_if_arm_init_get(arm_id), outer_fn, outer_vars, module_vars)
-                for w in ins: warnings.push(w)
-                var arm_vars = copy_capture_scope(outer_vars)
-                add_if_arm_bindings(arm_id, arm_vars)
-                val body = capture_if_arm_body(arm_id)
-                collect_local_var_decls(body, arm_vars)
-                val nested = check_stmts_for_nested_capture(body, outer_fn, arm_vars, module_vars)
-                for w in nested: warnings.push(w)
-                arm_id = flat_if_arm_next_get(arm_id)
-                remaining = remaining - 1
-            var else_vars = copy_capture_scope(outer_vars)
-            val else_body = capture_if_else_body(chain_id)
-            collect_local_var_decls(else_body, else_vars)
-            val else_nested = check_stmts_for_nested_capture(else_body, outer_fn, else_vars, module_vars)
-            for w in else_nested: warnings.push(w)
-            continue
+        val tag = stmt_get_tag(s)
 
         # Check expressions for lambdas and nested function calls
         if tag == STMT_EXPR or tag == STMT_VAL_DECL or tag == STMT_VAR_DECL:
-            val e = stmt_expr[s]
+            val e = stmt_get_expr(s)
             if e >= 0:
                 val ws = check_expr_for_nested_capture(e, outer_fn, outer_vars, module_vars)
                 for w in ws:
@@ -225,7 +153,7 @@ fn check_stmts_for_nested_capture(
 
         # Recurse into nested statement blocks
         if tag == STMT_IF or tag == STMT_BLOCK or tag == STMT_FOR or tag == STMT_WHILE or tag == STMT_MATCH:
-            val nested = check_stmts_for_nested_capture(stmt_body[s], outer_fn, outer_vars, module_vars)
+            val nested = check_stmts_for_nested_capture(stmt_get_body(s), outer_fn, outer_vars, module_vars)
             for w in nested:
                 warnings.push(w)
 
@@ -242,37 +170,17 @@ fn check_expr_for_nested_capture(
     if e < 0:
         return warnings
 
-    val tag = expr_tag[e]
-
-    if tag == EXPR_IF_CHAIN:
-        val chain_id = expr_get_extra(e)
-        var arm_id = flat_if_chain_first_arm_get(chain_id)
-        var remaining = flat_if_chain_arm_count_get(chain_id)
-        while arm_id >= 0 and remaining > 0:
-            if flat_if_arm_kind_get(arm_id) == ARM_CONDITION:
-                val hs = check_expr_for_nested_capture(flat_if_arm_head_get(arm_id), outer_fn, outer_vars, module_vars)
-                for w in hs: warnings.push(w)
-            val ins = check_expr_for_nested_capture(flat_if_arm_init_get(arm_id), outer_fn, outer_vars, module_vars)
-            for w in ins: warnings.push(w)
-            var arm_vars = copy_capture_scope(outer_vars)
-            add_if_arm_bindings(arm_id, arm_vars)
-            val ts = check_expr_for_nested_capture(flat_if_arm_then_expr_get(arm_id), outer_fn, arm_vars, module_vars)
-            for w in ts: warnings.push(w)
-            arm_id = flat_if_arm_next_get(arm_id)
-            remaining = remaining - 1
-        val es = check_expr_for_nested_capture(flat_if_chain_else_expr_get(chain_id), outer_fn, outer_vars, module_vars)
-        for w in es: warnings.push(w)
-        return warnings
+    val tag = expr_get_tag(e)
 
     # Lambda expression — check its body for writes to outer vars
     if tag == EXPR_LAMBDA:
-        val body = expr_right[e]
+        val body = expr_get_right(e)
         if body >= 0:
             val ws = check_expr_for_outer_writes(body, outer_fn, "lambda", outer_vars, module_vars)
             for w in ws:
                 warnings.push(w)
         # Also check stmts inside lambda
-        for child_stmt in expr_stmts[e]:
+        for child_stmt in expr_get_stmts(e):
             if child_stmt >= 0:
                 val ws = check_stmts_for_outer_writes(
                     [child_stmt], outer_fn, "lambda", outer_vars, module_vars
@@ -282,31 +190,31 @@ fn check_expr_for_nested_capture(
         return warnings
 
     # Recurse into sub-expressions
-    val left = expr_left[e]
+    val left = expr_get_left(e)
     if left >= 0:
         val ws = check_expr_for_nested_capture(left, outer_fn, outer_vars, module_vars)
         for w in ws:
             warnings.push(w)
 
-    val right = expr_right[e]
+    val right = expr_get_right(e)
     if right >= 0:
         val ws = check_expr_for_nested_capture(right, outer_fn, outer_vars, module_vars)
         for w in ws:
             warnings.push(w)
 
-    for arg in expr_args[e]:
+    for arg in expr_get_args(e):
         val ws = check_expr_for_nested_capture(arg, outer_fn, outer_vars, module_vars)
         for w in ws:
             warnings.push(w)
 
-    for child_stmt in expr_stmts[e]:
+    for child_stmt in expr_get_stmts(e):
         if child_stmt >= 0:
-            val child_e = stmt_expr[child_stmt]
+            val child_e = stmt_get_expr(child_stmt)
             if child_e >= 0:
                 val ws = check_expr_for_nested_capture(child_e, outer_fn, outer_vars, module_vars)
                 for w in ws:
                     warnings.push(w)
-            val child_body = stmt_body[child_stmt]
+            val child_body = stmt_get_body(child_stmt)
             val nested = check_stmts_for_nested_capture(child_body, outer_fn, outer_vars, module_vars)
             for w in nested:
                 warnings.push(w)
@@ -330,32 +238,10 @@ fn check_stmts_for_outer_writes(
     for s in stmts:
         if s < 0:
             continue
-        val tag = stmt_tag[s]
-
-        if tag == STMT_IF_CHAIN:
-            val chain_id = stmt_get_type(s)
-            var arm_id = flat_if_chain_first_arm_get(chain_id)
-            var remaining = flat_if_chain_arm_count_get(chain_id)
-            while arm_id >= 0 and remaining > 0:
-                if flat_if_arm_kind_get(arm_id) == ARM_CONDITION:
-                    val hs = check_expr_for_outer_writes(flat_if_arm_head_get(arm_id), outer_fn, closure_name, outer_vars, module_vars)
-                    for w in hs: warnings.push(w)
-                val ins = check_expr_for_outer_writes(flat_if_arm_init_get(arm_id), outer_fn, closure_name, outer_vars, module_vars)
-                for w in ins: warnings.push(w)
-                var arm_outer = copy_capture_scope(outer_vars)
-                var bindings: {text: bool} = {}
-                add_if_arm_bindings(arm_id, bindings)
-                for name in bindings: arm_outer.remove(name)
-                val nested = check_stmts_for_outer_writes(capture_if_arm_body(arm_id), outer_fn, closure_name, arm_outer, module_vars)
-                for w in nested: warnings.push(w)
-                arm_id = flat_if_arm_next_get(arm_id)
-                remaining = remaining - 1
-            val else_nested = check_stmts_for_outer_writes(capture_if_else_body(chain_id), outer_fn, closure_name, outer_vars, module_vars)
-            for w in else_nested: warnings.push(w)
-            continue
+        val tag = stmt_get_tag(s)
 
         if tag == STMT_ASSIGN or tag == STMT_COMPOUND_ASSIGN:
-            val name = stmt_name[s]
+            val name = stmt_get_name(s)
             if name != "":
                 # Only warn if it's an outer var and NOT a module-level var
                 if outer_vars.has(name) and not module_vars.has(name):
@@ -370,7 +256,7 @@ fn check_stmts_for_outer_writes(
                     ))
 
         if tag == STMT_EXPR or tag == STMT_VAL_DECL or tag == STMT_VAR_DECL:
-            val e = stmt_expr[s]
+            val e = stmt_get_expr(s)
             if e >= 0:
                 val ws = check_expr_for_outer_writes(e, outer_fn, closure_name, outer_vars, module_vars)
                 for w in ws:
@@ -378,7 +264,7 @@ fn check_stmts_for_outer_writes(
 
         # Recurse into nested blocks
         if tag == STMT_IF or tag == STMT_BLOCK or tag == STMT_FOR or tag == STMT_WHILE or tag == STMT_MATCH:
-            val nested = check_stmts_for_outer_writes(stmt_body[s], outer_fn, closure_name, outer_vars, module_vars)
+            val nested = check_stmts_for_outer_writes(stmt_get_body(s), outer_fn, closure_name, outer_vars, module_vars)
             for w in nested:
                 warnings.push(w)
 
@@ -396,36 +282,14 @@ fn check_expr_for_outer_writes(
     if e < 0:
         return warnings
 
-    val tag = expr_tag[e]
-
-    if tag == EXPR_IF_CHAIN:
-        val chain_id = expr_get_extra(e)
-        var arm_id = flat_if_chain_first_arm_get(chain_id)
-        var remaining = flat_if_chain_arm_count_get(chain_id)
-        while arm_id >= 0 and remaining > 0:
-            if flat_if_arm_kind_get(arm_id) == ARM_CONDITION:
-                val hs = check_expr_for_outer_writes(flat_if_arm_head_get(arm_id), outer_fn, closure_name, outer_vars, module_vars)
-                for w in hs: warnings.push(w)
-            val ins = check_expr_for_outer_writes(flat_if_arm_init_get(arm_id), outer_fn, closure_name, outer_vars, module_vars)
-            for w in ins: warnings.push(w)
-            var arm_outer = copy_capture_scope(outer_vars)
-            var bindings: {text: bool} = {}
-            add_if_arm_bindings(arm_id, bindings)
-            for name in bindings: arm_outer.remove(name)
-            val ts = check_expr_for_outer_writes(flat_if_arm_then_expr_get(arm_id), outer_fn, closure_name, arm_outer, module_vars)
-            for w in ts: warnings.push(w)
-            arm_id = flat_if_arm_next_get(arm_id)
-            remaining = remaining - 1
-        val es = check_expr_for_outer_writes(flat_if_chain_else_expr_get(chain_id), outer_fn, closure_name, outer_vars, module_vars)
-        for w in es: warnings.push(w)
-        return warnings
+    val tag = expr_get_tag(e)
 
     # Assignment: check if target is an outer var
     if tag == EXPR_ASSIGN or tag == EXPR_COMPOUND_ASSIGN:
-        val target = expr_left[e]
+        val target = expr_get_left(e)
         if target >= 0:
-            if expr_tag[target] == EXPR_IDENT:
-                val var_name = expr_s_val[target]
+            if expr_get_tag(target) == EXPR_IDENT:
+                val var_name = expr_get_str(target)
                 if outer_vars.has(var_name) and not module_vars.has(var_name):
                     warnings.push(ClosureCaptureWarning(
                         code: "CLOS001",
@@ -438,31 +302,31 @@ fn check_expr_for_outer_writes(
                     ))
 
     # Recurse into sub-expressions
-    val left = expr_left[e]
+    val left = expr_get_left(e)
     if left >= 0:
         val ws = check_expr_for_outer_writes(left, outer_fn, closure_name, outer_vars, module_vars)
         for w in ws:
             warnings.push(w)
 
-    val right = expr_right[e]
+    val right = expr_get_right(e)
     if right >= 0:
         val ws = check_expr_for_outer_writes(right, outer_fn, closure_name, outer_vars, module_vars)
         for w in ws:
             warnings.push(w)
 
-    for arg in expr_args[e]:
+    for arg in expr_get_args(e):
         val ws = check_expr_for_outer_writes(arg, outer_fn, closure_name, outer_vars, module_vars)
         for w in ws:
             warnings.push(w)
 
-    for child_stmt in expr_stmts[e]:
+    for child_stmt in expr_get_stmts(e):
         if child_stmt >= 0:
-            val child_e = stmt_expr[child_stmt]
+            val child_e = stmt_get_expr(child_stmt)
             if child_e >= 0:
                 val ws = check_expr_for_outer_writes(child_e, outer_fn, closure_name, outer_vars, module_vars)
                 for w in ws:
                     warnings.push(w)
-            val child_body = stmt_body[child_stmt]
+            val child_body = stmt_get_body(child_stmt)
             val nested = check_stmts_for_outer_writes(child_body, outer_fn, closure_name, outer_vars, module_vars)
             for w in nested:
                 warnings.push(w)

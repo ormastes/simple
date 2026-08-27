@@ -118,20 +118,43 @@ fn tokenize(source: text, config: DuplicationConfig) -> [SimpleToken]:
                 handled = true
 
         if not handled:
-            if b == 34:
+            val next_is_label = b == 39 and i + 1 < source_len and (((bytes[i + 1] >= 97 and bytes[i + 1] <= 122) or (bytes[i + 1] >= 65 and bytes[i + 1] <= 90) or bytes[i + 1] == 95))
+            if b == 34 or (b == 39 and not next_is_label):
                 val start_idx = i
-                var start_col = column
-                i = i + 1
-                column = column + 1
-                while i < source_len and bytes[i] != 34:
-                    i = i + 1
-                    column = column + 1
-                if i < source_len:
-                    i = i + 1
-                    column = column + 1
+                val start_line = line
+                val start_col = column
+                val quote = b
+                val is_triple = i + 2 < source_len and bytes[i + 1] == quote and bytes[i + 2] == quote
+                val quote_len = if is_triple: 3 else: 1
+                i = i + quote_len
+                column = column + quote_len
+                var closed = false
+                while i < source_len and not closed:
+                    if is_triple and i + 2 < source_len and bytes[i] == quote and bytes[i + 1] == quote and bytes[i + 2] == quote:
+                        i = i + 3
+                        column = column + 3
+                        closed = true
+                    elif not is_triple and bytes[i] == quote:
+                        i = i + 1
+                        column = column + 1
+                        closed = true
+                    elif not is_triple and bytes[i] == 92 and i + 1 < source_len:
+                        if bytes[i + 1] == 10:
+                            line = line + 1
+                            column = 1
+                        else:
+                            column = column + 2
+                        i = i + 2
+                    else:
+                        if bytes[i] == 10:
+                            line = line + 1
+                            column = 1
+                        else:
+                            column = column + 1
+                        i = i + 1
                 val str_val = source[start_idx:i]
                 val value = if config.ignore_literals then "LITERAL" else str_val
-                result.push(SimpleToken(kind: SimpleTokenKind.Literal, value: value, line: line, column: start_col, start_offset: start_idx, end_offset: i))
+                result.push(SimpleToken(kind: SimpleTokenKind.Literal, value: value, line: start_line, column: start_col, start_offset: start_idx, end_offset: i))
                 handled = true
 
         if not handled:

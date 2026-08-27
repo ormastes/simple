@@ -465,7 +465,7 @@ fn md_check_trailing_whitespace(content: text, path: text) -> [EditorDiagnostic]
     while i < total:
         val line = lines[i]
         val line_len = line.len()
-        if line_len > 0 and line.char_at(line_len - 1) == " ":
+        if line_len > 0 and line[line_len - 1:line_len - 1 + 1] == " ":
             val trailing = _md_diag_count_trailing_spaces(line)
             if trailing == 1:
                 val d = EditorDiagnostic(
@@ -558,37 +558,45 @@ fn _md_diag_find_links_with_positions(content: text) -> [MdDiagLinkRef]:
             var col = 0
             val line_len = line.len()
             while col < line_len:
-                val ch = line.char_at(col)
+                val ch = line[col:col + 1]
                 # Detect image prefix to skip (handled separately)
                 var is_image = false
-                if col > 0 and line.char_at(col - 1) == "!":
+                if col > 0 and line[col - 1:col - 1 + 1] == "!":
                     is_image = true
                 if ch == "[" and not is_image:
                     val link_start_col = col
                     # Extract display text
                     var display = ""
+                    # Whole-SPAN label extraction (per-byte appends corrupt
+                    # multi-byte labels under the interpreter — its Rust
+                    # Strings turn mid-codepoint 1-byte slices into U+FFFD).
+                    # The span up to the depth-0 "]" includes nested
+                    # brackets exactly like the old per-char append did.
                     var j = col + 1
                     var depth = 1
+                    val label_start = j
                     while j < line_len and depth > 0:
-                        val c = line.char_at(j)
+                        val c = line[j:j + 1]
                         if c == "[":
                             depth = depth + 1
                         elif c == "]":
                             depth = depth - 1
                             if depth == 0:
                                 break
-                        if depth > 0:
-                            display = display + c
                         j = j + 1
+                    display = display + line[label_start:j]
                     # j should now point at ']'
-                    if j < line_len and line.char_at(j) == "]":
+                    if j < line_len and line[j:j + 1] == "]":
                         val after_bracket = j + 1
-                        if after_bracket < line_len and line.char_at(after_bracket) == "(":
+                        if after_bracket < line_len and line[after_bracket:after_bracket + 1] == "(":
+                            # Whole-SPAN url extraction (interpreter
+                            # per-byte U+FFFD hazard; URLs can be
+                            # non-ASCII).
                             var url = ""
                             var k = after_bracket + 1
-                            while k < line_len and line.char_at(k) != ")":
-                                url = url + line.char_at(k)
+                            while k < line_len and line[k:k + 1] != ")":
                                 k = k + 1
+                            url = url + line[after_bracket + 1:k]
                             # Strip optional title from url
                             val url_clean = _md_diag_strip_url_title(url)
                             val entry = MdDiagLinkRef(line: line_idx, col: link_start_col, label: display, url: url_clean)
@@ -621,28 +629,33 @@ fn _md_diag_find_images_with_positions(content: text) -> [MdDiagLinkRef]:
             var col = 0
             val line_len = line.len()
             while col < line_len:
-                val ch = line.char_at(col)
-                if ch == "!" and col + 1 < line_len and line.char_at(col + 1) == "[":
+                val ch = line[col:col + 1]
+                if ch == "!" and col + 1 < line_len and line[col + 1:col + 1 + 1] == "[":
                     val img_start_col = col
                     # Extract alt text
+                    # Whole-SPAN alt-text extraction (same interpreter
+                    # per-byte U+FFFD hazard).
                     var alt = ""
                     var j = col + 2
-                    while j < line_len and line.char_at(j) != "]":
-                        alt = alt + line.char_at(j)
+                    while j < line_len and line[j:j + 1] != "]":
                         j = j + 1
+                    alt = alt + line[col + 2:j]
                     # j should point at ']'
-                    if j < line_len and line.char_at(j) == "]":
+                    if j < line_len and line[j:j + 1] == "]":
                         val after_bracket = j + 1
-                        if after_bracket < line_len and line.char_at(after_bracket) == "(":
+                        if after_bracket < line_len and line[after_bracket:after_bracket + 1] == "(":
+                            # Whole-SPAN url extraction (interpreter
+                            # per-byte U+FFFD hazard; URLs can be
+                            # non-ASCII).
                             var url = ""
                             var k = after_bracket + 1
-                            while k < line_len and line.char_at(k) != ")":
-                                url = url + line.char_at(k)
+                            while k < line_len and line[k:k + 1] != ")":
                                 k = k + 1
+                            url = url + line[after_bracket + 1:k]
                             # Inline url title strip: take url up to first space
                             var url_clean = url
                             var ui = 0
-                            while ui < url.len() and url.char_at(ui) != " ":
+                            while ui < url.len() and url[ui:ui + 1] != " ":
                                 ui = ui + 1
                             url_clean = url.slice(0, ui).trim()
                             val img_entry = MdDiagLinkRef(line: line_idx, col: img_start_col, label: alt, url: url_clean)
@@ -658,14 +671,14 @@ fn _md_diag_heading_level(line: text) -> i64:
     var count = 0
     val line_len = line.len()
     while count < line_len and count < 6:
-        if line.char_at(count) == "#":
+        if line[count:count + 1] == "#":
             count = count + 1
         else:
             break
     if count == 0:
         return 0
     # Must be followed by a space or end of line
-    if count < line_len and line.char_at(count) != " ":
+    if count < line_len and line[count:count + 1] != " ":
         return 0
     count
 
@@ -674,7 +687,7 @@ fn _md_diag_heading_text(line: text, level: i64) -> text:
     val line_len = line.len()
     var start = level
     # Skip the space after hashes
-    if start < line_len and line.char_at(start) == " ":
+    if start < line_len and line[start:start + 1] == " ":
         start = start + 1
     if start >= line_len:
         return ""
@@ -685,16 +698,16 @@ fn _md_diag_list_marker(trimmed: text) -> text:
     # Returns "" otherwise.
     if trimmed.len() == 0:
         return ""
-    val first = trimmed.char_at(0)
+    val first = trimmed[0:0 + 1]
     if first == "-" or first == "*" or first == "+":
-        if trimmed.len() == 1 or trimmed.char_at(1) == " ":
+        if trimmed.len() == 1 or trimmed[1:1 + 1] == " ":
             return first
     ""
 
 fn _md_diag_count_trailing_spaces(line: text) -> i64:
     var count = 0
     var i = line.len() - 1
-    while i >= 0 and line.char_at(i) == " ":
+    while i >= 0 and line[i:i + 1] == " ":
         count = count + 1
         i = i - 1
     count
@@ -704,7 +717,7 @@ fn _md_diag_strip_url_title(url: text) -> text:
     # Returns just the url portion (up to the first space).
     var i = 0
     val url_len = url.len()
-    while i < url_len and url.char_at(i) != " ":
+    while i < url_len and url[i:i + 1] != " ":
         i = i + 1
     url.slice(0, i).trim()
 
@@ -713,7 +726,7 @@ fn _md_diag_strip_fragment(url: text) -> text:
     var i = 0
     val url_len = url.len()
     while i < url_len:
-        if url.char_at(i) == "#":
+        if url[i:i + 1] == "#":
             return url.slice(0, i)
         i = i + 1
     url
@@ -721,7 +734,7 @@ fn _md_diag_strip_fragment(url: text) -> text:
 fn _md_diag_find_char(haystack: text, needle: text, start: i64) -> i64:
     var i = start
     while i < haystack.len():
-        if haystack.char_at(i) == needle:
+        if haystack[i:i + 1] == needle:
             return i
         i = i + 1
     -1

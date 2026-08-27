@@ -32,7 +32,19 @@ use std.nogc_sync_mut.compression.brotli.decoder_block.{
     _MetaBlockResult, _decode_compressed_block
 }
 
-extern fn rt_bytes_alloc(len: i64) -> [u8]
+# Zero-filled `[u8]` of `len` bytes, built with ordinary Simple pushes.
+#
+# The former `rt_bytes_alloc` extern hands back a raw runtime buffer that the
+# interpreter refuses to index-assign into ("invalid assignment: cannot index
+# assign value of type array"), so every brotli encode/decode path that filled
+# such a buffer slot-by-slot failed there.
+fn _brotli_alloc_bytes(len: i64) -> [u8]:
+    var buf: [u8] = []
+    var i = 0
+    while i < len:
+        buf.push(0u8)
+        i = i + 1
+    buf
 
 # Decode a brotli-compressed byte stream.
 # Returns Ok(decompressed_bytes) or Err(CompressionError).
@@ -218,7 +230,7 @@ fn _brotli_read_meta_block(r: BrotliBitReader, output: [u8]) -> Result<_MetaBloc
         # Preallocate merged output in one shot to avoid per-byte push overhead.
         val old_len = output.len()
         val new_len = old_len + raw.bytes.len()
-        var new_output = rt_bytes_alloc(new_len)
+        var new_output = _brotli_alloc_bytes(new_len)
         var i = 0
         while i < old_len:
             new_output[i] = output[i]

@@ -13,8 +13,10 @@
 use compiler.common.diagnostics.span.{Span}
 use std.nogc_sync_mut.io_runtime.{env_get_opt}
 
+extern fn rt_enum_payload(value: TypeKind) -> i64
+extern fn rt_enum_discriminant(value: TypeKind) -> i64
+extern fn rt_tuple_get(tuple: i64, index: i64) -> i64
 extern fn rt_println(msg: text)
-extern fn rt_env_get(key: text) -> text
 
 fn parser_types_trace_enabled() -> bool:
     """Level gate for TypeKind payload-decode tracing (default off).
@@ -23,8 +25,7 @@ fn parser_types_trace_enabled() -> bool:
     asked for an ``Array`` element but handed a different variant.  This is
     the probe that located the Stage-3 ``field access on nil receiver`` trap.
     """
-    ((rt_env_get("SIMPLE_TRACE_TYPEKIND") ?? "") == "1" and
-     not frontend_trace_suppressed())
+    (env_get_opt("SIMPLE_TRACE_TYPEKIND") ?? "") == "1"
 
 # ============================================================================
 # Type AST
@@ -56,17 +57,21 @@ enum TypeKind:
 # Keep multi-field TypeKind extraction beside its owner.  Consumers that also
 # import HirTypeKind have a colliding Named variant on stage4.
 fn parser_type_kind_named_name(kind: TypeKind) -> text:
-    match kind:
-        case TypeKind.Named(name, _): name
-        case _: ""
+    if rt_enum_discriminant(kind) != rt_enum_discriminant(TypeKind.Named("", [])):
+        return ""
+    val payload = rt_enum_payload(kind)
+    if payload == nil:
+        return ""
+    val name: text = rt_tuple_get(payload, 0)
+    name
 
 fn parser_type_kind_named_args(kind: TypeKind) -> [Type]:
-    if compiler_value_discriminant(kind) != compiler_value_discriminant(TypeKind.Named("", [])):
+    if rt_enum_discriminant(kind) != rt_enum_discriminant(TypeKind.Named("", [])):
         return []
-    val payload = compiler_value_payload(kind)
+    val payload = rt_enum_payload(kind)
     if payload == nil:
         return []
-    val args: [Type] = compiler_value_tuple_at(payload, 1)
+    val args: [Type] = rt_tuple_get(payload, 1)
     args
 
 fn parser_type_kind_array_discriminant() -> i64:
@@ -77,7 +82,7 @@ fn parser_type_kind_array_discriminant() -> i64:
     `Named`/`Tuple` decoders above build their own comparison values.
     """
     val placeholder = Type(kind: TypeKind.Infer, span: Span(0, 0, 0, 0, "", 0))
-    compiler_value_discriminant(TypeKind.Array(placeholder, nil))
+    rt_enum_discriminant(TypeKind.Array(placeholder, nil))
 
 fn parser_type_kind_array_element(kind: TypeKind, fallback: Type) -> Type:
     # Decode slot 0 ONLY for a real `Array` payload.  Every other variant
@@ -85,12 +90,12 @@ fn parser_type_kind_array_element(kind: TypeKind, fallback: Type) -> Type:
     # an array, `Infer`/`Error` nothing at all), so an unguarded decode
     # reinterprets a foreign value as a `Type`.  Same discriminant guard the
     # `Named`/`Tuple` decoders above already carry.
-    if compiler_value_discriminant(kind) != parser_type_kind_array_discriminant():
+    if rt_enum_discriminant(kind) != parser_type_kind_array_discriminant():
         return fallback
-    val payload = compiler_value_payload(kind)
+    val payload = rt_enum_payload(kind)
     if payload == nil:
         return fallback
-    val element: Type = compiler_value_tuple_at(payload, 0)
+    val element: Type = rt_tuple_get(payload, 0)
     if element == nil:
         return fallback
     element
@@ -105,15 +110,15 @@ fn parser_type_kind_array_element_name(kind: TypeKind) -> text:
     type, not just array-typed ones, so a non-`Array` kind is the common
     case and must return "" rather than decode a foreign payload slot.
     """
-    val disc = compiler_value_discriminant(kind)
+    val disc = rt_enum_discriminant(kind)
     if disc != parser_type_kind_array_discriminant():
         if parser_types_trace_enabled():
             rt_println("[typekind] array-element-name on non-array disc={disc}")
         return ""
-    val payload = compiler_value_payload(kind)
+    val payload = rt_enum_payload(kind)
     if payload == nil:
         return ""
-    val element: Type = compiler_value_tuple_at(payload, 0)
+    val element: Type = rt_tuple_get(payload, 0)
     if element == nil:
         if parser_types_trace_enabled():
             rt_println("[typekind] array payload slot0 nil disc={disc}")
@@ -121,11 +126,11 @@ fn parser_type_kind_array_element_name(kind: TypeKind) -> text:
     parser_type_kind_named_name(element.kind)
 
 fn parser_type_kind_tuple_elements(kind: TypeKind) -> [Type]:
-    if compiler_value_discriminant(kind) != compiler_value_discriminant(TypeKind.Tuple([])):
+    if rt_enum_discriminant(kind) != rt_enum_discriminant(TypeKind.Tuple([])):
         return []
     match kind:
-        case TypeKind.Named(_, args): args
-        case _: empty_args
+        case TypeKind.Tuple(elements): elements
+        case _: []
 
 fn parser_type_kind_pointer_inner(kind: TypeKind, fallback: Type) -> Type:
     val placeholder = Type(kind: TypeKind.Infer, span: fallback.span)
@@ -192,66 +197,74 @@ fn parser_type_named_dependencies_into(type_: Type, mut names: [text]):
     Multi-field ``TypeKind`` values are decoded only in this owner module via
     their typed discriminant/payload ABI. This avoids colliding staged-native
     matches in HIR scopes that also import ``HirTypeKind``.
+
+    The caller-owned accumulator keeps the recursive walk linear: nested type
+    nodes do not allocate result arrays and then copy them into their parents.
     """
     val kind = type_.kind
-    val disc = compiler_value_discriminant(kind)
-    if disc == compiler_value_discriminant(TypeKind.Named("", [])):
+    val disc = rt_enum_discriminant(kind)
+    if disc == rt_enum_discriminant(TypeKind.Named("", [])):
         val name = parser_type_kind_named_name(kind)
-        var names: [text] = []
-        if name != "": names = names.push(name)
+        if name != "": names.push(name)
         for arg in parser_type_kind_named_args(kind):
-            for nested in parser_type_named_dependencies(arg):
-                names = names.push(nested)
-        return names
-    if disc == compiler_value_discriminant(TypeKind.Tuple([])):
-        var names: [text] = []
+            parser_type_named_dependencies_into(arg, names)
+        return
+    if disc == rt_enum_discriminant(TypeKind.Tuple([])):
         for element in parser_type_kind_tuple_elements(kind):
-            for nested in parser_type_named_dependencies(element):
-                names = names.push(nested)
-        return names
+            parser_type_named_dependencies_into(element, names)
+        return
 
     val placeholder = Type(kind: TypeKind.Infer, span: type_.span)
-    if disc == compiler_value_discriminant(TypeKind.Array(placeholder, nil)):
-        return parser_type_named_dependencies(
-            parser_type_kind_array_element(kind, placeholder))
-    val payload = compiler_value_payload(kind)
-    if payload == nil: return []
-    if disc == compiler_value_discriminant(TypeKind.Function([], placeholder)):
-        val params: [Type] = compiler_value_tuple_at(payload, 0)
-        val return_type: Type = compiler_value_tuple_at(payload, 1)
-        var names: [text] = []
+    if disc == rt_enum_discriminant(TypeKind.Array(placeholder, nil)):
+        parser_type_named_dependencies_into(
+            parser_type_kind_array_element(kind, placeholder), names)
+        return
+    val payload = rt_enum_payload(kind)
+    if payload == nil: return
+    if disc == rt_enum_discriminant(TypeKind.Function([], placeholder)):
+        val params: [Type] = rt_tuple_get(payload, 0)
+        val return_type: Type = rt_tuple_get(payload, 1)
         for param in params:
-            for nested in parser_type_named_dependencies(param):
-                names = names.push(nested)
-        for nested in parser_type_named_dependencies(return_type):
-            names = names.push(nested)
-        return names
-    if disc == compiler_value_discriminant(TypeKind.Optional(placeholder)):
+            parser_type_named_dependencies_into(param, names)
+        parser_type_named_dependencies_into(return_type, names)
+        return
+    if disc == rt_enum_discriminant(TypeKind.Optional(placeholder)):
         val inner: Type = payload
-        return parser_type_named_dependencies(inner)
-    if disc == compiler_value_discriminant(TypeKind.Reference(placeholder, false)):
-        val inner: Type = compiler_value_tuple_at(payload, 0)
-        return parser_type_named_dependencies(inner)
-    if disc == compiler_value_discriminant(TypeKind.Atomic(placeholder)):
+        parser_type_named_dependencies_into(inner, names)
+        return
+    if disc == rt_enum_discriminant(TypeKind.Reference(placeholder, false)):
+        val inner: Type = rt_tuple_get(payload, 0)
+        parser_type_named_dependencies_into(inner, names)
+        return
+    if disc == rt_enum_discriminant(TypeKind.Atomic(placeholder)):
         val inner: Type = payload
-        return parser_type_named_dependencies(inner)
-    if disc == compiler_value_discriminant(TypeKind.Isolated(placeholder)):
+        parser_type_named_dependencies_into(inner, names)
+        return
+    if disc == rt_enum_discriminant(TypeKind.Isolated(placeholder)):
         val inner: Type = payload
-        return parser_type_named_dependencies(inner)
-    if disc == compiler_value_discriminant(TypeKind.Union([])):
+        parser_type_named_dependencies_into(inner, names)
+        return
+    if disc == rt_enum_discriminant(TypeKind.Weak(placeholder)):
+        val inner: Type = payload
+        parser_type_named_dependencies_into(inner, names)
+        return
+    if disc == rt_enum_discriminant(TypeKind.Union([])):
         val members: [Type] = payload
-        var names: [text] = []
         for member in members:
-            for nested in parser_type_named_dependencies(member):
-                names = names.push(nested)
-        return names
-    if disc == compiler_value_discriminant(TypeKind.Projection(placeholder, "")):
-        val base: Type = compiler_value_tuple_at(payload, 0)
-        return parser_type_named_dependencies(base)
-    if disc == compiler_value_discriminant(TypeKind.Pointer(placeholder, false)):
-        val inner: Type = compiler_value_tuple_at(payload, 0)
-        return parser_type_named_dependencies(inner)
-    []
+            parser_type_named_dependencies_into(member, names)
+        return
+    if disc == rt_enum_discriminant(TypeKind.Projection(placeholder, "")):
+        val base: Type = rt_tuple_get(payload, 0)
+        parser_type_named_dependencies_into(base, names)
+        return
+    if disc == rt_enum_discriminant(TypeKind.Pointer(placeholder, false)):
+        val inner: Type = rt_tuple_get(payload, 0)
+        parser_type_named_dependencies_into(inner, names)
+
+fn parser_type_named_dependencies(type_: Type) -> [text]:
+    var names: [text] = []
+    parser_type_named_dependencies_into(type_, names)
+    names
 
 # ============================================================================
 # Tensor Suffix
@@ -377,10 +390,6 @@ struct Expr:
     """Expression."""
     kind: ExprKind
     span: Span
-    # Explicit generic arguments belong to the call expression, not to its
-    # callee name. This preserves ordinary `obj.method<T>()` syntax without a
-    # facet-specific frontend expression variant.
-    type_args: [Type] = []
 
 """Expression kind."""
 enum ExprKind:
@@ -391,6 +400,7 @@ enum ExprKind:
     BoolLit(bool)
     NilLit
     ArrayLit([Expr])
+    ArrayRepeat(Expr, Expr)     # [value; count] — repeat value count times
     TupleLit([Expr])
     DictLit([(Expr, Expr)])
     SetLit([Expr])              # Set literal: s{1, 2, 3}
@@ -403,6 +413,7 @@ enum ExprKind:
     NullCoalesce(Expr, Expr)    # ??
     ExistsCheck(Expr)                   # .? — value if present, nil if absent
     ForceUnwrap(Expr)                   # ! — value if present, panic if nil
+    Cast(Expr, Type)                    # expr as Type
 
     # Operators
     Binary(BinOp, Expr, Expr)
@@ -447,7 +458,7 @@ enum ExprKind:
     NogradBlock(Block)          # nograd{ ... } - disables gradient tracking
 
     # Unsafe block - allows raw pointer ops, SFFI, inline assembly
-    UnsafeBlock(Block)          # unsafe: ... - unsafe operations
+    UnsafeBlock(Block, [text])  # unsafe: ... - unsafe operations; capability names from `unsafe(capabilities: [...])`
 
     # Inline assembly - must be within unsafe block
     AsmBlock(AsmExpr)            # asm { mov eax, ebx } or legacy asm volatile(...)
@@ -696,6 +707,7 @@ struct GpuLaunchConfig:
 
 """Binary operator."""
 enum BinOp:
+    Invalid
     # Arithmetic
     Add
     Sub
@@ -752,6 +764,7 @@ enum UnaryOp:
     Not         # not, !
     BitNot      # ~
     Ref         # &
+    RefMut      # &mut
     Deref       # *
     Transpose   # ' (postfix, m{} only)
 

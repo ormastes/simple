@@ -20,7 +20,7 @@ val lines = input_render(inp, make_rect(0, 0, 40, 1))
 ```
 """
 
-use std.tui.style.{Style, StyledLine, StyledSegment, default_style,
+use std.tui.style.{Style, StyledLine, StyledSegment, tui_default_style,
                      make_segment, make_line, make_styled_line}
 use std.tui.widget.{Rect, pad_or_truncate}
 
@@ -76,10 +76,48 @@ fn make_input_widget_with_value(prompt: text, value: text, style: Style) -> Inpu
     InputWidget(
         prompt: prompt,
         value: value,
-        cursor_pos: len(value),
+        cursor_pos: input_text_len(value),
         style: style,
         focused: true
     )
+
+# ============================================================================
+# Cursor arithmetic
+# ============================================================================
+
+fn input_text_len(s: text) -> i64:
+    """Length of `s` in CODE POINTS (not bytes).
+
+    `len(s)` and `substring` are UTF-8 BYTE based while `chars()` and
+    `char_at` are codepoint based, so every cursor position in this widget
+    is a codepoint index measured with this helper, never with `len`.
+    """
+    s.chars().len()
+
+fn input_byte_offset(s: text, cp_index: i64) -> i64:
+    """Byte offset of codepoint index `cp_index` in `s`, for `substring`.
+
+    Clamps to the end of `s` when `cp_index` is past the last codepoint.
+    """
+    val cs = s.chars()
+    val n = cs.len()
+    var bo = 0
+    var i = 0
+    while i < n and i < cp_index:
+        bo = bo + input_codepoint_bytes(cs[i].char_code_at(0))
+        i = i + 1
+    bo
+
+fn input_codepoint_bytes(code: i64) -> i64:
+    """UTF-8 encoded length of one code point, from its scalar value.
+
+    Derived from the code point rather than `.len()` on a `chars()` element
+    so it is identical on the interpreter and the compiled test engine.
+    """
+    if code < 0x80: return 1
+    if code < 0x800: return 2
+    if code < 0x10000: return 3
+    4
 
 # ============================================================================
 # Text Editing
@@ -95,13 +133,14 @@ fn input_insert_char(widget: InputWidget, ch: text) -> InputWidget:
     Returns:
         Updated InputWidget with character inserted
     """
-    val before = widget.value.substring(0, widget.cursor_pos)
-    val after = widget.value.substring(widget.cursor_pos, len(widget.value))
+    val bo = input_byte_offset(widget.value, widget.cursor_pos)
+    val before = widget.value.substring(0, bo)
+    val after = widget.value.substring(bo, len(widget.value))
     val new_value = "{before}{ch}{after}"
     InputWidget(
         prompt: widget.prompt,
         value: new_value,
-        cursor_pos: widget.cursor_pos + len(ch),
+        cursor_pos: widget.cursor_pos + input_text_len(ch),
         style: widget.style,
         focused: widget.focused
     )
@@ -117,8 +156,10 @@ fn input_delete_back(widget: InputWidget) -> InputWidget:
     """
     if widget.cursor_pos <= 0:
         return widget
-    val before = widget.value.substring(0, widget.cursor_pos - 1)
-    val after = widget.value.substring(widget.cursor_pos, len(widget.value))
+    val bo_prev = input_byte_offset(widget.value, widget.cursor_pos - 1)
+    val bo = input_byte_offset(widget.value, widget.cursor_pos)
+    val before = widget.value.substring(0, bo_prev)
+    val after = widget.value.substring(bo, len(widget.value))
     val new_value = "{before}{after}"
     InputWidget(
         prompt: widget.prompt,
@@ -137,10 +178,12 @@ fn input_delete_forward(widget: InputWidget) -> InputWidget:
     Returns:
         Updated InputWidget with character deleted
     """
-    if widget.cursor_pos >= len(widget.value):
+    if widget.cursor_pos >= input_text_len(widget.value):
         return widget
-    val before = widget.value.substring(0, widget.cursor_pos)
-    val after = widget.value.substring(widget.cursor_pos + 1, len(widget.value))
+    val bo = input_byte_offset(widget.value, widget.cursor_pos)
+    val bo_next = input_byte_offset(widget.value, widget.cursor_pos + 1)
+    val before = widget.value.substring(0, bo)
+    val after = widget.value.substring(bo_next, len(widget.value))
     val new_value = "{before}{after}"
     InputWidget(
         prompt: widget.prompt,
@@ -168,7 +211,7 @@ fn input_move_left(widget: InputWidget) -> InputWidget:
 
 fn input_move_right(widget: InputWidget) -> InputWidget:
     """Move cursor one position to the right."""
-    if widget.cursor_pos >= len(widget.value):
+    if widget.cursor_pos >= input_text_len(widget.value):
         return widget
     InputWidget(
         prompt: widget.prompt,
@@ -193,7 +236,7 @@ fn input_move_end(widget: InputWidget) -> InputWidget:
     InputWidget(
         prompt: widget.prompt,
         value: widget.value,
-        cursor_pos: len(widget.value),
+        cursor_pos: input_text_len(widget.value),
         style: widget.style,
         focused: widget.focused
     )
@@ -258,7 +301,7 @@ fn input_render(widget: InputWidget, area: Rect) -> [StyledLine]:
     if available_width <= 0:
         # Not enough space for anything; just show truncated prompt
         val truncated_prompt = pad_or_truncate(widget.prompt, area.width)
-        result = result + [make_styled_line(truncated_prompt, widget.style)]
+        result.push(make_styled_line(truncated_prompt, widget.style))
         # Fill remaining rows
         var i = 1
         while i < area.height:
@@ -271,14 +314,14 @@ fn input_render(widget: InputWidget, area: Rect) -> [StyledLine]:
     if widget.cursor_pos > available_width - 1:
         display_start = widget.cursor_pos - available_width + 1
 
-    val visible_value = widget.value.substring(display_start, len(widget.value))
+    val visible_value = widget.value.substring(input_byte_offset(widget.value, display_start), len(widget.value))
     val display_text = pad_or_truncate(visible_value, available_width)
 
     # Build line with prompt + value
     var segments: [StyledSegment] = []
-    segments = segments + [make_segment(widget.prompt, default_style())]
+    segments = segments + [make_segment(widget.prompt, tui_default_style())]
     segments = segments + [make_segment(display_text, widget.style)]
-    result = result + [make_line(segments)]
+    result.push(make_line(segments))
 
     # Fill remaining rows with blanks
     var row = 1

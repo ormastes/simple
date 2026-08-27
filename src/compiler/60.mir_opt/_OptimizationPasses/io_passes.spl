@@ -1,9 +1,9 @@
 # Optimization Passes — io_passes: standalone optimize_*/count_* IO and bulk-memory passes
 #
 # Standalone optimize_* and count_* functions for general IO optimization passes:
-# - Write coalescing (bulk_store_hint)
+# - Write-coalescing candidate analysis (transform quarantined)
 # - Read-ahead hoisting (loop-invariant loads/calls)
-# - Syscall batching (call_batch_hint)
+# - Syscall-batching candidate analysis (transform quarantined)
 # - Bulk copy recognition (bulk_copy_hint)
 # - Bulk fill recognition (bulk_fill_hint)
 # - Bulk compare recognition (bulk_cmp_hint)
@@ -12,7 +12,9 @@
 #
 # Split from optimization_passes.spl to keep module cohesion under the 800-line source limit.
 
-use mir_data.*
+use compiler.mir.mir_instructions.{MirBlock, MirInst, MirInstKind, MirOperand, MirOperandKind, MirFunction}
+use compiler.mir.mir_types.{LocalId, MirConstValue, MirType}
+use compiler.mir.mir_data.*
 use compiler.mir_opt._OptimizationPasses.engine.*
 
 # ============================================================================
@@ -20,104 +22,11 @@ use compiler.mir_opt._OptimizationPasses.engine.*
 # ============================================================================
 
 fn optimize_write_coalesce(func: MirFunction, mut stats: OptimizationStats) -> MirFunction:
-    var new_blocks: [MirBlock] = []
-    var modified = false
-    var bi = 0
-    while bi < func.blocks.len():
-        val block = func.blocks[bi]
-        var gep_base: Dict<i64, i64> = {}
-        var base_store_count: Dict<i64, i64> = {}
-        var ii = 0
-        while ii < block.instructions.len():
-            val inst = block.instructions[ii]
-            match inst.kind:
-                case GetElementPtr(dest, base, indices):
-                    match base.kind:
-                        case Copy(local) | Move(local):
-                            # Guard: seed JIT Dict<i64,_> corruption can hand back a
-                            # nil-payload operand here (doc/08_tracking/bug/
-                            # seed_jit_int_keyed_dict_broken_2026-07-02.md). `local` is
-                            # never semantically nil for a real Copy/Move operand; skip
-                            # rather than crash so bootstrap surfaces the next issue.
-                            if local.?:
-                                gep_base[dest.id] = local.id
-                        case _:
-                            pass
-                case Store(ptr, value):
-                    match ptr.kind:
-                        case Copy(local) | Move(local):
-                            if local.? and gep_base.has(local.id):
-                                val base_id = gep_base[local.id]
-                                val prev = base_store_count[base_id] ?? 0
-                                base_store_count[base_id] = prev + 1
-                        case _:
-                            pass
-                case _:
-                    pass
-            ii = ii + 1
-        var any_coalesce = false
-        val ks = base_store_count.keys()
-        var ki = 0
-        while ki < ks.len():
-            if base_store_count[ks[ki]] >= 2:
-                any_coalesce = true
-            ki = ki + 1
-        if any_coalesce:
-            modified = true
-            var new_insts: [MirInst] = []
-            var hint_emitted: Dict<i64, bool> = {}
-            var gep_base2: Dict<i64, i64> = {}
-            var jj = 0
-            while jj < block.instructions.len():
-                val inst = block.instructions[jj]
-                match inst.kind:
-                    case GetElementPtr(dest, base, indices):
-                        match base.kind:
-                            case Copy(local) | Move(local):
-                                # Guard: see seed JIT Dict<i64,_> corruption note above.
-                                if local.?:
-                                    gep_base2[dest.id] = local.id
-                            case _:
-                                pass
-                        new_insts = new_insts.push(inst)
-                    case Store(ptr, value):
-                        match ptr.kind:
-                            case Copy(local) | Move(local):
-                                if local.? and gep_base2.has(local.id):
-                                    val base_id: i64 = gep_base2[local.id] ?? 0
-                                    val sc: i64 = base_store_count[base_id] ?? 0
-                                    if sc >= 2 and not hint_emitted.has(base_id):
-                                        val base_lid = LocalId(id: base_id)
-                                        val base_op = MirOperand(kind: MirOperandKind.Copy(base_lid))
-                                        val cnt_op = MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(sc), MirType.i64()))
-                                        var hint_args: [MirOperand] = []
-                                        hint_args = hint_args.push(base_op)
-                                        hint_args = hint_args.push(cnt_op)
-                                        val hint = MirInst(
-                                            kind: MirInstKind.Intrinsic(nil, "bulk_store_hint", hint_args),
-                                            span: nil
-                                        )
-                                        new_insts = new_insts.push(hint)
-                                        hint_emitted[base_id] = true
-                            case _:
-                                pass
-                        new_insts = new_insts.push(inst)
-                    case _:
-                        new_insts = new_insts.push(inst)
-                jj = jj + 1
-            new_blocks = new_blocks.push(MirBlock(
-                id: block.id, label: block.label,
-                instructions: new_insts, terminator: block.terminator
-            ))
-        else:
-            new_blocks = new_blocks.push(block)
-        bi = bi + 1
-    if modified:
-        MirFunction.with_blocks(func, new_blocks)
-    else:
-        func
+    # Analysis-only until every backend and interpreter can consume a stable
+    # bulk-store representation. Candidate discovery remains in count_*.
+    func
 
-fn optimize_read_ahead_hoist(func: MirFunction, stats: OptimizationStats) -> MirFunction:
+fn optimize_read_ahead_hoist(func: MirFunction, mut stats: OptimizationStats) -> MirFunction:
     """Detect loop-invariant Load/Call instructions; count hoist candidates.
 
     Identifies basic blocks inside loops (targeted by back-edges from Goto
@@ -213,78 +122,9 @@ fn optimize_read_ahead_hoist(func: MirFunction, stats: OptimizationStats) -> Mir
     func
 
 fn optimize_syscall_batch(func: MirFunction, mut stats: OptimizationStats) -> MirFunction:
-    var new_blocks: [MirBlock] = []
-    var modified = false
-    var bi = 0
-    while bi < func.blocks.len():
-        val block = func.blocks[bi]
-        var batch_starts: Dict<i64, i64> = {}
-        var batch_fids: Dict<i64, i64> = {}
-        var prev_func_id: i64 = -1
-        var run_length: i64 = 0
-        var run_start: i64 = 0
-        var ii = 0
-        while ii < block.instructions.len():
-            val inst = block.instructions[ii]
-            match inst.kind:
-                case Call(dest, func_op, args):
-                    var fid: i64 = -1
-                    match func_op.kind:
-                        case Copy(local) | Move(local):
-                            fid = local.id
-                        case _:
-                            pass
-                    if fid >= 0 and fid == prev_func_id:
-                        run_length = run_length + 1
-                    else:
-                        if run_length >= 2:
-                            batch_starts[run_start] = run_length
-                            batch_fids[run_start] = prev_func_id
-                        prev_func_id = fid
-                        run_start = ii
-                        run_length = 1
-                case _:
-                    if run_length >= 2:
-                        batch_starts[run_start] = run_length
-                        batch_fids[run_start] = prev_func_id
-                    prev_func_id = -1
-                    run_length = 0
-            ii = ii + 1
-        if run_length >= 2:
-            batch_starts[run_start] = run_length
-            batch_fids[run_start] = prev_func_id
-        val bk = batch_starts.keys()
-        if bk.len() > 0:
-            modified = true
-            var new_insts: [MirInst] = []
-            ii = 0
-            while ii < block.instructions.len():
-                if batch_starts.has(ii):
-                    val fid_val: i64 = batch_fids[ii] ?? 0
-                    val run_val: i64 = batch_starts[ii] ?? 0
-                    val func_op = MirOperand(kind: MirOperandKind.Copy(LocalId(id: fid_val)))
-                    val cnt_op = MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(run_val), MirType.i64()))
-                    var hint_args: [MirOperand] = []
-                    hint_args = hint_args.push(func_op)
-                    hint_args = hint_args.push(cnt_op)
-                    val hint = MirInst(
-                        kind: MirInstKind.Intrinsic(nil, "call_batch_hint", hint_args),
-                        span: nil
-                    )
-                    new_insts = new_insts.push(hint)
-                new_insts = new_insts.push(block.instructions[ii])
-                ii = ii + 1
-            new_blocks = new_blocks.push(MirBlock(
-                id: block.id, label: block.label,
-                instructions: new_insts, terminator: block.terminator
-            ))
-        else:
-            new_blocks = new_blocks.push(block)
-        bi = bi + 1
-    if modified:
-        MirFunction.with_blocks(func, new_blocks)
-    else:
-        func
+    # Analysis-only until batching has a semantics-preserving MIR operation
+    # and complete backend/interpreter support. Candidate discovery remains.
+    func
 
 fn count_write_coalesce(func: MirFunction) -> i64:
     var count = 0
@@ -300,13 +140,19 @@ fn count_write_coalesce(func: MirFunction) -> i64:
                 case GetElementPtr(dest, base, indices):
                     match base.kind:
                         case Copy(local) | Move(local):
-                            gep_base[dest.id] = local.id
+                            # Guard: seed JIT Dict<i64,_> corruption can hand back a
+                            # nil-payload operand here (doc/08_tracking/bug/
+                            # seed_jit_int_keyed_dict_broken_2026-07-02.md). `local` is
+                            # never semantically nil for a real Copy/Move operand; skip
+                            # rather than crash so bootstrap surfaces the next issue.
+                            if local.?:
+                                gep_base[dest.id] = local.id
                         case _:
                             pass
                 case Store(ptr, value):
                     match ptr.kind:
                         case Copy(local) | Move(local):
-                            if gep_base.has(local.id):
+                            if local.? and gep_base.has(local.id):
                                 val base_id = gep_base[local.id]
                                 val prev = base_store_count[base_id] ?? 0
                                 base_store_count[base_id] = prev + 1
@@ -453,7 +299,7 @@ fn count_syscall_batch(func: MirFunction) -> i64:
 # Bulk Copy Recognizer — Load+Store pairs from different GEP bases
 # ============================================================================
 
-fn optimize_bulk_copy(func: MirFunction, stats: OptimizationStats) -> MirFunction:
+fn optimize_bulk_copy(func: MirFunction, mut stats: OptimizationStats) -> MirFunction:
     # SG-1.3 WARNING — index-blind recognizer. This pass is ADDITIVE: it inserts the
     # advisory `bulk_copy_hint` and KEEPS every original GEP/Load/Store, so it is
     # semantics-preserving by construction (the hint lowers to a NO-OP in the C backend).
@@ -582,17 +428,18 @@ fn optimize_bulk_copy(func: MirFunction, stats: OptimizationStats) -> MirFunctio
     else:
         func
 
-# ── SG-1.3 SOUND bulk-copy elision (C backend + SIMPLE_MIR_BULK_OPS=1 only) ──────────────
-# Replaces a canonical element-copy run with the active `bulk_copy` intrinsic that the C
-# backend lowers to a real memmove. SOUND BY STRICTNESS — fires ONLY when ALL hold:
+# ── SG-1.3 quarantined bulk-copy analysis ───────────────────────────────────────────────
+# The dormant matcher recognizes a canonical element-copy run, but its direct adapter below
+# is an identity until region alias facts prove the complete source/destination spans disjoint.
+# The legacy structural conditions are:
 #   (struct)   consecutive 4-instr units `GEP gs=src[i]; Load ld=*gs; GEP gd=dst[i]; Store *gd=ld`
 #              for i=0..k-1, k>=2, same src_base != dst_base, indices contiguous from 0, di==si==i;
 #   (H1)       every unit temp (gs/ld/gd) is DEAD outside the matched run — no other instruction
 #              or terminator references it (else deleting its def is a dangling-local miscompile);
 #   (H2)       every loaded element is EXACTLY 8 bytes — the memmove copies count*8 bytes, but a
 #              sub-8-byte element Store writes only sizeof(ty), so memmove would clobber gap bytes.
-# H1/H2 were surfaced by adversarial review; the non-firing specs in bulk_copy_elision_spec.spl
-# exercise each guard. Erring toward NOT firing is safe (a miss is a perf miss, never a miscompile).
+# H1/H2 were surfaced by adversarial review. They do not discharge M1: distinct LocalIds can
+# still reference overlapping storage, where a forward loop and memmove have different results.
 
 struct CopyUnit:
     ok: bool
@@ -661,7 +508,10 @@ fn elide_term_refs(term: MirTerminator, consumed: Dict<i64, bool>) -> bool:
         case Unreachable: false
         case Abort(_): false
         case Ret(v):
-            if val ret_value = v: consumed.has(elide_operand_local(ret_value)) else: false
+            if val ret_value = v:
+                consumed.has(elide_operand_local(ret_value))
+            else:
+                false
         case If(cond, _, _): consumed.has(elide_operand_local(cond))
         case Switch(value, _, _): consumed.has(elide_operand_local(value))
         case _: true
@@ -735,75 +585,13 @@ fn elide_match_copy_unit(insts: [MirInst], p: i64, ei: i64) -> CopyUnit:
             case _: fail
 
 fn elide_bulk_copy(func: MirFunction, stats: OptimizationStats) -> MirFunction:
-    var new_blocks: [MirBlock] = []
-    var modified = false
-    var bi = 0
-    while bi < func.blocks.len():
-        val block = func.blocks[bi]
-        var new_insts: [MirInst] = []
-        var j = 0
-        while j < block.instructions.len():
-            val first = elide_match_copy_unit(block.instructions, j, 0)
-            if first.ok:
-                val src_b = first.src_base
-                val dst_b = first.dst_base
-                var units: [CopyUnit] = []
-                units = units.push(first)
-                var k = 1
-                var cont = true
-                while cont:
-                    val nxt = elide_match_copy_unit(block.instructions, j + k * 4, k)
-                    if nxt.ok and nxt.src_base == src_b and nxt.dst_base == dst_b:
-                        units = units.push(nxt)
-                        k = k + 1
-                    else:
-                        cont = false
-                var fire = k >= 2
-                # H2 — every loaded element is exactly 8 bytes.
-                if fire:
-                    var u2 = 0
-                    while u2 < units.len():
-                        if not elide_value_is_8byte(func, units[u2].ld):
-                            fire = false
-                        u2 = u2 + 1
-                # H1 — run temporaries dead outside the matched range.
-                if fire:
-                    var consumed: Dict<i64, bool> = {}
-                    var u1 = 0
-                    while u1 < units.len():
-                        consumed[units[u1].gs] = true
-                        consumed[units[u1].ld] = true
-                        consumed[units[u1].gd] = true
-                        u1 = u1 + 1
-                    if not elide_run_dead_out(func, bi, j, j + k * 4, consumed):
-                        fire = false
-                if fire:
-                    val src_op = MirOperand(kind: MirOperandKind.Copy(LocalId(id: src_b)))
-                    val dst_op = MirOperand(kind: MirOperandKind.Copy(LocalId(id: dst_b)))
-                    val cnt_op = MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(k), MirType.i64()))
-                    var bargs: [MirOperand] = []
-                    bargs = bargs.push(src_op)
-                    bargs = bargs.push(dst_op)
-                    bargs = bargs.push(cnt_op)
-                    val bc = MirInst(kind: MirInstKind.Intrinsic(nil, "bulk_copy", bargs), span: nil)
-                    new_insts = new_insts.push(bc)
-                    modified = true
-                    j = j + k * 4
-                else:
-                    new_insts = new_insts.push(block.instructions[j])
-                    j = j + 1
-            else:
-                new_insts = new_insts.push(block.instructions[j])
-                j = j + 1
-        new_blocks = new_blocks.push(MirBlock(
-            id: block.id, label: block.label,
-            instructions: new_insts, terminator: block.terminator
-        ))
-        bi = bi + 1
-    if modified:
-        MirFunction.with_blocks(func, new_blocks)
-    else:
-        func
+    # Disabled: distinct MIR base locals do not prove disjoint storage. For
+    # overlapping aliases, the original forward element loop can cascade a
+    # prior write into the next load, while memmove preserves the original
+    # source bytes. H1/H2 and structural matching do not discharge that alias
+    # precondition, so no active bulk_copy may be produced until region alias
+    # facts prove non-overlap for the complete copied span.
+    func
 
 fn count_bulk_copy(func: MirFunction) -> i64:
     var count = 0
@@ -862,7 +650,7 @@ fn count_bulk_copy(func: MirFunction) -> i64:
 # Bulk Fill Recognizer — Store of same constant to contiguous GEP offsets
 # ============================================================================
 
-fn optimize_bulk_fill(func: MirFunction, stats: OptimizationStats) -> MirFunction:
+fn optimize_bulk_fill(func: MirFunction, mut stats: OptimizationStats) -> MirFunction:
     var new_blocks: [MirBlock] = []
     var modified = false
     var bi = 0
@@ -1001,7 +789,7 @@ fn count_bulk_fill(func: MirFunction) -> i64:
 # Bulk Compare Recognizer — Load+Load+Compare from two GEP bases
 # ============================================================================
 
-fn optimize_bulk_cmp(func: MirFunction, stats: OptimizationStats) -> MirFunction:
+fn optimize_bulk_cmp(func: MirFunction, mut stats: OptimizationStats) -> MirFunction:
     var new_blocks: [MirBlock] = []
     var modified = false
     var bi = 0
@@ -1195,7 +983,7 @@ fn count_bulk_cmp(func: MirFunction) -> i64:
 # Endian Load Recognizer — byte-shift-OR patterns assembling multi-byte values
 # ============================================================================
 
-fn optimize_endian_load(func: MirFunction, stats: OptimizationStats) -> MirFunction:
+fn optimize_endian_load(func: MirFunction, mut stats: OptimizationStats) -> MirFunction:
     var new_blocks: [MirBlock] = []
     var modified = false
     var bi = 0
@@ -1394,7 +1182,7 @@ fn count_endian_load(func: MirFunction) -> i64:
 # Endian Store Recognizer — shift-AND-Store patterns splitting values into bytes
 # ============================================================================
 
-fn optimize_endian_store(func: MirFunction, stats: OptimizationStats) -> MirFunction:
+fn optimize_endian_store(func: MirFunction, mut stats: OptimizationStats) -> MirFunction:
     var new_blocks: [MirBlock] = []
     var modified = false
     var bi = 0

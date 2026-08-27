@@ -4,28 +4,22 @@
 # of the append-only sink descriptor.  Driver call sites pass scalar
 # cardinalities; no HIR aggregate is copied or formatted for diagnostics.
 
-extern fn rt_env_get(key: text) -> text
-extern fn rt_string_data(value: text) -> i64
-extern fn rt_string_len(value: text) -> i64
-extern fn rt_mem_snapshot_open(path_ptr: i64, path_len: i64) -> i64
+use std.nogc_sync_mut.io_runtime.{env_get_opt}
+
+extern fn rt_mem_snapshot_open(path: text) -> i64
 extern fn rt_mem_snapshot_record(
-    fd: i64, seq: i64, event_ptr: i64, event_len: i64,
-    phase_ptr: i64, phase_len: i64, source_index: i64,
-    source_path_ptr: i64, source_path_len: i64,
-    retained_modules: i64, validation_keys: i64,
+    fd: i64, seq: i64, event: text, phase: text, source_index: i64,
+    source_path: text, retained_modules: i64, validation_keys: i64,
     validation_values: i64, shared_traits: i64, hir_names: i64,
     hir_symbols: i64, hir_functions: i64, hir_constants: i64,
     hir_enums: i64, hir_structs: i64, hir_classes: i64
 ) -> bool
 extern fn rt_mem_snapshot_close(fd: i64) -> bool
-use compiler.driver.driver_evidence_identity.{driver_evidence_run_id}
 
 var _mem_snapshot_fd: i64 = -1
 var _mem_snapshot_seq: i64 = 0
 var _mem_snapshot_enabled: bool = false
 var _mem_snapshot_failed: bool = false
-var _mem_snapshot_finished: bool = false
-val _MEM_SNAPSHOT_MAX_SEQ: i64 = 9223372036854775807
 
 fn _snapshot_append(
     event: text, phase: text, source_index: i64, source_path: text,
@@ -36,20 +30,14 @@ fn _snapshot_append(
 ) -> bool:
     if not _mem_snapshot_enabled:
         return true
-    if _mem_snapshot_failed or _mem_snapshot_finished or _mem_snapshot_fd < 0:
-        return false
-    if _mem_snapshot_seq == _MEM_SNAPSHOT_MAX_SEQ:
-        _mem_snapshot_failed = true
+    if _mem_snapshot_failed or _mem_snapshot_fd < 0:
         return false
     # Formatting is deliberately runtime-owned and stack-bounded. Building an
     # interpolated Simple text here would contaminate the no-GC heap counter
     # this probe exists to measure.
     if not rt_mem_snapshot_record(
-        _mem_snapshot_fd, _mem_snapshot_seq,
-        rt_string_data(event), rt_string_len(event),
-        rt_string_data(phase), rt_string_len(phase), source_index,
-        rt_string_data(source_path), rt_string_len(source_path),
-        retained_modules, validation_keys, validation_values,
+        _mem_snapshot_fd, _mem_snapshot_seq, event, phase, source_index,
+        source_path, retained_modules, validation_keys, validation_values,
         shared_traits, hir_names, hir_symbols, hir_functions, hir_constants,
         hir_enums, hir_structs, hir_classes):
         _mem_snapshot_failed = true
@@ -62,7 +50,7 @@ fn _snapshot_append(
 # without following symlinks and opens an absent regular target O_EXCL,
 # O_NOFOLLOW, O_APPEND and O_CLOEXEC.
 fn mem_snapshot_begin() -> i64:
-    if _mem_snapshot_enabled or _mem_snapshot_finished or _mem_snapshot_fd >= 0:
+    if _mem_snapshot_fd >= 0:
         return -1
     val path = env_get_opt("SIMPLE_MEM_SNAPSHOT_FILE") ?? ""
     if path == "":
@@ -70,12 +58,8 @@ fn mem_snapshot_begin() -> i64:
         return 0
     _mem_snapshot_enabled = true
     _mem_snapshot_failed = false
-    _mem_snapshot_finished = false
     _mem_snapshot_seq = 0
-    # This provider is a raw SFFI boundary. Passing `text` directly supplies
-    # the boxed runtime value as one word; the provider requires byte pointer
-    # plus length. Keep that lowering explicit so Stage 2 and Stage 3 agree.
-    _mem_snapshot_fd = rt_mem_snapshot_open(rt_string_data(path), rt_string_len(path))
+    _mem_snapshot_fd = rt_mem_snapshot_open(path)
     if _mem_snapshot_fd < 0:
         _mem_snapshot_failed = true
         return -1
@@ -107,53 +91,22 @@ fn mem_snapshot_record(
         hir_symbols, hir_functions, hir_constants, hir_enums, hir_structs,
         hir_classes)
 
-# Promotion-specific scalar row. The stable v1 wire schema is preserved:
-# retained_modules and validation_keys carry promoted node/byte counts only
-# for hir-promotion and hir-promotion-total phases; all aggregate-cardinality
-# fields are zero.
-fn mem_snapshot_record_promotion(
-    phase: text, source_index: i64, source_path: text,
-    promoted_nodes: i64, promoted_bytes: i64
-) -> bool:
-    _snapshot_append(
-        "snapshot", phase, source_index, source_path,
-        promoted_nodes, promoted_bytes, 0, 0, 0, 0, 0, 0, 0, 0, 0)
-
 fn mem_snapshot_finish_with_outcome(outcome: text) -> bool:
     if not _mem_snapshot_enabled:
         return true
-    if _mem_snapshot_failed or _mem_snapshot_finished:
-        return false
     val appended = _snapshot_append("terminal", outcome, -1, "", 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
     val closed = if _mem_snapshot_fd >= 0: rt_mem_snapshot_close(_mem_snapshot_fd) else: false
     _mem_snapshot_fd = -1
-    _mem_snapshot_finished = true
-    if not appended or not closed:
-        _mem_snapshot_failed = true
-        return false
-    true
+    appended and closed and not _mem_snapshot_failed
 
 fn mem_snapshot_finish() -> bool:
     mem_snapshot_finish_with_outcome("hir-complete")
 
 fn mem_snapshot_abort():
     if _mem_snapshot_fd >= 0:
-        if not _mem_snapshot_finished:
-            val failure_recorded = rt_mem_snapshot_record_bound(
-                _mem_snapshot_fd, driver_evidence_run_id(),
-                _mem_snapshot_seq, "terminal", "evidence-failed", -1, "",
-                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
-            if failure_recorded:
-                _mem_snapshot_seq = _mem_snapshot_seq + 1
-        val _closed = rt_mem_snapshot_close(_mem_snapshot_fd)
+        val _ = rt_mem_snapshot_close(_mem_snapshot_fd)
     _mem_snapshot_fd = -1
     _mem_snapshot_failed = true
-    _mem_snapshot_finished = true
-
-fn mem_snapshot_failed() -> bool:
-    _mem_snapshot_failed
 
 export mem_snapshot_begin, mem_snapshot_record, mem_snapshot_finish
-export mem_snapshot_record_promotion
 export mem_snapshot_finish_with_outcome, mem_snapshot_abort
-export mem_snapshot_failed

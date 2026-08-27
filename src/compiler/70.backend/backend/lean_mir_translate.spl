@@ -2,11 +2,20 @@
 #
 # Extracted from lean_backend.spl. Contains MIR body/block/instruction
 # translation to Lean 4 syntax.
+#
+# SOUNDNESS CONTRACT (mission-critical, verification-carrying codegen):
+# Every construct that cannot be faithfully modelled in Lean MUST return
+# `Err(CompileError)` naming the construct. This module NEVER emits `sorry`,
+# never silently drops an instruction/terminator, and never substitutes a
+# plausible-but-wrong operator/type for an unknown one. Emitting a wrong-but-
+# well-typed Lean model would let a false theorem be "proved", so refusing to
+# emit is the only sound behaviour.
+#
+# DETERMINISM: any `Dict` iterated here is key-sorted before emission so the
+# generated Lean is byte-identical for identical MIR.
 
 use compiler.mir.mir_data.*
 use compiler.backend.backend.backend_types.{BackendKind, CompileError, compileerror_backend_error}
-use compiler.mir.mir_types.{MirType}
-use compiler.mir.mir_types.{LocalId}  # explicit: a glob is not an import-origin for surface projection
 
 fn lean_err(msg: text) -> CompileError:
     """Construct a named Lean-backend diagnostic."""
@@ -16,8 +25,14 @@ fn lean_err(msg: text) -> CompileError:
 # MIR Type to Lean Conversion
 # ============================================================================
 
-fn mir_type_to_lean(ty: MirType) -> text:
-    """Convert MIR type to Lean 4 type."""
+fn mir_type_to_lean(ty: MirType) -> Result<text, CompileError>:
+    """Convert MIR type to a faithful Lean 4 type, or hard-fail.
+
+    Signedness and width are preserved so the Lean model matches MIR
+    semantics. Types without a faithful primitive Lean representation
+    (SIMD lanes, raw references, foreign/opaque, hardware bit lanes)
+    return an error naming the kind rather than a lossy placeholder.
+    """
     match ty.kind:
         case I8 | U8: Ok("BitVec 8")
         case I16 | U16: Ok("BitVec 16")
@@ -58,15 +73,17 @@ fn mir_type_to_lean(ty: MirType) -> text:
 # MIR-to-Lean Body Translation
 # ============================================================================
 
-fn translate_mir_body(body: MirBody) -> text:
-    """Translate a MIR function body to a Lean 4 term.
+fn translate_mir_body(body: MirBody) -> Result<text, CompileError>:
+    """Translate a MIR function body to a Lean 4 term, or hard-fail.
 
-    Walks the basic blocks and instructions of the MIR body,
-    producing a let-binding chain that represents the computation.
-    The final value is the return expression.
+    Walks the basic blocks and instructions of the MIR body, producing a
+    let-binding chain whose final value is the return expression. A body
+    with no blocks, or one that produces no translatable statements, is an
+    error: the previous behaviour emitted `sorry`, which in Lean admits any
+    goal and would silently validate false theorems.
     """
     if body.blocks.is_empty():
-        return "sorry"
+        return Err(lean_err("lean-backend: function `{body.name}` has no MIR basic blocks; cannot emit a sound Lean term (refusing to emit `sorry`)"))
 
     val structured_match = translate_exact_result_match_body(body)
     match structured_match:
@@ -82,14 +99,14 @@ fn translate_mir_body(body: MirBody) -> text:
 
     var lines: [text] = []
     for block in body.blocks:
-        val block_lines = translate_mir_block(block, body)
+        val block_lines = translate_mir_block(block, body)?
         for line in block_lines:
             lines = lines.push(line)
 
     if lines.is_empty():
-        return "()"
+        return Err(lean_err("lean-backend: function `{body.name}` produced no translatable statements; refusing to emit an empty/placeholder body"))
 
-    lines.join("\n")
+    Ok(lines.join("\n"))
 
 struct LeanGlobalStateBodyV1:
     body: text
@@ -120,6 +137,8 @@ fn translate_mir_global_state_body_v1(body: MirBody) -> Result<LeanGlobalStateBo
                 state_value_type = lean_type
                 val region = symbol.id.to_string()
                 if not written_regions.contains(region): written_regions.push(region)
+            case GlobalAddr(_, _, _):
+                return Err(lean_err("lean-backend: GlobalAddr lowering is not implemented"))
             case _: pass
     if state_value_type == "":
         return Err(lean_err("lean-backend: global-state lowering requires at least one exact global access"))
@@ -499,7 +518,7 @@ fn translate_mir_block(block: MirBlock, body: MirBody) -> Result<[text], Compile
     if term_line != "":
         lines = lines.push(term_line)
 
-    lines
+    Ok(lines)
 
 fn lean_body_local_type(body: MirBody, local: LocalId) -> MirType?:
     """Resolve a local type from the same MIR body being translated."""
@@ -512,50 +531,6 @@ fn lean_operand_mir_type(body: MirBody, operand: MirOperand) -> MirType?:
     match operand.kind:
         case Copy(local) | Move(local): lean_body_local_type(body, local)
         case Const(_, type_): Some(type_)
-
-fn lean_operand_is_canonical_i64_zero(body: MirBody, operand: MirOperand) -> bool:
-    """Recognize only the native Result ABI projection of semantic Unit."""
-    match operand.kind:
-        case Const(MirConstValue.Int(value), type_):
-            value == 0 and type_.kind == MirTypeKind.I64
-        case Copy(local) | Move(local):
-            val local_type = lean_body_local_type(body, local)
-            if local_type == nil or (local_type ?? MirType.unit()).kind != MirTypeKind.I64:
-                return false
-            for block in body.blocks:
-                for instruction in block.instructions:
-                    match instruction.kind:
-                        case Const(dest, MirConstValue.Int(value), type_):
-                            if dest.id == local.id:
-                                return value == 0 and type_.kind == MirTypeKind.I64
-                        case _:
-                            ()
-            false
-
-fn translate_result_payload_exact(body: MirBody, operand: MirOperand, expected_type: MirType, variant: text) -> Result<text, CompileError>:
-    """Recover semantic Unit from its canonical native ABI zero projection."""
-    val payload_type = lean_operand_mir_type(body, operand)
-    if payload_type == nil:
-        return Err(lean_err("lean-backend: Result {variant} payload lacks a retained MIR type"))
-    val found_type = payload_type ?? MirType.unit()
-    match expected_type.kind:
-        case Unit:
-            match found_type.kind:
-                case Unit:
-                    return Ok("()")
-                case Tuple(elements):
-                    if elements.len() == 0:
-                        return Ok("()")
-                case I64:
-                    if lean_operand_is_canonical_i64_zero(body, operand):
-                        return Ok("()")
-                case _:
-                    ()
-            Err(lean_err("lean-backend: Result {variant} Unit payload is not the canonical i64-zero ABI projection"))
-        case _:
-            if found_type.kind != expected_type.kind:
-                return Err(lean_err("lean-backend: Result {variant} payload type does not match retained MIR Result type"))
-            translate_operand_exact(body, operand)
 
 fn translate_mir_inst(inst: MirInst, body: MirBody) -> Result<text, CompileError>:
     """Translate a single MIR instruction to a Lean let-binding, or hard-fail.
@@ -575,10 +550,10 @@ fn translate_mir_inst(inst: MirInst, body: MirBody) -> Result<text, CompileError
             Ok("let _l{dest.id} := {lean_val}")
 
         case Copy(dest, src):
-            "let _l{dest.id} := _l{src.id}"
+            Ok("let _l{dest.id} := _l{src.id}")
 
         case Move(dest, src):
-            "let _l{dest.id} := _l{src.id}"
+            Ok("let _l{dest.id} := _l{src.id}")
 
         case BinOp(dest, op, left, right):
             val lean_op = translate_binop(op)?
@@ -610,7 +585,7 @@ fn translate_mir_inst(inst: MirInst, body: MirBody) -> Result<text, CompileError
             val ops_str = translate_operand_list_exact(body, operands, ", ")?
             match kind:
                 case Tuple:
-                    "let _l{dest.id} := ({ops_str})"
+                    Ok("let _l{dest.id} := ({ops_str})")
                 case Array(_):
                     Err(lean_err("lean-backend: fixed-array aggregate requires an exact Vector constructor and length proof"))
                 case Struct(sym):
@@ -644,22 +619,21 @@ fn translate_mir_inst(inst: MirInst, body: MirBody) -> Result<text, CompileError
                                 case Result(ok_type, err_type):
                                     if args.len() != 3:
                                         return Err(lean_err("lean-backend: typed Result constructor requires enum id, literal discriminant, and payload"))
-                                    val enum_id_type = lean_operand_mir_type(body, args[0])
-                                    val discriminant_type = lean_operand_mir_type(body, args[1])
-                                    if enum_id_type == nil or (enum_id_type ?? MirType.unit()).kind != MirTypeKind.I32:
-                                        return Err(lean_err("lean-backend: typed Result constructor enum id must retain the native i32 width"))
-                                    if discriminant_type == nil or (discriminant_type ?? MirType.unit()).kind != MirTypeKind.I32:
-                                        return Err(lean_err("lean-backend: typed Result constructor discriminant must retain the native i32 width"))
                                     var discriminant = -1
                                     match args[1].kind:
                                         case Const(MirConstValue.Int(value), _): discriminant = value
                                         case _:
                                             return Err(lean_err("lean-backend: typed Result constructor discriminant must be a literal"))
+                                    val payload = translate_operand_exact(body, args[2])?
                                     if discriminant == 0:
-                                        val payload = translate_result_payload_exact(body, args[2], ok_type, "Ok")?
+                                        val payload_type = lean_operand_mir_type(body, args[2])
+                                        if payload_type == nil or (payload_type ?? MirType.unit()).kind != ok_type.kind:
+                                            return Err(lean_err("lean-backend: Result Ok payload type does not match retained MIR Result type"))
                                         return Ok("let _l{result_dest.id} := Except.ok {payload}")
                                     if discriminant == 1:
-                                        val payload = translate_result_payload_exact(body, args[2], err_type, "Err")?
+                                        val payload_type = lean_operand_mir_type(body, args[2])
+                                        if payload_type == nil or (payload_type ?? MirType.unit()).kind != err_type.kind:
+                                            return Err(lean_err("lean-backend: Result Err payload type does not match retained MIR Result type"))
                                         return Ok("let _l{result_dest.id} := Except.error {payload}")
                                     return Err(lean_err("lean-backend: typed Result constructor has unknown discriminant {discriminant}"))
                                 case _: pass
@@ -668,21 +642,21 @@ fn translate_mir_inst(inst: MirInst, body: MirBody) -> Result<text, CompileError
             val args_str = translate_operand_list_exact(body, args, " ")?
             if dest.?:
                 val d = dest.unwrap()
-                "let _l{d.id} := {f} {args_str}"
+                Ok("let _l{d.id} := {f} {args_str}")
             else:
-                "let _ := {f} {args_str}"
+                Ok("let _ := {f} {args_str}")
 
         case Intrinsic(dest, name, args):
             Err(lean_err("lean-backend: intrinsic `{name}` requires a registered exact semantic definition"))
 
         case DebugValue(local, name):
-            "-- debug: {name} = _l{local.id}"
+            Ok("-- debug: {name} = _l{local.id}")
 
         case Nop:
-            ""
+            Ok("")
 
         case _:
-            "-- unsupported instruction"
+            Err(lean_err("lean-backend: MIR instruction `{inst.kind}` has no sound Lean lowering; refusing to drop it from the model"))
 
 fn translate_operand_list_exact(body: MirBody, ops: [MirOperand], sep: text) -> Result<text, CompileError>:
     """Translate and join operands only after preserving their retained MIR type."""
@@ -749,7 +723,7 @@ fn translate_mir_terminator(term: MirTerminator, body: MirBody) -> Result<text, 
         case Switch(value, targets, default):
             val v = translate_operand_exact(body, value)?
             Err(lean_err("lean-backend: switch on `{v}` (default block{default.id}) requires structured-CFG lowering; refusing to emit a term that drops branch targets"))
-        case CallTerminator(dest, func, args, normal, _):
+        case CallTerminator(dest, func, args, normal, _, _, _):
             val f = translate_operand_exact(body, func)?
             Err(lean_err("lean-backend: call terminator `{f}` continuing at block{normal.id} requires structured-CFG lowering; refusing to drop the successor edge"))
 

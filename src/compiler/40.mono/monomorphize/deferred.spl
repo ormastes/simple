@@ -22,7 +22,7 @@
 use .types (ConcreteType, SpecializationKey)
 use .engine (Monomorphizer)
 use .metadata (MonomorphizationMetadata, SpecializationEntry, GenericFunctionMeta, GenericStructMeta, GenericClassMeta, GenericEnumMeta)
-use ..ast (FunctionDef, StructDef, ClassDef, EnumDef, TraitDef)
+use compiler.frontend.ast (FunctionDef, StructDef, ClassDef, EnumDef, TraitDef)
 use error (CompileError)
 
 # Import from split files
@@ -211,8 +211,14 @@ impl DeferredMonomorphizer:
             deferred_set_error("Invalid template magic")
             return false
 
-        # Read version
+        # Read version -- GTPL v2 is the only format this reader understands
+        # (enum records carry the ENV2 payload/attribute block). A v1 header
+        # is rejected up front with a named error instead of relying on the
+        # per-record marker to trip part-way through the data.
         val version = (data[4] as i64) + ((data[5] as i64) << 8)
+        if version != 2:
+            deferred_set_error("SMF template section (GTPL) is format version {version}, but this compiler reads version 2 only: this .smf was written by an older compiler; rebuild it")
+            return false
 
         # Read template count
         val count = ((data[6] as i64) +
@@ -233,8 +239,12 @@ impl DeferredMonomorphizer:
             val result = self.deserialize_full_template(kind, data, offset)
             if result == nil:
                 return false
-            val template = result.0
-            offset = result.1
+            # Double unwrap: the optional tuple reads as nested optionals here
+            # (same idiom as deferred_deserialize._read_def_prefix).
+            val result_opt = result!
+            val pair = result_opt!
+            val template = pair.0
+            offset = pair.1
 
             val name = template.name()
             self.template_cache[name] = template
@@ -250,17 +260,25 @@ impl DeferredMonomorphizer:
 
         ROBUSTNESS: Validates data bounds before each read.
         """
-        match kind:
+        # Match on an i64: a `u8` scrutinee never matched the bare integer
+        # literal arms below (every kind fell to "Unknown template kind"), so
+        # no template had ever deserialized through this path.
+        val kind_i: i64 = kind as i64
+        match kind_i:
             0:  # Function
                 val result = deserialize_function_def(data, start_offset)
                 if result == nil:
                     return nil
-                (GenericTemplate.Function(result.0), result.1)
+                val result_opt = result!
+                val pair = result_opt!
+                (GenericTemplate.Function(pair.0), pair.1)
             1:  # Struct
                 val result = deserialize_struct_def(data, start_offset)
                 if result == nil:
                     return nil
-                (GenericTemplate.Struct(result.0), result.1)
+                val result_opt = result!
+                val pair = result_opt!
+                (GenericTemplate.Struct(pair.0), pair.1)
             2:  # Class
                 val result = deserialize_class_def(data, start_offset)
                 if result == nil:
@@ -270,12 +288,16 @@ impl DeferredMonomorphizer:
                 val result = deserialize_enum_def(data, start_offset)
                 if result == nil:
                     return nil
-                (GenericTemplate.Enum(result.0), result.1)
+                val result_opt = result!
+                val pair = result_opt!
+                (GenericTemplate.Enum(pair.0), pair.1)
             4:  # Trait
                 val result = deserialize_trait_def(data, start_offset)
                 if result == nil:
                     return nil
-                (GenericTemplate.Trait(result.0), result.1)
+                val result_opt = result!
+                val pair = result_opt!
+                (GenericTemplate.Trait(pair.0), pair.1)
             _:
                 deferred_set_error("Unknown template kind: {kind}")
                 nil
@@ -303,17 +325,19 @@ impl DeferredMonomorphizer:
         val key = SpecializationKey.new(name, type_args)
 
         # Check cache
-        val cached = self.specialization_cache.get(key)
-        if cached != nil:
+        # NOTE: native dict `.get()` returns a corrupt payload on a hit; use
+        # contains_key + indexed read. See doc/07_guide/language/dict_native_pitfalls.md
+        if self.specialization_cache.contains_key(key):
+            val cached = self.specialization_cache[key]
             match cached:
                 CompiledCode.Function(func): return func
                 _: pass
 
         # Get template
-        val template = self.template_cache.get(name)
-        if template == nil:
+        if not self.template_cache.contains_key(name):
             deferred_set_error("Template not found: {name}")
             return nil
+        val template = self.template_cache[name]
 
         val func_template = template.as_function()
         if func_template == nil:
@@ -365,17 +389,19 @@ impl DeferredMonomorphizer:
         val key = SpecializationKey.new(name, type_args)
 
         # Check cache
-        val cached = self.specialization_cache.get(key)
-        if cached != nil:
+        # NOTE: native dict `.get()` returns a corrupt payload on a hit; use
+        # contains_key + indexed read. See doc/07_guide/language/dict_native_pitfalls.md
+        if self.specialization_cache.contains_key(key):
+            val cached = self.specialization_cache[key]
             match cached:
                 CompiledCode.Struct(s): return s
                 _: pass
 
         # Get template
-        val template = self.template_cache.get(name)
-        if template == nil:
+        if not self.template_cache.contains_key(name):
             deferred_set_error("Template not found: {name}")
             return nil
+        val template = self.template_cache[name]
 
         val struct_template = template.as_struct()
         if struct_template == nil:
@@ -427,17 +453,19 @@ impl DeferredMonomorphizer:
         val key = SpecializationKey.new(name, type_args)
 
         # Check cache
-        val cached = self.specialization_cache.get(key)
-        if cached != nil:
+        # NOTE: native dict `.get()` returns a corrupt payload on a hit; use
+        # contains_key + indexed read. See doc/07_guide/language/dict_native_pitfalls.md
+        if self.specialization_cache.contains_key(key):
+            val cached = self.specialization_cache[key]
             match cached:
                 CompiledCode.Class(c): return c
                 _: pass
 
         # Get template
-        val template = self.template_cache.get(name)
-        if template == nil:
+        if not self.template_cache.contains_key(name):
             deferred_set_error("Template not found: {name}")
             return nil
+        val template = self.template_cache[name]
 
         val class_template = template.as_class()
         if class_template == nil:
@@ -489,17 +517,19 @@ impl DeferredMonomorphizer:
         val key = SpecializationKey.new(name, type_args)
 
         # Check cache
-        val cached = self.specialization_cache.get(key)
-        if cached != nil:
+        # NOTE: native dict `.get()` returns a corrupt payload on a hit; use
+        # contains_key + indexed read. See doc/07_guide/language/dict_native_pitfalls.md
+        if self.specialization_cache.contains_key(key):
+            val cached = self.specialization_cache[key]
             match cached:
                 CompiledCode.Enum(e): return e
                 _: pass
 
         # Get template
-        val template = self.template_cache.get(name)
-        if template == nil:
+        if not self.template_cache.contains_key(name):
             deferred_set_error("Template not found: {name}")
             return nil
+        val template = self.template_cache[name]
 
         val enum_template = template.as_enum()
         if enum_template == nil:
@@ -545,7 +575,7 @@ impl DeferredMonomorphizer:
 
     fn specialization_count() -> i64:
         """Get the number of cached specializations."""
-        self.specialization_cache.len()
+        self.specialization_cache.keys().len()
 
     me clear_cache():
         """Clear the specialization cache (keep templates)."""
@@ -569,10 +599,13 @@ impl DeferredMonomorphizer:
         Returns:
             CompiledCode wrapping the specialized definition, or nil with error set
         """
-        val template = self.template_cache.get(name)
-        if template == nil:
+        # contains_key + index read: a native enum-valued `Dict.get()` HIT
+        # returns a corrupt Option that segfaults on match.
+        # See doc/07_guide/language/dict_native_pitfalls.md
+        if not self.template_cache.contains_key(name):
             deferred_set_error("Template not found: {name}")
             return nil
+        val template = self.template_cache[name]
 
         match template:
             GenericTemplate.Function(_):
@@ -615,8 +648,8 @@ impl DeferredMonomorphizer:
     fn get_stats() -> DeferredMonoStats:
         """Get statistics about deferred monomorphization."""
         DeferredMonoStats(
-            template_count: self.template_cache.len(),
-            specialization_count: self.specialization_cache.len(),
+            template_count: self.template_cache.keys().len(),
+            specialization_count: self.specialization_cache.keys().len(),
             mode: self.mode
         )
 

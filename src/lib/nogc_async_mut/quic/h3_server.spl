@@ -1,38 +1,16 @@
-# H3 Server — HTTP/3 server built on QUIC + existing H3 frame layer
+# H3 Server capability facade — blocked until authenticated QUIC-TLS is live
 #
 # Combines:
 #   - QuicConnection (quic_connection.spl) for transport
 #   - H3Frame types (nogc_sync_mut.http.h3.h3_frame) for framing
 #   - UDP socket fd for sending/receiving datagrams
 #
-# Typical flow:
-#   1. h3_server_new       — bind UDP socket, allocate config
-#   2. h3_server_accept    — wait for first UDP datagram, feed to QUIC
-#   3. loop h3_server_process — drain QUIC streams into H3ServerEvents
-#   4. h3_server_respond   — encode headers+body and write to stream
+# The public shape is retained for compatibility, but every lifecycle entry
+# fails closed. Framing and a zero native handle are not service readiness.
 
 use nogc_async_mut.quic.quic_connection.{
     QuicConfig,
-    QuicConnection,
-    QuicOutgoing,
-    QuicStreamRead,
-    quic_config_default,
-    quic_accept,
-    quic_feed_udp,
-    quic_get_outgoing,
-    quic_stream_recv,
-    quic_stream_send,
-    quic_close,
-    quic_check_timeout
-}
-
-use nogc_sync_mut.http.h3.h3_frame.{
-    H3Frame,
-    H3DataFrame,
-    H3HeadersFrame,
-    h3_frame_emit,
-    h3_frame_parse,
-    H3FrameResult
+    QuicConnection
 }
 
 # ============================================================================
@@ -90,12 +68,11 @@ class H3Server:
 # Constructor
 # ============================================================================
 
-pub fn h3_server_new(bind_addr: text, port: i64, config: QuicConfig) -> H3Server:
+pub fn h3_server_new(bind_addr: text, port: i64, _config: QuicConfig) -> H3Server:
     """Create an H3Server bound to bind_addr:port.
 
-    The UDP socket fd is stored for later use by h3_server_accept and
-    h3_server_process.  A placeholder QuicConnection (handle=0) is kept until
-    the first client datagram arrives.
+    The current provider cannot create authenticated QUIC-TLS state, so the
+    returned compatibility value is terminally Closed and owns no UDP socket.
     """
     # Placeholder connection — replaced on first accept.
     val placeholder = QuicConnection {
@@ -107,7 +84,7 @@ pub fn h3_server_new(bind_addr: text, port: i64, config: QuicConfig) -> H3Server
     H3Server {
         quic: placeholder,
         udp_fd: -1,
-        state: H3ServerState.Listening,
+        state: H3ServerState.Closed,
         bind_addr: bind_addr,
         port: port
     }
@@ -117,62 +94,24 @@ pub fn h3_server_new(bind_addr: text, port: i64, config: QuicConfig) -> H3Server
 # ============================================================================
 
 pub fn h3_server_accept(server: H3Server) -> H3Server:
-    """Accept the first incoming QUIC connection on the bound UDP socket.
-
-    Feeds the initial datagram into quiche and returns an updated server with
-    the real QuicConnection handle.  The state transitions from Listening to
-    Connected once the handshake is established.
-    """
-    val cfg = quic_config_default()
-    val scid = "simple-quic-server"
-    val conn = quic_accept(scid, cfg)
-    H3Server {
-        quic: conn,
-        udp_fd: server.udp_fd,
-        state: H3ServerState.Connected,
-        bind_addr: server.bind_addr,
-        port: server.port
-    }
+    """Fail closed; no accept occurs without authenticated provider authority."""
+    server
 
 # ============================================================================
 # Process loop
 # ============================================================================
 
 pub fn h3_server_process(server: H3Server) -> (H3Server, [H3ServerEvent]):
-    """Drain pending QUIC stream data and emit H3ServerEvents.
-
-    Drives the QUIC timeout clock, then reads from stream 0 (the control
-    stream) and collects events.  The caller should call this in a loop until
-    the returned event list is empty.
-    """
-    val conn = quic_check_timeout(server.quic)
-
-    # Read up to 64 KiB from the primary request stream (stream 0).
-    val read = quic_stream_recv(conn, 0, 65535)
-
+    """Return terminal Closed with no fabricated request/data events."""
     val events: [H3ServerEvent] = []
-
-    val updated_state = if conn.closed:
-        H3ServerState.Closed
-    else:
-        server.state
-
     val updated = H3Server {
-        quic: conn,
+        quic: server.quic,
         udp_fd: server.udp_fd,
-        state: updated_state,
+        state: H3ServerState.Closed,
         bind_addr: server.bind_addr,
         port: server.port
     }
-
-    if read.data_len > 0:
-        val evt = H3ServerEvent.Data(H3DataEvent {
-            stream_id: 0,
-            data: read.data
-        })
-        (updated, [evt])
-    else:
-        (updated, events)
+    (updated, events)
 
 # ============================================================================
 # Respond
@@ -180,16 +119,11 @@ pub fn h3_server_process(server: H3Server) -> (H3Server, [H3ServerEvent]):
 
 pub fn h3_server_respond(
     server: H3Server,
-    stream_id: i64,
-    status: i64,
-    headers: [(text, text)],
-    body: text
+    _stream_id: i64,
+    _status: i64,
+    _headers: [(text, text)],
+    _body: text
 ) -> H3Server:
-    """Send an HTTP/3 response on stream_id.
-
-    Encodes the status pseudo-header plus caller-supplied headers as an H3
-    HEADERS frame, then sends the body as a DATA frame with FIN set.
-    """
-    # Send headers (simplified: body carries the response).
-    quic_stream_send(server.quic, stream_id, body, true)
+    """Fail closed without writing while authenticated QUIC-TLS is blocked."""
+    # No write occurs while authenticated QUIC-TLS is unavailable.
     server

@@ -8,30 +8,92 @@ use std.nogc_sync_mut.io.process_governor (proc_slot_acquire, proc_slot_release)
 extern fn rt_stderr_write(s: text)
 @unsafe(reason: "raw process capture; exit_code -1 is the execution-failure sentinel", capabilities: [ffi])
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+@unsafe(reason: "raw bounded process capture; exit_code -1 is the failure sentinel and output is contract-bounded", capabilities: [ffi])
 extern fn rt_process_run_bounded(cmd: text, args: [text], timeout_ms: i64, max_output_bytes: i64) -> (text, text, i64)
-extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
-use std.nogc_sync_mut.io.env_ops.{env_get}
-use std.nogc_sync_mut.io.file_ops.{file_delete, file_exists}
-use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
-use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
+use std.io_runtime.{env_get}
+@unsafe(reason: "raw owned-child liveness status; false sentinel means stopped, absent, or runtime failure", capabilities: [ffi])
+extern fn rt_process_is_running(pid: i64) -> bool
+@unsafe(reason: "raw owned-child spawn; positive PID is published ownership and -1 is the failure sentinel", capabilities: [ffi])
 extern fn rt_process_spawn_async(cmd: text, args: [text]) -> i64
+@unsafe(reason: "raw owned-child wait; -2 is timeout and -1 is the failure sentinel", capabilities: [ffi])
 extern fn rt_process_wait(pid: i64, timeout_ms: i64) -> i64
+@unsafe(reason: "raw owned-child termination status; false sentinel means absent or termination failure", capabilities: [ffi])
 extern fn rt_process_kill(pid: i64) -> bool
+@unsafe(reason: "raw piped-child spawn; positive PID is owned and -1 is the failure sentinel", capabilities: [ffi])
 extern fn rt_process_spawn_piped(cmd: text, args: [text]) -> i64
 extern fn rt_browser_renderer_spawn_sandboxed(cmd: text, args: [text]) -> i64
 extern fn rt_browser_renderer_sandbox_enter() -> bool
+@unsafe(reason: "raw piped-child stdin status; false sentinel means absent or write failure", capabilities: [ffi])
 extern fn rt_process_write_stdin(pid: i64, data: text) -> bool
+@unsafe(reason: "raw partial stdin write; nonnegative count is progress and -1 is the failure sentinel", capabilities: [ffi])
 extern fn rt_process_write_stdin_some(pid: i64, data: text, data_len: i64, offset: i64, max_bytes: i64) -> i64
+@unsafe(reason: "raw nonblocking stdout; empty sentinel conflates no data with absent or read failure", capabilities: [ffi])
 extern fn rt_process_read_stdout(pid: i64) -> text
+@unsafe(reason: "raw piped-child liveness status; false sentinel means stopped, absent, or runtime failure", capabilities: [ffi])
 extern fn rt_process_is_alive(pid: i64) -> bool
+@unsafe(reason: "raw piped-child close status; false sentinel means absent or cleanup failure", capabilities: [ffi])
 extern fn rt_process_close_piped(pid: i64) -> bool
 extern fn rt_file_read_text(path: text) -> text
+use std.io_runtime.{file_delete}
+use std.io_runtime.{file_exists}
+use std.io_runtime.{time_now_unix_micros}
+use std.io_runtime.{getpid}
 extern fn rt_stdout_flush()
 extern fn rt_stderr_flush()
 
+fn _process_run_raw(cmd: text, args: [text]) -> (text, text, i64):
+    unsafe(capabilities: [ffi]):
+        rt_process_run(cmd, args)
+
+fn _process_run_bounded_raw(cmd: text, args: [text], timeout_ms: i64, max_output_bytes: i64) -> (text, text, i64):
+    unsafe(capabilities: [ffi]):
+        rt_process_run_bounded(cmd, args, timeout_ms, max_output_bytes)
+
+fn _process_is_running_raw(pid: i64) -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_process_is_running(pid)
+
+fn _process_spawn_async_raw(cmd: text, args: [text]) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_process_spawn_async(cmd, args)
+
+fn _process_wait_raw(pid: i64, timeout_ms: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_process_wait(pid, timeout_ms)
+
+fn _process_kill_raw(pid: i64) -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_process_kill(pid)
+
+fn _process_spawn_piped_raw(cmd: text, args: [text]) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_process_spawn_piped(cmd, args)
+
+fn _process_write_stdin_raw(pid: i64, data: text) -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_process_write_stdin(pid, data)
+
+fn _process_write_stdin_some_raw(pid: i64, data: text, data_len: i64, offset: i64, max_bytes: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_process_write_stdin_some(pid, data, data_len, offset, max_bytes)
+
+fn _process_read_stdout_raw(pid: i64) -> text:
+    unsafe(capabilities: [ffi]):
+        rt_process_read_stdout(pid)
+
+fn _process_is_alive_raw(pid: i64) -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_process_is_alive(pid)
+
+fn _process_close_piped_raw(pid: i64) -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_process_close_piped(pid)
+
+use std.nogc_sync_mut.io.file_ops.{file_read_text_at, file_size}
+
 # Platform detection - inlined to avoid bootstrap runtime limitations
 fn _is_windows_platform() -> bool:
-    val os_env = rt_env_get("OS")
+    val os_env = env_get("OS")
     if os_env == nil:
         false
     else:
@@ -44,38 +106,87 @@ fn _is_windows_platform() -> bool:
 # ProcessResult is defined once in std.io_runtime (shared with io_runtime.shell
 # and io.file_shell.shell); re-imported here so process_ops stays the home of
 # the process API surface.
-use std.io_runtime.{ProcessResult}
+use std.nogc_sync_mut.io_runtime.{ProcessResult}
 
 # ============================================================================
 # Process Execution
 # ============================================================================
 
-fn process_run(cmd: text, args: [text]) -> (text, text, i64):
+fn _resolve_process_cmd(cmd: text) -> text:
     var resolved_cmd = cmd
     if _is_windows_platform():
         if not cmd.ends_with(".exe") and not cmd.ends_with(".cmd") and not cmd.ends_with(".bat"):
-            val check = rt_process_run("where", [cmd + ".exe"])
+            val check = _process_run_raw("where", [cmd + ".exe"])
             if check.2 == 0:
                 resolved_cmd = cmd + ".exe"
     else:
         if not cmd.contains("/"):
-            val check = rt_process_run("which", [cmd])
+            val check = _process_run_raw("which", [cmd])
             if check.2 == 0 and check.0.trim() != "":
                 resolved_cmd = check.0.trim()
+    resolved_cmd
+
+fn process_run(cmd: text, args: [text]) -> (text, text, i64):
+    val resolved_cmd = _resolve_process_cmd(cmd)
     proc_slot_acquire()
-    val result = process_run_raw(resolved_cmd, args)
+    val result = _process_run_raw(resolved_cmd, args)
     proc_slot_release()
     result
 
 pub fn process_run_bounded(cmd: text, args: [text], timeout_ms: i64, max_output_bytes: i64) -> (text, text, i64):
     val resolved_cmd = _resolve_process_cmd(cmd)
     proc_slot_acquire()
-    val (stdout, stderr, exit_code) = rt_process_run_bounded(resolved_cmd, args, timeout_ms, max_output_bytes)
+    val (stdout, stderr, exit_code) = _process_run_bounded_raw(resolved_cmd, args, timeout_ms, max_output_bytes)
     proc_slot_release()
     (stdout, stderr, exit_code)
 
+# --------------------------------------------------------------------------
+# Timeout-vs-kill discrimination for process_run_bounded results.
+#
+# rt_process_run_bounded has THREE parallel implementations (all read-only
+# references, verified against a live probe 2026-08-18); their timeout markers
+# differ, but every one of them appends a marker as the LAST bytes of stderr
+# on a deadline expiry and returns exit_code -1:
+#   - Rust runtime (env_process.rs:1275):      trailing "\nTIMEOUT\n"
+#   - interpreter extern (system.rs:161-165):  trailing "Process timed out"
+#     (this is the path a spec child under `bin/simple test` actually takes)
+#   - C runtime (runtime_process.c:88-100):    trailing "[TIMEOUT: Process
+#     killed after <N>ms]"
+# Death by signal maps to 128 + signo on the Rust-runtime path
+# (exit_status_to_code, env_process.rs:22-34: SIGKILL -> 137, SIGTERM -> 143),
+# but the interpreter-extern BOUNDED path still collapses it to -1
+# (`status.code().unwrap_or(-1)`, system.rs:~172) and the C runtime collapses
+# it at runtime_process.c:1481 (`if (rt_fork_parent_signaled()) code = -1;`).
+# Closing THAT residue needs a Rust/C runtime change — see
+# doc/08_tracking/bug/test_runner_emits_no_result_summary_silent_exit0_2026-08-17.md.
+# So: timeout is discriminable on every path; signal-vs-spawn-failure only
+# where 128+signo survives. Additive helpers only — tuple shape unchanged.
+# --------------------------------------------------------------------------
+
+pub fn process_bounded_timed_out(exit_code: i64, stderr: text) -> bool:
+    """True iff a process_run_bounded result means the deadline expired
+    (the runtime killed the child), per the trailing-marker contracts above.
+    Anchored to the END of stderr so a child that merely PRINTS the words
+    cannot classify as a timeout unless it also dies with exit_code -1."""
+    if exit_code != -1:
+        return false
+    if stderr.ends_with("\nTIMEOUT\n"):
+        return true
+    if stderr.ends_with("Process timed out"):
+        return true
+    stderr.ends_with("ms]") and stderr.contains("[TIMEOUT: Process killed after ")
+
+pub fn process_bounded_kill_signal(exit_code: i64) -> i64:
+    """Signal number when a process_run_bounded child died by signal
+    (exit_code = 128 + signo), else 0. A timeout is NOT a signal death here:
+    every runtime reports timeout as -1 + marker, never 128+9. Returns 0 on
+    the paths that still collapse signal deaths to -1 (see block comment)."""
+    if exit_code > 128 and exit_code < 192:
+        return exit_code - 128
+    0
+
 pub fn process_spawn_piped(cmd: text, args: [text]) -> i64:
-    rt_process_spawn_piped(cmd, args)
+    _process_spawn_piped_raw(cmd, args)
 
 pub fn browser_renderer_spawn_sandboxed(cmd: text, args: [text]) -> i64:
     rt_browser_renderer_spawn_sandboxed(cmd, args)
@@ -84,34 +195,30 @@ pub fn browser_renderer_sandbox_enter() -> bool:
     rt_browser_renderer_sandbox_enter()
 
 pub fn process_write_stdin(pid: i64, data: text) -> bool:
-    rt_process_write_stdin(pid, data)
+    _process_write_stdin_raw(pid, data)
 
 pub fn process_write_stdin_some(pid: i64, data: text, offset: i64, max_bytes: i64) -> i64:
-    rt_process_write_stdin_some(pid, data, data.len(), offset, max_bytes)
+    _process_write_stdin_some_raw(pid, data, data.len(), offset, max_bytes)
 
 pub fn process_read_stdout(pid: i64) -> text:
-    rt_process_read_stdout(pid)
+    _process_read_stdout_raw(pid)
 
 pub fn process_is_piped_alive(pid: i64) -> bool:
-    rt_process_is_alive(pid)
+    _process_is_alive_raw(pid)
 
 pub fn process_close_piped(pid: i64) -> bool:
-    rt_process_close_piped(pid)
+    _process_close_piped_raw(pid)
 
 fn process_run_timeout_unix(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32):
-    """Unix implementation using 'timeout' command"""
-    val timeout_secs = if timeout_ms <= 0:
-        120
-    else:
-        val secs = timeout_ms / 1000
-        if secs < 1: 1 else: secs
+    """Unix implementation using the native async process facade."""
+    val effective_timeout = if timeout_ms <= 0: 120000 else: timeout_ms
 
-    var temp_dir = rt_env_get("TMPDIR")
+    var temp_dir = env_get("TMPDIR")
     if temp_dir == nil or temp_dir == "":
         temp_dir = "/tmp"
 
-    val pid_str = "{rt_getpid()}"
-    val time_str = "{rt_time_now_unix_micros()}"
+    val pid_str = "{getpid()}"
+    val time_str = "{time_now_unix_micros()}"
     val stdout_file = "{temp_dir}/simple_out_{pid_str}_{time_str}.txt"
     val stderr_file = "{temp_dir}/simple_err_{pid_str}_{time_str}.txt"
 
@@ -125,21 +232,21 @@ fn process_run_timeout_unix(cmd: text, args: [text], timeout_ms: i64) -> (text, 
     val redirected_cmd = "exec {command_line} > '{stdout_file}' 2> '{stderr_file}'"
 
     proc_slot_acquire()
-    val pid = rt_process_spawn_async("/bin/sh", ["-c", redirected_cmd])
-    val exit_code = if pid <= 0: -1 else: rt_process_wait(pid, effective_timeout)
-    val timed_out = pid > 0 and (exit_code == -2 or (exit_code == -1 and rt_process_is_running(pid)))
+    val pid = _process_spawn_async_raw("/bin/sh", ["-c", redirected_cmd])
+    val exit_code = if pid <= 0: -1 else: _process_wait_raw(pid, effective_timeout)
+    val timed_out = pid > 0 and (exit_code == -2 or (exit_code == -1 and _process_is_running_raw(pid)))
     if timed_out:
-        rt_process_kill(pid)
+        _process_kill_raw(pid)
     proc_slot_release()
 
     var stdout = ""
     var stderr = ""
-    if rt_file_exists(stdout_file):
+    if file_exists(stdout_file):
         stdout = rt_file_read_text(stdout_file)
-        rt_file_delete(stdout_file)
-    if rt_file_exists(stderr_file):
+        file_delete(stdout_file)
+    if file_exists(stderr_file):
         stderr = rt_file_read_text(stderr_file)
-        rt_file_delete(stderr_file)
+        file_delete(stderr_file)
 
     if pid <= 0:
         (stdout, stderr + "\n[ERROR: failed to spawn process '{cmd}']", -1)
@@ -147,20 +254,20 @@ fn process_run_timeout_unix(cmd: text, args: [text], timeout_ms: i64) -> (text, 
         val timeout_secs = (effective_timeout + 999) / 1000
         (stdout, stderr + "\n[TIMEOUT: Process killed after {timeout_secs}s]", -1)
     else:
-        (out, err, code)
+        (stdout, stderr, exit_code)
 
 fn process_run_timeout_windows(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32):
     """Windows implementation using async spawn + temp files"""
     val effective_timeout = if timeout_ms <= 0: 120000 else: timeout_ms
 
-    var temp_dir = rt_env_get("TEMP")
+    var temp_dir = env_get("TEMP")
     if temp_dir == "":
-        temp_dir = rt_env_get("TMP")
+        temp_dir = env_get("TMP")
     if temp_dir == "":
         temp_dir = "C:\\Windows\\Temp"
 
-    val pid_str = "{rt_getpid()}"
-    val time_str = "{rt_time_now_unix_micros()}"
+    val pid_str = "{getpid()}"
+    val time_str = "{time_now_unix_micros()}"
     val stdout_file = "{temp_dir}\\simple_out_{pid_str}_{time_str}.txt"
     val stderr_file = "{temp_dir}\\simple_err_{pid_str}_{time_str}.txt"
 
@@ -172,23 +279,23 @@ fn process_run_timeout_windows(cmd: text, args: [text], timeout_ms: i64) -> (tex
         "{cmd} {args_str} > \"{stdout_file}\" 2> \"{stderr_file}\""
 
     proc_slot_acquire()
-    val pid = rt_process_spawn_async("cmd", ["/c", full_cmd])
-    val exit_code = rt_process_wait(pid, effective_timeout)
+    val pid = _process_spawn_async_raw("cmd", ["/c", full_cmd])
+    val exit_code = _process_wait_raw(pid, effective_timeout)
     proc_slot_release()
 
     var stdout = ""
     var stderr = ""
 
-    if rt_file_exists(stdout_file):
+    if file_exists(stdout_file):
         stdout = rt_file_read_text(stdout_file)
-        rt_file_delete(stdout_file)
+        file_delete(stdout_file)
 
-    if rt_file_exists(stderr_file):
+    if file_exists(stderr_file):
         stderr = rt_file_read_text(stderr_file)
-        rt_file_delete(stderr_file)
+        file_delete(stderr_file)
 
     if exit_code == -2:
-        rt_process_kill(pid)
+        _process_kill_raw(pid)
         val timeout_secs = effective_timeout / 1000
         (stdout, stderr + "\n[TIMEOUT: Process killed after {timeout_secs}s]", -1)
     else:
@@ -231,14 +338,18 @@ fn process_run_timeout_live(cmd: text, args: [text], timeout_ms: i64) -> (text, 
 
     val effective_timeout = if timeout_ms <= 0: 120000 else: timeout_ms
 
-    var temp_dir = rt_env_get("TMPDIR")
+    var temp_dir = env_get("TMPDIR")
     if temp_dir == nil or temp_dir == "":
         temp_dir = "/tmp"
 
-    val pid_str = "{rt_getpid()}"
-    val time_str = "{rt_time_now_unix_micros()}"
+    val pid_str = "{getpid()}"
+    val time_str = "{time_now_unix_micros()}"
     val stdout_file = "{temp_dir}/simple_out_{pid_str}_{time_str}.txt"
     val stderr_file = "{temp_dir}/simple_err_{pid_str}_{time_str}.txt"
+    # Session/process-group id of the spawned tree, written by the leader
+    # (see _process_kill_group): a killed or timed-out wrapper must not leave
+    # the real worker orphaned (native-build run6, 2026-08-21).
+    val pgid_file = "{temp_dir}/simple_pgid_{pid_str}_{time_str}.txt"
 
     var command_parts: [text] = ["stdbuf", "-oL", "-eL"]
     val cmd_escaped = cmd.replace("'", "'\\''")
@@ -247,10 +358,13 @@ fn process_run_timeout_live(cmd: text, args: [text], timeout_ms: i64) -> (text, 
         val arg_escaped = arg.replace("'", "'\\''")
         command_parts.push("'{arg_escaped}'")
     val command_line = command_parts.join(" ")
-    val redirected_cmd = "exec {command_line} > '{stdout_file}' 2> '{stderr_file}'"
+    # command_line is single-quoted per part; inside the double-quoted inner
+    # `sh -c` string the outer shell must not expand anything, so escape \ " $ `.
+    val inner_cmd = command_line.replace("\\", "\\\\").replace("\"", "\\\"").replace("$", "\\$").replace("`", "\\`")
+    val redirected_cmd = "exec setsid -w sh -c \"echo \\$\\$ > '{pgid_file}'; exec {inner_cmd}\" > '{stdout_file}' 2> '{stderr_file}'"
 
     proc_slot_acquire()
-    val pid = rt_process_spawn_async("/bin/sh", ["-c", redirected_cmd])
+    val pid = _process_spawn_async_raw("/bin/sh", ["-c", redirected_cmd])
     if pid <= 0:
         proc_slot_release()
         return ("", "\n[ERROR: failed to spawn process '{cmd}']", -1)
@@ -266,39 +380,60 @@ fn process_run_timeout_live(cmd: text, args: [text], timeout_ms: i64) -> (text, 
     var stdout_relayed = 0
     var stderr_relayed = 0
     var exit_code: i64 = -2
+    var relay_error = ""
     while exit_code == -2 and elapsed_ms < effective_timeout:
         val remaining = effective_timeout - elapsed_ms
         val quantum = if remaining < poll_quantum_ms: remaining else: poll_quantum_ms
-        exit_code = rt_process_wait(pid, quantum)
+        exit_code = _process_wait_raw(pid, quantum)
         elapsed_ms = elapsed_ms + quantum
-        if file_exists(stdout_file):
-            val current = rt_file_read_text(stdout_file)
-            if current.len() > stdout_relayed:
-                print current[stdout_relayed:current.len()]
-                rt_stdout_flush()
-                stdout_relayed = current.len()
-        if rt_file_exists(stderr_file):
-            val current_err = rt_file_read_text(stderr_file)
-            if current_err.len() > stderr_relayed:
-                eprint(current_err[stderr_relayed:current_err.len()])
-                rt_stderr_flush()
-                stderr_relayed = current_err.len()
+        val out_size = file_size(stdout_file)
+        if out_size > stdout_relayed:
+            match file_read_text_at(stdout_file, stdout_relayed, out_size - stdout_relayed):
+                case Ok(chunk):
+                    if chunk.len() > 0:
+                        print chunk
+                        rt_stdout_flush()
+                        stdout_relayed = stdout_relayed + chunk.len()
+                case Err(message):
+                    relay_error = message
+                    _process_kill_raw(pid)
+                    exit_code = _process_wait_raw(pid, 5000)
+                    break
+        val err_size = file_size(stderr_file)
+        if err_size > stderr_relayed:
+            match file_read_text_at(stderr_file, stderr_relayed, err_size - stderr_relayed):
+                case Ok(chunk_err):
+                    if chunk_err.len() > 0:
+                        eprint(chunk_err)
+                        rt_stderr_flush()
+                        stderr_relayed = stderr_relayed + chunk_err.len()
+                case Err(message):
+                    relay_error = message
+                    _process_kill_raw(pid)
+                    exit_code = _process_wait_raw(pid, 5000)
+                    break
 
-    val timed_out = exit_code == -2 or (exit_code == -1 and rt_process_is_running(pid))
+    val timed_out = exit_code == -2 or (exit_code == -1 and _process_is_running_raw(pid))
     if timed_out:
-        rt_process_kill(pid)
+        _process_kill_raw(pid)
     proc_slot_release()
+    if exit_code != 0:
+        _process_kill_group(pgid_file)
+    if file_exists(pgid_file):
+        file_delete(pgid_file)
 
     var stdout = ""
     var stderr = ""
-    if rt_file_exists(stdout_file):
+    if file_exists(stdout_file):
         stdout = rt_file_read_text(stdout_file)
-        rt_file_delete(stdout_file)
-    if rt_file_exists(stderr_file):
+        file_delete(stdout_file)
+    if file_exists(stderr_file):
         stderr = rt_file_read_text(stderr_file)
-        rt_file_delete(stderr_file)
+        file_delete(stderr_file)
 
-    if timed_out:
+    if relay_error != "":
+        (stdout, stderr + "\n[ERROR: {relay_error}]", -1)
+    elif timed_out:
         val timeout_secs = (effective_timeout + 999) / 1000
         (stdout, stderr + "\n[TIMEOUT: Process killed after {timeout_secs}s]", -1)
     else:
@@ -323,16 +458,19 @@ fn _process_run_with_limits(cmd: text, args: [text], timeout_ms: i64, memory_byt
     if _is_windows_platform():
         eprint("[WARNING] Resource limits not supported on Windows - using timeout only")
         val effective_timeout = if timeout_ms <= 0: 0 else: timeout_ms
-        val (stdout, stderr, exit_code) = if effective_timeout <= 0:
+        val (stdout, stderr, exit_code) = if max_output_bytes > 0:
+            process_run_bounded(cmd, args, effective_timeout, max_output_bytes)
+        elif effective_timeout <= 0:
             process_run(cmd, args)
         else:
             process_run_timeout(cmd, args, effective_timeout)
+        val timed_out = effective_timeout > 0 and exit_code == -1 and (stderr.contains("TIMEOUT") or stderr.contains("timed out"))
         return ProcessResult(
             stdout: stdout,
             stderr: stderr,
             exit_code: exit_code,
-            limit_exceeded: effective_timeout > 0 and exit_code == -1,
-            limit_type: if effective_timeout > 0 and exit_code == -1: "timeout" else: ""
+            limit_exceeded: timed_out,
+            limit_type: if timed_out: "timeout" else: ""
         )
 
     val memory_kb = if memory_bytes > 0: memory_bytes / 1024 else: 0
@@ -354,33 +492,27 @@ fn _process_run_with_limits(cmd: text, args: [text], timeout_ms: i64, memory_byt
         arg_parts.push("'{escaped}'")
     val args_str = arg_parts.join(" ")
 
-    # The command word goes through /bin/sh -c exactly like the arguments do,
-    # so it needs the SAME single-quote escaping. Interpolating it raw split
-    # any cmd containing a space into two shell words (a path like
-    # "/tmp/dir with space/tool" became "/tmp/dir" plus stray words) and let
-    # shell metacharacters in cmd execute, while process_run/
-    # process_run_timeout on the same file preserve argv exactly. See
-    # todo_db row 573 (area runtime, P1).
-    val cmd_escaped = "'" + cmd.replace("'", "'\\''") + "'"
-    val full_cmd = if args_str == "": "{cmd_escaped}" else: "{cmd_escaped} {args_str}"
+    val full_cmd = if args_str == "": "{cmd}" else: "{cmd} {args_str}"
     val wrapped_cmd = if timeout_ms > 0:
-        val timeout_sec = if timeout_ms < 1000: 1 else: timeout_ms / 1000
-        val timeout_buffer = timeout_sec + 5
-        "{limit_cmds}exec timeout --kill-after=5s {timeout_buffer}s {full_cmd}"
+        val timeout_sec = 1 + (timeout_ms - 1) / 1000
+        "{limit_cmds}exec timeout --kill-after=5s {timeout_sec}s {full_cmd}"
     else:
         "{limit_cmds}exec {full_cmd}"
 
     proc_slot_acquire()
     val (stdout, stderr, code) = if max_output_bytes > 0:
-        rt_process_run_bounded("/bin/sh", ["-c", wrapped_cmd], timeout_ms, max_output_bytes)
+        _process_run_bounded_raw("/bin/sh", ["-c", wrapped_cmd], timeout_ms, max_output_bytes)
     else:
-        rt_process_run("/bin/sh", ["-c", wrapped_cmd])
+        _process_run_raw("/bin/sh", ["-c", wrapped_cmd])
     proc_slot_release()
 
     var limit_exceeded = false
     var limit_type = ""
 
-    if code == 124:
+    if code == -1 and (stderr.contains("TIMEOUT") or stderr.contains("timed out")):
+        limit_exceeded = true
+        limit_type = "timeout"
+    elif code == 124:
         limit_exceeded = true
         limit_type = "timeout"
     elif code == 137:
@@ -412,6 +544,12 @@ fn _process_run_with_limits(cmd: text, args: [text], timeout_ms: i64, memory_byt
         limit_type: limit_type
     )
 
+pub fn process_run_with_limits(cmd: text, args: [text], timeout_ms: i64, memory_bytes: i64, cpu_seconds: i64, max_fds: i64, max_procs: i64) -> ProcessResult:
+    _process_run_with_limits(cmd, args, timeout_ms, memory_bytes, cpu_seconds, max_fds, max_procs, 0)
+
+pub fn process_run_with_limits_bounded(cmd: text, args: [text], timeout_ms: i64, memory_bytes: i64, cpu_seconds: i64, max_fds: i64, max_procs: i64, max_output_bytes: i64) -> ProcessResult:
+    _process_run_with_limits(cmd, args, timeout_ms, memory_bytes, cpu_seconds, max_fds, max_procs, max_output_bytes)
+
 pub fn process_output(cmd: text, args: [text]) -> text:
     val (stdout, stderr, code) = process_run(cmd, args)
     stdout
@@ -429,21 +567,21 @@ fn _shell_command_args(command: text) -> (text, [text]):
 pub fn shell(command: text) -> ProcessResult:
     val (shell_path, shell_args) = _shell_command_args(command)
     proc_slot_acquire()
-    val (stdout, stderr, code) = rt_process_run(shell_path, shell_args)
+    val (stdout, stderr, code) = _process_run_raw(shell_path, shell_args)
     proc_slot_release()
     ProcessResult(stdout: stdout, stderr: stderr, exit_code: code, limit_exceeded: false, limit_type: "")
 
 pub fn shell_bool(command: text) -> bool:
     val (shell_path, shell_args) = _shell_command_args(command)
     proc_slot_acquire()
-    val (_stdout, _stderr, code) = rt_process_run(shell_path, shell_args)
+    val (_stdout, _stderr, code) = _process_run_raw(shell_path, shell_args)
     proc_slot_release()
     code == 0
 
 pub fn shell_output_default(command: text, default: text) -> text:
     val (shell_path, shell_args) = _shell_command_args(command)
     proc_slot_acquire()
-    val (stdout, _stderr, code) = rt_process_run(shell_path, shell_args)
+    val (stdout, _stderr, code) = _process_run_raw(shell_path, shell_args)
     proc_slot_release()
     if code == 0:
         stdout
@@ -453,7 +591,7 @@ pub fn shell_output_default(command: text, default: text) -> text:
 pub fn shell_output_trimmed(command: text, default: text) -> text:
     val (shell_path, shell_args) = _shell_command_args(command)
     proc_slot_acquire()
-    val (stdout, _stderr, code) = rt_process_run(shell_path, shell_args)
+    val (stdout, _stderr, code) = _process_run_raw(shell_path, shell_args)
     proc_slot_release()
     if code == 0:
         stdout.trim()
@@ -463,7 +601,7 @@ pub fn shell_output_trimmed(command: text, default: text) -> text:
 pub fn shell_lines(command: text) -> [text]:
     val (shell_path, shell_args) = _shell_command_args(command)
     proc_slot_acquire()
-    val (stdout, _stderr, code) = rt_process_run(shell_path, shell_args)
+    val (stdout, _stderr, code) = _process_run_raw(shell_path, shell_args)
     proc_slot_release()
     if code == 0 and stdout.?:
         stdout.trim().split("\n")
@@ -473,7 +611,7 @@ pub fn shell_lines(command: text) -> [text]:
 pub fn shell_int(command: text, default: i64) -> i64:
     val (shell_path, shell_args) = _shell_command_args(command)
     proc_slot_acquire()
-    val (stdout, _stderr, code) = rt_process_run(shell_path, shell_args)
+    val (stdout, _stderr, code) = _process_run_raw(shell_path, shell_args)
     proc_slot_release()
     if code == 0:
         val trimmed = stdout.trim()
@@ -499,7 +637,7 @@ fn process_spawn_async(cmd: text, args: [text]) -> i64:
         # ... do other work ...
         val exit_code = process_wait(pid, 0)  # Wait for completion
     """
-    rt_process_spawn_async(cmd, args)
+    _process_spawn_async_raw(cmd, args)
 
 fn process_wait(pid: i64, timeout_ms: i64) -> i64:
     """
@@ -516,7 +654,7 @@ fn process_wait(pid: i64, timeout_ms: i64) -> i64:
     """
     if pid <= 0:
         return -1
-    rt_process_wait(pid, timeout_ms)
+    _process_wait_raw(pid, timeout_ms)
 
 fn process_is_running(pid: i64) -> bool:
     """
@@ -524,7 +662,7 @@ fn process_is_running(pid: i64) -> bool:
 
     Returns: true if running, false if exited or invalid pid
     """
-    rt_process_is_running(pid)
+    _process_is_running_raw(pid)
 
 fn process_kill(pid: i64) -> bool:
     """
@@ -537,7 +675,7 @@ fn process_kill(pid: i64) -> bool:
     """
     if pid <= 1:
         return false
-    rt_process_kill(pid)
+    _process_kill_raw(pid)
 
 # ============================================================================
 # Eprint (real stderr, fd 2)

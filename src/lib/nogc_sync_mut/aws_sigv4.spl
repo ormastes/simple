@@ -61,7 +61,7 @@ fn _sha256_hex_bytes(bytes: list) -> text:
 
 fn sigv4_sha256_hex(s: text) -> text:
     """Lowercase hex SHA256 of the UTF-8 bytes of `s`."""
-    _sha256_hex_bytes(_text_to_bytes(s))
+    _sha256_hex_bytes(_aws_sigv4_text_to_bytes(s))
 
 
 # --- URI encoding per SigV4 spec ---
@@ -115,11 +115,11 @@ fn sigv4_derive_signing_key(secret_key: text, date: text, region: text, service:
 
     signing_key = HMAC(HMAC(HMAC(HMAC("AWS4"+secret, date), region), service), "aws4_request")
     """
-    val k_secret = _text_to_bytes("AWS4" + secret_key)
-    val k_date = hmac_sha256_bytes(k_secret, _text_to_bytes(date))
-    val k_region = hmac_sha256_bytes(k_date, _text_to_bytes(region))
-    val k_service = hmac_sha256_bytes(k_region, _text_to_bytes(service))
-    hmac_sha256_bytes(k_service, _text_to_bytes(SIGV4_REQUEST_SUFFIX))
+    val k_secret = _aws_sigv4_text_to_bytes("AWS4" + secret_key)
+    val k_date = hmac_sha256_bytes(k_secret, _aws_sigv4_text_to_bytes(date))
+    val k_region = hmac_sha256_bytes(k_date, _aws_sigv4_text_to_bytes(region))
+    val k_service = hmac_sha256_bytes(k_region, _aws_sigv4_text_to_bytes(service))
+    hmac_sha256_bytes(k_service, _aws_sigv4_text_to_bytes(SIGV4_REQUEST_SUFFIX))
 
 
 # --- Compute signature given a literal canonical request ---
@@ -146,7 +146,7 @@ fn sigv4_compute_signature(
     val scope = sigv4_credential_scope(date, region, service)
     val sts = sigv4_string_to_sign(amz_datetime, scope, canonical_request)
     val key = sigv4_derive_signing_key(secret_key, date, region, service)
-    _bytes_to_hex(hmac_sha256_bytes(key, _text_to_bytes(sts)))
+    _bytes_to_hex(hmac_sha256_bytes(key, _aws_sigv4_text_to_bytes(sts)))
 
 
 # --- Canonical query string ---
@@ -189,9 +189,10 @@ fn sigv4_canonical_query(params: [SigV4QueryParam]) -> text:
     out
 
 
-# --- Presigned-GET URL (query-string auth) ---
+# --- Presigned URL (query-string auth), any method ---
 
-fn sigv4_presign_get_url(
+fn sigv4_presign_url(
+    method: text,
     endpoint: text,
     host: text,
     bucket: text,
@@ -203,12 +204,17 @@ fn sigv4_presign_get_url(
     amz_datetime: text,
     expires: i64
 ) -> text:
-    """Build a presigned GET URL for the given object.
+    """Build a presigned URL for the given object and HTTP method.
 
     `endpoint` is the scheme://host[:port] (no trailing slash).
     `host` is the value of the `Host` header (typically host[:port]).
     `bucket` and `key` are NOT pre-encoded; this fn handles encoding.
     `amz_datetime` is YYYYMMDDTHHMMSSZ; `expires` is seconds (max 604800).
+
+    Used for GET (download) and PUT (upload — the escape hatch for binary
+    bodies: PUT the raw bytes straight to this URL with curl/a browser/any
+    HTTP client, since rt_http_request's body is `text`-only and can't carry
+    arbitrary bytes; see minio_presign_put in adapter_minio.spl).
     """
     val date = amz_datetime[0:8]
     val scope = sigv4_credential_scope(date, region, service)
@@ -232,10 +238,27 @@ fn sigv4_presign_get_url(
     val canonical_uri = path
 
     val canonical_headers = "host:{host}\n"
-    val canonical_request = "GET\n{canonical_uri}\n{canonical_query}\n{canonical_headers}\n{signed_headers}\n{SIGV4_UNSIGNED_PAYLOAD}"
+    val canonical_request = "{method}\n{canonical_uri}\n{canonical_query}\n{canonical_headers}\n{signed_headers}\n{SIGV4_UNSIGNED_PAYLOAD}"
 
     val signature = sigv4_compute_signature(secret_key, date, region, service, amz_datetime, canonical_request)
     "{endpoint}{canonical_uri}?{canonical_query}&X-Amz-Signature={signature}"
+
+
+fn sigv4_presign_get_url(
+    endpoint: text,
+    host: text,
+    bucket: text,
+    key: text,
+    access_key: text,
+    secret_key: text,
+    region: text,
+    service: text,
+    amz_datetime: text,
+    expires: i64
+) -> text:
+    """Build a presigned GET URL for the given object. Thin wrapper over
+    sigv4_presign_url("GET", ...) kept for existing call sites/tests."""
+    sigv4_presign_url("GET", endpoint, host, bucket, key, access_key, secret_key, region, service, amz_datetime, expires)
 
 
 # --- Header auth (used by adapter_minio for live calls) ---
@@ -310,10 +333,10 @@ class S3ErrorInfo:
 fn _xml_inner(body: text, tag: text) -> text:
     val open = "<" + tag + ">"
     val close = "</" + tag + ">"
-    val a = body.find(open).unwrap_or(-1)
+    val a = body.find(open)
     if a < 0:
         return ""
-    val b = body.find(close).unwrap_or(-1)
+    val b = body.find(close)
     if b < 0 or b <= a:
         return ""
     body[a + open.len():b]

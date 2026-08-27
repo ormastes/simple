@@ -21,21 +21,17 @@
 
 use compiler.core.ast_expr.{
     EXPR_IDENT, EXPR_BINARY, EXPR_UNARY, EXPR_CALL, EXPR_METHOD_CALL,
-    EXPR_FIELD_ACCESS, EXPR_INDEX, EXPR_IF, EXPR_IF_CHAIN, EXPR_ARRAY_LIT, EXPR_DICT_LIT,
+    EXPR_FIELD_ACCESS, EXPR_INDEX, EXPR_IF, EXPR_ARRAY_LIT, EXPR_DICT_LIT,
     EXPR_NULL_COALESCE, EXPR_CAST, EXPR_SPREAD, EXPR_LAMBDA, EXPR_TUPLE,
-    EXPR_SLICE, EXPR_MATCH,
+    EXPR_SLICE, EXPR_MATCH, EXPR_INTERPOLATED_STRING,
     expr_tag, expr_s_val, expr_left, expr_right, expr_extra, expr_args, expr_stmts, expr_i_val,
     expr_ident, expr_binary, expr_unary, expr_call, expr_method_call,
-    expr_field_access, expr_index, expr_if_expr, expr_if_chain_expr, expr_array_lit, expr_dict_lit,
+    expr_field_access, expr_index, expr_if_expr, expr_array_lit, expr_dict_lit,
     expr_null_coalesce, expr_cast, expr_spread, expr_lambda, expr_tuple, expr_slice,
     expr_match_expr, expr_get_arg_names, expr_call_args_set, expr_get_span, expr_set_span
 }
 use compiler.frontend.core._AstExpr.accessors.{expr_interpolated_string, expr_interpolated_string_with_text}
 use compiler.core.ast.{expr_count, expr_get_arg_names, expr_call_args_set, arm_pattern}
-use compiler.frontend.core.if_chain_nodes.{ARM_CONDITION}
-use compiler.frontend.core.if_chain_nodes.{flat_if_expr_chain_new, flat_if_expr_arm_append, flat_if_expr_else_set}
-use compiler.frontend.core.if_chain_nodes.{flat_if_chain_first_arm_get, flat_if_chain_arm_count_get, flat_if_chain_span_get, flat_if_chain_else_expr_get}
-use compiler.frontend.core.if_chain_nodes.{flat_if_arm_next_get, flat_if_arm_kind_get, flat_if_arm_head_get, flat_if_arm_init_get, flat_if_arm_then_expr_get, flat_if_arm_span_get}
 
 # ===== Placeholder Counter (module-level for mutation in recursive walk) =====
 
@@ -96,24 +92,27 @@ fn is_numbered_placeholder(name: text) -> bool:
         return false
     if name[0:1] != "_":
         return false
-    # Numbered placeholders are one-based. `_0` is an ordinary identifier and
-    # must never become the invalid generated name `__p-1`.
-    if name[1:2] == "0":
+    # Numbered placeholders are one-indexed. Besides making `_0` an invalid
+    # placeholder, spell the digit test with equality rather than text ordering:
+    # the admitted Stage-2 self-host has misclassified ordinary underscore
+    # identifiers such as `_pp` through the `<`/`>` text path, after which
+    # parse_placeholder_number returns 0 and lowering fabricates `__p-1`.
+    val first = name[1:2]
+    if first == "0":
         return false
     var i = 1
     while i < name.len():
         val ch = name[i:i + 1]
-        # Do not use lexicographic text ordering as a digit predicate. The
-        # self-hosted native path can classify ordinary locals such as `_pp`
-        # differently from the seed, which later makes parse-number return 0.
-        val is_digit = (
-            ch == "0" or ch == "1" or ch == "2" or ch == "3" or ch == "4" or
-            ch == "5" or ch == "6" or ch == "7" or ch == "8" or ch == "9"
-        )
+        val is_digit = (ch == "0" or ch == "1" or ch == "2" or ch == "3" or
+            ch == "4" or ch == "5" or ch == "6" or ch == "7" or
+            ch == "8" or ch == "9")
         if not is_digit:
             return false
         i = i + 1
     true
+
+fn placeholder_ident_name(name: text) -> bool:
+    name == "_" or is_numbered_placeholder(name)
 
 fn parse_placeholder_number(name: text) -> i64:
     """Extract N from `_N` identifier. Returns -1 if not a numbered placeholder."""
@@ -123,28 +122,8 @@ fn parse_placeholder_number(name: text) -> i64:
     var result = 0
     var i = 0
     while i < num_text.len():
-        val ch = num_text[i:i + 1]
-        val digit = ch[0:1]
-        if digit == "0":
-            result = result * 10
-        elif digit == "1":
-            result = result * 10 + 1
-        elif digit == "2":
-            result = result * 10 + 2
-        elif digit == "3":
-            result = result * 10 + 3
-        elif digit == "4":
-            result = result * 10 + 4
-        elif digit == "5":
-            result = result * 10 + 5
-        elif digit == "6":
-            result = result * 10 + 6
-        elif digit == "7":
-            result = result * 10 + 7
-        elif digit == "8":
-            result = result * 10 + 8
-        elif digit == "9":
-            result = result * 10 + 9
+        val code = num_text[i:i + 1].ord()
+        result = result * 10 + (code - 48)
         i = i + 1
     result
 
@@ -156,7 +135,7 @@ var _ph_max_number: i64 = 0
 
 fn detect_placeholder_mode(eid: i64):
     """Scan expression to detect unnumbered `_` vs numbered `_N` usage."""
-    if eid < 0:
+    if eid < 0 or eid >= expr_tag.len():
         return
     val tag = expr_tag[eid]
 
@@ -169,10 +148,6 @@ fn detect_placeholder_mode(eid: i64):
             val num = parse_placeholder_number(name)
             if num > _ph_max_number:
                 _ph_max_number = num
-        return
-
-    if tag == EXPR_IF_CHAIN:
-        detect_placeholder_if_chain(expr_extra[eid])
         return
 
     if tag == EXPR_BINARY:
@@ -268,22 +243,6 @@ fn detect_placeholder_mode(eid: i64):
         detect_placeholder_mode(expr_left[eid])
         return
 
-fn detect_placeholder_if_chain(chain_id: i64):
-    var arm_id = flat_if_chain_first_arm_get(chain_id)
-    var remaining = flat_if_chain_arm_count_get(chain_id)
-    while arm_id >= 0 and remaining > 0:
-        val kind = flat_if_arm_kind_get(arm_id)
-        if kind == ARM_CONDITION:
-            detect_placeholder_mode(flat_if_arm_head_get(arm_id))
-        else:
-            # VALUE_BIND/PATTERN_BIND heads introduce names; `_` there is a
-            # wildcard/binding, never placeholder-lambda shorthand.
-            detect_placeholder_mode(flat_if_arm_init_get(arm_id))
-        detect_placeholder_mode(flat_if_arm_then_expr_get(arm_id))
-        arm_id = flat_if_arm_next_get(arm_id)
-        remaining = remaining - 1
-    detect_placeholder_mode(flat_if_chain_else_expr_get(chain_id))
-
 # ===== Main Transform Entry Point =====
 
 fn transform_placeholder_lambda(eid: i64) -> i64:
@@ -296,6 +255,9 @@ fn transform_placeholder_lambda(eid: i64) -> i64:
 
     Returns the original expression unchanged if no placeholders are found.
     """
+    if _ph_suppress_transform:
+        return eid
+
     # Detect mode
     _ph_has_unnumbered = false
     _ph_has_numbered = false
@@ -303,7 +265,11 @@ fn transform_placeholder_lambda(eid: i64) -> i64:
     detect_placeholder_mode(eid)
 
     if not _ph_has_unnumbered and not _ph_has_numbered:
-        return eid
+        # The outer expression may have no placeholder while one of a nested
+        # call's arguments does (`items.map(render(_))`). Walk/rebuild it so
+        # each call argument gets its own transform instead of leaking `_`
+        # into HIR as an unresolved identifier.
+        return replace_placeholders(eid)
 
     # Error on mixing numbered and unnumbered
     if _ph_has_numbered and _ph_has_unnumbered:
@@ -407,6 +373,20 @@ fn transform_placeholder_call_args_after_interpolation():
     allocates new nodes, which must not be walked again by this pass.
     """
     val initial_expr_count = expr_tag.len()
+    # PERF: exact no-op precondition. See module_has_placeholder_ident above.
+    if not module_has_placeholder_ident(initial_expr_count):
+        return
+    transform_placeholder_call_args_after_interpolation_known_present()
+
+fn transform_placeholder_call_args_after_interpolation_known_present():
+    """Run the transform when a preceding arena walk already proved at least
+    one placeholder identifier exists. This avoids immediately rescanning the
+    entire expression arena solely to rediscover the same boolean.
+    """
+    # Snapshot from this module's authoritative arena owner. A caller-facing
+    # expr_count() can be a re-export/private copy under staged self-hosting and
+    # is not a safe bound for indexing this module's expr_tag arrays.
+    val initial_expr_count = expr_tag.len()
     # Build the marks array in a LOCAL and assign the module-global ONCE. Under
     # the Rust-seed interpreter, `.push()` on a module-global array lands in a
     # per-call copy while `.len()` in a while condition (and later indexed
@@ -461,7 +441,7 @@ fn count_placeholders(eid: i64) -> i64:
     Does NOT recurse into nested call/method-call arguments (they get their
     own independent transform).
     """
-    if eid < 0:
+    if eid < 0 or eid >= expr_tag.len():
         return 0
     val tag = expr_tag[eid]
 
@@ -470,9 +450,6 @@ fn count_placeholders(eid: i64) -> i64:
         if name == "_":
             return 1
         return 0
-
-    if tag == EXPR_IF_CHAIN:
-        return count_placeholders_if_chain(expr_extra[eid])
 
     if tag == EXPR_BINARY:
         val l = count_placeholders(expr_left[eid])
@@ -551,34 +528,32 @@ fn count_placeholders(eid: i64) -> i64:
         return count_placeholders(expr_left[eid])
 
     if tag == EXPR_INTERPOLATED_STRING:
-        var total = 0
+        # Bug (2026-07-30, string_template_multi_placeholder_slot_not_found):
+        # a bare (unnumbered) `_` used more than once across an interpolated
+        # string's `{...}` regions always refers to the SAME implicit bound
+        # value -- the one argument a higher-order callback such as
+        # `.map("{_.0}: {_.1}")` receives per call -- unlike an ordinary
+        # expression like `_ + _`, where each `_` is legitimately a distinct
+        # positional lambda parameter. Summing per-occurrence (as the
+        # branches above do) over-counts and makes
+        # transform_placeholder_lambda synthesize a lambda with more
+        # parameters than `.map` ever supplies, leaving the extra `__pN`
+        # unbound ("variable `__pN` not found"). Collapse to presence
+        # (0 or 1) so the whole template shares one slot; see the matching
+        # note in replace_placeholders's EXPR_INTERPOLATED_STRING arm.
         val parts = expr_args[eid]
         var i = 0
         while i < parts.len():
-            total = total + count_placeholders(parts[i])
+            if count_placeholders(parts[i]) > 0:
+                return 1
             i = i + 1
-        return total
+        return 0
 
     if tag == EXPR_MATCH:
         # Count placeholders in scrutinee only; arms are a scoping boundary.
         return count_placeholders(expr_left[eid])
 
     0
-
-fn count_placeholders_if_chain(chain_id: i64) -> i64:
-    var total = 0
-    var arm_id = flat_if_chain_first_arm_get(chain_id)
-    var remaining = flat_if_chain_arm_count_get(chain_id)
-    while arm_id >= 0 and remaining > 0:
-        val kind = flat_if_arm_kind_get(arm_id)
-        if kind == ARM_CONDITION:
-            total = total + count_placeholders(flat_if_arm_head_get(arm_id))
-        else:
-            total = total + count_placeholders(flat_if_arm_init_get(arm_id))
-        total = total + count_placeholders(flat_if_arm_then_expr_get(arm_id))
-        arm_id = flat_if_arm_next_get(arm_id)
-        remaining = remaining - 1
-    total + count_placeholders(flat_if_chain_else_expr_get(chain_id))
 
 # ===== Replace Placeholders =====
 
@@ -591,7 +566,7 @@ fn replace_placeholders(eid: i64) -> i64:
     Does NOT recurse into nested call/method-call arguments — those get their
     own independent transform via the call-arg parsing path.
     """
-    if eid < 0:
+    if eid < 0 or eid >= expr_tag.len():
         return eid
     val tag = expr_tag[eid]
 
@@ -605,13 +580,11 @@ fn replace_placeholders(eid: i64) -> i64:
             if is_numbered_placeholder(name):
                 val num = parse_placeholder_number(name)
                 # _1 → __p0 (1-indexed to 0-indexed)
+                if num <= 0:
+                    return eid
                 val param_idx = num - 1
                 return placeholder_retain_span(eid, expr_ident("__p{param_idx}", 0))
         return eid
-
-    if tag == EXPR_IF_CHAIN:
-        val rebuilt_chain = replace_placeholders_if_chain(expr_extra[eid])
-        return placeholder_retain_span(eid, expr_if_chain_expr(rebuilt_chain, flat_if_chain_span_get(rebuilt_chain)))
 
     if tag == EXPR_BINARY:
         val new_left = replace_placeholders(expr_left[eid])
@@ -709,11 +682,17 @@ fn replace_placeholders(eid: i64) -> i64:
         return placeholder_retain_span(eid, expr_spread(new_inner, 0))
 
     if tag == EXPR_INTERPOLATED_STRING:
+        # See the matching note in count_placeholders's
+        # EXPR_INTERPOLATED_STRING arm: every bare `_` inside one
+        # interpolated string shares a SINGLE slot (reserved once from
+        # _ph_counter), instead of each occurrence grabbing its own
+        # incrementing slot.
         val old_parts = expr_args[eid]
-        var new_parts: [i64] = []
+        var has_bare = false
         var i = 0
         while i < old_parts.len():
-            new_parts.push(replace_placeholders(old_parts[i]))
+            if count_placeholders(old_parts[i]) > 0:
+                has_bare = true
             i = i + 1
         var new_parts: [i64] = []
         if has_bare:
@@ -744,25 +723,6 @@ fn replace_placeholders(eid: i64) -> i64:
     # For any other expression type, return as-is
     eid
 
-fn replace_placeholders_if_chain(chain_id: i64) -> i64:
-    val rebuilt = flat_if_expr_chain_new(flat_if_chain_span_get(chain_id))
-    var arm_id = flat_if_chain_first_arm_get(chain_id)
-    var remaining = flat_if_chain_arm_count_get(chain_id)
-    while arm_id >= 0 and remaining > 0:
-        val kind = flat_if_arm_kind_get(arm_id)
-        var head = flat_if_arm_head_get(arm_id)
-        var init = flat_if_arm_init_get(arm_id)
-        if kind == ARM_CONDITION:
-            head = replace_placeholders(head)
-        else:
-            init = replace_placeholders(init)
-        val then_expr = replace_placeholders(flat_if_arm_then_expr_get(arm_id))
-        flat_if_expr_arm_append(rebuilt, kind, head, init, then_expr, flat_if_arm_span_get(arm_id))
-        arm_id = flat_if_arm_next_get(arm_id)
-        remaining = remaining - 1
-    flat_if_expr_else_set(rebuilt, replace_placeholders(flat_if_chain_else_expr_get(chain_id)))
-    rebuilt
-
 # ===== Replace Placeholders (shared fixed slot, for interpolated strings) =====
 
 fn replace_placeholders_fixed_slot(eid: i64, slot: i64) -> i64:
@@ -785,13 +745,11 @@ fn replace_placeholders_fixed_slot(eid: i64, slot: i64) -> i64:
         if _ph_has_numbered and not _ph_has_unnumbered:
             if is_numbered_placeholder(name):
                 val num = parse_placeholder_number(name)
+                if num <= 0:
+                    return eid
                 val param_idx = num - 1
                 return placeholder_retain_span(eid, expr_ident("__p{param_idx}", 0))
         return eid
-
-    if tag == EXPR_IF_CHAIN:
-        val rebuilt_chain = replace_placeholders_fixed_if_chain(expr_extra[eid], slot)
-        return placeholder_retain_span(eid, expr_if_chain_expr(rebuilt_chain, flat_if_chain_span_get(rebuilt_chain)))
 
     if tag == EXPR_BINARY:
         val new_left = replace_placeholders_fixed_slot(expr_left[eid], slot)
@@ -907,25 +865,6 @@ fn replace_placeholders_fixed_slot(eid: i64, slot: i64) -> i64:
 
     # For any other expression type, return as-is
     eid
-
-fn replace_placeholders_fixed_if_chain(chain_id: i64, slot: i64) -> i64:
-    val rebuilt = flat_if_expr_chain_new(flat_if_chain_span_get(chain_id))
-    var arm_id = flat_if_chain_first_arm_get(chain_id)
-    var remaining = flat_if_chain_arm_count_get(chain_id)
-    while arm_id >= 0 and remaining > 0:
-        val kind = flat_if_arm_kind_get(arm_id)
-        var head = flat_if_arm_head_get(arm_id)
-        var init = flat_if_arm_init_get(arm_id)
-        if kind == ARM_CONDITION:
-            head = replace_placeholders_fixed_slot(head, slot)
-        else:
-            init = replace_placeholders_fixed_slot(init, slot)
-        val then_expr = replace_placeholders_fixed_slot(flat_if_arm_then_expr_get(arm_id), slot)
-        flat_if_expr_arm_append(rebuilt, kind, head, init, then_expr, flat_if_arm_span_get(arm_id))
-        arm_id = flat_if_arm_next_get(arm_id)
-        remaining = remaining - 1
-    flat_if_expr_else_set(rebuilt, replace_placeholders_fixed_slot(flat_if_chain_else_expr_get(chain_id), slot))
-    rebuilt
 
 # ===== Second pass: interpolated-string call arguments =====
 #

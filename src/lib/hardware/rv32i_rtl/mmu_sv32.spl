@@ -25,8 +25,6 @@
 # VHDL synthesizable subset: u32, bool, structs only.
 # ============================================================================
 
-use std.hardware.soc_rtl.ram.{RamState, ram_read}
-
 # ============================================================================
 # Constants
 # ============================================================================
@@ -53,6 +51,7 @@ val PTE_R_MASK: u32 = 2   # bit 1
 val PTE_W_MASK: u32 = 4   # bit 2
 val PTE_X_MASK: u32 = 8   # bit 3
 val PTE_U_MASK: u32 = 16  # bit 4
+val PTE_G_MASK: u32 = 32  # bit 5
 val PTE_A_MASK: u32 = 64  # bit 6
 val PTE_D_MASK: u32 = 128 # bit 7
 
@@ -80,6 +79,7 @@ struct TlbEntry:
     vpn: u32      # Virtual page number (VPN[1]:VPN[0], 20 bits)
     ppn: u32      # Physical page number (22 bits)
     flags: u32    # PTE flags (lower 10 bits)
+    asid: u32     # Address-space identifier at refill time
     valid: bool   # Entry is valid
 
 # ============================================================================
@@ -111,17 +111,8 @@ struct MmuState:
     tlb_15: TlbEntry
     tlb_count: u32     # FIFO write pointer (wraps at MMU_TLB_SIZE)
     satp_mode: u32     # 0=Bare, 1=Sv32
+    satp_asid: u32     # Current 9-bit ASID
     satp_ppn: u32      # Root page table PPN (22 bits)
-
-# ============================================================================
-# Translation Result
-# ============================================================================
-
-struct MmuTranslateResult:
-    """Result of a virtual-to-physical address translation."""
-    paddr: u32         # Translated physical address
-    fault: bool        # True if a page fault occurred
-    fault_cause: u32   # 12=insn, 13=load, 15=store page fault
 
 # ============================================================================
 # TLB Lookup Result
@@ -139,7 +130,7 @@ struct TlbLookupResult:
 
 fn mmu_create() -> MmuState:
     """Create initial MMU state.  Translation disabled (Bare mode)."""
-    val empty = TlbEntry(vpn: 0, ppn: 0, flags: 0, valid: false)
+    val empty = TlbEntry(vpn: 0, ppn: 0, flags: 0, asid: 0, valid: false)
     MmuState(
         tlb_0: empty, tlb_1: empty, tlb_2: empty, tlb_3: empty,
         tlb_4: empty, tlb_5: empty, tlb_6: empty, tlb_7: empty,
@@ -147,6 +138,7 @@ fn mmu_create() -> MmuState:
         tlb_12: empty, tlb_13: empty, tlb_14: empty, tlb_15: empty,
         tlb_count: 0,
         satp_mode: 0,
+        satp_asid: 0,
         satp_ppn: 0
     )
 
@@ -158,10 +150,11 @@ fn mmu_set_satp(state: MmuState, satp_val: u32) -> MmuState:
     """Parse the SATP register and update MMU configuration.
     RV32 SATP layout:
       bit  [31]    — MODE (0=Bare, 1=Sv32)
-      bits [30:22] — ASID (ignored in this implementation)
+      bits [30:22] — ASID (9 bits)
       bits [21:0]  — PPN  (22 bits)"""
     var out = state
     out.satp_mode = (satp_val >> 31) & 0x1
+    out.satp_asid = (satp_val >> 22) & 0x1FF
     out.satp_ppn = satp_val & 0x003FFFFF
     out
 
@@ -203,17 +196,50 @@ fn mmu_tlb_read_entry(state: MmuState, idx: u32) -> TlbEntry:
         return state.tlb_14
     if idx == 15:
         return state.tlb_15
-    TlbEntry(vpn: 0, ppn: 0, flags: 0, valid: false)
+    TlbEntry(vpn: 0, ppn: 0, flags: 0, asid: 0, valid: false)
 
 fn mmu_tlb_lookup(state: MmuState, vpn: u32) -> TlbLookupResult:
     """Search TLB for a matching entry.
     vpn is the full 20-bit virtual page number (VPN[1]:VPN[0])."""
-    var i: u32 = 0
-    while i < MMU_TLB_SIZE:
-        val entry = mmu_tlb_read_entry(state, i)
-        if entry.valid and entry.vpn == vpn:
-            return TlbLookupResult(ppn: entry.ppn, flags: entry.flags, hit: true)
-        i = i + 1
+    val r0 = mmu_tlb_lookup_at(state, vpn, 0)
+    if r0.hit: return r0
+    val r1 = mmu_tlb_lookup_at(state, vpn, 1)
+    if r1.hit: return r1
+    val r2 = mmu_tlb_lookup_at(state, vpn, 2)
+    if r2.hit: return r2
+    val r3 = mmu_tlb_lookup_at(state, vpn, 3)
+    if r3.hit: return r3
+    val r4 = mmu_tlb_lookup_at(state, vpn, 4)
+    if r4.hit: return r4
+    val r5 = mmu_tlb_lookup_at(state, vpn, 5)
+    if r5.hit: return r5
+    val r6 = mmu_tlb_lookup_at(state, vpn, 6)
+    if r6.hit: return r6
+    val r7 = mmu_tlb_lookup_at(state, vpn, 7)
+    if r7.hit: return r7
+    val r8 = mmu_tlb_lookup_at(state, vpn, 8)
+    if r8.hit: return r8
+    val r9 = mmu_tlb_lookup_at(state, vpn, 9)
+    if r9.hit: return r9
+    val r10 = mmu_tlb_lookup_at(state, vpn, 10)
+    if r10.hit: return r10
+    val r11 = mmu_tlb_lookup_at(state, vpn, 11)
+    if r11.hit: return r11
+    val r12 = mmu_tlb_lookup_at(state, vpn, 12)
+    if r12.hit: return r12
+    val r13 = mmu_tlb_lookup_at(state, vpn, 13)
+    if r13.hit: return r13
+    val r14 = mmu_tlb_lookup_at(state, vpn, 14)
+    if r14.hit: return r14
+    val r15 = mmu_tlb_lookup_at(state, vpn, 15)
+    if r15.hit: return r15
+    TlbLookupResult(ppn: 0, flags: 0, hit: false)
+
+fn mmu_tlb_lookup_at(state: MmuState, vpn: u32, idx: u32) -> TlbLookupResult:
+    val entry = mmu_tlb_read_entry(state, idx)
+    val global_mapping = (entry.flags & PTE_G_MASK) != 0
+    if entry.valid and entry.vpn == vpn and (global_mapping or entry.asid == state.satp_asid):
+        return TlbLookupResult(ppn: entry.ppn, flags: entry.flags, hit: true)
     TlbLookupResult(ppn: 0, flags: 0, hit: false)
 
 # ============================================================================
@@ -259,7 +285,8 @@ fn mmu_tlb_write_entry(state: MmuState, idx: u32, entry: TlbEntry) -> MmuState:
 
 fn mmu_tlb_insert(state: MmuState, vpn: u32, ppn: u32, flags: u32) -> MmuState:
     """Insert a new TLB entry using FIFO replacement policy."""
-    val entry = TlbEntry(vpn: vpn, ppn: ppn, flags: flags, valid: true)
+    val entry = TlbEntry(vpn: vpn, ppn: ppn, flags: flags,
+        asid: state.satp_asid, valid: true)
     val idx = state.tlb_count % MMU_TLB_SIZE
     var out = mmu_tlb_write_entry(state, idx, entry)
     out.tlb_count = state.tlb_count + 1
@@ -269,26 +296,54 @@ fn mmu_tlb_insert(state: MmuState, vpn: u32, ppn: u32, flags: u32) -> MmuState:
 # TLB Flush — clear all entries (for SFENCE.VMA)
 # ============================================================================
 
-fn mmu_flush(state: MmuState) -> MmuState:
-    """Clear all TLB entries.  Called on SFENCE.VMA."""
-    val empty = TlbEntry(vpn: 0, ppn: 0, flags: 0, valid: false)
+fn mmu_tlb_invalidate_match(entry: TlbEntry, vpn: u32, asid: u32,
+                            match_vpn: bool, match_asid: bool) -> TlbEntry:
+    if not entry.valid:
+        return entry
+    if match_vpn and entry.vpn != vpn:
+        return entry
+    if match_asid:
+        if (entry.flags & PTE_G_MASK) != 0 or entry.asid != asid:
+            return entry
+    var out = entry
+    out.valid = false
+    out
+
+fn mmu_tlb_invalidate_at(state: MmuState, idx: u32, vpn: u32, asid: u32,
+                         match_vpn: bool, match_asid: bool) -> MmuState:
+    val entry = mmu_tlb_read_entry(state, idx)
+    val next = mmu_tlb_invalidate_match(entry, vpn, asid, match_vpn, match_asid)
+    mmu_tlb_write_entry(state, idx, next)
+
+@hardware
+fn mmu_sfence_vma(state: MmuState, vaddr: u32, asid: u32,
+                   match_vaddr: bool, match_asid: bool) -> MmuState:
+    """Apply SFENCE.VMA matching rules; ASID-scoped fences retain globals."""
+    val vpn = sv32_full_vpn(vaddr)
     var out = state
-    out.tlb_0 = empty
-    out.tlb_1 = empty
-    out.tlb_2 = empty
-    out.tlb_3 = empty
-    out.tlb_4 = empty
-    out.tlb_5 = empty
-    out.tlb_6 = empty
-    out.tlb_7 = empty
-    out.tlb_8 = empty
-    out.tlb_9 = empty
-    out.tlb_10 = empty
-    out.tlb_11 = empty
-    out.tlb_12 = empty
-    out.tlb_13 = empty
-    out.tlb_14 = empty
-    out.tlb_15 = empty
+    val fence_asid = asid & 0x1FF
+    out = mmu_tlb_invalidate_at(out, 0, vpn, fence_asid, match_vaddr, match_asid)
+    out = mmu_tlb_invalidate_at(out, 1, vpn, fence_asid, match_vaddr, match_asid)
+    out = mmu_tlb_invalidate_at(out, 2, vpn, fence_asid, match_vaddr, match_asid)
+    out = mmu_tlb_invalidate_at(out, 3, vpn, fence_asid, match_vaddr, match_asid)
+    out = mmu_tlb_invalidate_at(out, 4, vpn, fence_asid, match_vaddr, match_asid)
+    out = mmu_tlb_invalidate_at(out, 5, vpn, fence_asid, match_vaddr, match_asid)
+    out = mmu_tlb_invalidate_at(out, 6, vpn, fence_asid, match_vaddr, match_asid)
+    out = mmu_tlb_invalidate_at(out, 7, vpn, fence_asid, match_vaddr, match_asid)
+    out = mmu_tlb_invalidate_at(out, 8, vpn, fence_asid, match_vaddr, match_asid)
+    out = mmu_tlb_invalidate_at(out, 9, vpn, fence_asid, match_vaddr, match_asid)
+    out = mmu_tlb_invalidate_at(out, 10, vpn, fence_asid, match_vaddr, match_asid)
+    out = mmu_tlb_invalidate_at(out, 11, vpn, fence_asid, match_vaddr, match_asid)
+    out = mmu_tlb_invalidate_at(out, 12, vpn, fence_asid, match_vaddr, match_asid)
+    out = mmu_tlb_invalidate_at(out, 13, vpn, fence_asid, match_vaddr, match_asid)
+    out = mmu_tlb_invalidate_at(out, 14, vpn, fence_asid, match_vaddr, match_asid)
+    out = mmu_tlb_invalidate_at(out, 15, vpn, fence_asid, match_vaddr, match_asid)
+    out
+
+@hardware
+fn mmu_flush(state: MmuState) -> MmuState:
+    """Invalidate every entry (SFENCE.VMA x0, x0)."""
+    var out = mmu_sfence_vma(state, 0, 0, false, false)
     out.tlb_count = 0
     out
 
@@ -340,170 +395,3 @@ fn fault_cause_for(access_type: u32) -> u32:
         return CAUSE_STORE_PAGE_FAULT
     # ACCESS_LOAD or default
     CAUSE_LOAD_PAGE_FAULT
-
-# ============================================================================
-# Permission Check
-# ============================================================================
-
-fn pte_check_perms(flags: u32, access_type: u32, privilege: u32) -> bool:
-    """Check PTE permissions for the given access type and privilege level.
-    Returns true if access is ALLOWED, false if it should fault.
-
-    Rules:
-    - PTE must be valid (V=1)
-    - Leaf PTE must have at least one of R/W/X set
-    - Fetch requires X
-    - Load requires R
-    - Store requires W (and D bit should be set for hardware A/D)
-    - U-mode can only access pages with U=1
-    - S-mode cannot access pages with U=1 (unless SUM is set, not modelled)"""
-
-    # Must be valid
-    if (flags & PTE_V_MASK) == 0:
-        return false
-
-    # Must be a leaf (at least one of R/W/X set)
-    if (flags & (PTE_R_MASK | PTE_W_MASK | PTE_X_MASK)) == 0:
-        return false
-
-    # Reserved encoding: W=1, R=0 is invalid per RISC-V spec
-    val w_set = (flags & PTE_W_MASK) != 0
-    val r_set = (flags & PTE_R_MASK) != 0
-    if w_set and r_set == false:
-        return false
-
-    # Check U bit vs privilege
-    val is_user_page = (flags & PTE_U_MASK) != 0
-    if privilege == PRIV_U and is_user_page == false:
-        return false
-    if privilege == PRIV_S and is_user_page:
-        return false
-
-    # Check access type
-    if access_type == ACCESS_FETCH:
-        if (flags & PTE_X_MASK) == 0:
-            return false
-    else if access_type == ACCESS_LOAD:
-        if (flags & PTE_R_MASK) == 0:
-            return false
-    else if access_type == ACCESS_STORE:
-        if (flags & PTE_W_MASK) == 0:
-            return false
-
-    true
-
-# ============================================================================
-# Translate — main entry point
-# ============================================================================
-
-fn mmu_translate(state: MmuState, vaddr: u32, access_type: u32, privilege: u32, ram: RamState) -> MmuTranslateResult:
-    """Translate a virtual address to a physical address.
-
-    access_type: 0=fetch, 1=load, 2=store
-    privilege: 0=U, 1=S, 3=M
-
-    If satp_mode==0 (Bare) or privilege==M, return identity mapping.
-    Otherwise perform Sv32 two-level page table walk with TLB.
-
-    NOTE: On a TLB miss + successful walk, this function does NOT
-    auto-insert into the TLB (the return type carries no MmuState).
-    Caller may invoke mmu_tlb_insert() to populate the TLB on success."""
-
-    # M-mode or Bare mode — identity mapping (no translation)
-    if privilege == PRIV_M or state.satp_mode == 0:
-        return MmuTranslateResult(paddr: vaddr, fault: false, fault_cause: 0)
-
-    # ── TLB lookup ──────────────────────────────────────────────────────
-    val vpn = sv32_full_vpn(vaddr)
-    val tlb_result = mmu_tlb_lookup(state, vpn)
-    if tlb_result.hit:
-        # Check permissions on cached entry
-        if pte_check_perms(tlb_result.flags, access_type, privilege) == false:
-            return MmuTranslateResult(
-                paddr: 0,
-                fault: true,
-                fault_cause: fault_cause_for(access_type)
-            )
-        val paddr = (tlb_result.ppn << PAGE_OFFSET_BITS) | sv32_offset(vaddr)
-        return MmuTranslateResult(paddr: paddr, fault: false, fault_cause: 0)
-
-    # ── Page table walk (two levels) ────────────────────────────────────
-    val vpn1 = sv32_vpn1(vaddr)
-    val vpn0 = sv32_vpn0(vaddr)
-    val offset = sv32_offset(vaddr)
-
-    # Level 1: read PTE from root page table
-    # NOTE: satp_ppn * PAGE_SIZE can exceed 32 bits for Sv32 (34-bit physical
-    # address space).  In this RV32 simulation model we accept u32 truncation;
-    # physical addresses above 4 GiB are not reachable.
-    val l1_pte_addr = (state.satp_ppn * PAGE_SIZE) + (vpn1 * PTE_SIZE)
-    val l1_pte = ram_read(ram, l1_pte_addr)
-
-    # Check valid bit
-    if (l1_pte & PTE_V_MASK) == 0:
-        return MmuTranslateResult(
-            paddr: 0,
-            fault: true,
-            fault_cause: fault_cause_for(access_type)
-        )
-
-    # Check if this is a leaf PTE (megapage — R, W, or X set)
-    val l1_is_leaf = (l1_pte & (PTE_R_MASK | PTE_W_MASK | PTE_X_MASK)) != 0
-    if l1_is_leaf:
-        # Megapage: PPN[0] from PTE must be zero for alignment
-        if pte_ppn0(l1_pte) != 0:
-            # Misaligned megapage — fault
-            return MmuTranslateResult(
-                paddr: 0,
-                fault: true,
-                fault_cause: fault_cause_for(access_type)
-            )
-
-        val l1_flags = pte_flags_extract(l1_pte)
-        if pte_check_perms(l1_flags, access_type, privilege) == false:
-            return MmuTranslateResult(
-                paddr: 0,
-                fault: true,
-                fault_cause: fault_cause_for(access_type)
-            )
-
-        # Megapage: paddr = PPN[1] << 22 | VPN[0] << 12 | offset
-        val mega_ppn1 = pte_ppn1(l1_pte)
-        val paddr = (mega_ppn1 << 22) | (vpn0 << 12) | offset
-        return MmuTranslateResult(paddr: paddr, fault: false, fault_cause: 0)
-
-    # Level 1 is a pointer to level-0 page table
-    val l0_table_ppn = pte_ppn_full(l1_pte)
-    val l0_pte_addr = (l0_table_ppn * PAGE_SIZE) + (vpn0 * PTE_SIZE)
-    val l0_pte = ram_read(ram, l0_pte_addr)
-
-    # Check valid bit
-    if (l0_pte & PTE_V_MASK) == 0:
-        return MmuTranslateResult(
-            paddr: 0,
-            fault: true,
-            fault_cause: fault_cause_for(access_type)
-        )
-
-    # Level 0 must be a leaf
-    val l0_is_leaf = (l0_pte & (PTE_R_MASK | PTE_W_MASK | PTE_X_MASK)) != 0
-    if l0_is_leaf == false:
-        # Non-leaf at level 0 is invalid
-        return MmuTranslateResult(
-            paddr: 0,
-            fault: true,
-            fault_cause: fault_cause_for(access_type)
-        )
-
-    val l0_flags = pte_flags_extract(l0_pte)
-    if pte_check_perms(l0_flags, access_type, privilege) == false:
-        return MmuTranslateResult(
-            paddr: 0,
-            fault: true,
-            fault_cause: fault_cause_for(access_type)
-        )
-
-    # 4K page: paddr = PPN << 12 | offset
-    val leaf_ppn = pte_ppn_full(l0_pte)
-    val paddr = (leaf_ppn << PAGE_OFFSET_BITS) | offset
-    MmuTranslateResult(paddr: paddr, fault: false, fault_cause: 0)

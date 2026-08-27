@@ -21,21 +21,21 @@
 use std.play.types.*
 use std.json.builder.{JsonBuilder, escape_json}
 
-extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
-extern fn rt_time_now_unix_micros() -> i64
-extern fn rt_file_write_text(path: text, content: text) -> bool
+use std.io_runtime.{process_run}
+use std.io_runtime.{time_now_unix_micros}
+use std.io_runtime.{file_write}
 
 class Sdl2Client:
     base_url: text
     session: PlaySession
 
     static fn connect(base_url: text) -> Result<Sdl2Client, PlayError>:
-        val probe = rt_process_run("curl", ["-s", "--max-time", "3", base_url + "/api/test/ready"])
+        val probe = process_run("curl", ["-s", "--max-time", "3", base_url + "/api/test/ready"])
         if probe.2 != 0:
             return Err(play_error_with_detail(ERR_BACKEND_UNAVAILABLE, "sdl2 test api not reachable", base_url))
         if not probe.0.contains("\"ready\":true"):
             return Err(play_error_with_detail(ERR_BACKEND_UNAVAILABLE, "sdl2 test api did not report ready", probe.0))
-        val now = rt_time_now_unix_micros()
+        val now = time_now_unix_micros()
         val sess = PlaySession(
             id: "sdl2-{now}",
             backend: BACKEND_SDL2,
@@ -59,7 +59,7 @@ class Sdl2Client:
         Ok(Sdl2Client(base_url: base_url, session: sess))
 
     me _post(path: text, json_body: text) -> Result<text, PlayError>:
-        val r = rt_process_run("curl", [
+        val r = process_run("curl", [
             "-s", "--max-time", "5",
             "-X", "POST",
             "-H", "Content-Type: application/json",
@@ -73,7 +73,7 @@ class Sdl2Client:
         Ok(r.0)
 
     me _get(path: text) -> Result<text, PlayError>:
-        val r = rt_process_run("curl", ["-s", "--max-time", "5", self.base_url + path])
+        val r = process_run("curl", ["-s", "--max-time", "5", self.base_url + path])
         if r.2 != 0:
             return Err(play_error_with_detail(ERR_BACKEND_UNAVAILABLE, "http get failed", path))
         Ok(r.0)
@@ -135,7 +135,7 @@ class Sdl2Client:
     me screenshot(path: text) -> Result<text, PlayError>:
         val body = self._get("/api/test/screenshot")?
         val final_path = if path == "": self.session.artifacts_dir + "/screenshot.txt" else: path
-        rt_file_write_text(final_path, body)
+        file_write(final_path, body)
         Ok(final_path)
 
     # ------------------------------------------------------------------
@@ -143,8 +143,8 @@ class Sdl2Client:
     # ------------------------------------------------------------------
 
     me wait_for_element(widget_id: text, timeout_ms: i64) -> Result<(), PlayError>:
-        val deadline = rt_time_now_unix_micros() + (timeout_ms * 1000)
-        while rt_time_now_unix_micros() < deadline:
+        val deadline = time_now_unix_micros() + (timeout_ms * 1000)
+        while time_now_unix_micros() < deadline:
             val r = self.element(widget_id)
             match r:
                 case Ok(body):

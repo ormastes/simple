@@ -1,45 +1,26 @@
 """
 # Service Externs — UDS (Unix Domain Socket) SFFI declarations
-
-Declares the runtime externs for UDS server/client operations and the
-text-shaped wrappers callers should use.
-
-## ABI contract
-
-The runtime implements these symbols with a **(ptr, len)** ABI, plus an
-out-parameter for `recv` and a companion `rt_unix_socket_free_buf`:
-
-    rt_unix_socket_listen(path_ptr, path_len, backlog) -> fd | -errno
-    rt_unix_socket_connect(path_ptr, path_len)         -> fd | -errno
-    rt_unix_socket_accept(fd)                          -> cfd | -EAGAIN | -errno
-    rt_unix_socket_send(fd, data_ptr, data_len)        -> nbytes | -errno
-    rt_unix_socket_recv(fd, max_len, out_len_ptr)      -> buf_ptr (0 on EOF/err)
-    rt_unix_socket_free_buf(buf_ptr, len)
-    rt_unix_socket_close(fd)                           -> 0 | -errno
-
-Both lanes agree on this shape: the native runtime in
-`src/compiler_rust/runtime/src/value/net_uds.rs` and the interpreter shims in
-`src/compiler_rust/compiler/src/interpreter_extern/qmp_socket.rs`.
-
-Declaring these with text-shaped signatures (`path: text`) is a **defect**: a
-tagged interpreter string is passed where a raw byte pointer is expected, so
-`listen`/`connect` return -22 (EINVAL) and `recv` dereferences a bogus
-out-parameter and core-dumps. See
-`doc/08_tracking/bug/rt_unix_socket_extern_shape_mismatch_2026-08-26.md`.
-
-Simple text is bridged to a raw pointer with `rt_string_data`, and a received
-buffer is lifted back to text with `rt_string_new`.
+#
+# Declares the runtime externs for UDS server/client operations.
+# Client-side rt_unix_socket_connect already exists in qmp_client.
+# Server-side externs are new.
 """
 
 use std.io_runtime
 
 # --- UDS externs ---
 # Client-side (already in runtime via qmp_client)
+@unsafe(reason: "raw Unix-socket connect status ABI", capabilities: [ffi])
 extern fn rt_unix_socket_connect(path: text) -> i64
 
 # Server-side (new — require runtime implementation)
-extern fn rt_unix_socket_listen(path: text, backlog: i64) -> i64
+@unsafe(reason: "raw Unix-socket listen status ABI", capabilities: [ffi])
+extern fn rt_unix_socket_listen(path: text, backlog: i32) -> i64
+@unsafe(reason: "raw Unix-socket accept status ABI", capabilities: [ffi])
 extern fn rt_unix_socket_accept(fd: i64) -> i64
+@unsafe(reason: "raw Unix-socket send status ABI", capabilities: [ffi])
 extern fn rt_unix_socket_send(fd: i64, data: text) -> i64
+@unsafe(reason: "raw Unix-socket receive buffer ABI; native lane uses pointer/out-length", capabilities: [ffi])
 extern fn rt_unix_socket_recv(fd: i64, max_bytes: i64) -> text
-extern fn rt_unix_socket_close(fd: i64) -> bool
+@unsafe(reason: "raw Unix-socket close errno ABI", capabilities: [ffi])
+extern fn rt_unix_socket_close(fd: i64) -> i32

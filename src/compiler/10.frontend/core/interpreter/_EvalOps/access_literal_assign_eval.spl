@@ -17,6 +17,30 @@ use compiler.frontend.core.interpreter.eval_ops.*
 use compiler.core.types.{TYPE_VOID, TYPE_BOOL, TYPE_I64, TYPE_F64, TYPE_TEXT, TYPE_ANY}
 use compiler.core.monomorphize.{mono_cache_init, mono_cache_lookup, mono_cache_register, mono_specialize}
 
+# Raw O(1) byte read out of the text buffer. Registered for this engine in
+# interpreter_extern/mod.rs. See the `byte_at` arm below for why this is not
+# rt_text_to_bytes.
+extern fn rt_string_byte_at(s: text, index: i64) -> i64
+
+# THE live text-method dispatch table.
+#
+# This used to be one of TWO definitions of `eval_text_method`; the other lived
+# in ../eval_methods.spl and was a superset (24 arms vs 13). The subset was the
+# one that ran: the sole call site is call_method_eval.spl:586, in this same
+# _EvalOps package, so the package-local definition shadowed the one
+# __init__.spl re-exports from eval_methods.spl. Result: byte_at returned 0 for
+# every index, slice/char_at/to_upper returned the receiver unchanged, and
+# parse_int returned nil -- all silently, because a missing arm falls through to
+# eval_set_error + -1 rather than failing loudly at the call site.
+#
+# Proven by sabotage in both directions through core_interpret_expr: making
+# eval_methods.spl's `len` arm return 4242 changed nothing (still 6); making
+# THIS arm return 7373 returned 7373.
+#
+# eval_methods.spl has been deleted rather than resynced -- keeping two copies
+# in sync was already attempted once (113f0864c7a fixed char_code_at in both)
+# and is precisely what let the drift persist. Do not re-add a second copy;
+# text_byte_at_dispatch_spec.spl now asserts eval_methods.spl does not exist.
 fn eval_text_method(receiver: i64, method_name: text, arg_eids: [i64]) -> i64:
     val s = val_get_text(receiver)
 
@@ -31,18 +55,55 @@ fn eval_text_method(receiver: i64, method_name: text, arg_eids: [i64]) -> i64:
             return val_make_bool(s.contains(t))
         return val_make_bool(false)
 
+    # char_code_at is CHARACTER (codepoint) indexed in every other lane: the
+    # seed does `s.chars().nth(idx)` (interpreter_method/string.rs), and the
+    # compiled lanes lower to __simple_rt_string_char_code_at, which walks
+    # UTF-8 widths (runtime_native.c rt_string_char_code_at /
+    # src/runtime/simple_core/core_string.spl).
+    #
+    # This used to be `s.substring(idx, idx+1)` then `.char_code_at(0)` on the
+    # result. `substring` is BYTE-indexed (deliberately -- it has to agree with
+    # the byte offsets `len` and `index_of` hand out), so on any multi-byte
+    # codepoint this sliced ONE byte out of the middle of a character and
+    # re-decoded that lone byte as UTF-8. Measured: "café,".char_code_at(3)
+    # returned 65533 (U+FFFD, the lossy-decode replacement for a bare 0xC3)
+    # instead of 233, and every index at or past the first non-ASCII character
+    # was shifted.
+    #
+    # Bounds are handled inside the runtime, which returns 0 for negative and
+    # for out-of-range indices -- matching the seed's `None => 0`. Do NOT
+    # re-add an `idx < s.len()` guard here: `len` is BYTE length, so for
+    # multi-byte text it is an over-estimate of the character count and the
+    # walk is the only thing that knows the real end.
     if method_name == "char_code_at":
         if arg_eids.len() > 0:
             val idx_val = eval_expr(arg_eids[0])
             if eval_had_error: return -1
             val idx = val_get_int(idx_val)
-            if idx >= 0 and idx < s.len():
-                val ch = s.substring(idx, idx + 1)
-                return val_make_int(ch.char_code_at(0))
-            return val_make_int(0)
-        if s.len() > 0:
-            val first_ch = s.substring(0, 1)
-            return val_make_int(first_ch.char_code_at(0))
+            return val_make_int(s.char_code_at(idx))
+        return val_make_int(s.char_code_at(0))
+
+    # byte_at is BYTE-indexed, in contrast to char_code_at above which is
+    # CHARACTER-indexed: on non-ASCII text the two diverge (e.g.
+    # "café,".byte_at(3) == 195, the raw 0xC3 lead byte of 'é', while
+    # char_code_at(3) == 233, the decoded codepoint). It must NOT reuse
+    # char_code_at's slice-then-decode shape: slicing one byte out of a
+    # multi-byte codepoint and decoding it as UTF-8 yields the replacement
+    # char, not the raw byte. It reads through rt_string_byte_at, a direct
+    # O(1) buffer read (matches the byte-framing scan in
+    # src/lib/common/web/browser_renderer_protocol.spl, which relies on
+    # byte_at being byte-indexed). Deliberately NOT rt_text_to_bytes: that
+    # materializes the whole byte array per call, so a
+    # `while i < s.len(): s.byte_at(i)` scan would be O(n^2) -- the same
+    # quadratic trap char_code_at was already fixed for. Bounds and negative
+    # indices are handled inside the extern, which returns 0 for both,
+    # matching the seed and the compiled lanes.
+    if method_name == "byte_at":
+        if arg_eids.len() > 0:
+            val byte_idx_val = eval_expr(arg_eids[0])
+            if eval_had_error: return -1
+            val byte_idx = val_get_int(byte_idx_val)
+            return val_make_int(rt_string_byte_at(s, byte_idx))
         return val_make_int(0)
 
     if method_name == "substring":
@@ -67,6 +128,30 @@ fn eval_text_method(receiver: i64, method_name: text, arg_eids: [i64]) -> i64:
             if s_start < 0: s_start = 0
             if s_start > s.len(): s_start = s.len()
             return val_make_text(s.substring(s_start, s.len()))
+        return val_make_text(s)
+
+    # slice is a byte-offset alias of substring, with the same clamping. Kept
+    # byte-indexed on purpose: `len` and `index_of` hand out byte offsets, so a
+    # character-indexed slice would not compose with them.
+    if method_name == "slice":
+        if arg_eids.len() >= 2:
+            val sl_start_val = eval_expr(arg_eids[0])
+            if eval_had_error: return -1
+            val sl_end_val = eval_expr(arg_eids[1])
+            if eval_had_error: return -1
+            var sl_start = val_get_int(sl_start_val)
+            var sl_end = val_get_int(sl_end_val)
+            if sl_start < 0: sl_start = 0
+            if sl_end > s.len(): sl_end = s.len()
+            if sl_start > sl_end: sl_start = sl_end
+            return val_make_text(s.substring(sl_start, sl_end))
+        elif arg_eids.len() == 1:
+            val sl1_start_val = eval_expr(arg_eids[0])
+            if eval_had_error: return -1
+            var sl1_start = val_get_int(sl1_start_val)
+            if sl1_start < 0: sl1_start = 0
+            if sl1_start > s.len(): sl1_start = s.len()
+            return val_make_text(s.substring(sl1_start, s.len()))
         return val_make_text(s)
 
     if method_name == "starts_with":
@@ -102,8 +187,33 @@ fn eval_text_method(receiver: i64, method_name: text, arg_eids: [i64]) -> i64:
             if eval_had_error: return -1
             val sep = val_get_text(sep_val)
             val parts = s.split(sep)
+            # Bug (text-split-limit-ignored, 2026-07-20): a second `limit` arg
+            # (`.split(sep, N)`) was silently ignored -- this handler always
+            # split on every occurrence of `sep`. splitn semantics: keep the
+            # first `limit - 1` parts as-is, then rejoin the remainder with
+            # `sep` as the final element (mirrors Rust's str::splitn). The fix
+            # was written into eval_methods.spl, which does not run, so it
+            # never took effect; ported here.
+            var limited: [text] = parts
+            if arg_eids.len() > 1:
+                val limit_val = eval_expr(arg_eids[1])
+                if eval_had_error: return -1
+                val limit = val_get_int(limit_val)
+                if limit > 0 and parts.len() > limit:
+                    var head: [text] = []
+                    var hi = 0
+                    while hi < limit - 1:
+                        head.push(parts[hi])
+                        hi = hi + 1
+                    var tail: [text] = []
+                    var ti = limit - 1
+                    while ti < parts.len():
+                        tail.push(parts[ti])
+                        ti = ti + 1
+                    head.push(tail.join(sep))
+                    limited = head
             var result: [i64] = []
-            for p in parts:
+            for p in limited:
                 result.push(val_make_text(p))
             return val_make_array(result)
         return val_make_array([val_make_text(s)])
@@ -125,20 +235,125 @@ fn eval_text_method(receiver: i64, method_name: text, arg_eids: [i64]) -> i64:
             result.push(val_make_text(p))
         return val_make_array(result)
 
-    if method_name == "trim":
+    if method_name == "trim" or method_name == "strip":
         return val_make_text(s.trim())
 
-    if method_name == "index_of":
+    # `find` / `find_str` are one-arg aliases of index_of; only `index_of`
+    # carries the two-arg `(needle, start)` form.
+    if method_name == "index_of" or method_name == "find" or method_name == "find_str":
         if arg_eids.len() > 0:
             val needle_val = eval_expr(arg_eids[0])
             if eval_had_error: return -1
             val needle = val_get_text(needle_val)
-            if arg_eids.len() >= 2:
+            if method_name == "index_of" and arg_eids.len() >= 2:
                 val start_val = eval_expr(arg_eids[1])
                 if eval_had_error: return -1
-                return val_make_int(s.index_of(needle, val_get_int(start_val)) ?? -1)
-            return val_make_int(s.index_of(needle) ?? -1)
+                # index_of already returns a raw i64 with -1 for not-found, so
+                # the `?? -1` these two lines used to carry was never reached
+                # on a miss — and it corrupted a genuine hit at index 3, which
+                # is the nil sentinel (TAG_SPECIAL = 0b011), into a miss.
+                return val_make_int(s.index_of(needle, val_get_int(start_val)))
+            return val_make_int(s.index_of(needle))
         return val_make_int(-1)
+
+    if method_name == "last_index_of" or method_name == "rfind":
+        if arg_eids.len() > 0:
+            val r_needle_val = eval_expr(arg_eids[0])
+            if eval_had_error: return -1
+            val r_needle = val_get_text(r_needle_val)
+            # Same raw-i64 / -1-for-miss contract as the index_of branch above:
+            # no `?? -1`, which is dead on a miss and corrupts a genuine hit at
+            # index 3 (the nil sentinel, TAG_SPECIAL = 0b011).
+            return val_make_int(s.last_index_of(r_needle))
+        return val_make_int(-1)
+
+    # char_at is left BYTE-indexed on purpose: the compiled lanes lower it to
+    # rt_string_char_at, which is `rt_string_new(s->data + index, 1)` -- a raw
+    # one-byte slice (runtime_native.c). The seed disagrees (it uses
+    # `s.chars().nth(idx)`), so char_at is a genuine cross-lane divergence in
+    # its own right, but the split is between the SEED and the RUNTIME, not
+    # something this interpreter introduced -- matching the seed here would
+    # break agreement with native/JIT. Tracked separately in
+    # doc/08_tracking/bug/2026-08-01_interpreter_char_code_at_byte_indexed.md;
+    # do not "fix" one side of it in isolation.
+    if method_name == "char_at":
+        if arg_eids.len() > 0:
+            val ca_idx_val = eval_expr(arg_eids[0])
+            if eval_had_error: return -1
+            val ca_idx = val_get_int(ca_idx_val)
+            if ca_idx >= 0 and ca_idx < s.len():
+                return val_make_text(s.substring(ca_idx, ca_idx + 1))
+            return val_make_text("")
+        return val_make_text("")
+
+    # Text `at`: bounds-checked byte access returning Option in the FLAT
+    # encoding — a one-byte text is its own `Some`, `nil` is `None`. Deliberately
+    # NOT an alias of `char_at`, and deliberately NOT the seed's semantics:
+    #
+    #   | lane                                | index | out of range |
+    #   |-------------------------------------|-------|--------------|
+    #   | seed `interpreter_method/string.rs` | char  | `""`         |
+    #   |   (`"char_at" | "at"` share one arm)|       |              |
+    #   | C runtime `rt_string_char_at`       | byte  | `nil`        |
+    #   |   (what `s[i]` lowers to via rt_index_get)                  |
+    #   | live array `at` (call_method_eval)  | n/a   | `nil`        |
+    #   | THIS arm                            | byte  | `nil`        |
+    #
+    # Two properties are being preserved, and they both point the same way:
+    #   1. `.at` is this codebase's bounds-checked Option accessor. Array `.at`
+    #      returns flat-None for an out-of-range index, and 250+ call sites
+    #      `match x.at(i)` as Some/None. An `""` return would make every such
+    #      match take the Some branch on an out-of-range read.
+    #   2. Byte indexing keeps `at` composable with `len` / `index_of` / `slice`
+    #      / `char_at`, which all hand out byte offsets here, and keeps the
+    #      interpreter in agreement with native/JIT, which lower text indexing to
+    #      `rt_string_char_at`. Interpreter/native agreement is the property that
+    #      matters for a compiler lane — the same reasoning recorded on `char_at`
+    #      above and in
+    #      doc/08_tracking/bug/2026-08-01_interpreter_char_code_at_byte_indexed.md.
+    #
+    # So this arm agrees with the runtime on BOTH axes and diverges from the seed
+    # on both. Do not "fix" it toward the seed in isolation. Recorded in
+    # doc/08_tracking/bug/2026-08-01_interpreter_evalops_export_gaps.md.
+    if method_name == "at":
+        if arg_eids.len() == 0:
+            eval_set_error("at() requires an index argument")
+            return -1
+        val at_idx_val = eval_expr(arg_eids[0])
+        if eval_had_error: return -1
+        val at_idx = val_get_int(at_idx_val)
+        if at_idx >= 0 and at_idx < s.len():
+            return val_make_text(s.substring(at_idx, at_idx + 1))
+        return val_make_nil()
+
+    if method_name == "parse_int":
+        val parsed = s.parse_int()
+        if parsed.?:
+            val int_val = parsed ?? 0
+            # Returned as an Option-shaped struct so `??` works on the result.
+            var some_names: [text] = []
+            some_names.push("__tag")
+            some_names.push("__payload")
+            var some_values: [i64] = []
+            some_values.push(val_make_text("Some"))
+            some_values.push(val_make_int(int_val))
+            return val_make_struct("Option", some_names, some_values)
+        var none_names: [text] = []
+        none_names.push("__tag")
+        none_names.push("__payload")
+        var none_values: [i64] = []
+        none_values.push(val_make_text("None"))
+        none_values.push(val_make_nil())
+        return val_make_struct("Option", none_names, none_values)
+
+    if method_name == "to_upper":
+        return val_make_text(s.to_upper())
+
+    if method_name == "to_lower":
+        return val_make_text(s.to_lower())
+
+    if method_name == "to_string":
+        return val_make_text(s)
 
     eval_set_error("no method '" + method_name + "' on text")
     -1
@@ -221,6 +436,11 @@ fn eval_index_expr(eid: i64) -> i64:
                 return val_make_text(s[idx])
         eval_set_error("string index out of bounds: " + "{idx}")
         return -1
+
+    if val_is_struct(base_val) and val_get_struct_name(base_val) == "__dict":
+        val field_val = val_struct_get_field(base_val, val_to_text(index_val))
+        if field_val >= 0: return field_val
+        return val_make_nil()
 
     eval_set_error("cannot index " + val_kind_name(val_get_kind(base_val)))
     -1
@@ -358,6 +578,24 @@ fn eval_struct_lit(eid: i64) -> i64:
 
     val_make_struct(type_name, field_names, field_values)
 
+# Dict literals use the existing dynamic-field struct representation.
+fn eval_dict_lit(eid: i64) -> i64:
+    val e_node = expr_get(eid)
+    val key_eids = e_node.args
+    val value_eids = e_node.stmts
+    var field_names: [text] = []
+    var field_values: [i64] = []
+    var i: i64 = 0
+    for key_eid in key_eids:
+        val key = eval_expr(key_eid)
+        if eval_had_error: return -1
+        val value = eval_expr(value_eids[i])
+        if eval_had_error: return -1
+        field_names.push(val_to_text(key))
+        field_values.push(value)
+        i = i + 1
+    val_make_struct("__dict", field_names, field_values)
+
 # ===== Assignment Expression =====
 
 fn eval_assign_expr(eid: i64) -> i64:
@@ -419,10 +657,8 @@ fn eval_assign_expr(eid: i64) -> i64:
             return new_val
         if val_is_array(base_val) and val_is_int(key_val):
             val idx = val_get_int(key_val)
-            var elements = val_get_array(base_val)
-            if idx >= 0 and idx < elements.len():
-                elements[idx] = new_val
-                val_arrays[base_val] = elements
+            if idx >= 0 and idx < val_arrays[base_val].len():
+                val_arrays[base_val][idx] = new_val
                 return new_val
         eval_set_error("invalid index assignment")
         return -1
@@ -498,7 +734,7 @@ fn eval_compound_assign_expr(eid: i64) -> i64:
 
         if val_is_array(ix_base):
             if val_is_int(ix_key):
-                var ix_elems = val_get_array(ix_base)
+                val ix_elems = val_get_array(ix_base)
                 val ix_i = val_get_int(ix_key)
                 var ix_in_range = false
                 if ix_i >= 0:
@@ -516,8 +752,7 @@ fn eval_compound_assign_expr(eid: i64) -> i64:
                     if ix_err != "":
                         eval_set_error(ix_err)
                     return -1
-                ix_elems[ix_i] = ix_new
-                val_arrays[ix_base] = ix_elems
+                val_arrays[ix_base][ix_i] = ix_new
                 return ix_new
 
         if val_is_struct(ix_base):
@@ -558,6 +793,34 @@ fn eval_return_expr(eid: i64) -> i64:
 
 # ===== Interpolated String =====
 
+fn eval_interpolation_segments(value: text) -> [text]:
+    var segments: [text] = []
+    var current = ""
+    var depth = 0
+    var i = 0
+    while i < value.len():
+        val ch = value[i:i + 1]
+        val next = if i + 1 < value.len(): value[i + 1:i + 2] else: ""
+        if depth == 0 and ch == "{" and next == "{":
+            current = current + "{"
+            i = i + 1
+        elif depth == 0 and ch == "}" and next == "}":
+            current = current + "}"
+            i = i + 1
+        elif depth == 0 and ch == "{":
+            segments.push(current)
+            current = ""
+            depth = 1
+        elif depth > 0 and ch == "{":
+            depth = depth + 1
+        elif depth > 0 and ch == "}":
+            depth = depth - 1
+        elif depth == 0:
+            current = current + ch
+        i = i + 1
+    segments.push(current)
+    segments
+
 fn eval_interpolated_string(eid: i64) -> i64:
     val node = expr_get(eid)
     val parts = node.args
@@ -565,15 +828,16 @@ fn eval_interpolated_string(eid: i64) -> i64:
     if segments.len() != parts.len() + 1:
         eval_set_error("invalid interpolated string")
         return -1
-    var result = segments[0]
+    var result_parts: [text] = [segments[0]]
     var i = 0
     while i < parts.len():
         val part_eid = parts[i]
         val part_val = eval_expr(part_eid)
         if eval_had_error: return -1
-        result = result + val_to_text(part_val) + segments[i + 1]
+        result_parts.push(val_to_text(part_val))
+        result_parts.push(segments[i + 1])
         i = i + 1
-    val_make_text(result)
+    val_make_text(result_parts.join(""))
 
 # ===== Null Coalesce =====
 
@@ -679,8 +943,9 @@ fn eval_list_comp(eid: i64) -> i64:
     var result_elements: [i64] = []
     val kind = val_get_kind(iterable_val)
 
-    if kind == VAL_ARRAY:
-        val elements = val_get_array(iterable_val)
+    val iterable_array = val_iterable_array(iterable_val)
+    if iterable_array >= 0:
+        val elements = val_get_array(iterable_array)
         for elem_vid in elements:
             if eval_had_error: break
             env_push_scope()

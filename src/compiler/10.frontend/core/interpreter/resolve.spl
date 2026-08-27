@@ -11,13 +11,6 @@
 # 4. Per-function slot mappings are cached for use at call time
 
 use compiler.core.ast_types.{CoreExpr, CoreStmt, CoreDecl}
-use compiler.frontend.core.if_chain_nodes.{ARM_CONDITION, ARM_VALUE_BIND, ARM_PATTERN_BIND}
-use compiler.frontend.core.if_chain_nodes.{flat_if_chain_first_arm_get, flat_if_chain_arm_count_get}
-use compiler.frontend.core.if_chain_nodes.{flat_if_chain_else_expr_get, flat_if_chain_else_stmt_count_get}
-use compiler.frontend.core.if_chain_nodes.{flat_if_chain_else_stmt_at, flat_if_arm_next_get}
-use compiler.frontend.core.if_chain_nodes.{flat_if_arm_kind_get, flat_if_arm_head_get}
-use compiler.frontend.core.if_chain_nodes.{flat_if_arm_init_get, flat_if_arm_then_expr_get}
-use compiler.frontend.core.if_chain_nodes.{flat_if_arm_body_count_get, flat_if_arm_body_at}
 
 # ===== Resolution State =====
 # Current function being resolved
@@ -141,61 +134,10 @@ fn resolve_is_slot_shadowed(decl_id: i64, slot: i64) -> bool:
 
 # ===== Resolution Pass =====
 
-fn rl_register_branch_local(name: text):
-    if name == "" or name == "_": return
-    val slot = rl_register(name)
-    # A chain binding exists only in its selected arm. Keep it off LOAD_FAST,
-    # whose frame slots are function-wide and cannot represent branch scope.
-    if slot >= 0 and slot < rl_shadowed.len():
-        rl_shadowed[slot] = true
-
-fn resolve_prescan_pattern_bindings(pattern_eid: i64):
-    if pattern_eid < 0: return
-    val tag = expr_get_tag(pattern_eid)
-    if tag == EXPR_IDENT:
-        val name = expr_get_str(pattern_eid)
-        if name != "None": rl_register_branch_local(name)
-        return
-    for arg_eid in expr_get_args(pattern_eid):
-        resolve_prescan_pattern_bindings(arg_eid)
-
-fn resolve_prescan_expr(eid: i64):
-    if eid < 0: return
-    val tag = expr_get_tag(eid)
-    if tag == EXPR_IF_CHAIN:
-        val chain_id = expr_get_extra(eid)
-        var arm_id = flat_if_chain_first_arm_get(chain_id)
-        var remaining = flat_if_chain_arm_count_get(chain_id)
-        while arm_id >= 0 and remaining > 0:
-            val kind = flat_if_arm_kind_get(arm_id)
-            val head = flat_if_arm_head_get(arm_id)
-            if kind == ARM_VALUE_BIND:
-                rl_register_branch_local(expr_get_str(head))
-            elif kind == ARM_PATTERN_BIND:
-                resolve_prescan_pattern_bindings(head)
-            else:
-                resolve_prescan_expr(head)
-            resolve_prescan_expr(flat_if_arm_init_get(arm_id))
-            resolve_prescan_expr(flat_if_arm_then_expr_get(arm_id))
-            arm_id = flat_if_arm_next_get(arm_id)
-            remaining = remaining - 1
-        resolve_prescan_expr(flat_if_chain_else_expr_get(chain_id))
-        return
-    if tag == EXPR_BLOCK:
-        resolve_prescan_stmts(expr_get_stmts(eid))
-        resolve_prescan_expr(expr_get_left(eid))
-        return
-    resolve_prescan_expr(expr_get_left(eid))
-    resolve_prescan_expr(expr_get_right(eid))
-    for arg_eid in expr_get_args(eid):
-        resolve_prescan_expr(arg_eid)
-
 fn resolve_prescan_stmts(stmts: [i64]):
     for sid in stmts:
         val s_node = stmt_get(sid)
-        val tag = stmt_get_tag(sid)
-        if s_node.expr_idx >= 0:
-            resolve_prescan_expr(s_node.expr_idx)
+        val tag = s_node.tag
         if tag == STMT_VAL_DECL or tag == STMT_VAR_DECL:
             val name = s_node.name
             if name != "":
@@ -216,32 +158,6 @@ fn resolve_prescan_stmts(stmts: [i64]):
         elif tag == STMT_IF:
             resolve_prescan_stmts(s_node.body)
             resolve_prescan_stmts(s_node.else_body)
-        elif tag == STMT_IF_CHAIN:
-            val chain_id = stmt_get_type(sid)
-            var arm_id = flat_if_chain_first_arm_get(chain_id)
-            var remaining = flat_if_chain_arm_count_get(chain_id)
-            while arm_id >= 0 and remaining > 0:
-                val kind = flat_if_arm_kind_get(arm_id)
-                val head = flat_if_arm_head_get(arm_id)
-                if kind == ARM_VALUE_BIND:
-                    rl_register_branch_local(expr_get_str(head))
-                elif kind == ARM_PATTERN_BIND:
-                    resolve_prescan_pattern_bindings(head)
-                else:
-                    resolve_prescan_expr(head)
-                resolve_prescan_expr(flat_if_arm_init_get(arm_id))
-                var body_offset: i64 = 0
-                val body_count = flat_if_arm_body_count_get(arm_id)
-                while body_offset < body_count:
-                    resolve_prescan_stmts([flat_if_arm_body_at(arm_id, body_offset)])
-                    body_offset = body_offset + 1
-                arm_id = flat_if_arm_next_get(arm_id)
-                remaining = remaining - 1
-            var else_offset: i64 = 0
-            val else_count = flat_if_chain_else_stmt_count_get(chain_id)
-            while else_offset < else_count:
-                resolve_prescan_stmts([flat_if_chain_else_stmt_at(chain_id, else_offset)])
-                else_offset = else_offset + 1
         elif tag == STMT_WHILE:
             resolve_prescan_stmts(s_node.body)
         elif tag == STMT_BLOCK:
@@ -249,7 +165,7 @@ fn resolve_prescan_stmts(stmts: [i64]):
 
 fn resolve_expr(eid: i64):
     if eid < 0: return
-    val tag = expr_get_tag(eid)
+    val tag = expr_get(eid).tag
     if tag == EXPR_IDENT:
         val name = expr_get(eid).s_val
         val slot = rl_lookup(name)
@@ -257,23 +173,6 @@ fn resolve_expr(eid: i64):
             val shadowed = rl_is_shadowed(slot)
             if shadowed == false:
                 expr_i_val[eid] = slot
-        return
-    if tag == EXPR_IF_CHAIN:
-        val chain_id = expr_get_extra(eid)
-        var arm_id = flat_if_chain_first_arm_get(chain_id)
-        var remaining = flat_if_chain_arm_count_get(chain_id)
-        while arm_id >= 0 and remaining > 0:
-            resolve_expr(flat_if_arm_head_get(arm_id))
-            resolve_expr(flat_if_arm_init_get(arm_id))
-            resolve_expr(flat_if_arm_then_expr_get(arm_id))
-            arm_id = flat_if_arm_next_get(arm_id)
-            remaining = remaining - 1
-        resolve_expr(flat_if_chain_else_expr_get(chain_id))
-        return
-    if tag == EXPR_BLOCK:
-        for block_sid in expr_get_stmts(eid):
-            resolve_stmt(block_sid)
-        resolve_expr(expr_get_left(eid))
         return
     # Recurse into sub-expressions
     val e = expr_get(eid)
@@ -286,26 +185,6 @@ fn resolve_expr(eid: i64):
 
 fn resolve_stmt(sid: i64):
     if sid < 0: return
-    if stmt_get_tag(sid) == STMT_IF_CHAIN:
-        val chain_id = stmt_get_type(sid)
-        var arm_id = flat_if_chain_first_arm_get(chain_id)
-        var remaining = flat_if_chain_arm_count_get(chain_id)
-        while arm_id >= 0 and remaining > 0:
-            resolve_expr(flat_if_arm_head_get(arm_id))
-            resolve_expr(flat_if_arm_init_get(arm_id))
-            var body_offset: i64 = 0
-            val body_count = flat_if_arm_body_count_get(arm_id)
-            while body_offset < body_count:
-                resolve_stmt(flat_if_arm_body_at(arm_id, body_offset))
-                body_offset = body_offset + 1
-            arm_id = flat_if_arm_next_get(arm_id)
-            remaining = remaining - 1
-        var else_offset: i64 = 0
-        val else_count = flat_if_chain_else_stmt_count_get(chain_id)
-        while else_offset < else_count:
-            resolve_stmt(flat_if_chain_else_stmt_at(chain_id, else_offset))
-            else_offset = else_offset + 1
-        return
     val s_node = stmt_get(sid)
     val tag = s_node.tag
     # Resolve expressions in statement
@@ -325,13 +204,194 @@ fn resolve_function(decl_id: i64):
         rl_register(pname)
     # Prescan body for all local names (detects shadowing)
     resolve_prescan_stmts(d_node.body_stmts)
+    # Demote captured-and-mutated names off the fast path (escape analysis).
+    var ki: i64 = 0
+    while ki < rl_keys.len():
+        if esc_contains(rl_keys[ki]):
+            rl_shadowed[ki] = true
+        ki = ki + 1
     # Walk expressions to set slot indices
     for sid in d_node.body_stmts:
         resolve_stmt(sid)
     # Cache for use at call time
     fn_slot_cache_current(decl_id)
 
+# ===== Escape Analysis (captured-variable demotion) =====
+# A local variable that is assigned inside a NESTED function or lambda cannot be
+# a LOAD_FAST slot: the nested call updates the shared scope hash map, but the
+# enclosing frame's fast-local cache is never refreshed, so the enclosing scope
+# keeps reading the stale slot. Any such name is demoted to the slow (scope hash
+# map) path so cross-call mutations are observed. Demotion is always correct —
+# it only forgoes an optimization — so over-approximation is safe.
+#
+# A name "escapes" when it is assigned:
+#   - inside any lambda body (EXPR_LAMBDA), or
+#   - inside a function where it is not one of that function's own locals/params
+#     (i.e. a captured outer variable, including hoisted nested named fns).
+
+var esc_names: [text] = []
+var esc_buckets: [i64] = []
+var esc_nexts: [i64] = []
+var esc_in_lambda: bool = false
+
+# Current-function local set (params + declared locals), rebuilt per function.
+var cl_names: [text] = []
+var cl_buckets: [i64] = []
+var cl_nexts: [i64] = []
+
+fn esc_reset_all():
+    esc_names = []
+    esc_buckets = rl_make_buckets()
+    esc_nexts = []
+    esc_in_lambda = false
+
+fn esc_add(name: text):
+    if name == "": return
+    val bucket = hm_hash_text(name) % RL_HM_SIZE
+    var idx = esc_buckets[bucket]
+    while idx != -1:
+        if esc_names[idx] == name: return
+        idx = esc_nexts[idx]
+    val new_idx = esc_names.len()
+    esc_names.push(name)
+    esc_nexts.push(esc_buckets[bucket])
+    esc_buckets[bucket] = new_idx
+
+fn esc_contains(name: text) -> bool:
+    if esc_names.len() == 0: return false
+    val bucket = hm_hash_text(name) % RL_HM_SIZE
+    var idx = esc_buckets[bucket]
+    while idx != -1:
+        if esc_names[idx] == name: return true
+        idx = esc_nexts[idx]
+    false
+
+fn cl_reset():
+    cl_names = []
+    cl_buckets = rl_make_buckets()
+    cl_nexts = []
+
+fn cl_add(name: text):
+    if name == "": return
+    val bucket = hm_hash_text(name) % RL_HM_SIZE
+    var idx = cl_buckets[bucket]
+    while idx != -1:
+        if cl_names[idx] == name: return
+        idx = cl_nexts[idx]
+    val new_idx = cl_names.len()
+    cl_names.push(name)
+    cl_nexts.push(cl_buckets[bucket])
+    cl_buckets[bucket] = new_idx
+
+fn cl_contains(name: text) -> bool:
+    if cl_names.len() == 0: return false
+    val bucket = hm_hash_text(name) % RL_HM_SIZE
+    var idx = cl_buckets[bucket]
+    while idx != -1:
+        if cl_names[idx] == name: return true
+        idx = cl_nexts[idx]
+    false
+
+fn esc_collect_locals(stmts: [i64]):
+    for sid in stmts:
+        val s_node = stmt_get(sid)
+        val tag = s_node.tag
+        if tag == STMT_VAL_DECL or tag == STMT_VAR_DECL:
+            if s_node.name != "": cl_add(s_node.name)
+        elif tag == STMT_FOR:
+            val iter_name = s_node.name
+            if iter_name != "":
+                if iter_name.starts_with("("):
+                    val inner = iter_name[1:iter_name.len() - 1]
+                    for tname in inner.split(","):
+                        cl_add(tname)
+                else:
+                    cl_add(iter_name)
+            esc_collect_locals(s_node.body)
+        elif tag == STMT_IF:
+            esc_collect_locals(s_node.body)
+            esc_collect_locals(s_node.else_body)
+        elif tag == STMT_WHILE:
+            esc_collect_locals(s_node.body)
+        elif tag == STMT_BLOCK:
+            esc_collect_locals(s_node.body)
+
+fn esc_note_assign_target(target_eid: i64):
+    if target_eid < 0: return
+    if expr_get(target_eid).tag != EXPR_IDENT: return
+    val nm = expr_get(target_eid).s_val
+    if esc_in_lambda:
+        esc_add(nm)
+    elif cl_contains(nm) == false:
+        esc_add(nm)
+
+fn esc_walk_expr(eid: i64):
+    if eid < 0: return
+    val e = expr_get(eid)
+    val tag = e.tag
+    if tag == EXPR_ASSIGN or tag == EXPR_COMPOUND_ASSIGN:
+        esc_note_assign_target(e.left)
+    if tag == EXPR_LAMBDA:
+        val prev = esc_in_lambda
+        esc_in_lambda = true
+        for beid in e.stmts:
+            esc_walk_expr(beid)
+        esc_in_lambda = prev
+        return
+    if e.left >= 0: esc_walk_expr(e.left)
+    if e.right >= 0: esc_walk_expr(e.right)
+    for arg_eid in e.args:
+        esc_walk_expr(arg_eid)
+    for seid in e.stmts:
+        esc_walk_expr(seid)
+
+fn esc_walk_stmt(sid: i64):
+    if sid < 0: return
+    val s_node = stmt_get(sid)
+    val tag = s_node.tag
+    if tag == STMT_ASSIGN or tag == STMT_COMPOUND_ASSIGN:
+        esc_note_assign_target(s_node.expr_idx)
+        for veid in s_node.body:
+            esc_walk_expr(veid)
+        return
+    if tag == STMT_VAL_DECL or tag == STMT_VAR_DECL or tag == EVAL_STMT_LAZY_VAL_DECL:
+        for veid in s_node.body:
+            esc_walk_expr(veid)
+        return
+    if tag == STMT_EXPR or tag == STMT_RETURN:
+        esc_walk_expr(s_node.expr_idx)
+        return
+    # Control flow / other: expr_idx is a condition/scrutinee, body holds stmts.
+    if s_node.expr_idx >= 0:
+        esc_walk_expr(s_node.expr_idx)
+    for cs in s_node.body:
+        esc_walk_stmt(cs)
+    for cs in s_node.else_body:
+        esc_walk_stmt(cs)
+
+fn esc_analyze_function(decl_id: i64):
+    val d_node = decl_get(decl_id)
+    cl_reset()
+    for pname in d_node.param_names:
+        cl_add(pname)
+    esc_collect_locals(d_node.body_stmts)
+    esc_in_lambda = false
+    for sid in d_node.body_stmts:
+        esc_walk_stmt(sid)
+
+fn esc_analyze_module():
+    esc_reset_all()
+    var did: i64 = 0
+    val total = decl_count()
+    while did < total:
+        if decl_get(did).tag == DECL_FN:
+            esc_analyze_function(did)
+        did = did + 1
+
 fn resolve_module_locals():
+    # Pass 0: collect names captured-and-mutated across function/lambda
+    # boundaries so they can be kept off the LOAD_FAST fast path.
+    esc_analyze_module()
     # Walk all declarations, resolve functions
     var did: i64 = 0
     val total = decl_count()
@@ -340,3 +400,4 @@ fn resolve_module_locals():
         if d.tag == DECL_FN:
             resolve_function(did)
         did = did + 1
+

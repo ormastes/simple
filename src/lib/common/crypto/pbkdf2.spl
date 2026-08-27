@@ -29,7 +29,7 @@
 #   RFC 8018 §5.2 — Same algorithm, updated obsoletes RFC 2898
 #   draft-josefsson-pbkdf2-test-vectors-00 — reference test vectors
 
-use std.common.crypto.hmac.{hmac_sha256_bytes, hmac_sha384_bytes, hmac_sha512_bytes}
+use std.common.crypto.hmac.{hmac_sha1_bytes, hmac_sha256_bytes, hmac_sha384_bytes, hmac_sha512_bytes}
 
 # ============================================================================
 # Internal helpers
@@ -102,6 +102,19 @@ fn _pbkdf2_block_sha256(password: [i64], salt: [i64], iterations: i64,
         j = j + 1
     t
 
+fn _pbkdf2_block_sha1(password: [i64], salt: [i64], iterations: i64,
+                      block_i: i64) -> [i64]:
+    """Compute T_i = U_1 XOR ... XOR U_c for one block using HMAC-SHA-1."""
+    val u1_input = _pbkdf2_append(salt, _pbkdf2_int4(block_i))
+    var u = hmac_sha1_bytes(password, u1_input)
+    var t = u
+    var j: i64 = 2
+    while j <= iterations:
+        u = hmac_sha1_bytes(password, u)
+        t = _pbkdf2_xor_bytes(t, u)
+        j = j + 1
+    t
+
 fn _pbkdf2_block_sha384(password: [i64], salt: [i64], iterations: i64,
                         block_i: i64) -> [i64]:
     """Compute T_i = U_1 XOR ... XOR U_c for one block using HMAC-SHA-384."""
@@ -131,6 +144,37 @@ fn _pbkdf2_block_sha512(password: [i64], salt: [i64], iterations: i64,
 # ============================================================================
 # Public API
 # ============================================================================
+
+fn pbkdf2_sha1_bytes(password: [i64], salt: [i64], iterations: i64,
+                     dk_len: i64) -> [i64]:
+    """PBKDF2-HMAC-SHA-1 key derivation (RFC 2898 §5.2).
+
+    Required by SCRAM-SHA-1 (RFC 5802 §3, which fixes the PRF to
+    HMAC-SHA-1 and dkLen to 20). `src/os/crypto/scram_sha1.spl:4` has
+    imported this name since it was written, but only the SHA-256/384/512
+    variants existed, so every SCRAM-SHA-1 call site failed with
+    "function `pbkdf2_sha1_bytes` not found".
+
+    Args:
+      password   — secret octet string
+      salt       — random salt (at least 8 bytes recommended by RFC §4)
+      iterations — iteration count c (>= 1)
+      dk_len     — desired derived-key length in bytes (<= 20 * (2^32 - 1))
+
+    Returns: dk_len-byte derived key as [i64] list (values 0-255).
+    """
+    val h_len: i64 = 20   # HMAC-SHA-1 output bytes
+    val num_blocks: i64 = (dk_len + h_len - 1) / h_len
+    var dk: [i64] = []
+    var bi: i64 = 1
+    while bi <= num_blocks:
+        val t = _pbkdf2_block_sha1(password, salt, iterations, bi)
+        var ki: i64 = 0
+        while ki < t.len():
+            dk.push(t[ki])
+            ki = ki + 1
+        bi = bi + 1
+    _pbkdf2_slice(dk, 0, dk_len)
 
 fn pbkdf2_sha256_bytes(password: [i64], salt: [i64], iterations: i64,
                        dk_len: i64) -> [i64]:

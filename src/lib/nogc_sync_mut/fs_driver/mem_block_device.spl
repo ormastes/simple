@@ -14,8 +14,19 @@
 
 use std.fs_driver.block_device.{BlockDevice}
 
-extern fn rt_bytes_alloc(len: i64) -> [u8]
-extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
+# Zero-filled `[u8]` of `len` bytes, built with ordinary Simple pushes.
+#
+# The former `rt_bytes_alloc` extern hands back a raw runtime buffer that the
+# interpreter refuses to index-assign into ("invalid assignment: cannot index
+# assign value of type array").
+fn _alloc_zeroed_bytes(len: i64) -> [u8]:
+    var buf: [u8] = []
+    var i = 0
+    while i < len:
+        buf.push(0u8)
+        i = i + 1
+    buf
+use std.io_runtime.{file_write_bytes}
 
 # ---------------------------------------------------------------------------
 # Module-level backing store
@@ -44,7 +55,7 @@ fn _mem_bd_find(inst_id: i64) -> i64:
 fn _mem_bd_register(inst_id: i64, sector_count: u64, sector_size: u32):
     """Allocate a zeroed backing buffer and register it."""
     val total = (sector_count as i64) * (sector_size as i64)
-    val buf = rt_bytes_alloc(total)
+    val buf = _alloc_zeroed_bytes(total)
     _mem_bd_ids.push(inst_id)
     _mem_bd_bufs.push(buf)
     _mem_bd_ssizes.push(sector_size)
@@ -75,37 +86,6 @@ impl MemBlockDevice:
             sector_count_: sector_count,
         )
 
-    static fn from_file(path: text, sector_size: u32) -> Result<MemBlockDevice, text>:
-        """Load a raw disk image from `path` into a new in-memory device.
-
-        The write-side mirror of `write_to_file`.  Without this there is no way
-        to mount an image that mkfs already wrote: every consumer had to rebuild
-        the device in memory, so an on-disk dbfs/nvfs image had never actually
-        been opened and read back.  Sector count is derived from the file
-        length, which must be a whole number of sectors.
-        """
-        if sector_size == 0u32:
-            return Err("MemBlockDevice.from_file: sector_size must be non-zero")
-        val buf = file_read_bytes(path)
-        val len = buf.len() as i64
-        if len == 0:
-            return Err("MemBlockDevice.from_file: empty or unreadable image: " + path)
-        val ssize = sector_size as i64
-        if len % ssize != 0:
-            return Err("MemBlockDevice.from_file: image is not a whole number of sectors: " + path)
-        val sector_count = (len / ssize) as u64
-        val id = _mem_bd_alloc_id()
-        _mem_bd_register(id, sector_count, sector_size)
-        val idx = _mem_bd_find(id)
-        if idx < 0:
-            return Err("MemBlockDevice.from_file: device registration failed")
-        _mem_bd_bufs[idx] = buf
-        Ok(MemBlockDevice(
-            inst_id:       id,
-            sector_size_:  sector_size,
-            sector_count_: sector_count,
-        ))
-
     fn sector_count() -> u64:
         self.sector_count_
 
@@ -122,7 +102,7 @@ impl MemBlockDevice:
         if idx < 0:
             return Err("MemBlockDevice.write_to_file: device not found")
         val buf = _mem_bd_bufs[idx]
-        if rt_file_write_bytes(path, buf):
+        if file_write_bytes(path, buf):
             Ok(true)
         else:
             Err("MemBlockDevice.write_to_file: write failed: " + path)
@@ -188,3 +168,7 @@ impl BlockDevice for MemBlockDevice:
 
     fn sector_size() -> u32:
         self.sector_size_
+
+    fn flush() -> Result<bool, text>:
+        # Writes update the sole in-memory backing store synchronously.
+        Ok(true)

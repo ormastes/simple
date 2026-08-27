@@ -17,6 +17,8 @@ pattern — proto3 signed integers are always 10 bytes (two's complement).
 Reference: https://protobuf.dev/programming-guides/encoding/
 """
 
+use std.common.encoding.utf8.{text_codepoints}
+
 # ============================================================================
 # BYTE HELPERS
 # ============================================================================
@@ -31,6 +33,12 @@ fn pb_byte_at(bytes: [i64], index: i64) -> i64:
 
 fn pb_bytes_concat(a: [i64], b: [i64]) -> [i64]:
     """Concatenate two byte arrays."""
+    for a_val in a:
+        if a_val < 0 or a_val > 255:
+            return []
+    for b_val in b:
+        if b_val < 0 or b_val > 255:
+            return []
     var result = a
     for b_val in b:
         result = result.push(b_val)
@@ -39,11 +47,17 @@ fn pb_bytes_concat(a: [i64], b: [i64]) -> [i64]:
 fn pb_bytes_slice(bytes: [i64], start: i64, length: i64) -> [i64]:
     """Extract a sub-slice of a byte array."""
     var result = []
+    if start < 0 or length < 0:
+        return result
+    if start + length > bytes.len():
+        return result
     var i = 0
     while i < length:
         val idx = start + i
-        if idx < bytes.len():
-            result = result.push(pb_byte_at(bytes, idx))
+        val byte_val = pb_byte_at(bytes, idx)
+        if byte_val < 0 or byte_val > 255:
+            return []
+        result = result.push(byte_val)
         i = i + 1
     result
 
@@ -52,19 +66,44 @@ fn pb_text_to_bytes(s: text) -> [i64]:
     Non-ASCII codepoints are emitted as raw single bytes — not valid UTF-8
     multi-byte sequences. Pre-encode to UTF-8 via std.common.encoding.utf8
     if you need wire-valid UTF-8 for non-ASCII content."""
+    # Bounded by CHARACTER count (text_codepoints(s).len()), not `s.len()`
+    # (BYTE count). `s[i]` (single-index) is CHARACTER-indexed on this
+    # engine (confirmed: "café"[3] is the whole "é", .ord()=233, not a
+    # byte) -- this function's own documented model already treats each
+    # character as one output unit (`code`), so `s[i]` was always the
+    # right accessor; the bug was bounding that character-indexed loop by
+    # a BYTE count. For "café" (4 characters, 5 bytes) the old bound let
+    # `i` reach 4, one past the last valid character index (0..3),
+    # silently appending a spurious `code=0` from the out-of-range read
+    # instead of stopping -- confirmed: pb_encode_string("café") emitted
+    # length=5 with payload [...,233,0], not the intended length=4 with no
+    # trailing byte. Genuinely fine for any character whose codepoint is
+    # already <=255 (the `code > 255` guard below still rejects the rest,
+    # e.g. CJK, exactly as documented) -- this is a bound fix, not a UTF-8
+    # upgrade, matching this function's stated non-UTF-8 scope.
+    val char_count = text_codepoints(s).len()
     var result = []
     var i = 0
-    while i < s.len():
-        result = result.push(s[i].ord())
+    while i < char_count:
+        val code = s[i].ord()
+        if code < 0 or code > 255:
+            return []
+        result = result.push(code)
         i = i + 1
     result
 
 fn pb_bytes_to_text(bytes: [i64], offset: i64, length: i64) -> text:
     """Convert a slice of bytes back to text (ASCII/UTF-8 chars)."""
+    if offset < 0 or length < 0:
+        return ""
+    if offset + length > bytes.len():
+        return ""
     var result = ""
     var i = 0
     while i < length:
         val b = pb_byte_at(bytes, offset + i)
+        if b < 0 or b > 255:
+            return ""
         result = result + b.chr()
         i = i + 1
     result
@@ -73,7 +112,7 @@ fn pb_bytes_to_text(bytes: [i64], offset: i64, length: i64) -> text:
 # VARINT ENCODING
 # ============================================================================
 
-fn pb_encode_varint(value: i64) -> [i64]:
+fn pb_wire_encode_varint(value: i64) -> [i64]:
     """Encode a value as a protobuf base-128 varint.
 
     The i64 is interpreted as its u64 bit pattern. Negative values are
@@ -178,36 +217,40 @@ fn pb_wire_i32() -> i64:     5
 
 fn pb_encode_field(field_num: i64, wire_type: i64, payload: [i64]) -> [i64]:
     """Encode a field tag followed by its raw payload bytes."""
+    if field_num <= 0 or field_num > 536870911:
+        return []
+    if wire_type != pb_wire_varint() and wire_type != pb_wire_i64() and wire_type != pb_wire_len() and wire_type != pb_wire_i32():
+        return []
     val tag = pb_make_tag(field_num, wire_type)
-    val tag_bytes = pb_encode_varint(tag)
+    val tag_bytes = pb_wire_encode_varint(tag)
     pb_bytes_concat(tag_bytes, payload)
 
 fn pb_encode_uint32(field_num: i64, value: i64) -> [i64]:
     """Encode a uint32 field (wire type 0, no sign extension)."""
     # Mask to 32 bits to treat as unsigned
     val masked = value & 4294967295
-    pb_encode_field(field_num, pb_wire_varint(), pb_encode_varint(masked))
+    pb_encode_field(field_num, pb_wire_varint(), pb_wire_encode_varint(masked))
 
 fn pb_encode_uint64(field_num: i64, value: i64) -> [i64]:
     """Encode a uint64 field (wire type 0, full 64-bit)."""
-    pb_encode_field(field_num, pb_wire_varint(), pb_encode_varint(value))
+    pb_encode_field(field_num, pb_wire_varint(), pb_wire_encode_varint(value))
 
 fn pb_encode_int32(field_num: i64, value: i64) -> [i64]:
     """Encode an int32 field (wire type 0).
     Negative values are sign-extended to 64 bits → 10 bytes."""
-    pb_encode_field(field_num, pb_wire_varint(), pb_encode_varint(value))
+    pb_encode_field(field_num, pb_wire_varint(), pb_wire_encode_varint(value))
 
 fn pb_encode_int64(field_num: i64, value: i64) -> [i64]:
     """Encode an int64 field (wire type 0)."""
-    pb_encode_field(field_num, pb_wire_varint(), pb_encode_varint(value))
+    pb_encode_field(field_num, pb_wire_varint(), pb_wire_encode_varint(value))
 
 fn pb_encode_sint32(field_num: i64, value: i64) -> [i64]:
     """Encode a sint32 field (wire type 0, zigzag encoded)."""
-    pb_encode_field(field_num, pb_wire_varint(), pb_encode_varint(pb_encode_zigzag32(value)))
+    pb_encode_field(field_num, pb_wire_varint(), pb_wire_encode_varint(pb_encode_zigzag32(value)))
 
 fn pb_encode_sint64(field_num: i64, value: i64) -> [i64]:
     """Encode a sint64 field (wire type 0, zigzag encoded)."""
-    pb_encode_field(field_num, pb_wire_varint(), pb_encode_varint(pb_encode_zigzag64(value)))
+    pb_encode_field(field_num, pb_wire_varint(), pb_wire_encode_varint(pb_encode_zigzag64(value)))
 
 fn pb_encode_bool(field_num: i64, value: bool) -> [i64]:
     """Encode a bool field (wire type 0)."""
@@ -217,8 +260,17 @@ fn pb_encode_bool(field_num: i64, value: bool) -> [i64]:
 
 fn pb_encode_string(field_num: i64, s: text) -> [i64]:
     """Encode a string field (wire type 2, length-delimited UTF-8)."""
+    # Same character-count bound fix as pb_text_to_bytes above (this is a
+    # redundant fail-fast pre-check duplicating that function's own guard).
+    val char_count = text_codepoints(s).len()
+    var i = 0
+    while i < char_count:
+        val code = s[i].ord()
+        if code < 0 or code > 255:
+            return []
+        i = i + 1
     val payload = pb_text_to_bytes(s)
-    val len_bytes = pb_encode_varint(payload.len())
+    val len_bytes = pb_wire_encode_varint(payload.len())
     pb_encode_field(field_num, pb_wire_len(), pb_bytes_concat(len_bytes, payload))
 
 fn pb_encode_bytes_field(field_num: i64, data: [i64]) -> [i64]:
@@ -226,10 +278,10 @@ fn pb_encode_bytes_field(field_num: i64, data: [i64]) -> [i64]:
     for byte_val in data:
         if byte_val < 0 or byte_val > 255:
             return []
-    val len_bytes = pb_encode_varint(data.len())
+    val len_bytes = pb_wire_encode_varint(data.len())
     pb_encode_field(field_num, pb_wire_len(), pb_bytes_concat(len_bytes, data))
 
-fn pb_encode_fixed32(field_num: i64, value: i64) -> [i64]:
+fn pb_wire_encode_fixed32_field(field_num: i64, value: i64) -> [i64]:
     """Encode a fixed32/sfixed32 field (wire type 5, little-endian 4 bytes)."""
     val b0 = value & 255
     val b1 = (value >> 8) & 255
@@ -237,7 +289,7 @@ fn pb_encode_fixed32(field_num: i64, value: i64) -> [i64]:
     val b3 = (value >> 24) & 255
     pb_encode_field(field_num, pb_wire_i32(), [b0, b1, b2, b3])
 
-fn pb_encode_fixed64(field_num: i64, value: i64) -> [i64]:
+fn pb_wire_encode_fixed64_field(field_num: i64, value: i64) -> [i64]:
     """Encode a fixed64/sfixed64 field (wire type 1, little-endian 8 bytes).
     The i64 value is stored as its raw little-endian bit pattern."""
     val b0 = value & 255
@@ -258,6 +310,8 @@ fn pb_read_varint(bytes: [i64], offset: i64) -> (i64, i64):
     """Decode a base-128 varint from bytes at offset.
     Returns (value, new_offset). On malformed input returns (0, offset).
     Caps at 10 bytes to prevent infinite loop on truncated input."""
+    if offset < 0:
+        return (0, offset)
     var value = 0
     var shift = 0
     var pos = offset
@@ -267,9 +321,13 @@ fn pb_read_varint(bytes: [i64], offset: i64) -> (i64, i64):
         if pos >= bytes.len():
             return (0, offset)
         val b = pb_byte_at(bytes, pos)
+        if b < 0 or b > 255:
+            return (0, offset)
         pos = pos + 1
         # Accumulate 7 data bits
         val data_bits = b & 127
+        if count == 9 and data_bits > 1:
+            return (0, offset)
         # Shift and OR — for high shifts (>=63) use multiplication to avoid overflow
         if shift < 56:
             value = value | (data_bits << shift)
@@ -284,6 +342,8 @@ fn pb_read_varint(bytes: [i64], offset: i64) -> (i64, i64):
         shift = shift + 7
         count = count + 1
         if (b & 128) == 0:
+            if count > 1 and data_bits == 0:
+                return (0, offset)
             done = true
             count = 10  # break
     if done:
@@ -304,7 +364,7 @@ fn pb_read_field(bytes: [i64], offset: i64) -> (i64, i64, [i64], i64):
     Wire type 2 (len):    payload = length-delimited bytes
     Wire type 5 (i32):    payload = 4 bytes little-endian
     """
-    if offset >= bytes.len():
+    if offset < 0 or offset >= bytes.len():
         return (0, 0, [], offset)
 
     # Read tag varint
@@ -317,6 +377,8 @@ fn pb_read_field(bytes: [i64], offset: i64) -> (i64, i64, [i64], i64):
 
     val field_num = pb_tag_field_num(tag)
     val wire_type = pb_tag_wire_type(tag)
+    if field_num <= 0 or field_num > 536870911:
+        return (0, 0, [], offset)
 
     # Wire type 0: varint payload
     if wire_type == pb_wire_varint():
@@ -326,7 +388,7 @@ fn pb_read_field(bytes: [i64], offset: i64) -> (i64, i64, [i64], i64):
         if after_varint == after_tag:
             return (0, 0, [], offset)
         # Reconstruct varint bytes as payload
-        val payload = pb_encode_varint(varint_val)
+        val payload = pb_wire_encode_varint(varint_val)
         return (field_num, wire_type, payload, after_varint)
 
     # Wire type 1: 64-bit little-endian
@@ -334,6 +396,8 @@ fn pb_read_field(bytes: [i64], offset: i64) -> (i64, i64, [i64], i64):
         if after_tag + 8 > bytes.len():
             return (0, 0, [], offset)
         val payload = pb_bytes_slice(bytes, after_tag, 8)
+        if payload.len() != 8:
+            return (0, 0, [], offset)
         return (field_num, wire_type, payload, after_tag + 8)
 
     # Wire type 2: length-delimited
@@ -346,6 +410,8 @@ fn pb_read_field(bytes: [i64], offset: i64) -> (i64, i64, [i64], i64):
         if after_len + data_len > bytes.len():
             return (0, 0, [], offset)
         val payload = pb_bytes_slice(bytes, after_len, data_len)
+        if payload.len() != data_len:
+            return (0, 0, [], offset)
         return (field_num, wire_type, payload, after_len + data_len)
 
     # Wire type 5: 32-bit little-endian
@@ -353,6 +419,8 @@ fn pb_read_field(bytes: [i64], offset: i64) -> (i64, i64, [i64], i64):
         if after_tag + 4 > bytes.len():
             return (0, 0, [], offset)
         val payload = pb_bytes_slice(bytes, after_tag, 4)
+        if payload.len() != 4:
+            return (0, 0, [], offset)
         return (field_num, wire_type, payload, after_tag + 4)
 
     # Unknown/unsupported wire type
@@ -364,11 +432,20 @@ fn pb_read_field(bytes: [i64], offset: i64) -> (i64, i64, [i64], i64):
 
 fn pb_varint_from_payload(payload: [i64]) -> i64:
     """Decode varint value from a payload returned by pb_read_field."""
+    if payload.len() == 0:
+        return 0
     val result = pb_read_varint(payload, 0)
+    if result.1 != payload.len():
+        return 0
     result.0
 
 fn pb_fixed32_from_payload(payload: [i64]) -> i64:
     """Decode little-endian i32 from a 4-byte payload."""
+    if payload.len() != 4:
+        return 0
+    for b in payload:
+        if b < 0 or b > 255:
+            return 0
     val b0 = pb_byte_at(payload, 0)
     val b1 = pb_byte_at(payload, 1)
     val b2 = pb_byte_at(payload, 2)
@@ -377,6 +454,11 @@ fn pb_fixed32_from_payload(payload: [i64]) -> i64:
 
 fn pb_fixed64_from_payload(payload: [i64]) -> i64:
     """Decode little-endian i64 from an 8-byte payload."""
+    if payload.len() != 8:
+        return 0
+    for b in payload:
+        if b < 0 or b > 255:
+            return 0
     val b0 = pb_byte_at(payload, 0)
     val b1 = pb_byte_at(payload, 1)
     val b2 = pb_byte_at(payload, 2)

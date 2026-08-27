@@ -87,6 +87,7 @@ pub fn semantic_coverage_for_mir_instruction_v2(
         case GetElementPtr(_, _, _): "MirInstKind.GetElementPtr"
         case LoadGlobal(_, _): "MirInstKind.LoadGlobal"
         case StoreGlobal(_, _): "MirInstKind.StoreGlobal"
+        case GlobalAddr(_, _, _): "MirInstKind.GlobalAddr"
         case Aggregate(_, _, _): "MirInstKind.Aggregate"
         case GetField(_, _, _): "MirInstKind.GetField"
         case SetField(_, _, _): "MirInstKind.SetField"
@@ -96,10 +97,8 @@ pub fn semantic_coverage_for_mir_instruction_v2(
         case Call(_, _, _): "MirInstKind.Call"
         case CallIndirect(_, _, _, _): "MirInstKind.CallIndirect"
         case Intrinsic(_, _, _): "MirInstKind.Intrinsic"
-        case DecisionProbe(_, _, _, _, _, _, _, _, _, _): "MirInstKind.DecisionProbe"
+        case DecisionProbe(_, _, _, _, _, _): "MirInstKind.DecisionProbe"
         case ConditionProbe(_, _, _, _, _, _, _, _): "MirInstKind.ConditionProbe"
-        case DynamicDecisionProbe(_, _, _, _, _, _, _, _, _, _): "MirInstKind.DynamicDecisionProbe"
-        case DynamicConditionProbe(_, _, _, _, _, _, _, _): "MirInstKind.DynamicConditionProbe"
         case SimdAddF32x4(_, _, _): "MirInstKind.SimdAddF32x4"
         case SimdSubF32x4(_, _, _): "MirInstKind.SimdSubF32x4"
         case SimdMulF32x4(_, _, _): "MirInstKind.SimdMulF32x4"
@@ -140,7 +139,6 @@ pub fn semantic_coverage_for_mir_instruction_v2(
         case Parallel(_, _): "MirInstKind.Parallel"
         case LayerConnect(_, _, _): "MirInstKind.LayerConnect"
         case DebugValue(_, _): "MirInstKind.DebugValue"
-        case RtHalEnvExecutorProvenance(_, _, _, _, _): "MirInstKind.RtHalEnvExecutorProvenance"
         case Nop: "MirInstKind.Nop"
         case CreatePromise(_, _, _): "MirInstKind.CreatePromise"
         case Await(_, _): "MirInstKind.Await"
@@ -151,7 +149,6 @@ pub fn semantic_coverage_for_mir_instruction_v2(
         case Ref(_, _, _): "MirInstKind.Ref"
         case GpuKernelDef(_): "MirInstKind.GpuKernelDef"
         case GpuLaunch(_): "MirInstKind.GpuLaunch"
-        case GpuLaunchConfigured(_, _, _): "MirInstKind.GpuLaunchConfigured"
         case GpuGlobalId(_, _): "MirInstKind.GpuGlobalId"
         case GpuLocalId(_, _): "MirInstKind.GpuLocalId"
         case GpuBlockId(_, _): "MirInstKind.GpuBlockId"
@@ -160,7 +157,6 @@ pub fn semantic_coverage_for_mir_instruction_v2(
         case GpuBarrier(_): "MirInstKind.GpuBarrier"
         case GpuMemFence(_): "MirInstKind.GpuMemFence"
         case GpuSharedAlloc(_, _, _): "MirInstKind.GpuSharedAlloc"
-        case GpuSharedAllocInit(_, _, _, _): "MirInstKind.GpuSharedAllocInit"
         case GpuAtomicOp(_, _, _, _): "MirInstKind.GpuAtomicOp"
         case GpuAtomicCas(_, _, _, _): "MirInstKind.GpuAtomicCas"
         case HostGpuLaneBegin(_, _): "MirInstKind.HostGpuLaneBegin"
@@ -216,7 +212,9 @@ pub fn semantic_coverage_for_mir_terminator_v2(
         case Switch(_, _, _): "MirTerminator.Switch"
         case Unreachable: "MirTerminator.Unreachable"
         case Abort(_): "MirTerminator.Abort"
-        case CallTerminator(_, _, _, _, _): "MirTerminator.CallTerminator"
+        case Throw(_, _): "MirTerminator.Throw"
+        case Resume(_, _): "MirTerminator.Resume"
+        case CallTerminator(_, _, _, _, _, _, _): "MirTerminator.CallTerminator"
     _coverage_row_v2(variant, SemanticClass.Unsupported)
 
 pub fn semantic_coverage_for_mir_type_v2(type_: MirType) -> SemanticCoverageV1:
@@ -273,8 +271,13 @@ fn _coverage_add_type_v2(
     var result = _coverage_add_unique_v2(rows,
         semantic_coverage_for_mir_type_v2(type_))
     match type_.kind:
-        case Ptr(inner, _) | Ref(inner, _) | Slice(inner) | Promise(inner) |
-                ActorType(inner) | ScalableVec(inner, _):
+        # NOTE: these or-patterns must stay on ONE line each. An or-pattern in a
+        # `case` arm cannot be continued across lines with a trailing `|` — the
+        # continuation lexes as Indent and the pattern parser has no rule for
+        # it ("expected pattern, found Indent"). Filed as
+        # doc/08_tracking/bug/multiline_or_pattern_in_case_arm_fails_to_parse_2026-08-17.md;
+        # until the grammar gap is closed, re-wrapping these breaks the build.
+        case Ptr(inner, _) | Ref(inner, _) | Slice(inner) | Promise(inner) | ActorType(inner) | ScalableVec(inner, _):
             result = _coverage_add_type_v2(result, inner)
         case Array(inner, _): result = _coverage_add_type_v2(result, inner)
         case Dict(key, value):
@@ -290,9 +293,7 @@ fn _coverage_add_type_v2(
             for parameter in signature.params:
                 result = _coverage_add_type_v2(result, parameter)
             result = _coverage_add_type_v2(result, signature.return_type)
-        case I8 | I16 | I32 | I64 | U8 | U16 | U32 | U64 | F32 | F64 |
-                Bool | Char | Unit | Vec4f | Vec8f | Vec4d | Vec4i | Vec8i |
-                Struct(_) | Enum(_) | Bits(_, _) | Never | Opaque(_): pass
+        case I8 | I16 | I32 | I64 | U8 | U16 | U32 | U64 | F32 | F64 | Bool | Char | Unit | Vec4f | Vec8f | Vec4d | Vec4i | Vec8i | Struct(_) | Enum(_) | Bits(_, _) | Never | Opaque(_): pass
     result
 
 fn _coverage_functions_by_symbol_v2(module: MirModule) -> [MirFunction]:

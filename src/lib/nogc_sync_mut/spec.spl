@@ -39,15 +39,18 @@ var indent_level = 0
 # Hook storage
 var before_hooks = []
 var after_hooks = []
+# Suite-scoped after_all hooks, drained by the enclosing describe (see below).
+var after_all_hooks = []
 
-# Current test error: nil = no error, text = error message (Option pattern)
-var current_test_error = nil
+# Assertion failures are accumulated in-place so a later passing matcher cannot
+# overwrite an earlier failure through nested-call global writeback.
+var current_test_errors = []
 
 # NOTE: passed_test_names for pending_on dependency tracking is defined
 # inline in test files. Module vars can't be accessed from imported functions.
 
 fn _test_filter() -> text:
-    val filter = rt_env_get("SIMPLE_TEST_FILTER")
+    val filter = env_get("SIMPLE_TEST_FILTER")
     if filter == nil:
         return ""
     filter
@@ -67,9 +70,9 @@ fn _write_test_result_evidence(passed: i64, failed: i64):
     write is not visible to callees until the writing function returns, so
     reading them here recorded the totals from BEFORE the test that just ran —
     which meant a failing final test could leave false-green evidence behind."""
-    val path = rt_env_get("SIMPLE_TEST_RESULT_FILE") ?? ""
+    val path = env_get("SIMPLE_TEST_RESULT_FILE") ?? ""
     if path != "":
-        val _ = rt_file_write_text(path, "simple-bdd-v1\n{passed}\n{failed}\n")
+        val _ = file_write(path, "simple-bdd-v1\n{passed}\n{failed}\n")
 
 # ================================================================
 # Test Suite Structure
@@ -81,7 +84,9 @@ pub fn describe(name: text, block: fn()):
     val indent = "  ".repeat(indent_level)
     print "{indent}{name}"
     indent_level = indent_level + 1
+    val after_all_baseline = after_all_hooks.len()
     block()
+    _drain_after_all(after_all_baseline)
     indent_level = indent_level - 1
     val prev = suite_stack.pop()
     current_suite = prev ?? ""
@@ -105,16 +110,14 @@ fn _execute_it(name: text, block: fn()):
     # Preserve the shared array identity across nested calls; rebinding here
     # can leave matchers mutating a stale value under global writeback.
     current_test_errors.clear()
+    _expect_provisional_len = -1
     val pending_before = test_pending
 
     # Run before_each hooks
     for hook in before_hooks:
         hook()
 
-    # Reset error state (nil = no error)
-    current_test_error = nil
-
-    # Run test block - assertions set current_test_error on failure
+    # Run test block - assertions append to current_test_errors on failure
     block()
 
     # Run after_each hooks
@@ -122,14 +125,31 @@ fn _execute_it(name: text, block: fn()):
         hook()
 
     # Check result via Option pattern
-    if current_test_error == nil:
-        test_passed = test_passed + 1
+    var passed = test_passed
+    var failed = test_failed
+    if (
+        current_test_errors.len() == 0 and
+        test_pending > pending_before
+    ):
+        # pending(reason); return marks this example without inflating passes.
+        pass
+    elif current_test_errors.len() == 0:
+        passed = passed + 1
+        test_passed = passed
         print "{indent}  it {name} ... ok"
     else:
-        test_failed = test_failed + 1
+        # A failing example has one outcome: failure wins over an earlier
+        # pending() call in the same block.
+        if test_pending > pending_before:
+            test_pending = pending_before
+        failed = failed + 1
+        test_failed = failed
         print "{indent}  it {name} ... FAILED"
+        val current_test_error = current_test_errors.join("; ")
         print "{indent}    Error: {current_test_error}"
         test_errors.push("{full_name}: {current_test_error}")
+    # global write is not visible to callees until return — pass the tallies
+    _write_test_result_evidence(passed, failed)
 
 pub fn it(name: text, block: fn()):
     if not _run_test("normal"):
@@ -157,7 +177,7 @@ pub fn slow_it(name: text, block: fn()):
 
 fn _is_interpreter_mode() -> bool:
     """Check if running in interpreter mode via SIMPLE_RUNTIME_MODE env var."""
-    val mode = rt_env_get("SIMPLE_RUNTIME_MODE")
+    val mode = env_get("SIMPLE_RUNTIME_MODE")
     if mode == nil:
         return true
     if mode == "":
@@ -167,19 +187,19 @@ fn _is_interpreter_mode() -> bool:
     false
 
 fn _is_baremetal_mode() -> bool:
-    val mode = rt_env_get("SIMPLE_RUNTIME_MODE")
+    val mode = env_get("SIMPLE_RUNTIME_MODE")
     if mode == nil: return false
     if mode == "": return false
     mode.contains("baremetal")
 
 fn _is_remote_mode() -> bool:
-    val mode = rt_env_get("SIMPLE_RUNTIME_MODE")
+    val mode = env_get("SIMPLE_RUNTIME_MODE")
     if mode == nil: return false
     if mode == "": return false
     mode.contains("remote")
 
 fn _target_arch() -> text:
-    val mode = rt_env_get("SIMPLE_RUNTIME_MODE")
+    val mode = env_get("SIMPLE_RUNTIME_MODE")
     if mode == nil: return "host"
     if mode == "": return "host"
     if mode.contains("riscv32"): return "riscv32"
@@ -239,6 +259,16 @@ pub fn pending(name: text):
         return
     test_pending = test_pending + 1
     print "    it {name} ... pending"
+
+# Future-implementation marker: declares a spec that is intentionally not yet
+# implemented, so dashboards can report it as planned rather than failed.
+# Counts as pending (never pass, never fail). Deliberately NOT routed through
+# validate_bare_pending: a reasoned planned() is exactly the governed
+# replacement that gate demands of bare pending. The "... pending (planned:"
+# suffix keeps extract_pending_test_name (test_runner_helpers.spl) counting it.
+pub fn planned(name: text, reason: text):
+    test_pending = test_pending + 1
+    print "    it {name} ... pending (planned: {reason})"
 
 # @tag(name=file_name, reason=reason)
 pub fn skip(name: text, reason: text):
@@ -313,12 +343,12 @@ pub fn skip_context(reason: text):
 # These functions ACTUALLY skip tests based on platform detection.
 # Inline platform detection to avoid circular dependencies.
 
-extern fn rt_env_get(key: text) -> text
-extern fn rt_file_write_text(path: text, content: text) -> bool
-extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+use std.io_runtime.{env_get}
+use std.io_runtime.{file_write}
+use std.io_runtime.{process_run}
 
 fn _shell_output_trim(command: text) -> text:
-    val result = rt_process_run("/bin/sh", ["-c", command])
+    val result = process_run("/bin/sh", ["-c", command])
     val stdout = result[0]
     val code = result[2]
     if code == 0:
@@ -327,7 +357,7 @@ fn _shell_output_trim(command: text) -> text:
         ""
 
 fn _is_windows_env() -> bool:
-    val os_env = rt_env_get("OS")
+    val os_env = env_get("OS")
     if os_env == nil:
         false
     else:
@@ -521,7 +551,7 @@ pub fn skip_if_missing_module(name: text, module_name: text, block: fn()):
         export SIMPLE_MODULES="std.json,std.sdn,compiler.parser"
     """
     # Strategy 1: Check environment variable
-    val modules_env = rt_env_get("SIMPLE_MODULES")
+    val modules_env = env_get("SIMPLE_MODULES")
     if modules_env.len() > 0:
         val available_modules = modules_env.split(",")
         var found = false
@@ -573,6 +603,43 @@ pub fn before_each(hook: fn()):
 
 pub fn after_each(hook: fn()):
     after_hooks.push(hook)
+
+# before_all / after_all
+#
+# Suite-scoped, once-per-group hooks. Previously ABSENT from this module
+# entirely, so `before_all`/`after_all` were unresolved names and any spec
+# importing them (notably the t32_hw specs, via the `std.spipe` alias module)
+# died at load and ran ZERO examples while looking green. See
+# doc/08_tracking/bug/spipe_before_all_after_all_not_found_t32_hw_2026-07-20.md
+#
+# Implementation contract, chosen because this runner has no separate
+# collect-then-execute phase (a `describe` body EXECUTES as it is read):
+#
+#   * before_all(block) runs the block IMMEDIATELY at the point it is written.
+#     Declaration order inside the enclosing `describe` therefore gives the
+#     required guarantee: it runs once, before any sibling `it` in that group.
+#   * after_all(block) is deferred and drained by the enclosing `describe`
+#     once its body has finished. `describe` drains only the hooks registered
+#     during its OWN body, so a nested group's after_all fires at the end of
+#     the nested group, not the outer one.
+#
+# A top-level after_all with no enclosing `describe` never fires; that is
+# stated rather than faked, because there is no end-of-file callback here.
+pub fn before_all(hook: fn()):
+    hook()
+
+pub fn after_all(hook: fn()):
+    after_all_hooks.push(hook)
+
+fn _drain_after_all(baseline: i64):
+    # Run in registration order, then truncate back to the baseline depth.
+    var i = baseline
+    while i < after_all_hooks.len():
+        val hook = after_all_hooks[i]
+        hook()
+        i = i + 1
+    while after_all_hooks.len() > baseline:
+        val _ = after_all_hooks.pop()
 
 # ================================================================
 # Prevention mocks
@@ -804,9 +871,13 @@ impl ExpectScalarMatcher for i64:
 pub class ExpectHelper:
     value: any
     negated: bool
+    implicit_error: bool
 
     fn not_() -> ExpectHelper:
-        ExpectHelper(value: self.value, negated: true)
+        ExpectHelper(
+            value: self.value, negated: true,
+            implicit_error: self.implicit_error
+        )
 
     fn to_equal(expected):
         _expect_begin_matcher(self.implicit_error)
@@ -988,18 +1059,21 @@ pub class ExpectHelper:
 
 # Assertion Helpers
 pub fn fail_assertion(message: text):
-    current_test_error = message
+    current_test_errors.push(message)
 
 pub fn fail_test(message: text):
     fail_assertion(message)
 
+# Explicit failure for spec authors: `fail("reason")` registers a failing
+# assertion on the current example (same reporting path as expect matchers).
+pub fn fail(message: text):
+    fail_assertion(message)
+
 pub fn check(condition: bool):
-    expect(condition)
     if not condition:
         fail_assertion("expected true to equal true")
 
 pub fn check_msg(condition: bool, message: text):
-    expect(condition)
     if not condition:
         fail_assertion(message)
 
@@ -1067,6 +1141,12 @@ pub fn get_exit_code() -> i64:
     if test_failed > 0:
         return 1
     return 0
+
+pub fn get_test_count() -> i64:
+    test_passed + test_failed + test_pending + test_skipped
+
+pub fn get_executed_test_count() -> i64:
+    test_passed + test_failed
 
 # ================================================================
 # Import New Skip/Ignore System

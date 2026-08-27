@@ -2,7 +2,6 @@
 # Strict bounded SDN codec for compiler-injected RT/HAL cold-start plans.
 
 use std.common.env_access.model.*
-use std.common.crypto.sha256.{sha256_text}
 use std.common.sdn.value.{SdnValue}
 use std.common.sdn.parser.{parse_untrusted, parse_with_issues}
 use std.common.sdn.encode.{sdn_encode_canonical}
@@ -20,20 +19,12 @@ pub struct EnvAccessPlanInstallV1:
     queue_capacity: i64
     timeout_ticks: i64
     max_output_bytes: i64
-    # Canonical effective @rt assurance carried to host admission.  A public
-    # host capability record is never authority for Critical dispatch.
-    required_assurance_rank: i64
-    # No inferred provider registry exists.  Independent V3 execution is
-    # enabled solely by these explicit, bounded operation rows.
-    rt_hal_operations: [EnvRtHalOperationPlan]
 
 fn install_error(value: EnvAccessPlanInstallV1) -> text:
     if (value.worker_count <= 0 or value.worker_count > 64 or
         value.queue_capacity <= 0 or value.queue_capacity > 16 or
         value.timeout_ticks <= 0 or value.timeout_ticks > 600000 or
         value.max_output_bytes <= 0 or value.max_output_bytes > 16777216): return "RTHAL-E-BOUND"
-    if value.required_assurance_rank < 0 or value.required_assurance_rank > 4:
-        return "RTHAL-E-ASSURANCE"
     if (not value.compare_c and value.c_tool_id != "") or
         (not value.compare_rust and value.rust_tool_id != ""): return "ENV-E-PLAN-SCHEMA: disabled comparator must not name a tool"
     if value.compare_c and value.c_tool_id == "": return "ENV-E-TOOL-NOT-ALLOWED"
@@ -47,23 +38,6 @@ fn install_error(value: EnvAccessPlanInstallV1) -> text:
         if tool.tool_id == value.rust_tool_id: rust_admitted = true
     if value.compare_c and not c_admitted: return "ENV-E-TOOL-NOT-ALLOWED"
     if value.compare_rust and not rust_admitted: return "ENV-E-TOOL-NOT-ALLOWED"
-    if value.rt_hal_operations.len() > 256: return "RTHAL-E-OPERATION-BOUND"
-    # Comparator-enabled plan files are V3 host plans.  An absent map must
-    # fail closed rather than deriving a provider operation from source text.
-    if (value.compare_c or value.compare_rust) and value.rt_hal_operations.len() == 0:
-        return "RTHAL-E-OPERATION-PLAN"
-    var operation_index = 0
-    while operation_index < value.rt_hal_operations.len():
-        val row = value.rt_hal_operations[operation_index]
-        val operation_problem = env_rt_hal_operation_plan_error(
-            row, value.compare_c, value.compare_rust)
-        if operation_problem != "": return operation_problem
-        var prior = 0
-        while prior < operation_index:
-            if value.rt_hal_operations[prior].operation_id == row.operation_id:
-                return "RTHAL-E-OPERATION-DUPLICATE"
-            prior = prior + 1
-        operation_index = operation_index + 1
     return ""
 
 fn fields_exact(value: SdnValue, keys: [text], context: text) -> Result<Dict<text, SdnValue>, text>:
@@ -118,25 +92,6 @@ fn parse_kind(value: text) -> Result<EnvAccessKind, text>:
         case "read-repo-file": return Ok(EnvAccessKind.ReadRepoFile)
         case "run-allowed-tool": return Ok(EnvAccessKind.RunAllowedTool)
         case "hardware-probe": return Ok(EnvAccessKind.HardwareProbe)
-        case "socket-connect": return Ok(EnvAccessKind.SocketConnect)
-        case "socket-send": return Ok(EnvAccessKind.SocketSend)
-        case "socket-receive": return Ok(EnvAccessKind.SocketReceive)
-        case "socket-close": return Ok(EnvAccessKind.SocketClose)
-        case "device-read": return Ok(EnvAccessKind.DeviceRead)
-        case "device-write": return Ok(EnvAccessKind.DeviceWrite)
-        case "mmio-read": return Ok(EnvAccessKind.MmioRead)
-        case "mmio-write": return Ok(EnvAccessKind.MmioWrite)
-        case "irq-enable": return Ok(EnvAccessKind.IrqEnable)
-        case "irq-wait": return Ok(EnvAccessKind.IrqWait)
-        case "irq-acknowledge": return Ok(EnvAccessKind.IrqAcknowledge)
-        case "irq-disable": return Ok(EnvAccessKind.IrqDisable)
-        case "dma-map": return Ok(EnvAccessKind.DmaMap)
-        case "dma-sync-for-device": return Ok(EnvAccessKind.DmaSyncForDevice)
-        case "dma-sync-for-cpu": return Ok(EnvAccessKind.DmaSyncForCpu)
-        case "dma-submit": return Ok(EnvAccessKind.DmaSubmit)
-        case "dma-wait": return Ok(EnvAccessKind.DmaWait)
-        case "dma-unmap": return Ok(EnvAccessKind.DmaUnmap)
-        case "clock-read": return Ok(EnvAccessKind.ClockRead)
         case _: return Err("ENV-E-PLAN-SCHEMA: unknown instruction kind")
 
 fn parse_instruction(value: SdnValue) -> Result<EnvAccessInstruction, text>:
@@ -170,17 +125,6 @@ fn parse_probe(value: SdnValue) -> Result<EnvHardwareProbeIdentity, text>:
         max_stderr_bytes: field_int(fields, "max_stderr_bytes", "hardware_probe")?
     ))
 
-fn parse_rt_hal_operation(value: SdnValue) -> Result<EnvRtHalOperationPlan, text>:
-    val fields = fields_exact(value, ["operation_id", "c_adapter_id", "rust_adapter_id", "effect_capable", "c_effect_adapter_id", "rust_effect_adapter_id"], "rt_hal_operation")?
-    return Ok(EnvRtHalOperationPlan(
-        operation_id: field_text(fields, "operation_id", "rt_hal_operation")?,
-        c_adapter_id: field_int(fields, "c_adapter_id", "rt_hal_operation")?,
-        rust_adapter_id: field_int(fields, "rust_adapter_id", "rt_hal_operation")?,
-        effect_capable: field_bool(fields, "effect_capable", "rt_hal_operation")?,
-        c_effect_adapter_id: field_int(fields, "c_effect_adapter_id", "rt_hal_operation")?,
-        rust_effect_adapter_id: field_int(fields, "rust_effect_adapter_id", "rt_hal_operation")?
-    ))
-
 pub fn env_access_plan_parse_sdn_v1(source: text) -> Result<EnvAccessPlanInstallV1, text>:
     if source.len() == 0 or source.len() > ENV_ACCESS_PLAN_SDN_MAX_BYTES: return Err("ENV-E-PLAN-SIZE")
     match parse_untrusted(source):
@@ -190,22 +134,19 @@ pub fn env_access_plan_parse_sdn_v1(source: text) -> Result<EnvAccessPlanInstall
         case Err(problem): return Err("ENV-E-PLAN-PARSE: " + problem)
         case Ok((root, issues)):
             if issues.len() != 0: return Err("ENV-E-PLAN-SCHEMA: duplicate fields are forbidden")
-            val fields = fields_exact(root, ["schema", "version", "plan_id", "canonical_repo_root", "max_total_bytes", "max_processes", "instructions", "tools", "hardware_probes", "install", "rt_hal_operations"], "plan")?
+            val fields = fields_exact(root, ["schema", "version", "plan_id", "canonical_repo_root", "max_total_bytes", "max_processes", "instructions", "tools", "hardware_probes", "install"], "plan")?
             if field_text(fields, "schema", "plan")? != ENV_ACCESS_PLAN_SCHEMA_V1: return Err("ENV-E-PLAN-SCHEMA: unsupported schema")
             if field_int(fields, "version", "plan")? != 1: return Err("ENV-E-PLAN-VERSION")
             val instruction_values = field_array(fields, "instructions", "plan")?
             val tool_values = field_array(fields, "tools", "plan")?
             val probe_values = field_array(fields, "hardware_probes", "plan")?
-            val operation_values = field_array(fields, "rt_hal_operations", "plan")?
-            if instruction_values.len() > 1024 or tool_values.len() > 64 or probe_values.len() > 64 or operation_values.len() > 256: return Err("ENV-E-BOUND")
+            if instruction_values.len() > 1024 or tool_values.len() > 64 or probe_values.len() > 64: return Err("ENV-E-BOUND")
             var instructions: [EnvAccessInstruction] = []
             var tools: [EnvToolIdentity] = []
             var probes: [EnvHardwareProbeIdentity] = []
-            var operations: [EnvRtHalOperationPlan] = []
             for item in instruction_values: instructions.push(parse_instruction(item)?)
             for item in tool_values: tools.push(parse_tool(item)?)
             for item in probe_values: probes.push(parse_probe(item)?)
-            for item in operation_values: operations.push(parse_rt_hal_operation(item)?)
             val plan = EnvAccessPlan(
                 plan_id: field_text(fields, "plan_id", "plan")?,
                 canonical_repo_root: field_text(fields, "canonical_repo_root", "plan")?,
@@ -217,7 +158,7 @@ pub fn env_access_plan_parse_sdn_v1(source: text) -> Result<EnvAccessPlanInstall
             )
             val problem = env_access_plan_error(plan)
             if problem != "": return Err(problem)
-            val install = fields_exact(fields["install"], ["compare_c", "compare_rust", "c_tool_id", "rust_tool_id", "worker_count", "queue_capacity", "timeout_ticks", "max_output_bytes", "required_assurance_rank"], "install")?
+            val install = fields_exact(fields["install"], ["compare_c", "compare_rust", "c_tool_id", "rust_tool_id", "worker_count", "queue_capacity", "timeout_ticks", "max_output_bytes"], "install")?
             val result = EnvAccessPlanInstallV1(
                 plan: plan,
                 compare_c: field_bool(install, "compare_c", "install")?,
@@ -227,9 +168,7 @@ pub fn env_access_plan_parse_sdn_v1(source: text) -> Result<EnvAccessPlanInstall
                 worker_count: field_int(install, "worker_count", "install")?,
                 queue_capacity: field_int(install, "queue_capacity", "install")?,
                 timeout_ticks: field_int(install, "timeout_ticks", "install")?,
-                max_output_bytes: field_int(install, "max_output_bytes", "install")?,
-                required_assurance_rank: field_int(install, "required_assurance_rank", "install")?,
-                rt_hal_operations: operations
+                max_output_bytes: field_int(install, "max_output_bytes", "install")?
             )
             val install_problem = install_error(result)
             if install_problem != "": return Err(install_problem)
@@ -242,25 +181,6 @@ fn kind_text(kind: EnvAccessKind) -> text:
         case EnvAccessKind.ReadRepoFile: return "read-repo-file"
         case EnvAccessKind.RunAllowedTool: return "run-allowed-tool"
         case EnvAccessKind.HardwareProbe: return "hardware-probe"
-        case EnvAccessKind.SocketConnect: return "socket-connect"
-        case EnvAccessKind.SocketSend: return "socket-send"
-        case EnvAccessKind.SocketReceive: return "socket-receive"
-        case EnvAccessKind.SocketClose: return "socket-close"
-        case EnvAccessKind.DeviceRead: return "device-read"
-        case EnvAccessKind.DeviceWrite: return "device-write"
-        case EnvAccessKind.MmioRead: return "mmio-read"
-        case EnvAccessKind.MmioWrite: return "mmio-write"
-        case EnvAccessKind.IrqEnable: return "irq-enable"
-        case EnvAccessKind.IrqWait: return "irq-wait"
-        case EnvAccessKind.IrqAcknowledge: return "irq-acknowledge"
-        case EnvAccessKind.IrqDisable: return "irq-disable"
-        case EnvAccessKind.DmaMap: return "dma-map"
-        case EnvAccessKind.DmaSyncForDevice: return "dma-sync-for-device"
-        case EnvAccessKind.DmaSyncForCpu: return "dma-sync-for-cpu"
-        case EnvAccessKind.DmaSubmit: return "dma-submit"
-        case EnvAccessKind.DmaWait: return "dma-wait"
-        case EnvAccessKind.DmaUnmap: return "dma-unmap"
-        case EnvAccessKind.ClockRead: return "clock-read"
 
 fn string_values(values: [text]) -> SdnValue:
     var result: [SdnValue] = []
@@ -294,16 +214,6 @@ fn probe_value(probe: EnvHardwareProbeIdentity) -> SdnValue:
     fields["max_stderr_bytes"] = SdnValue.Int(probe.max_stderr_bytes)
     return SdnValue.Dict(fields)
 
-fn rt_hal_operation_value(row: EnvRtHalOperationPlan) -> SdnValue:
-    var fields: Dict<text, SdnValue> = {}
-    fields["operation_id"] = SdnValue.String(row.operation_id)
-    fields["c_adapter_id"] = SdnValue.Int(row.c_adapter_id)
-    fields["rust_adapter_id"] = SdnValue.Int(row.rust_adapter_id)
-    fields["effect_capable"] = SdnValue.Bool(row.effect_capable)
-    fields["c_effect_adapter_id"] = SdnValue.Int(row.c_effect_adapter_id)
-    fields["rust_effect_adapter_id"] = SdnValue.Int(row.rust_effect_adapter_id)
-    return SdnValue.Dict(fields)
-
 pub fn env_access_plan_encode_sdn_v1(value: EnvAccessPlanInstallV1) -> Result<text, text>:
     val problem = env_access_plan_error(value.plan)
     if problem != "": return Err(problem)
@@ -312,11 +222,9 @@ pub fn env_access_plan_encode_sdn_v1(value: EnvAccessPlanInstallV1) -> Result<te
     var instruction_values: [SdnValue] = []
     var tool_values: [SdnValue] = []
     var probe_values: [SdnValue] = []
-    var operation_values: [SdnValue] = []
     for instruction in value.plan.instructions: instruction_values.push(instruction_value(instruction))
     for tool in value.plan.allowed_tools: tool_values.push(tool_value(tool))
     for probe in value.plan.allowed_hardware_probes: probe_values.push(probe_value(probe))
-    for row in value.rt_hal_operations: operation_values.push(rt_hal_operation_value(row))
     var install: Dict<text, SdnValue> = {}
     install["compare_c"] = SdnValue.Bool(value.compare_c)
     install["compare_rust"] = SdnValue.Bool(value.compare_rust)
@@ -326,7 +234,6 @@ pub fn env_access_plan_encode_sdn_v1(value: EnvAccessPlanInstallV1) -> Result<te
     install["queue_capacity"] = SdnValue.Int(value.queue_capacity)
     install["timeout_ticks"] = SdnValue.Int(value.timeout_ticks)
     install["max_output_bytes"] = SdnValue.Int(value.max_output_bytes)
-    install["required_assurance_rank"] = SdnValue.Int(value.required_assurance_rank)
     var root: Dict<text, SdnValue> = {}
     root["schema"] = SdnValue.String(ENV_ACCESS_PLAN_SCHEMA_V1)
     root["version"] = SdnValue.Int(1)
@@ -337,19 +244,7 @@ pub fn env_access_plan_encode_sdn_v1(value: EnvAccessPlanInstallV1) -> Result<te
     root["instructions"] = SdnValue.Array(instruction_values)
     root["tools"] = SdnValue.Array(tool_values)
     root["hardware_probes"] = SdnValue.Array(probe_values)
-    root["rt_hal_operations"] = SdnValue.Array(operation_values)
     root["install"] = SdnValue.Dict(install)
     val encoded = sdn_encode_canonical(SdnValue.Dict(root))
     if encoded.len() > ENV_ACCESS_PLAN_SDN_MAX_BYTES: return Err("ENV-E-PLAN-SIZE")
     return Ok(encoded)
-
-# This is the compiler-to-host authority binding for a cold RT/HAL install.
-# It covers the whole canonical plan, including plan_id, tools, every typed
-# environment instruction, the assurance rank, and every exact operation
-# mapping.  It deliberately derives from the codec rather than the plan file
-# bytes: harmless SDN presentation differences cannot produce a second host
-# identity, while every semantic replacement changes this digest.
-pub fn env_access_plan_canonical_identity_v1(value: EnvAccessPlanInstallV1) -> Result<text, text>:
-    match env_access_plan_encode_sdn_v1(value):
-        case Err(problem): return Err(problem)
-        case Ok(encoded): return Ok(sha256_text("simple-env-access-plan-canonical-v1\n" + encoded))

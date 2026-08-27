@@ -13,18 +13,6 @@ use compiler.common.diagnostics.span.{Span}
 use compiler.common.dependency.visibility.{Visibility}
 use compiler.common.dynamic_identity.closure.{Closure}
 use compiler.hir.hir_symbol_table_methods.*
-# `HirModule` (below) types 13 of its fields with declarations that physically
-# live in hir_definitions.spl, and this module carried NO import of that module
-# at all -- the names were only ever reachable because hir_definitions globs
-# this file back, which is not a route the dependency-materialization walk
-# accepts. The walk therefore reported
-# `[hir-callable-dep-origin-unresolved] owner=compiler.hir.hir_types
-# dependency=HirClass` (and 12 siblings) and each one resurfaced as a hard
-# `unresolved type: HirClass` against ~90 innocent importers -- the single
-# largest HIR-semantic error population in the Stage 3 log of 2026-08-24
-# (~1,170 of ~1,360 fatal errors). See the twin explicit-import comment in
-# hir_definitions.spl for the mechanism.
-use compiler.hir.hir_definitions.{HirFunction, HirClass, HirStruct, HirEnum, HirBitfield, HirTrait, HirImpl, HirConst, HirStaticAssert, HirAopAdvice, HirDiBinding, HirArchRule, HirMockDecl}
 
 # ============================================================================
 # HIR Module Structure
@@ -34,14 +22,13 @@ struct HirModule:
     """Complete HIR module."""
     name: text
     path: text
-    # User-authored source identity. `path` remains the physical compiler input
-    # used for parsing, visibility, cache identity, and source deduplication.
-    authored_path: text = ""
     imports: [HirImport]
     exports: [text]
     domain_blocks: [HirDomainBlock]
     symbols: SymbolTable
     functions: Dict<SymbolId, HirFunction>
+    gpu_function_targets: Dict<text, text>
+    gpu_function_backend_orders: Dict<text, text>
     classes: Dict<SymbolId, HirClass>
     structs: Dict<SymbolId, HirStruct>
     enums: Dict<SymbolId, HirEnum>
@@ -55,6 +42,25 @@ struct HirModule:
     arch_rules: [HirArchRule]
     mock_decls: [HirMockDecl]
     types: [text]
+    # `extend <Enum>:` sections carried from the frontend (design §2). MUST
+    # stay the LAST field -- partial named constructions are filled
+    # POSITIONALLY by the Rust seed -- and carries a default so existing
+    # `HirModule(...)` sites are untouched.
+    extend_enums: [HirExtendEnum] = []
+
+struct HirExtendEnum:
+    """One `complete:`/`dyn:` section of an `extend <Enum>:` declaration."""
+    target: text
+    closure: Closure
+    constructors: [HirExtendConstructor]
+    span: Span
+
+struct HirExtendConstructor:
+    """`provider.Name(payload, ...)` inside an `extend` section."""
+    provider: text
+    name: text
+    payload_types: [Type]
+    span: Span
 
 struct HirImport:
     """Import declaration."""
@@ -91,7 +97,7 @@ impl SymbolId:
     fn is_valid() -> bool:
         self.id >= 0
 
-struct Symbol:
+struct HirSymbol:
     """Symbol table entry."""
     id: SymbolId
     name: text
@@ -170,14 +176,6 @@ enum MethodResolution:
     # Not yet resolved (before resolution pass)
     Unresolved
 
-    # Module-qualified receipts. Appended to preserve the cached ordinal of
-    # every legacy variant. `defining_module` is the owning HirModule row;
-    # symbol ids are meaningful only inside that row.
-    QualifiedInstanceMethod(defining_module: i64, type_id: SymbolId, method_id: SymbolId)
-    QualifiedTraitMethod(defining_module: i64, trait_id: SymbolId, method_id: SymbolId)
-    QualifiedFreeFunction(defining_module: i64, func_id: SymbolId)
-    QualifiedStaticMethod(defining_module: i64, type_id: SymbolId, method_id: SymbolId)
-
 impl MethodResolution:
     fn is_resolved() -> bool:
         """Check if method has been resolved."""
@@ -188,26 +186,21 @@ impl MethodResolution:
     fn is_ufcs() -> bool:
         """Check if this is a UFCS resolution (free function)."""
         match self:
-            case FreeFunction(_) | QualifiedFreeFunction(_, _): true
+            case FreeFunction(_): true
             case _: false
 
     fn get_symbol_id() -> SymbolId?:
-        """Get the resolved symbol ID if available."""
-        match self:
-            case InstanceMethod(_, method_id): Some(method_id)
-            case TraitMethod(_, method_id): Some(method_id)
-            case FreeFunction(func_id): Some(func_id)
-            case StaticMethod(_, method_id): Some(method_id)
-            case Unresolved: nil
+        """Get the resolved symbol ID if available.
 
-    fn get_defining_module() -> i64?:
-        """Return qualified symbol authority, or nil for flat resolutions."""
+        Bare-lift accumulator: explicit Some(...) builds a heap Option box on
+        the stage4 native lane and if-val at the caller binds the BOX
+        un-unwrapped (bug doc 2026-07-23 family)."""
         match self:
-            case QualifiedInstanceMethod(defining_module, _, _): defining_module
-            case QualifiedTraitMethod(defining_module, _, _): defining_module
-            case QualifiedFreeFunction(defining_module, _): defining_module
-            case QualifiedStaticMethod(defining_module, _, _): defining_module
-            case _: nil
+            case InstanceMethod(_, method_id): method_id
+            case TraitMethod(_, method_id): method_id
+            case FreeFunction(func_id): func_id
+            case StaticMethod(_, method_id): method_id
+            case Unresolved: nil
 
 struct ScopeId:
     """Unique identifier for a scope."""
@@ -218,7 +211,7 @@ struct Scope:
     id: ScopeId
     parent: ScopeId?
     kind: ScopeKind
-    symbols: Dict<text, SymbolId>
+    symbols: Dict<text, i64>
 
 """Kind of scope."""
 enum ScopeKind:
@@ -248,11 +241,6 @@ class SymbolTable:
     gpu_function_backend_orders: Dict<text, text>
     qualified_functions: Dict<text, i64>
     qualified_types: Dict<text, i64>
-    qualified_function_names: [text]
-    qualified_function_ids: [i64]
-    qualified_type_module_names: [text]
-    qualified_type_member_names: [text]
-    qualified_type_ids: [i64]
     exact_symbols: Dict<text, i64>
     # MODCALLIDX (2026-08-21): "{defining_module}#{name}" -> raw symbol id for
     # every symbol that carries a defining_module, plus the same row under the
@@ -265,6 +253,11 @@ class SymbolTable:
     # Persistent root owner reused by reset_module. The Scope row is a small
     # routing value; its symbol backing never crosses reset by value.
     root_scope_symbols: Dict<text, i64>
+    # Module-owned structural-union identity shared by lowering and the later
+    # synthesis pass. Reverse ownership makes preferred-hash collisions loud
+    # to the allocator instead of silently aliasing two enums/variants.
+    structural_union_symbols: Dict<text, i64>
+    structural_union_owners: Dict<i64, text>
 
 impl SymbolTable:
     static fn new() -> SymbolTable:
@@ -279,11 +272,6 @@ impl SymbolTable:
             gpu_function_backend_orders: {},
             qualified_functions: {},
             qualified_types: {},
-            qualified_function_names: [],
-            qualified_function_ids: [],
-            qualified_type_module_names: [],
-            qualified_type_member_names: [],
-            qualified_type_ids: [],
             exact_symbols: {},
             module_callables: {},
             root_scope_symbols: root_scope_symbols,
@@ -312,12 +300,10 @@ impl SymbolTable:
         self.gpu_function_backend_orders = {}
         self.qualified_functions = {}
         self.qualified_types = {}
-        self.qualified_function_names = []
-        self.qualified_function_ids = []
-        self.qualified_type_module_names = []
-        self.qualified_type_member_names = []
-        self.qualified_type_ids = []
         self.exact_symbols = {}
+        self.module_callables = {}
+        self.structural_union_symbols = {}
+        self.structural_union_owners = {}
         self.current_scope = ScopeId(id: 0)
         self.next_symbol_id = 0
         self.next_scope_id = 1
@@ -357,6 +343,21 @@ impl SymbolTable:
             case SymbolKind.Trait: true
             case _: false
 
+        # Same Dict-free `next_scope_id` range check `lookup()` uses (see its
+        # long comment): `self.scopes` is append-only with scope 0 always
+        # present (both `new()` and `reset_module()` insert it), so an
+        # out-of-range `current_scope` can only come from a corrupted/stale
+        # read of this scalar field. Without this, the bracket reads below
+        # trap ud2 "field access on nil receiver" exactly like `lookup()` did
+        # -- the guard landed there covered only 2 of the 5 bracket reads of
+        # `self.scopes` in this file. Recovering to the root scope is the
+        # behaviour-preserving repair: in every correct execution the guard
+        # is a no-op, and scope 0 is the scope a flat/bootstrap symbol table
+        # is supposed to be in anyway.
+        # doc/08_tracking/bug/stage3_symboltable_lookup_ud2_field_access_nil_receiver_2026-08-06.md
+        if self.current_scope.id < 0 or self.current_scope.id >= self.next_scope_id:
+            self.current_scope = ScopeId(id: 0)
+
         if is_type_symbol:
             # SCOPEROW (2026-08-22): probe the scope row IN PLACE. `val scope =
             # self.scopes[id]` copied the Scope value (VT_OBJECT_FIELD_CLONES
@@ -367,10 +368,17 @@ impl SymbolTable:
                 # Bracket-index read: same stage4 lane hardening as `lookup`.
                 return SymbolId(id: self.scopes[self.current_scope.id].symbols[name])
 
-        val raw_id = self.next_symbol_id
+        var raw_id = self.next_symbol_id
+        # Zero overhead on the ordinary compact lane beyond one scalar compare;
+        # if normal allocation ever reaches reserved structural-union IDs, skip
+        # owners instead of aliasing them.
+        if raw_id >= 900000000:
+            while self.structural_union_owners.contains_key(raw_id):
+                raw_id = raw_id + 1
         val id = SymbolId(id: raw_id)
         self.next_symbol_id = raw_id + 1
 
+        val retained_visibility = hir_symbol_visibility_or_private(visibility)
         val symbol = HirSymbol(
             id: id,
             name: name,
@@ -390,14 +398,12 @@ impl SymbolTable:
         if val defining_module_name = defining_module:
             self.index_module_callable(defining_module_name, name, raw_id)
 
-        # Copy-modify-reassign for interpreter compatibility
-        var scope = self.scopes[self.current_scope.id]
-        var scope_syms = scope.symbols
-        scope_syms[name] = raw_id
-        scope.symbols = scope_syms
-        self.scopes[self.current_scope.id] = scope
-        if self.current_scope.id == 0:
-            self.root_scope_symbols = scope_syms
+        # SCOPEIP (2026-08-21): write the scope's symbol dict IN PLACE. The
+        # read-modify-write round trip this replaces was mandatory because
+        # a nested assignment target was unsupported; it is supported now
+        # (344f277cc45), and the round trip copied the whole scope row on
+        # every define -- 1,529 defines for one module in the real closure.
+        self.scopes[self.current_scope.id].symbols[name] = raw_id
 
         id
 
@@ -442,70 +448,69 @@ impl SymbolTable:
 
         Keep the hot lowering boundary scalar: staged native code can corrupt
         a value-type ``SymbolId`` carried inside ``Optional`` even though the
-        exact dictionary entry is valid.
+        exact dictionary entry is valid. The return stays a raw ``i64``; only
+        the CONTAINER changed.
+
+        QTYPEIDX (2026-08-22): O(1) Dict probe. This used to linear-scan three
+        parallel arrays with two text comparisons per row, so every query cost
+        O(qualified bindings) -- and 65% of queries are MISSES, which always
+        pay the full length. `materialize_imported_callable_dependency` issues
+        up to three of these per named type per imported callable per importing
+        module, so HIR import lowering paid O(modules x callables x deps x
+        bindings): 1,496,719 queries / 1,251,806 misses across one stage-1
+        build, and `callable_deps` alone (5,241,657ms) was the single largest
+        exclusive term in the whole HIR phase profile, ~3.4ms per query.
+
+        The Dict was already maintained in lockstep by `bind_qualified_type`
+        (its only writer) and is the ONLY form the HIR codec serializes -- the
+        arrays were dropped on every round trip -- so the Dict was already the
+        more authoritative store. The `#` separator makes the key injective:
+        `.` allowed ("a.b", "c") and ("a", "b.c") to collide.
+        doc/08_tracking/bug/hir_qualified_type_lookup_linear_scan_2026-08-22.md
         """
         val key = qualified_symbol_key(module_name, member_name)
         if self.qualified_types.contains_key(key):
             return self.qualified_types[key]
         -1
 
-    fn qualified_type_probe_steps(module_name: text, member_name: text) -> i64:
-        """Exact comparisons used by the scalar index (perf evidence only)."""
-        if self.qualified_type_buckets.len() != QUALIFIED_SYMBOL_BUCKET_COUNT:
-            return 0
-        val bucket = _qualified_symbol_bucket(module_name, member_name)
-        var index = self.qualified_type_buckets[bucket]
-        var steps: i64 = 0
-        while index >= 0 and
-              index < self.qualified_type_module_names.len() and
-              index < self.qualified_type_member_names.len() and
-              index < self.qualified_type_nexts.len():
-            steps = steps + 1
-            if self.qualified_type_module_names[index] == module_name and
-               self.qualified_type_member_names[index] == member_name:
-                return steps
-            index = self.qualified_type_nexts[index]
-        steps
-
-    fn qualified_function_probe_steps(module_name: text, member_name: text) -> i64:
-        """Exact comparisons used by the scalar index (perf evidence only)."""
-        if self.qualified_function_buckets.len() != QUALIFIED_SYMBOL_BUCKET_COUNT:
-            return 0
-        val bucket = _qualified_symbol_bucket(module_name, member_name)
-        var index = self.qualified_function_buckets[bucket]
-        var steps: i64 = 0
-        while index >= 0 and
-              index < self.qualified_function_module_names.len() and
-              index < self.qualified_function_member_names.len() and
-              index < self.qualified_function_nexts.len():
-            steps = steps + 1
-            if self.qualified_function_module_names[index] == module_name and
-               self.qualified_function_member_names[index] == member_name:
-                return steps
-            index = self.qualified_function_nexts[index]
-        steps
-
     me push_scope(kind: ScopeKind) -> ScopeId:
         """Push a new scope."""
         val raw_id = self.next_scope_id
         val id = ScopeId(id: raw_id)
-        self.next_scope_id = raw_id + 1
 
+        # Insert BEFORE advancing `next_scope_id`. The range guards in
+        # `lookup`/`lookup_or_invalid`/`declare`/`pop_scope` treat
+        # `0 <= id < next_scope_id` as an EXACT substitute for
+        # `id in self.scopes`, and that identity only holds if the counter
+        # never leads the dict. (This used to advance first, which made the
+        # guards' own comments false and left a window where `next_scope_id`
+        # admitted a key `self.scopes` did not yet have.)
         self.scopes[raw_id] = Scope(
             id: id,
             parent: Some(self.current_scope),
             kind: kind,
             symbols: {}
         )
+        self.next_scope_id = raw_id + 1
 
         self.current_scope = id
         id
 
     me pop_scope():
         """Pop current scope."""
+        # Same Dict-free range check as `lookup()`/`declare()`. An
+        # out-of-range `current_scope` here would trap ud2 "field access on
+        # nil receiver" on the bracket read below; there is no parent to walk
+        # to in that state, so reset to the always-present root scope.
+        if self.current_scope.id < 0 or self.current_scope.id >= self.next_scope_id:
+            self.current_scope = ScopeId(id: 0)
+            return
         val scope = self.scopes[self.current_scope.id]
-        if scope.parent.?:
-            self.current_scope = scope.parent.unwrap()
+        match scope.parent:
+            case Some(parent):
+                self.current_scope = parent
+            case nil:
+                pass
 
 # ============================================================================
 # HIR Types
@@ -547,17 +552,23 @@ enum HirTypeKind:
 
     # Trait types
     DynTrait(trait_: SymbolId)       # dyn Trait (trait object for dynamic dispatch)
-    # Compiler-owned identity for a closed-world facet reference. witness_key
-    # is the validated fully-qualified route when acquisition has one exact
-    # statically-known target; it is empty on general FacetRef<F> annotations.
-    # MIR materializes both base and route witness in an internal heap tuple.
-    FacetRef(facet: HirType, witness_key: text)
 
     # Function types
     Function(params: [HirType], ret: HirType, effects: [Effect])
 
     # Associated type projection: T.Item where T: Iterator
     Projection(base: HirType, assoc_name: text)
+
+    # Isolated (move-only) capability: `iso T` / bitwise_not(T) surface syntax.
+    # LANE ISO1 (2026-07-29): previously erased to Infer at lowering (see
+    # hir_lowering/types.spl); now carried through so MIR lowering can emit a
+    # real Move at iso-typed variable-to-variable binding sites and the NLL
+    # borrow checker can report use-after-move for it. Wraps the inner type
+    # so every existing consumer that does not special-case Isolated still
+    # sees a well-formed HirType via the wildcard match arm (transparent
+    # fallback), matching the pre-existing behavior for any code path that
+    # has not yet been taught about the capability.
+    Isolated(inner: HirType)
 
     # Special
     # Type inference variable with level for HM generalization
@@ -572,19 +583,6 @@ enum HirTypeKind:
     # Tensor and Layer types (for dimension checking)
     Tensor(element: HirType, dims: [DimExpr], device: DeviceType?)
     Layer(input: [DimExpr], output: [DimExpr])
-
-    # Weak capability wrapper. Appended so existing positional ordinals remain
-    # stable for bootstrap codecs and cached artifacts.
-    Weak(inner: HirType)
-
-    # Atomic reference-counted ownership (`@T`). The runtime owns one atomic
-    # strong-count transition per copied/dropped reference; the pointee remains
-    # `inner` and is never erased to Infer. Appended for cache compatibility.
-    Atomic(inner: HirType)
-
-    # Cross-module dyn-trait identity. Local DynTrait stays compact; imported
-    # traits carry the defining HirModule row because symbol ids are local.
-    QualifiedDynTrait(defining_module: i64, trait_: SymbolId)
 
 impl HirType:
     static fn named(name: text) -> HirType:
@@ -725,5 +723,52 @@ export ScopeId, Scope, ScopeKind, SymbolTable
 export HirType, HirTypeKind
 export DimExpr, DimExprKind
 export DeviceType, MemorySpace, LayerType, ParamShape
+
+# ============================================================================
+# Optional payload accessor
+# ============================================================================
+
+@unsafe(reason: "raw enum discriminant probe; -1 is the not-an-enum sentinel", capabilities: [ffi])
+extern fn rt_enum_discriminant(value: HirTypeKind) -> i64
+
+# Payload of an `Optional` whose inner type is a CONTAINER (Dict/Array/Slice),
+# else nil.
+#
+# Discriminant-guarded before the `match`, the same idiom every
+# `parser_type_kind_*` accessor uses: a qualified-arm match against an enum
+# value built through a different import spelling of the same module silently
+# falls to the wildcard on some lanes, and both callers of this helper also
+# import `TypeKind`, which has colliding variant names.
+#
+# CONTAINER-only on purpose. Typing an unannotated `val x = f()` as the bare
+# payload when `f` returns `T?` is what a human writes by hand (see the
+# `val map: Dict<text, any> = json_to_object(obj)` bindings in
+# src/lib/common/json/object_ops.spl), but doing it for EVERY optional return
+# would change what `.?` and `unwrap()` see on hundreds of bindings, and there
+# is no test lane that native-builds, so no suite would catch a regression.
+# Containers are the case where the loss is fatal rather than merely
+# imprecise: it surfaces as "#143 for-in over non-array iterables".
+# doc/08_tracking/bug/for_in_optional_initialized_local_loses_collection_type_2026-08-24.md
+fn _hir_optional_container_payload(t: HirType) -> HirType?:
+    val tk: HirTypeKind = t.kind
+    if rt_enum_discriminant(tk) != rt_enum_discriminant(HirTypeKind.Optional(t)):
+        return nil
+    val inner: HirType? = match tk:
+        case HirTypeKind.Optional(payload): payload
+        case _: nil
+    if not inner.?:
+        return nil
+    val inner_t: HirType = inner ?? t
+    val ik: HirTypeKind = inner_t.kind
+    val ik_disc = rt_enum_discriminant(ik)
+    if ik_disc == rt_enum_discriminant(HirTypeKind.Dict(inner_t, inner_t)):
+        return inner_t
+    if ik_disc == rt_enum_discriminant(HirTypeKind.Array(inner_t, nil)):
+        return inner_t
+    if ik_disc == rt_enum_discriminant(HirTypeKind.Slice(inner_t)):
+        return inner_t
+    nil
+
 export Effect, EffectKind
+export _hir_optional_container_payload
 # ============================================================================

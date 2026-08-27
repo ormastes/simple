@@ -95,6 +95,15 @@ impl CompilabilityStatus:
             case (RequiresInterpreter(a), RequiresInterpreter(b)):
                 CompilabilityStatus.RequiresInterpreter(a.merge(b))
 
+enum CompilabilityMode:
+    """Execution lane being classified.
+
+    HybridJit may safely use InterpCall because an interpreter bridge is
+    present. AotNative must retain constructs with real native lowering rather
+    than replacing them with an InterpCall that resolves to nil."""
+    HybridJit
+    AotNative
+
 # ============================================================================
 # Compilability Analyzer
 # ============================================================================
@@ -103,6 +112,7 @@ class CompilabilityAnalyzer:
     """Analyzes functions for native code compilability."""
     results: {text: CompilabilityStatus}
     known_safe_externs: [text]
+    mode: CompilabilityMode
 
 impl CompilabilityAnalyzer:
     static fn create() -> CompilabilityAnalyzer:
@@ -113,7 +123,13 @@ impl CompilabilityAnalyzer:
                 "rt_file_write_text", "rt_file_size", "rt_file_modified",
                 "rt_time_now", "rt_env_var", "rt_exit",
                 "rt_enum_discriminant"
-            ])
+            ],
+            mode: CompilabilityMode.HybridJit)
+
+    static fn create_for_mode(mode: CompilabilityMode) -> CompilabilityAnalyzer:
+        var analyzer = CompilabilityAnalyzer.create()
+        analyzer.mode = mode
+        analyzer
 
     me analyze_function(name: text, features: [text]) -> CompilabilityStatus:
         """Analyze a function by its feature usage list."""
@@ -135,6 +151,16 @@ impl CompilabilityAnalyzer:
                 case "field_access": reasons = reasons.push(FallbackReason.FieldAccess)
                 case "object_construction": reasons = reasons.push(FallbackReason.ObjectConstruction)
                 case "collection_literal": reasons = reasons.push(FallbackReason.CollectionLiteral)
+                # Interpolated strings have complete MIR plus LLVM/Cranelift
+                # lowering. Keep the conservative hybrid classification where
+                # InterpCall is safe, but never replace a standalone AOT body
+                # with a bridge call that has no interpreter and returns nil.
+                case "string_interpolation":
+                    match self.mode:
+                        case CompilabilityMode.HybridJit:
+                            reasons = reasons.push(FallbackReason.StringOps)
+                        case CompilabilityMode.AotNative:
+                            ()
                 case "actor": reasons = reasons.push(FallbackReason.ActorOps)
                 case "macro": reasons = reasons.push(FallbackReason.UserMacros)
                 case _:

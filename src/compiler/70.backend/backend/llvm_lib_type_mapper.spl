@@ -5,7 +5,6 @@
 
 use compiler.mir.mir_data.*
 use std.sffi.llvm.*
-use compiler.mir.mir_types.{MirType}
 
 # ============================================================================
 # LlvmLibTypeMapper
@@ -39,11 +38,20 @@ pub class LlvmLibTypeMapper:
             case Ptr(_, _): self.ptr_type()
             case Ref(_, _): self.ptr_type()
             case FuncPtr(_): self.ptr_type()
-            case Array(elem, size): llvm_array_type2(self.map_type(elem), size)
+            # Runtime arrays are heap references (like Struct/Slice/Enum): a
+            # value of array type is a pointer. Mapping to an LLVM array VALUE
+            # type ([0 x ...]) made params/locals non-pointer, breaking every
+            # GEP/load on them (Stage-1 verifier: "GEP base pointer is not a
+            # vector", "Load operand must be a pointer").
+            case Array(_, _): self.ptr_type()
+            case Dict(_, _): self.ptr_type()
             case Tuple(elements): self.map_tuple(elements)
             case Struct(_): self.ptr_type()
             case Enum(_): self.ptr_type()
-            case Function(_, _): self.ptr_type()
+            # `Function` is not a MirTypeKind variant — it is `FuncPtr(sig)`.
+            # The old arm never matched, so function-pointer types fell through.
+            # See doc/08_tracking/bug/case_bare_ident_is_irrefutable_binding_2026-08-01.md
+            case FuncPtr(_): self.ptr_type()
             case Never: llvm_void_type_in_context(self.ctx)
             case Opaque(_): self.ptr_type()
             case Promise(_): self.ptr_type()

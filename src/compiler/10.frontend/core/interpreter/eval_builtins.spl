@@ -14,6 +14,43 @@ use compiler.core.ast_types.{CoreExpr, CoreStmt, CoreDecl}
 # ===== Builtin Functions =====
 # Returns >= -1 if handled (value_id or -1 for error), returns -2 if not a builtin
 
+# int(text) canonical semantics (task #118): int(text) is a TOTAL function —
+# it never errors. It skips leading whitespace, an optional '+'/'-' sign, then
+# parses the longest run of leading decimal digits and stops at the first
+# non-digit (so "4.2" -> 4, truncating at '.'). If no digits are found at all
+# ("abc", "") the result is 0. This mirrors the C runtime's strtoll-based
+# rt_string_to_int() used by both compiled backends (cranelift .spl adapter
+# and the Rust seed's codegen Cast lowering), so interpret mode and compiled
+# mode now agree everywhere. See doc/07_guide/quick_reference/syntax_quick_reference.md
+# "int(text) semantics" for the full matrix and rationale, and
+# std.text.parse_int()/`??` for the checked (Option-returning) alternative
+# when garbage input must be detected rather than silently coerced to 0.
+fn eval_int_parse_lenient(s: text) -> i64:
+    val t = s.trim()
+    val n = t.len()
+    var i = 0
+    var negative = false
+    if i < n:
+        val sign_ch = t[i]
+        if sign_ch == "-":
+            negative = true
+            i = i + 1
+        elif sign_ch == "+":
+            i = i + 1
+    var result = 0
+    var any_digit = false
+    while i < n:
+        val code = t[i].char_code_at(0)
+        if code >= 48 and code <= 57:
+            any_digit = true
+            result = result * 10 + (code - 48)
+            i = i + 1
+        else:
+            break
+    if not any_digit: return 0
+    if negative: return 0 - result
+    return result
+
 fn eval_builtin_call(name: text, arg_eids: [i64]) -> i64:
     # First-character dispatch to skip irrelevant builtins early
     val first = name[0]
@@ -136,7 +173,10 @@ fn eval_builtin_call(name: text, arg_eids: [i64]) -> i64:
                 # Truncate float to int
                 return val_make_int(int(val_get_float(arg_val)))
             if kind == VAL_TEXT:
-                return val_make_int(int(val_get_text(arg_val)))
+                val itxt = val_get_text(arg_val)
+                # Total, non-erroring parse (task #118 canonical semantics):
+                # see eval_int_parse_lenient() above for the exact rules.
+                return val_make_int(eval_int_parse_lenient(itxt))
             if kind == VAL_BOOL:
                 if val_get_bool(arg_val): return val_make_int(1)
                 return val_make_int(0)
@@ -182,6 +222,22 @@ fn eval_builtin_call(name: text, arg_eids: [i64]) -> i64:
             if eval_had_error: return -1
             if val_is_truthy(sa_cond2) == false:
                 eval_set_error("static_assert failed")
+                return -1
+        return val_make_nil()
+
+    # Runtime assertion: `assert cond` / `assert cond, msg` desugars to
+    # __assert(cond[, msg]) in parser_stmts.spl. Raises on a false condition.
+    if name == "__assert":
+        if arg_eids.len() >= 1:
+            val as_cond = eval_expr(arg_eids[0])
+            if eval_had_error: return -1
+            if val_is_truthy(as_cond) == false:
+                if arg_eids.len() >= 2:
+                    val as_msg_val = eval_expr(arg_eids[1])
+                    if eval_had_error: return -1
+                    eval_set_error("assertion failed: " + val_to_text(as_msg_val))
+                    return -1
+                eval_set_error("assertion failed")
                 return -1
         return val_make_nil()
 

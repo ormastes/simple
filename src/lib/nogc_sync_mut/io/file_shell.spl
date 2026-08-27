@@ -4,20 +4,23 @@
 # Provides a unified interface for file I/O via shell commands.
 
 
-use std.io_runtime.{process_run}
+use std.io_runtime.{process_run, ProcessResult}
 
-# Execute shell command and return (stdout, stderr, exit_code)
-fn shell(command: text) -> (text, text, i64):
-    process_run("sh", ["-c", command])
+# Execute shell command; returns the canonical ProcessResult (same shape as
+# std.io_runtime.shell and io.process_ops.shell, so the three are no longer a
+# differing-signature cross-module collision).
+fn file_shell_run(command: text) -> ProcessResult:
+    val (stdout, stderr, code) = process_run("sh", ["-c", command])
+    ProcessResult(stdout: stdout, stderr: stderr, exit_code: code, limit_exceeded: false, limit_type: "")
 
 # Execute shell command and return trimmed stdout
 fn shell_output(command: text) -> text:
-    val (out, err, code) = rt_process_run("sh", ["-c", command])
+    val (out, err, code) = process_run("sh", ["-c", command])
     out.trim()
 
 # Write content to file using heredoc (shell-safe)
-fn file_write(path: text, content: text) -> bool:
-    val out_r = shell("cat > '{path}' << 'SIMPLE_WRITE_EOF'\n{content}\nSIMPLE_WRITE_EOF")
+fn file_shell_write(path: text, content: text) -> bool:
+    val out_r = file_shell_run("cat > '{path}' << 'SIMPLE_WRITE_EOF'\n{content}\nSIMPLE_WRITE_EOF")
     val out = out_r.stdout
     val err = out_r.stderr
     val code = out_r.exit_code
@@ -30,13 +33,16 @@ fn file_write(path: text, content: text) -> bool:
 # fall back to the LAST definition when ambiguous, so a `file_delete(p)` call
 # could dispatch to whichever won. See
 # doc/08_tracking/bug/cross_module_public_symbol_collisions_2026-08-16.md
-fn file_delete(path: text) -> bool:
-    val (out, err, code) = shell("rm -f '{path}'")
+fn file_shell_delete(path: text) -> bool:
+    val out_r = file_shell_run("rm -f '{path}'")
+    val out = out_r.stdout
+    val err = out_r.stderr
+    val code = out_r.exit_code
     code == 0
 
 # Get file size in bytes (returns 0 if file doesn't exist)
-fn file_size(path: text) -> i64:
-    val size_str_r = shell("stat -c '%s' '{path}' 2>/dev/null")
+fn file_shell_size(path: text) -> i64:
+    val size_str_r = file_shell_run("stat -c '%s' '{path}' 2>/dev/null")
     val size_str = size_str_r.stdout
     val err = size_str_r.stderr
     val code = size_str_r.exit_code
@@ -46,4 +52,3 @@ fn file_size(path: text) -> i64:
     if trimmed == "":
         return 0
     int(trimmed)
-

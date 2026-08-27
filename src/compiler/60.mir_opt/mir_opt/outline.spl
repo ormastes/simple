@@ -25,7 +25,13 @@
 # 6. Pass captures as arguments, restore results
 
 use compiler.mir.mir_data.*
-use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock}
+use compiler.mir.mir_data.*
+use compiler.mir.mir_instructions (MirModule, MirFunction, MirBlock)
+use compiler.mir_opt.mod (MirPass)
+
+# ============================================================================
+# Cold Block Analysis
+# ============================================================================
 
 class ColdBlockAnalysis:
     """Analyzes which blocks are likely cold (rarely executed).
@@ -68,11 +74,11 @@ impl ColdBlockAnalysis:
     me build_predecessor_map(func: MirFunction):
         """Build a map of block predecessors."""
         for block in func.blocks:
-            val succs = get_terminator_successors(block.terminator)
+            val succs: [BlockId] = get_terminator_successors(block.terminator)
             for succ_id in succs:
                 val key = succ_id.id
                 if self.block_preds.has(key):
-                    var preds = self.block_preds[key]
+                    var preds: [i64] = self.block_preds[key]
                     preds = preds.push(block.id.id)
                     self.block_preds[key] = preds
                 else:
@@ -343,7 +349,7 @@ impl BodyOutlining:
             return func
 
         # Compute live-in variables
-        var live_analysis = OutlineLiveVars.new()
+        var live_analysis: OutlineLiveVars = OutlineLiveVars.new()
         live_analysis.compute(cold_blocks, func.blocks)
 
         val captures = live_analysis.live_in
@@ -464,13 +470,14 @@ impl BodyOutlining:
                     # Find where the cold group would have exited to
                     val exit_target = self.find_group_exit(func, cold_set)
 
+                    val call_terminator = match exit_target:
+                        case Some(target): MirTerminator.Goto(target)
+                        case nil: MirTerminator.Ret(nil)
                     val call_block = MirBlock(
                         id: block.id,
                         label: Some("outlined_call"),
                         instructions: [call_inst],
-                        terminator: match exit_target:
-                            case Some(target): MirTerminator.Goto(target)
-                            case nil: MirTerminator.Ret(nil)
+                        terminator: call_terminator
                     )
                     new_blocks = new_blocks.push(call_block)
                 # else: skip other cold blocks (they're in the outlined function now)
@@ -633,7 +640,7 @@ fn get_inst_uses(inst: MirInst) -> [LocalId]:
             uses = add_operand_uses(uses, handler)
             for arg in args:
                 uses = add_operand_uses(uses, arg)
-        case Send(dest, target, message):
+        case Send(target, message):
             uses = add_operand_uses(uses, target)
             uses = add_operand_uses(uses, message)
         case Receive(_, timeout):
@@ -696,11 +703,11 @@ fn create_outline_pass() -> BodyOutlining:
 # Exports
 # ============================================================================
 
-fn outline_run_on_function(func: MirFunction, outline_pass: BodyOutlining) -> MirFunction:
+fn outline_run_on_function(outline_pass: BodyOutlining, func: MirFunction) -> MirFunction:
     """Free-function wrapper for body outlining pass dispatch."""
     func
 
-fn outline_run_on_module(module: MirModule, outline_pass: BodyOutlining) -> MirModule:
+fn outline_run_on_module(outline_pass: BodyOutlining, module: MirModule) -> MirModule:
     """Run body outlining on all functions in a module.
 
     This is a module-level pass because outlining creates new functions

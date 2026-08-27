@@ -9,7 +9,7 @@ use std.js.types.ast_types.JsExpression
 use std.js.types.ast_types.JsStatement
 use std.js.engine.interpreter_types.{Environment, EnvironmentStack, CallFrame, JsFunction, NativeIdMapping, to_number, js_to_string, to_boolean, is_truthy, typeof_value, strict_equals, abstract_equals, RETURN_SIGNAL, _is_array_method, _is_string_method, _get_obj_id, _get_fn_id, f64_to_i64, _digit_val}
 use std.js.engine.vm_object_store.{ObjectStore}
-use std.js.engine.runtime.{NATIVE_SET_IMMEDIATE, NATIVE_CLEAR_IMMEDIATE, NATIVE_WEBASSEMBLY_COMPILE_CATCH, NATIVE_WEBASSEMBLY_COMPILE_THEN, NATIVE_WEBASSEMBLY_EXPORT_FUNCTION, NATIVE_WEBASSEMBLY_INSTANTIATE_THEN}
+use std.js.engine.runtime.{NATIVE_SET_IMMEDIATE, NATIVE_CLEAR_IMMEDIATE, NATIVE_SET_TIMEOUT, NATIVE_CLEAR_TIMEOUT, NATIVE_REQUEST_ANIMATION_FRAME, NATIVE_CANCEL_ANIMATION_FRAME, NATIVE_WEBASSEMBLY_COMPILE_CATCH, NATIVE_WEBASSEMBLY_COMPILE_THEN, NATIVE_WEBASSEMBLY_EXPORT_FUNCTION, NATIVE_WEBASSEMBLY_INSTANTIATE_THEN}
 use std.js.node.buffer_module.{buffer_byteLength}
 use std.nogc_sync_mut.js.engine.interpreter.{JsInterpreter}
 use std.nogc_sync_mut.js.engine.interpreter_object.{JsInterpreter}
@@ -19,6 +19,13 @@ impl JsInterpreter:
     # ── JsExpression evaluation ────────────────────────────────────────────
 
     me eval_expression(expr: JsExpression, env: i64) -> BrowserResult<JsValue>:
+        if self.execution_steps_remaining <= 0:
+            if not self.execution_limit_hit:
+                self.logger.warn("Script execution step limit reached")
+                self.execution_limit_hit = true
+            self.control_return = true
+            return Ok(JsValue.Undefined)
+        self.execution_steps_remaining = self.execution_steps_remaining - 1
         match expr:
             JsExpression.Literal(value):
                 return Ok(value)
@@ -45,12 +52,26 @@ impl JsInterpreter:
                     return Ok(JsValue.Object(id: self.host_session_storage_id))
                 if name == "localStorage" and self.host_local_storage_id >= 0:
                     return Ok(JsValue.Object(id: self.host_local_storage_id))
-                if name == "require":
+                if name == "Promise":
+                    return Ok(self._promise_global_object())
+                if name == "require" and self.node_compat_enabled:
                     return Ok(self._native_node_require_function())
-                if name == "Buffer":
+                if name == "Buffer" and self.node_compat_enabled:
                     return Ok(self._native_node_buffer_global())
-                if name == "process":
+                if name == "process" and self.node_compat_enabled:
                     return Ok(self._native_node_process_object())
+                if name == "String":
+                    val string_fn = JsValue.Function(id: self._register_native("String", -14))
+                    self.define_global_value("String", string_fn)
+                    return Ok(string_fn)
+                if name == "Number":
+                    val number_fn = JsValue.Function(id: self._register_native("Number", -15))
+                    self.define_global_value("Number", number_fn)
+                    return Ok(number_fn)
+                if name == "Boolean":
+                    val boolean_fn = JsValue.Function(id: self._register_native("Boolean", -16))
+                    self.define_global_value("Boolean", boolean_fn)
+                    return Ok(boolean_fn)
                 if name == "setImmediate":
                     val immediate_fn = JsValue.Function(id: self._register_native("setImmediate", NATIVE_SET_IMMEDIATE))
                     self.define_global_value("setImmediate", immediate_fn)
@@ -59,6 +80,22 @@ impl JsInterpreter:
                     val clear_immediate_fn = JsValue.Function(id: self._register_native("clearImmediate", NATIVE_CLEAR_IMMEDIATE))
                     self.define_global_value("clearImmediate", clear_immediate_fn)
                     return Ok(clear_immediate_fn)
+                if name == "setTimeout":
+                    val set_timeout_fn = JsValue.Function(id: self._register_native("setTimeout", NATIVE_SET_TIMEOUT))
+                    self.define_global_value("setTimeout", set_timeout_fn)
+                    return Ok(set_timeout_fn)
+                if name == "clearTimeout":
+                    val clear_timeout_fn = JsValue.Function(id: self._register_native("clearTimeout", NATIVE_CLEAR_TIMEOUT))
+                    self.define_global_value("clearTimeout", clear_timeout_fn)
+                    return Ok(clear_timeout_fn)
+                if name == "requestAnimationFrame":
+                    val animation_fn = JsValue.Function(id: self._register_native("requestAnimationFrame", NATIVE_REQUEST_ANIMATION_FRAME))
+                    self.define_global_value("requestAnimationFrame", animation_fn)
+                    return Ok(animation_fn)
+                if name == "cancelAnimationFrame":
+                    val cancel_animation_fn = JsValue.Function(id: self._register_native("cancelAnimationFrame", NATIVE_CANCEL_ANIMATION_FRAME))
+                    self.define_global_value("cancelAnimationFrame", cancel_animation_fn)
+                    return Ok(cancel_animation_fn)
                 if env == self.global_env:
                     val cached = self.lookup_global_value(name)
                     if val Some(v) = cached:
@@ -70,6 +107,8 @@ impl JsInterpreter:
                 val global_lookup = self.lookup_global_value(name)
                 if val Some(v) = global_lookup:
                     return Ok(v)
+                if not self.node_compat_enabled and (name == "require" or name == "process" or name == "Buffer"):
+                    return Err(script_error("ReferenceError: {name} is not defined"))
                 self.logger.warn("ReferenceError: {name} is not defined")
                 return Ok(JsValue.Undefined)
             JsExpression.Binary(op, left, right):
@@ -503,7 +542,7 @@ impl JsInterpreter:
         if is_member and member_method == "cwd":
             match member_obj_expr:
                 JsExpression.Identifier(obj_name):
-                    if obj_name == "process":
+                    if obj_name == "process" and self.node_compat_enabled:
                         return Ok(JsValue.String(v: "/"))
                 _: pass_dn
 
@@ -515,7 +554,13 @@ impl JsInterpreter:
                         match root_expr:
                             JsExpression.Identifier(root_name):
                                 if root_name == "globalThis":
-                                    byte_length_global = true
+                                    if self.node_compat_enabled:
+                                        byte_length_global = true
+                                    else:
+                                        val root_value = self.eval_expression(root_expr, env)?
+                                        val root_id = _get_obj_id(root_value)
+                                        if root_id < 0 or strict_equals(self.get_object_property(root_id, "Buffer"), JsValue.Undefined):
+                                            return Err(script_error("ReferenceError: Buffer is not defined"))
                             _: pass_dn
                 _: pass_dn
             if byte_length_global:
@@ -1045,7 +1090,9 @@ impl JsInterpreter:
                                 var pi = 0
                                 while pi < src_obj.properties.len():
                                     val prop = src_obj.properties.get(pi)
-                                    self.set_object_property(target_id, prop.key, prop.value)
+                                    self._assign_object_property(
+                                        target_id, prop.key, prop.value
+                                    )
                                     pi = pi + 1
                             ai = ai + 1
                         return Ok(target)

@@ -4,15 +4,22 @@ use std.sffi.dynamic.{spl_dlsym, spl_wffi_call_i64}
 use std.sffi.dynamic_versioned.{VersionedDynLib}
 use std.debug.remote.t32_sffi.t32_types.{T32_OK, T32Error, make_t32_error}
 
+@unsafe(reason: "TRACE32 text pointer ABI", capabilities: [ffi, raw_ptr])
 extern fn spl_str_to_cstr(s: text) -> i64
+@unsafe(reason: "TRACE32 owned buffer allocation ABI", capabilities: [ffi, raw_ptr])
 extern fn spl_alloc_buffer(size: i64) -> i64
+@unsafe(reason: "TRACE32 owned buffer release ABI", capabilities: [ffi, raw_ptr])
 extern fn spl_free_buffer(ptr: i64)
+@unsafe(reason: "TRACE32 raw buffer read ABI", capabilities: [ffi, raw_ptr])
 extern fn spl_read_bytes(ptr: i64, len: i64) -> [i64]
+@unsafe(reason: "TRACE32 raw scalar read ABI", capabilities: [ffi, raw_ptr])
+extern fn spl_read_i32(ptr: i64) -> i64
 
 var _fp_WriteBreakpoint: i64 = 0
 var _fp_ReadBreakpoint: i64 = 0
 var _fp_GetBreakpointList: i64 = 0
 
+@unsafe(reason: "unverified TRACE32 provider call", capabilities: [ffi, raw_ptr])
 fn t32_breakpoint_bind(lib: VersionedDynLib) -> [text]:
     var missing: [text] = []
     _fp_WriteBreakpoint = lib.lib.sym("T32_WriteBreakpoint")
@@ -25,6 +32,7 @@ fn t32_breakpoint_function_names() -> [text]:
     ["T32_WriteBreakpoint", "T32_ReadBreakpoint", "T32_GetBreakpointList"]
 
 # int T32_WriteBreakpoint(uint32_t addr, int access, int enable, uint32_t size)
+@unsafe(reason: "unverified TRACE32 provider call", capabilities: [ffi, raw_ptr])
 fn t32_write_breakpoint(addr: i64, access: i64, enable: i64, size: i64) -> Result<i64, T32Error>:
     if _fp_WriteBreakpoint == 0: return Err(make_t32_error(-999))
     var args: [i64] = [addr, access, enable, size]
@@ -32,13 +40,13 @@ fn t32_write_breakpoint(addr: i64, access: i64, enable: i64, size: i64) -> Resul
     if rc == T32_OK: Ok(rc) else: Err(make_t32_error(rc))
 
 # int T32_ReadBreakpoint(uint32_t addr, int access, uint32_t* penable, uint32_t* psize)
+@unsafe(reason: "unverified TRACE32 provider call", capabilities: [ffi, raw_ptr])
 fn t32_read_breakpoint(addr: i64, access: i64) -> Result<(i64, i64), T32Error>:
     if _fp_ReadBreakpoint == 0: return Err(make_t32_error(-999))
     val enable_buf = spl_alloc_buffer(8)
     val size_buf = spl_alloc_buffer(8)
     var args: [i64] = [addr, access, enable_buf, size_buf]
     val rc = spl_wffi_call_i64(_fp_ReadBreakpoint, args, 4)
-    extern fn spl_read_i32(ptr: i64) -> i64
     if rc == T32_OK:
         val enable = spl_read_i32(enable_buf)
         val bp_size = spl_read_i32(size_buf)
@@ -51,6 +59,7 @@ fn t32_read_breakpoint(addr: i64, access: i64) -> Result<(i64, i64), T32Error>:
         Err(make_t32_error(rc))
 
 # int T32_GetBreakpointList(int* pcount, uint32_t* addrs, uint32_t* types, uint32_t* auxs, int max_count)
+@unsafe(reason: "unverified TRACE32 provider call", capabilities: [ffi, raw_ptr])
 fn t32_get_breakpoint_list(max_count: i64) -> Result<(i64, [i64], [i64], [i64]), T32Error>:
     if _fp_GetBreakpointList == 0: return Err(make_t32_error(-999))
     val count_buf = spl_alloc_buffer(8)
@@ -59,7 +68,6 @@ fn t32_get_breakpoint_list(max_count: i64) -> Result<(i64, [i64], [i64], [i64]),
     val auxs_buf = spl_alloc_buffer(max_count * 4)
     var args: [i64] = [count_buf, addrs_buf, types_buf, auxs_buf, max_count]
     val rc = spl_wffi_call_i64(_fp_GetBreakpointList, args, 5)
-    extern fn spl_read_i32(ptr: i64) -> i64
     if rc == T32_OK:
         val count = spl_read_i32(count_buf)
         val addrs = spl_read_bytes(addrs_buf, count * 4)

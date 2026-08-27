@@ -8,25 +8,25 @@
 
 use std.sffi.dynamic.{DynLib, platform_lib_extension, platform_name}
 
-extern fn rt_env_get(key: text) -> text
+use std.io_runtime.{env_get}
 
 # ============================================================================
 # Library Version
 # ============================================================================
 
-struct LibVersion:
+pub struct LibVersion:
     major: i64
     minor: i64
     patch: i64
 
 # reason: positional sffi dynamic_versioned API
-fn lib_version(major: i64, minor: i64, patch: i64) -> LibVersion:
+pub fn lib_version(major: i64, minor: i64, patch: i64) -> LibVersion:
     LibVersion(major: major, minor: minor, patch: patch)
 
-fn lib_version_any() -> LibVersion:
+pub fn lib_version_any() -> LibVersion:
     LibVersion(major: 0, minor: 0, patch: 0)
 
-fn lib_version_string(v: LibVersion) -> text:
+pub fn lib_version_string(v: LibVersion) -> text:
     if v.major == 0 and v.minor == 0 and v.patch == 0:
         return "any"
     if v.minor == 0 and v.patch == 0:
@@ -39,14 +39,15 @@ fn lib_version_string(v: LibVersion) -> text:
 # VersionedDynLib
 # ============================================================================
 
-class VersionedDynLib:
+pub class VersionedDynLib:
     lib: DynLib
     name: text
     version: LibVersion
     path: text
 
 impl VersionedDynLib:
-    static fn load_versioned(name: text, version: LibVersion) -> VersionedDynLib?:
+    @unsafe(reason: "loads an unverified versioned dynamic provider", capabilities: [ffi])
+    pub static fn load_versioned(name: text, version: LibVersion) -> VersionedDynLib?:
         val candidates = build_candidate_paths(name, version)
         var i = 0
         while i < candidates.len():
@@ -60,10 +61,12 @@ impl VersionedDynLib:
             i = i + 1
         nil
 
-    static fn load_best(name: text) -> VersionedDynLib?:
+    @unsafe(reason: "loads an unverified versioned dynamic provider", capabilities: [ffi])
+    pub static fn load_best(name: text) -> VersionedDynLib?:
         VersionedDynLib.load_versioned(name, lib_version_any())
 
-    static fn load_path(path: text, name: text) -> VersionedDynLib?:
+    @unsafe(reason: "loads an unverified dynamic provider path", capabilities: [ffi])
+    pub static fn load_path(path: text, name: text) -> VersionedDynLib?:
         val lib = DynLib.load(path)
         match lib:
             Some(loaded_lib):
@@ -71,10 +74,14 @@ impl VersionedDynLib:
             nil:
                 nil
 
-    fn has_symbol(name: text) -> bool:
-        self.lib.sym(name) != 0
+    @unsafe(reason: "resolves an unverified dynamic provider symbol", capabilities: [ffi, raw_ptr])
+    pub fn has_symbol(name: text) -> bool:
+        match self.lib.sym_checked(name):
+            case Ok(_): true
+            case Err(_): false
 
-    fn count_symbols(names: [text]) -> i64:
+    @unsafe(reason: "resolves unverified dynamic provider symbols", capabilities: [ffi, raw_ptr])
+    pub fn count_symbols(names: [text]) -> i64:
         var count: i64 = 0
         var i = 0
         while i < names.len():
@@ -83,7 +90,8 @@ impl VersionedDynLib:
             i = i + 1
         count
 
-    fn missing_symbols(names: [text]) -> [text]:
+    @unsafe(reason: "resolves unverified dynamic provider symbols", capabilities: [ffi, raw_ptr])
+    pub fn missing_symbols(names: [text]) -> [text]:
         var missing: [text] = []
         var i = 0
         while i < names.len():
@@ -98,14 +106,15 @@ impl VersionedDynLib:
 
 var _multi_libs: {text: VersionedDynLib} = {}
 
-class MultiVersionLoader:
+pub class MultiVersionLoader:
     pass_dn
 
 impl MultiVersionLoader:
-    static fn instance() -> MultiVersionLoader:
+    pub static fn instance() -> MultiVersionLoader:
         MultiVersionLoader()
 
-    fn load(name: text, version: LibVersion) -> VersionedDynLib?:
+    @unsafe(reason: "loads and caches an unverified versioned dynamic provider", capabilities: [ffi])
+    pub fn load(name: text, version: LibVersion) -> VersionedDynLib?:
         val key = "{name}:{lib_version_string(version)}"
         if _multi_libs.contains(key):
             return _multi_libs[key]
@@ -117,7 +126,8 @@ impl MultiVersionLoader:
             nil:
                 nil
 
-    fn load_best(name: text) -> VersionedDynLib?:
+    @unsafe(reason: "loads and caches an unverified versioned dynamic provider", capabilities: [ffi])
+    pub fn load_best(name: text) -> VersionedDynLib?:
         val key = "{name}:any"
         if _multi_libs.contains(key):
             return _multi_libs[key]
@@ -129,7 +139,8 @@ impl MultiVersionLoader:
             nil:
                 nil
 
-    fn load_path(path: text, name: text) -> VersionedDynLib?:
+    @unsafe(reason: "loads and caches an unverified dynamic provider path", capabilities: [ffi])
+    pub fn load_path(path: text, name: text) -> VersionedDynLib?:
         if _multi_libs.contains(path):
             return _multi_libs[path]
         val lib = VersionedDynLib.load_path(path, name)
@@ -140,13 +151,13 @@ impl MultiVersionLoader:
             nil:
                 nil
 
-    fn get(name: text, version: LibVersion) -> VersionedDynLib?:
+    pub fn get(name: text, version: LibVersion) -> VersionedDynLib?:
         val key = "{name}:{lib_version_string(version)}"
         if _multi_libs.contains(key):
             return _multi_libs[key]
         nil
 
-    fn loaded_keys() -> [text]:
+    pub fn loaded_keys() -> [text]:
         var keys: [text] = []
         for key in _multi_libs:
             keys.push(key)
@@ -156,7 +167,7 @@ impl MultiVersionLoader:
 # Path Resolution
 # ============================================================================
 
-fn build_candidate_paths(name: text, version: LibVersion) -> [text]:
+pub fn build_candidate_paths(name: text, version: LibVersion) -> [text]:
     val ext = platform_lib_extension()
     val plat = platform_name()
     val search_dirs = library_search_paths()
@@ -195,9 +206,9 @@ fn build_candidate_paths(name: text, version: LibVersion) -> [text]:
         candidates.push("{name}.so")
     candidates
 
-fn library_search_paths() -> [text]:
+pub fn library_search_paths() -> [text]:
     var paths: [text] = []
-    val simple_path = rt_env_get("SIMPLE_LIB_PATH") ?? ""
+    val simple_path = env_get("SIMPLE_LIB_PATH") ?? ""
     if simple_path != "":
         val parts = simple_path.split(":")
         var i = 0
@@ -207,7 +218,7 @@ fn library_search_paths() -> [text]:
             i = i + 1
     val plat = platform_name()
     if plat == "linux" or plat == "freebsd":
-        val ldpath = rt_env_get("LD_LIBRARY_PATH") ?? ""
+        val ldpath = env_get("LD_LIBRARY_PATH") ?? ""
         if ldpath != "":
             val parts = ldpath.split(":")
             var i = 0
@@ -218,7 +229,7 @@ fn library_search_paths() -> [text]:
         paths.push("/usr/local/lib")
         paths.push("/usr/lib")
     elif plat == "macos":
-        val dyldpath = rt_env_get("DYLD_LIBRARY_PATH") ?? ""
+        val dyldpath = env_get("DYLD_LIBRARY_PATH") ?? ""
         if dyldpath != "":
             val parts = dyldpath.split(":")
             var i = 0
@@ -229,7 +240,7 @@ fn library_search_paths() -> [text]:
         paths.push("/usr/local/lib")
         paths.push("/opt/homebrew/lib")
     elif plat == "windows":
-        val winpath = rt_env_get("PATH") ?? ""
+        val winpath = env_get("PATH") ?? ""
         if winpath != "":
             val parts = winpath.split(";")
             var i = 0
@@ -237,7 +248,7 @@ fn library_search_paths() -> [text]:
                 if parts[i] != "":
                     paths.push(parts[i])
                 i = i + 1
-    val t32_lib = rt_env_get("T32_API_LIB") ?? ""
+    val t32_lib = env_get("T32_API_LIB") ?? ""
     if t32_lib != "":
         paths.push(t32_lib)
     paths.push("/opt/t32/demo/api/capi/dll")

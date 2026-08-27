@@ -14,8 +14,8 @@ use std.db.dbfs_engine.schema.{InodeRow, DentryRow, InodeTable, DentryTable, Ino
 use std.db.dbfs_engine.intent_log.{IntentLog, IntentLogRecord}
 use std.database.atomic.{atomic_write, get_timestamp}
 
-extern fn rt_file_read_text(path: text) -> text
-extern fn rt_file_exists(path: text) -> bool
+use std.io_runtime.{read_file_text}
+use std.io_runtime.{file_exists}
 
 # ============================================================
 # MetaOp — the set of operations we can journal
@@ -222,9 +222,9 @@ impl MetaStore:
     static fn open(path: text) -> Result<MetaStore, text>:
         val jpath  = path + ".meta.wal"
         val ckpath = path + ".meta.ckpt"
-        val ck_content = if rt_file_exists(ckpath): rt_file_read_text(ckpath) else: ""
+        val ck_content = if file_exists(ckpath): read_file_text(ckpath) else: ""
         val ck = MetaStore._parse_checkpoint_text(ck_content) ?? MetaCheckpoint(gen: 0, inode_count: 0, dentry_count: 0, inline_count: 0, timestamp: 0)
-        val wal_content = if rt_file_exists(jpath): rt_file_read_text(jpath) else: ""
+        val wal_content = if file_exists(jpath): read_file_text(jpath) else: ""
         val entries = MetaStore._parse_journal_text(wal_content)
         var next_seq: i64 = 1
         var i: i32 = 0
@@ -343,12 +343,18 @@ impl MetaStore:
     # --- Internal: journal flush ---
 
     me fn _flush_journal() -> bool:
-        var lines: text = ""
+        # Assemble immutable fragments once, then join them in one allocation.
+        # Repeated `lines = lines + entry` copied the entire accumulated WAL for
+        # every journal record, making one flush quadratic in serialized bytes.
+        # The final trailing newline and atomic whole-file persistence remain
+        # unchanged, so recovery and durability semantics are identical.
+        var lines: [text] = []
         var i: i32 = 0
         while i < self.journal.len() as i32:
-            lines = lines + _serialize_journal_entry(self.journal[i]) + "\n"
+            lines.push(_serialize_journal_entry(self.journal[i]))
             i = i + 1
-        atomic_write(self.journal_path, lines)
+        val content = if lines.len() == 0: "" else: lines.join("\n") + "\n"
+        atomic_write(self.journal_path, content)
 
     # --- Internal: checkpoint serialization ---
 

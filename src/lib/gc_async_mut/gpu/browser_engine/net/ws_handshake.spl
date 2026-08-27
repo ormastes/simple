@@ -16,11 +16,15 @@ use std.gc_async_mut.gpu.browser_engine.net.ws_utils.{
 }
 use std.gc_async_mut.gpu.browser_engine.net.ws_crypto.{compute_accept_key}
 
-extern fn rt_io_tcp_read(fd: i64, size: i64) -> [u8]
+@unsafe(reason: "raw nullable TCP bytes; nil is read failure and empty is EOF", capabilities: [ffi])
+extern fn rt_io_tcp_read(fd: i64, size: i64) -> [u8]?
+@unsafe(reason: "raw TCP text-write count; negative sentinel or short count means failure", capabilities: [ffi])
 extern fn rt_io_tcp_write_text(fd: i64, data: text) -> i64
+@unsafe(reason: "raw descriptor flush status; false means flush failed", capabilities: [ffi])
 extern fn rt_io_tcp_flush(fd: i64) -> bool
+@unsafe(reason: "raw descriptor close consumes one live descriptor; false means close failed", capabilities: [ffi])
 extern fn rt_io_tcp_close(fd: i64) -> bool
-extern fn rt_bytes_to_text(data: [u8]) -> text
+use std.common.string_core.{bytes_to_text}
 
 # WebSocket protocol version
 val WS_VERSION = 13
@@ -42,9 +46,11 @@ fn ws_write_transport_fd(tls_conn: TlsConnection?, tcp_fd: i64, data: text) -> i
         return tls_conn.write_text(data)
     if tcp_fd < 0:
         return -1
-    val written = rt_io_tcp_write_text(tcp_fd, data)
+    val written = unsafe(capabilities: [ffi]):
+        rt_io_tcp_write_text(tcp_fd, data)
     if written > 0:
-        rt_io_tcp_flush(tcp_fd)
+        unsafe(capabilities: [ffi]):
+            rt_io_tcp_flush(tcp_fd)
     written
 
 fn ws_read_transport_fd(tls_conn: TlsConnection?, tcp_fd: i64, max_bytes: i64) -> text:
@@ -52,7 +58,11 @@ fn ws_read_transport_fd(tls_conn: TlsConnection?, tcp_fd: i64, max_bytes: i64) -
         return tls_conn.read_text(max_bytes)
     if tcp_fd < 0:
         return ""
-    bytes_to_text(rt_io_tcp_read(tcp_fd, max_bytes))
+    val bytes = unsafe(capabilities: [ffi]):
+        rt_io_tcp_read(tcp_fd, max_bytes)
+    if bytes == nil:
+        return ""
+    bytes_to_text(bytes!)
 
 fn build_upgrade_request(host: text, port: i64, path: text, key: text, protocols: [text]) -> text:
     # Build the HTTP/1.1 upgrade request for the WebSocket handshake.
@@ -78,9 +88,7 @@ fn build_upgrade_request(host: text, port: i64, path: text, key: text, protocols
     request
 
 fn ws_request_path(url: Url) -> text:
-    val path = if url.path.len() > 0: url.path else: "/"
-    val query = if url.query.len() > 0: "?{url.query}" else: ""
-    "{path}{query}"
+    url.request_target()
 
 fn read_ws_response_text(tls_conn: TlsConnection?, tcp_fd: i64) -> text:
     var response = ""

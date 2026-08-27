@@ -11,7 +11,18 @@ pub val TLS_VERSION_MAJOR_V1: i64 = 3
 pub val TLS_VERSION_MINOR_V1: i64 = 3
 pub val TLS_AEAD_TAG_LENGTH_V1: i64 = 16
 pub val TLS_MAX_FRAGMENT_LENGTH_V1: i64 = 16384
-pub val TLS_MAX_RECORD_PAYLOAD_LENGTH_V1: i64 = TLS_MAX_FRAGMENT_LENGTH_V1 + TLS_AEAD_TAG_LENGTH_V1
+pub val TLS_INNER_CONTENT_TYPE_LENGTH_V1: i64 = 1
+# The local TLS 1.3 producer emits no padding, so its largest payload carries
+# only the application fragment, trailing content-type byte, and AEAD tag.
+pub val TLS_MAX_UNPADDED_RECORD_PAYLOAD_LENGTH_V1: i64 = (
+    TLS_MAX_FRAGMENT_LENGTH_V1 +
+    TLS_INNER_CONTENT_TYPE_LENGTH_V1 +
+    TLS_AEAD_TAG_LENGTH_V1
+)
+# RFC 8446 section 5.2 permits TLSCiphertext expansion of up to 256 bytes.
+# Inbound framing must retain that full interoperability allowance because a
+# peer may add zero padding even though this repository's producer does not.
+pub val TLS_MAX_RECORD_PAYLOAD_LENGTH_V1: i64 = TLS_MAX_FRAGMENT_LENGTH_V1 + 256
 pub val TLS_MAX_RECORD_WIRE_LENGTH_V1: i64 = TLS_RECORD_HEADER_LENGTH_V1 + TLS_MAX_RECORD_PAYLOAD_LENGTH_V1
 pub val TLS_MAX_RX_BUFFER_LENGTH_V1: i64 = TLS_MAX_RECORD_WIRE_LENGTH_V1 * 2
 # Diagnostic ceiling only; byte capacity, not ingress-call count, bounds input.
@@ -196,8 +207,12 @@ pub class TlsApplicationRecordStreamV1:
         val write_offset = self.retained_length
         var incoming_index: i64 = 0
         while incoming_index < incoming.len():
-            self.storage[self.ring_index(write_offset + incoming_index)] =
-                incoming[incoming_index]
+            # Kept on ONE line: the parser does not accept a line continuation
+            # after `=` in an indexed assignment (`a[i] =` NEWLINE `expr` fails
+            # with "expected expression, found Newline"), which fails the whole
+            # module and every spec importing it. Grammar gap filed in
+            # doc/08_tracking/bug/assignment_rhs_line_continuation_rejected_2026-08-21.md
+            self.storage[self.ring_index(write_offset + incoming_index)] = incoming[incoming_index]
             incoming_index = incoming_index + 1
 
         val total_length = self.retained_length + incoming.len()
@@ -324,7 +339,9 @@ pub fn tls_application_record_sequence_can_advance_v1(sequence: i64) -> bool:
 export TlsApplicationRecordStreamV1, TlsRecordIngestV1
 export TLS_RECORD_HEADER_LENGTH_V1, TLS_APPLICATION_DATA_TYPE_V1
 export TLS_VERSION_MAJOR_V1, TLS_VERSION_MINOR_V1, TLS_AEAD_TAG_LENGTH_V1
-export TLS_MAX_FRAGMENT_LENGTH_V1, TLS_MAX_RECORD_PAYLOAD_LENGTH_V1
+export TLS_MAX_FRAGMENT_LENGTH_V1, TLS_INNER_CONTENT_TYPE_LENGTH_V1
+export TLS_MAX_UNPADDED_RECORD_PAYLOAD_LENGTH_V1
+export TLS_MAX_RECORD_PAYLOAD_LENGTH_V1
 export TLS_MAX_RECORD_WIRE_LENGTH_V1, TLS_MAX_RX_BUFFER_LENGTH_V1
 export TLS_MAX_RX_FRAGMENTS_V1, TLS_MAX_SEQUENCE_V1
 export tls_application_record_stream_new_v1

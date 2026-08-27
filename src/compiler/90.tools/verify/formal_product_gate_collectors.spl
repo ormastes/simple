@@ -141,133 +141,10 @@ fn rv64_class_at_v1(index: i64) -> Rv64EvidenceClassV1:
     if index >= 5: return Rv64EvidenceClassV1.ExecutedValidation
     Rv64EvidenceClassV1.KernelReplayedProof
 
-fn rv64_receipt_schema_at_v1(index: i64) -> text:
-    match index:
-        case 0: "fv2-rv64-shared-xlen-refinement-receipt-v1"
-        case 1: "fv2-rv64-privilege-csr-proof-receipt-v1"
-        case 2: "fv2-rv64-mmu-page-walk-proof-receipt-v1"
-        case 3: "fv2-rv64-precise-trap-interrupt-proof-receipt-v1"
-        case 4: "fv2-rv64-post-synthesis-equivalence-receipt-v1"
-        case 5: "fv2-rv64-linux-boot-validation-receipt-v1"
-        case _: "fv2-rv64-architectural-compatibility-validation-receipt-v1"
-
-fn rv64_receipt_authority_at_v1(index: i64) -> text:
-    match index:
-        case 0: "kernel-replayed-shared-xlen"
-        case 1: "kernel-replayed-privilege-csr"
-        case 2: "kernel-replayed-mmu-page-walk"
-        case 3: "kernel-replayed-precise-trap-interrupt"
-        case 4: "independent-rtl-netlist-equivalence"
-        case 5: "bounded-linux-boot-execution"
-        case _: "independent-isa-oracle-execution"
-
-fn rv64_receipt_field_v1(receipt: text, key: text) -> text:
-    var value = ""
-    var count = 0
-    for raw in receipt.split("\n"):
-        val parts = raw.trim().split(" ")
-        if parts.len() == 2 and parts[0] == key:
-            count = count + 1
-            value = parts[1]
-    if count == 1: value else: ""
-
-fn failed_executed_rv64_check_v1(index: i64) -> ExecutedRv64ProductCheckV1:
-    failed_executed_rv64_check_with_diagnostic_v1(index,
-        "FV2-E-RV64-RECEIPT: executed receipt is incomplete or stale")
-
-fn failed_executed_rv64_check_with_diagnostic_v1(
-    index: i64,
-    diagnostic: text
-) -> ExecutedRv64ProductCheckV1:
-    ExecutedRv64ProductCheckV1("", rv64_kind_at_v1(index),
-        rv64_class_at_v1(index), "", "", "", "", "",
-        ExecutedCheckOutcomeV1.Failed, diagnostic)
-
-# Reduce one retained external execution receipt. Kinds and evidence classes are
-# derived from the frozen row index rather than trusted from caller text.
-fn reduce_executed_rv64_product_check_v1(
-    identity: Rv64ProductIdentityV1,
-    index: i64,
-    receipt: text
-) -> ExecutedRv64ProductCheckV1:
-    if index < 0 or index >= 7: return failed_executed_rv64_check_v1(6)
-    val schema = rv64_receipt_field_v1(receipt, "schema")
-    val authority = rv64_receipt_field_v1(receipt, "authority")
-    val product_hash = rv64_receipt_field_v1(
-        receipt, "product_identity_sha256")
-    val proof_hash = rv64_receipt_field_v1(
-        receipt, "proof_or_certificate_sha256")
-    val tool_hash = rv64_receipt_field_v1(receipt, "tool_identity_sha256")
-    val policy_hash = rv64_receipt_field_v1(
-        receipt, "command_policy_sha256")
-    val output_hash = rv64_receipt_field_v1(receipt, "output_sha256")
-    val output_evidence = rv64_receipt_field_v1(receipt, "output_evidence")
-    val status = rv64_receipt_field_v1(receipt, "status")
-    val evidence_class = rv64_class_at_v1(index)
-    val proof_matches = if evidence_class == Rv64EvidenceClassV1.ExecutedValidation:
-        proof_hash == "none"
-    else:
-        sha256_lower_hex_valid(proof_hash)
-    val closed = schema == rv64_receipt_schema_at_v1(index) and
-        authority == rv64_receipt_authority_at_v1(index) and
-        product_hash == identity.hash() and proof_matches and
-        sha256_lower_hex_valid(tool_hash) and
-        sha256_lower_hex_valid(policy_hash) and
-        output_evidence != "" and sha256_text(output_evidence) == output_hash and
-        status == "passed"
-    if not closed: return failed_executed_rv64_check_v1(index)
-    ExecutedRv64ProductCheckV1("ExecutedRv64ProductCheck-v1",
-        rv64_kind_at_v1(index), evidence_class, product_hash,
-        if evidence_class == Rv64EvidenceClassV1.ExecutedValidation:
-            ""
-        else: proof_hash,
-        tool_hash, policy_hash, receipt, ExecutedCheckOutcomeV1.Passed, "")
-
-# Public text reduction is diagnostic-only.  Receipt text is caller material;
-# it cannot establish that the reviewed repository runner executed the row.
-pub fn produce_executed_rv64_product_check_v1(
-    identity: Rv64ProductIdentityV1,
-    index: i64,
-    receipt: text
-) -> ExecutedRv64ProductCheckV1:
-    val reduced = reduce_executed_rv64_product_check_v1(identity, index,
-        receipt)
-    if reduced.outcome != ExecutedCheckOutcomeV1.Passed: return reduced
-    failed_executed_rv64_check_with_diagnostic_v1(index,
-        "FV2-E-RV64-EXECUTION-AUTHORITY: caller-built receipt text cannot pass Gate 6")
-
-# Public Gate 6 text bridge.  It retains structural diagnostics, but caller-
-# supplied receipt assembly cannot establish runner execution authority.
-pub fn collect_executed_rv64_privilege_mmu_linux_gate_v1(
-    identity: Rv64ProductIdentityV1,
-    executed_receipts: [text],
-    proof_and_certificate_material: [FormalDeliveryReceiptFileV1]
-) -> FormalGateCollectionV1:
-    if executed_receipts.len() != 7:
-        return failed_rv64_collection_v1(
-            "FV2-E-RV64-RECEIPT-COUNT: exactly seven executed receipts are required")
-    var checks: [ExecutedRv64ProductCheckV1] = []
-    for index in 0..executed_receipts.len():
-        checks.push(reduce_executed_rv64_product_check_v1(
-            identity, index, executed_receipts[index]))
-    collect_structurally_validated_rv64_gate_v1(identity, checks,
-        proof_and_certificate_material,
-        "FV2-E-RV64-EXECUTION-AUTHORITY: caller-supplied receipt assembly cannot pass Gate 6")
-
 pub fn collect_rv64_privilege_mmu_linux_gate_v1(
     identity: Rv64ProductIdentityV1,
     checks: [ExecutedRv64ProductCheckV1],
     proof_and_certificate_material: [FormalDeliveryReceiptFileV1]
-) -> FormalGateCollectionV1:
-    collect_structurally_validated_rv64_gate_v1(identity, checks,
-        proof_and_certificate_material,
-        "FV2-E-RV64-EXECUTION-AUTHORITY: caller-built product checks cannot pass Gate 6")
-
-fn collect_structurally_validated_rv64_gate_v1(
-    identity: Rv64ProductIdentityV1,
-    checks: [ExecutedRv64ProductCheckV1],
-    proof_and_certificate_material: [FormalDeliveryReceiptFileV1],
-    authority_diagnostic: text
 ) -> FormalGateCollectionV1:
     val identity_hash = identity.hash()
     if not sha256_lower_hex_valid(identity.hwir_hash) or
@@ -319,6 +196,8 @@ fn collect_structurally_validated_rv64_gate_v1(
     if proof_and_certificate_material.len() != required_proof_hashes.len():
         return failed_rv64_collection_v1(
             "FV2-E-RV64-PROOF-COUNT: every and only referenced proof/certificate must be materialized")
+    var files: [FormalDeliveryReceiptFileV1] = []
+    var receipt_hashes: [text] = []
     for required_hash in required_proof_hashes:
         var matches = 0
         for file in proof_and_certificate_material:
@@ -328,7 +207,39 @@ fn collect_structurally_validated_rv64_gate_v1(
         if matches != 1:
             return failed_rv64_collection_v1(
                 "FV2-E-RV64-PROOF-MATERIAL: proof/certificate material is missing duplicated or stale")
-    failed_rv64_collection_v1(authority_diagnostic)
+    for file in proof_and_certificate_material:
+        files.push(file)
+        receipt_hashes.push(file.receipt_hash)
+    val identity_content = identity.canonical_text()
+    files.push(FormalDeliveryReceiptFileV1(identity_hash, identity_content))
+    receipt_hashes.push(identity_hash)
+    for check in checks:
+        val output_hash = sha256_text(check.retained_output)
+        files.push(FormalDeliveryReceiptFileV1(output_hash,
+            check.retained_output))
+        receipt_hashes.push(output_hash)
+        val check_content = "ExecutedRv64ProductCheck-v1" +
+            product_gate_frame_v1(check.kind.name()) +
+            product_gate_frame_v1(check.evidence_class.name()) +
+            product_gate_frame_v1(check.product_identity_hash) +
+            product_gate_frame_v1(check.proof_or_certificate_hash) +
+            product_gate_frame_v1(check.tool_identity_hash) +
+            product_gate_frame_v1(check.command_policy_hash) +
+            product_gate_frame_v1(output_hash) +
+            product_gate_frame_v1(check.outcome.name())
+        val check_hash = sha256_text(check_content)
+        files.push(FormalDeliveryReceiptFileV1(check_hash, check_content))
+        receipt_hashes.push(check_hash)
+    val aggregate_content = "Rv64PrivilegeMmuLinuxReceipt-v1" +
+        product_gate_frame_v1(identity_hash) +
+        product_gate_frames_v1(receipt_hashes)
+    val aggregate_hash = sha256_text(aggregate_content)
+    files.push(FormalDeliveryReceiptFileV1(aggregate_hash, aggregate_content))
+    receipt_hashes.push(aggregate_hash)
+    val evidence_hash = sha256_text("Rv64PrivilegeMmuLinuxGate-v1" +
+        product_gate_frames_v1(receipt_hashes))
+    finalize_formal_gate_collection_v2(
+        FormalDeliveryGateV1.Rv64PrivilegeMmuLinux, evidence_hash, files)
 
 fn failed_verified_release_collection_v1(
     diagnostic: text

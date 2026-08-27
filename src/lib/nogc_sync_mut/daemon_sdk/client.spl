@@ -16,7 +16,7 @@ use std.daemon_sdk.protocol.{
 use std.io_runtime.{time_now_unix_micros}
 use std.io_runtime.{thread_sleep}
 use std.io_runtime.{file_write}
-extern fn rt_mkdir_p(path: text) -> bool
+use std.io_runtime.{mkdir_p}
 extern fn rt_process_kill(pid: i64) -> bool
 
 # ============================================================================
@@ -31,11 +31,11 @@ fn daemon_ensure_running(config: DaemonConfig, start_fn: fn() -> bool) -> bool:
         return false
 
     # Wait briefly for daemon to acquire lock (avoids double-start on slow platforms)
-    val deadline = rt_time_now_unix_micros() + 5_000_000  # 5s
-    while rt_time_now_unix_micros() < deadline:
+    val deadline = time_now_unix_micros() + 5_000_000  # 5s
+    while time_now_unix_micros() < deadline:
         if is_daemon_running(config.lock_path):
             return true
-        rt_sleep_ms(100)
+        thread_sleep(100)
 
     false
 
@@ -46,7 +46,7 @@ fn daemon_ensure_responsive(config: DaemonConfig, start_fn: fn() -> bool, ping_f
     val pid = read_daemon_pid(config.lock_path)
     if pid > 0 and is_pid_alive(pid):
         rt_process_kill(pid)
-        rt_sleep_ms(250)
+        thread_sleep(250)
 
     if not daemon_ensure_running(config, start_fn):
         return false
@@ -69,15 +69,20 @@ fn daemon_submit(req: DaemonRequest, config: DaemonConfig) -> text:
 # Poll for Response
 # ============================================================================
 
+fn daemon_poll_attempt_limit(timeout_ms: i64) -> i64:
+    if timeout_ms <= 0:
+        return 1
+    2 + ((timeout_ms - 1) / 100)
+
 fn daemon_poll_result(request_id: text, config: DaemonConfig, timeout_ms: i64) -> DaemonResponse:
-    val deadline = rt_time_now_unix_micros() + (timeout_ms * 1000)
+    val deadline = time_now_unix_micros() + (timeout_ms * 1000)
 
     var attempts = 0
-    while rt_time_now_unix_micros() < deadline and attempts < daemon_poll_attempt_limit(timeout_ms):
+    while time_now_unix_micros() < deadline and attempts < daemon_poll_attempt_limit(timeout_ms):
         val resp = read_daemon_response(request_id, config.response_dir)
         if resp.request_id != "":
             return resp
-        rt_sleep_ms(100)
+        thread_sleep(100)
         attempts = attempts + 1
 
     # Timeout — return empty response

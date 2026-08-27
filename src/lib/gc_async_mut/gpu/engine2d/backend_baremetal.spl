@@ -23,7 +23,7 @@ use std.gpu.engine2d.backend_emu.{
     emu_draw_polygon_filled, emu_draw_polyline,
     emu_draw_rect_thick, emu_draw_circle_thick, emu_draw_rounded_rect_outline,
     emu_draw_gradient_rect_h, emu_draw_radial_gradient,
-    emu_draw_rect_blend, emu_draw_image_blend,
+    emu_draw_rect_blend,
     emu_draw_image_scaled,
     emu_draw_triangle_outline,
     emu_draw_blur_rect, emu_draw_shadow_rect,
@@ -34,6 +34,19 @@ use std.gpu.engine2d.backend_emu.{
 # ============================================================================
 # Framebuffer Surface
 # ============================================================================
+
+# Sanity ceiling for a single draw call's pixel dimensions -- far larger than
+# any real display mode, but small enough to reject garbage/corrupted sizes
+# (e.g. from an unresolved image command) before they can turn a per-pixel
+# walk into a runaway loop.
+val BM_MAX_DRAW_DIM: i32 = 20000
+
+# Level-gated serial probe for the bitmap glyph blit path (doc/08_tracking/bug/
+# native_char_code_at_tag_shift_2026-07-19.md investigation). Flip to false to
+# silence at land time. Capped to the first 8 draw_text calls so a busy
+# desktop frame can't flood serial.
+val _E2D_TEXT_PROBE: bool = false
+var _e2d_text_probe_count: i32 = 0
 
 class BaremetalBackend:
     """RenderBackend implementation that delegates to FramebufferDriver.
@@ -58,6 +71,10 @@ class BaremetalBackend:
         """Create a baremetal backend wrapping an initialized framebuffer surface."""
         val fw = fb.framebuffer_width().to_i32()
         val fh = fb.framebuffer_height().to_i32()
+        BaremetalBackend.create_sized(fb, fw, fh)
+
+    static fn create_sized(fb: FramebufferSurface, fw: i32, fh: i32) -> BaremetalBackend:
+        """Create from concrete dimensions without bootstrap virtual dispatch."""
         BaremetalBackend(
             fb: fb,
             w: fw,
@@ -112,26 +129,53 @@ impl RenderBackend for BaremetalBackend:
         _bm_vline(self, x + w - 1, y, h, color)
 
     me draw_rect_filled(x: i32, y: i32, w: i32, h: i32, color: u32):
-        """Draw a filled rectangle, delegating to fb.fill_rect with clipping."""
-        # Apply clipping
-        var cx = x
-        var cy = y
-        var cw = w
-        var ch = h
-        if self.clip_enabled:
-            if cx < self.clip_x:
-                cw = cw - (self.clip_x - cx)
-                cx = self.clip_x
-            if cy < self.clip_y:
-                ch = ch - (self.clip_y - cy)
-                cy = self.clip_y
-            if cx + cw > self.clip_x + self.clip_w:
-                cw = self.clip_x + self.clip_w - cx
-            if cy + ch > self.clip_y + self.clip_h:
-                ch = self.clip_y + self.clip_h - cy
-        if cw <= 0 or ch <= 0:
+        """Draw a filled rectangle, delegating to fb.fill_rect.
+
+        Clamps unconditionally to the physical framebuffer bounds
+        (independent of clip_enabled) so a garbage/unclipped rect can never
+        overrun fb.fill_rect's target buffer. All arithmetic is done in i64
+        so a huge/garbage w or h (e.g. from an unresolved draw command)
+        cannot wrap i32 addition before the clamp is applied.
+        """
+        if not self.initialized or self.w <= 0 or self.h <= 0:
             return
-        self.fb.framebuffer_fill_rect_argb(cx.to_u32(), cy.to_u32(), cw.to_u32(), ch.to_u32(), color)
+        if w <= 0 or h <= 0:
+            return
+        var x0: i64 = x as i64
+        var y0: i64 = y as i64
+        var x1: i64 = x0 + (w as i64)
+        var y1: i64 = y0 + (h as i64)
+        if self.clip_enabled:
+            val clip_x0 = self.clip_x as i64
+            val clip_y0 = self.clip_y as i64
+            val clip_x1 = clip_x0 + (self.clip_w as i64)
+            val clip_y1 = clip_y0 + (self.clip_h as i64)
+            if x0 < clip_x0:
+                x0 = clip_x0
+            if y0 < clip_y0:
+                y0 = clip_y0
+            if x1 > clip_x1:
+                x1 = clip_x1
+            if y1 > clip_y1:
+                y1 = clip_y1
+        # Always clamp to the physical framebuffer bounds too, independent of
+        # clip_enabled -- this is the fix for the unclipped-rect overrun that
+        # crashed the CPU rasterizer (see draw_ir_adv.spl's composition
+        # render path, which no longer bails out on unresolved commands and
+        # therefore relies on this clamp being unconditional).
+        if x0 < 0:
+            x0 = 0
+        if y0 < 0:
+            y0 = 0
+        val fb_w = self.w as i64
+        val fb_h = self.h as i64
+        if x1 > fb_w:
+            x1 = fb_w
+        if y1 > fb_h:
+            y1 = fb_h
+        if x1 <= x0 or y1 <= y0:
+            return
+        self.fb.framebuffer_fill_rect_argb((x0 as i32).to_u32(), (y0 as i32).to_u32(), ((x1 - x0) as i32).to_u32(), ((y1 - y0) as i32).to_u32(), color)
 
     me draw_line(x1: i32, y1: i32, x2: i32, y2: i32, color: u32, thickness: i32):
         """Draw a line using Bresenham via put_pixel."""
@@ -282,15 +326,30 @@ impl RenderBackend for BaremetalBackend:
             scale = 1
         val text_w = text_val.len().to_i32() * glyph_advance(scale)
         val text_h = gh * scale
-        if text_w <= 0 or text_h <= 0:
+        if text_w <= 0 or text_h <= 0 or text_w > BM_MAX_DRAW_DIM or text_h > BM_MAX_DRAW_DIM:
             return
         val buf_size = text_w * text_h
         var buf: [u32] = [0u32; buf_size]
         buf = render_text_to_buffer(buf, text_w, text_h, 0, 0, text_val, color, font_size)
+        if _E2D_TEXT_PROBE and _e2d_text_probe_count < 8:
+            _e2d_text_probe_count = _e2d_text_probe_count + 1
+            var nz = 0
+            var pi = 0
+            while pi < buf.len():
+                if buf[pi] != 0u32:
+                    nz = nz + 1
+                pi = pi + 1
+            print("[e2d-text-probe] bm len={buf.len()} tw={text_w} th={text_h} nz={nz}")
         self.draw_image(x, y, text_w, text_h, buf)
 
     me draw_image(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
         """Blit a pixel array to the framebuffer."""
+        # Sanity-guard: negative/huge dimensions (e.g. from a corrupted or
+        # unresolved image command) can't turn this into a runaway loop --
+        # per-pixel writes below are already bounds-checked unconditionally,
+        # but the row/col walk itself must stay sane.
+        if w <= 0 or h <= 0 or w > BM_MAX_DRAW_DIM or h > BM_MAX_DRAW_DIM:
+            return
         val pixel_count = pixels.len()
         var row = 0
         while row < h:
@@ -371,6 +430,10 @@ impl RenderBackend for BaremetalBackend:
         self.mask_w = 0
         self.mask_h = 0
 
+    me submit_batch() -> bool:
+        # Immediate-mode backend: nothing buffered to flush.
+        true
+
     me present():
         """Flush the back buffer to the hardware framebuffer."""
         self.fb.framebuffer_present()
@@ -435,7 +498,10 @@ impl RenderBackend for BaremetalBackend:
         emu_draw_rect_blend(self, x, y, w, h, color)
 
     me draw_image_blend(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
-        emu_draw_image_blend(self, x, y, w, h, pixels)
+        # draw_image already alpha-blends directly against the framebuffer.
+        # Avoid emu_draw_image_blend's full-frame readback and second result
+        # buffer, which are redundant for the direct-MMIO backend.
+        self.draw_image(x, y, w, h, pixels)
 
     me draw_image_scaled(dst_x: i32, dst_y: i32, dst_w: i32, dst_h: i32, src_w: i32, src_h: i32, pixels: [u32]):
         emu_draw_image_scaled(self, dst_x, dst_y, dst_w, dst_h, src_w, src_h, pixels)
@@ -535,15 +601,24 @@ fn _bm_render_glyph(backend: BaremetalBackend, x: i32, y: i32, ch: text, color: 
 
 fn _bm_hline(backend: BaremetalBackend, x: i32, y: i32, length: i32, color: u32):
     """Draw a horizontal line."""
+    # Sanity-guard: a horizontal line can never need more pixels than the
+    # framebuffer is wide -- clamp so garbage/huge `length` (e.g. from an
+    # unresolved draw command) can't turn into an unbounded/runaway loop.
+    var len = length
+    if len > backend.w:
+        len = backend.w
     var i = 0
-    while i < length:
+    while i < len:
         _bm_put(backend, x + i, y, color)
         i = i + 1
 
 fn _bm_vline(backend: BaremetalBackend, x: i32, y: i32, length: i32, color: u32):
     """Draw a vertical line."""
+    var len = length
+    if len > backend.h:
+        len = backend.h
     var i = 0
-    while i < length:
+    while i < len:
         _bm_put(backend, x, y + i, color)
         i = i + 1
 

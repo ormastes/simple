@@ -26,9 +26,6 @@ const ARENA_CONTEXT_OWNERSHIP_PUBLICATION: u64 = 16u64
 const ARENA_CONTEXT_ISOLATION_TRANSITION: u64 = 32u64
 const ARENA_CONTEXT_CRITICAL_MASK: u64 = 62u64
 const DOMAIN_ARENA_U64_MAX: u64 = 0xFFFFFFFFFFFFFFFF
-# V1 remains an active producer. Validate this finite construction bound
-# before either of its two fixed backing banks is allocated.
-const DOMAIN_ARENA_V1_MAX_QUOTA_BYTES: u64 = 16777216u64
 
 struct RelaxedAllocationProfileV1:
     schema_version: u16
@@ -173,54 +170,6 @@ struct ArenaCommittedSnapshotV1:
     allocation_count: u32
     publication_epoch: u64
 
-# Fixed backing storage helpers. The arena never exposes either buffer.
-fn arena_zero_bytes_v1(size: u64) -> [u8]:
-    if size == 0u64 or size > DOMAIN_ARENA_V1_MAX_QUOTA_BYTES:
-        return []
-    var bytes: [u8] = [0u8]
-    while (bytes.len() as u64) < size:
-        bytes = bytes.concat(bytes)
-    if (bytes.len() as u64) > size:
-        return bytes[0:(size as i64)]
-    bytes
-
-fn arena_zero_u64_v1(size: u32) -> [u64]:
-    # A malformed profile must not turn construction into an unbounded
-    # allocation attempt. The quota and allocation policy are hard limits.
-    if size == 0u32 or size > 1048576u32:
-        return []
-    var values: [u64] = [0u64]
-    while (values.len() as u32) < size:
-        values = values.concat(values)
-    if (values.len() as u32) > size:
-        return values[0:(size as i64)]
-    values
-
-fn arena_storage_hash_v1(
-    arena_id: u64, profile: RelaxedAllocationProfileV1,
-    storage: [u8], committed: ArenaCommittedSnapshotV1
-) -> text:
-    var canonical = (
-        "domain-arena-committed-bytes-v1|arena_id=" + arena_id.to_text() +
-        "|domain_id=" + profile.domain_id.to_text() +
-        "|profile_hash=" + relaxed_allocation_profile_hash_v1(profile) +
-        "|generation=" + committed.generation.to_text() +
-        "|cursor_bytes=" + committed.cursor_bytes.to_text() +
-        "|allocation_count=" + committed.allocation_count.to_text() +
-        "|publication_epoch=" + committed.publication_epoch.to_text() +
-        "|capacity_bytes=" + storage.len().to_text() +
-        "|byte_count=" + committed.cursor_bytes.to_text() + "|bytes="
-    )
-    var i = 0
-    val byte_limit = if committed.cursor_bytes < (storage.len() as u64):
-        committed.cursor_bytes
-    else:
-        storage.len() as u64
-    while (i as u64) < byte_limit:
-        canonical = canonical + storage[i].to_text() + ","
-        i = i + 1
-    sha256_text(canonical)
-
 struct DomainArenaRefV1:
     arena_id: u64
     domain_id: u32
@@ -232,24 +181,9 @@ enum DomainArenaAllocationV1:
     Allocated(DomainArenaRefV1)
     Exhausted(ArenaExhaustionV1)
 
-# Module-private storage owner. Keeping the bank type unexported prevents
-# callers of DomainArenaV1 from naming or constructing a mutable backing view.
-class DomainArenaStorageBankV1:
-    bytes: [u8]
-    ref_offsets: [u64]
-    ref_sizes: [u64]
-
-fn arena_storage_bank_v1(byte_capacity: u64, ref_capacity: u32) -> DomainArenaStorageBankV1:
-    DomainArenaStorageBankV1(
-        bytes: arena_zero_bytes_v1(byte_capacity),
-        ref_offsets: arena_zero_u64_v1(ref_capacity),
-        ref_sizes: arena_zero_u64_v1(ref_capacity)
-    )
-
 class DomainArenaV1:
     arena_id: u64
     profile: RelaxedAllocationProfileV1
-    sealed_profile: RelaxedAllocationProfileV1
     sealed_profile_fingerprint: text
     generation: u64
     committed_generation: u64
@@ -271,42 +205,11 @@ class DomainArenaV1:
     checkpoint_publication_epoch: u64
     generation_terminal: bool
     committed_state: ArenaCommittedSnapshotV1
-    # Two module-private, fixed-capacity bank objects are allocated once.
-    # `committed_bank_index` is the only bank-publication authority.
-    bank_zero: DomainArenaStorageBankV1
-    bank_one: DomainArenaStorageBankV1
-    committed_bank_index: u8
-    profile_admitted: bool
 
 impl DomainArenaV1:
     static fn from_sealed_profile(arena_id: u64, profile: RelaxedAllocationProfileV1) -> DomainArenaV1:
-        val profile_capacity_is_valid = (
-            profile.sealed and profile.schema_version == 1u16 and
-            profile.profile_id.len() > 0 and profile.domain_id != 0u32 and
-            profile.quota_bytes > 0u64 and
-            profile.quota_bytes <= DOMAIN_ARENA_V1_MAX_QUOTA_BYTES and
-            profile.max_allocations_per_generation > 0u32 and
-            profile.max_allocations_per_generation <= 1048576u32 and
-            profile.strict_default and profile.alignment > 0u32 and
-            (profile.alignment & (profile.alignment - 1u32)) == 0u32 and
-            profile.allowed_context_mask == ARENA_CONTEXT_NORMAL and
-            (profile.forbidden_context_mask & ARENA_CONTEXT_CRITICAL_MASK) == ARENA_CONTEXT_CRITICAL_MASK and
-            (profile.forbidden_context_mask & ARENA_CONTEXT_NORMAL) == 0u64 and
-            arena_id != 0u64
-        )
-        val storage_size = if profile_capacity_is_valid: profile.quota_bytes else: 0u64
-        val ref_capacity = if profile_capacity_is_valid:
-            profile.max_allocations_per_generation
-        else:
-            0u32
-        val bank_zero = arena_storage_bank_v1(storage_size, ref_capacity)
-        val bank_one = arena_storage_bank_v1(storage_size, ref_capacity)
-        val committed_state = ArenaCommittedSnapshotV1(
-            generation: 0u64, cursor_bytes: 0u64, allocation_count: 0u32,
-            publication_epoch: 0u64
-        )
         DomainArenaV1(
-            arena_id: arena_id, profile: profile, sealed_profile: profile,
+            arena_id: arena_id, profile: profile,
             sealed_profile_fingerprint: relaxed_allocation_profile_fingerprint_v1(profile),
             generation: 0u64,
             committed_generation: 0u64, staging_generation: 0u64,
@@ -319,17 +222,11 @@ impl DomainArenaV1:
             checkpoint_generation: 0u64, checkpoint_cursor_bytes: 0u64,
             checkpoint_allocation_count: 0u32, checkpoint_publication_epoch: 0u64,
             generation_terminal: false,
-            committed_state: committed_state,
-            bank_zero: bank_zero, bank_one: bank_one,
-            committed_bank_index: 0u8,
-            profile_admitted: profile_capacity_is_valid
+            committed_state: ArenaCommittedSnapshotV1(
+                generation: 0u64, cursor_bytes: 0u64, allocation_count: 0u32,
+                publication_epoch: 0u64
+            )
         )
-
-    fn _staging_bank() -> DomainArenaStorageBankV1:
-        if self.committed_bank_index == 0u8: self.bank_one else: self.bank_zero
-
-    fn _committed_bank() -> DomainArenaStorageBankV1:
-        if self.committed_bank_index == 0u8: self.bank_zero else: self.bank_one
 
     me arm_fault_once(fault_point: u16) -> bool:
         if not arena_failure_point_registered_v1(fault_point):
@@ -357,18 +254,6 @@ impl DomainArenaV1:
                 self.next_generation = self.next_generation + 1u64
             self.cursor_bytes = 0u64
             self.allocation_count = 0u32
-            # A generation starts with a zeroed fixed staging image. The
-            # committed image remains untouched until the publication point.
-            val staging_bank = self._staging_bank()
-            var i = 0
-            while i < staging_bank.bytes.len():
-                staging_bank.bytes[i] = 0u8
-                i = i + 1
-            var ref_index = 0
-            while ref_index < staging_bank.ref_offsets.len():
-                staging_bank.ref_offsets[ref_index] = 0u64
-                staging_bank.ref_sizes[ref_index] = 0u64
-                ref_index = ref_index + 1
             self.checkpoint_generation = self.staging_generation
             self.checkpoint_cursor_bytes = 0u64
             self.checkpoint_allocation_count = 0u32
@@ -390,17 +275,7 @@ impl DomainArenaV1:
             checkpoint.publication_epoch == self.checkpoint_publication_epoch)
 
     fn _profile_is_frozen() -> bool:
-        (self.profile_admitted and
-            self.profile.schema_version == self.sealed_profile.schema_version and
-            self.profile.profile_id == self.sealed_profile.profile_id and
-            self.profile.strict_default == self.sealed_profile.strict_default and
-            self.profile.domain_id == self.sealed_profile.domain_id and
-            self.profile.quota_bytes == self.sealed_profile.quota_bytes and
-            self.profile.alignment == self.sealed_profile.alignment and
-            self.profile.max_allocations_per_generation == self.sealed_profile.max_allocations_per_generation and
-            self.profile.allowed_context_mask == self.sealed_profile.allowed_context_mask and
-            self.profile.forbidden_context_mask == self.sealed_profile.forbidden_context_mask and
-            self.profile.sealed == self.sealed_profile.sealed)
+        self.sealed_profile_fingerprint == relaxed_allocation_profile_fingerprint_v1(self.profile)
 
     fn _exhaustion(requested_bytes: u64, reason: u16) -> ArenaExhaustionV1:
         val remaining = if self.cursor_bytes <= self.profile.quota_bytes:
@@ -433,9 +308,6 @@ impl DomainArenaV1:
             not self.profile.strict_default or self.profile.domain_id == 0u32 or
             self.profile.quota_bytes == 0u64 or
             self.profile.max_allocations_per_generation == 0u32 or
-            self.profile.max_allocations_per_generation > 1048576u32 or
-            self.profile.quota_bytes > 0x7FFFFFFFFFFFFFFFu64 or
-            self.arena_id == 0u64 or
             not alignment_is_power_of_two or not profile_masks_are_valid):
             reason = ARENA_EXHAUSTION_INVALID_REQUEST
         elif not self.profile.sealed or not self.transaction_open:
@@ -473,14 +345,6 @@ impl DomainArenaV1:
             return DomainArenaAllocationV1.Exhausted(self._exhaustion(bytes, reason))
         val offset = aligned_cursor
         self.cursor_bytes = aligned_cursor + bytes
-        val allocation_slot = self.allocation_count as i64
-        val staging_bank = self._staging_bank()
-        if allocation_slot < staging_bank.ref_offsets.len():
-            staging_bank.ref_offsets[allocation_slot] = offset
-            staging_bank.ref_sizes[allocation_slot] = bytes
-        else:
-            return DomainArenaAllocationV1.Exhausted(
-                self._exhaustion(bytes, ARENA_EXHAUSTION_INVALID_REQUEST))
         self.allocation_count = self.allocation_count + 1u32
         if self.cursor_bytes > self.high_water_bytes:
             self.high_water_bytes = self.cursor_bytes
@@ -508,11 +372,8 @@ impl DomainArenaV1:
             allocation_count: self.allocation_count,
             publication_epoch: self.committed_state.publication_epoch + 1u64
         )
-        # Owner-confined publication changes one scalar bank selector. The
-        # parent-authoritative owner performs metadata and selector update; no
-        # child or concurrent reader may access this mutable arena directly.
+        # This single value assignment is the observable publication point.
         self.committed_state = published
-        self.committed_bank_index = if self.committed_bank_index == 0u8: 1u8 else: 0u8
         # Compatibility mirrors are not publication authority.
         self.publication_epoch = published.publication_epoch
         self.committed_generation = published.generation
@@ -526,93 +387,23 @@ impl DomainArenaV1:
             return false
         if checkpoint.generation != self.staging_generation or checkpoint.publication_epoch != self.committed_state.publication_epoch:
             return false
-        # The committed bank is never touched by staging. Clear the abandoned
-        # staging bank so a later generation cannot inherit failed bytes.
-        val staging_bank = self._staging_bank()
-        var clear_index = 0
-        while clear_index < staging_bank.bytes.len():
-            staging_bank.bytes[clear_index] = 0u8
-            clear_index = clear_index + 1
-        var ref_index = 0
-        while ref_index < staging_bank.ref_offsets.len():
-            staging_bank.ref_offsets[ref_index] = 0u64
-            staging_bank.ref_sizes[ref_index] = 0u64
-            ref_index = ref_index + 1
         self.cursor_bytes = self.committed_state.cursor_bytes
         self.allocation_count = self.committed_state.allocation_count
         self.transaction_open = false
         self.generation = self.committed_state.generation
-        self.armed_fault_point = ARENA_FAULT_NONE
         true
 
     fn validates(reference: DomainArenaRefV1) -> bool:
         var end_is_bounded = false
-        var exact_span = false
         if reference.size_bytes > 0u64 and reference.offset_bytes < self.committed_state.cursor_bytes:
             end_is_bounded = (
                 reference.size_bytes <= self.committed_state.cursor_bytes - reference.offset_bytes
             )
-        var span_index = 0
-        val committed_bank = self._committed_bank()
-        while span_index < self.committed_state.allocation_count and
-              span_index < committed_bank.ref_offsets.len():
-            if committed_bank.ref_offsets[span_index] == reference.offset_bytes and
-               committed_bank.ref_sizes[span_index] == reference.size_bytes:
-                exact_span = true
-            span_index = span_index + 1
         reference.arena_id == self.arena_id and
             reference.domain_id == self.profile.domain_id and
             reference.generation > 0u64 and
             reference.generation == self.committed_state.generation and
-            self._profile_is_frozen() and
-            (committed_bank.bytes.len() as u64) == self.profile.quota_bytes and
-            end_is_bounded and exact_span
-
-    fn _validates_staging(reference: DomainArenaRefV1) -> bool:
-        var end_is_bounded = false
-        var exact_span = false
-        val staging_bank = self._staging_bank()
-        val capacity = staging_bank.bytes.len() as u64
-        if reference.size_bytes > 0u64 and reference.offset_bytes < self.cursor_bytes and
-           reference.offset_bytes < capacity and
-           reference.size_bytes <= capacity - reference.offset_bytes and
-           reference.size_bytes <= self.cursor_bytes - reference.offset_bytes:
-            end_is_bounded = true
-        var span_index = 0
-        while span_index < self.allocation_count and
-              span_index < staging_bank.ref_offsets.len():
-            if staging_bank.ref_offsets[span_index] == reference.offset_bytes and
-               staging_bank.ref_sizes[span_index] == reference.size_bytes:
-                exact_span = true
-            span_index = span_index + 1
-        reference.arena_id == self.arena_id and
-            reference.domain_id == self.profile.domain_id and
-            reference.generation > 0u64 and
-            reference.generation == self.staging_generation and
-            self.transaction_open and self._profile_is_frozen() and
-            capacity == self.profile.quota_bytes and end_is_bounded and exact_span
-
-    fn _validates_storage_reference(reference: DomainArenaRefV1) -> bool:
-        # Staging refs are writable leases only. Reads are publish-only so a
-        # consumer can never observe an uncommitted generation.
-        self.validates(reference)
-
-    # Scalar-only staging access keeps allocation and pointer transport out of
-    # the post-ready path.
-    me write_byte(reference: DomainArenaRefV1, relative_offset: u64, value: u8) -> bool:
-        if not self._validates_staging(reference) or
-           relative_offset >= reference.size_bytes:
-            return false
-        val staging_bank = self._staging_bank()
-        staging_bank.bytes[(reference.offset_bytes + relative_offset) as i64] = value
-        true
-
-    fn read_byte(reference: DomainArenaRefV1, relative_offset: u64) -> u8?:
-        if not self._validates_storage_reference(reference) or
-           relative_offset >= reference.size_bytes:
-            return nil
-        val committed_bank = self._committed_bank()
-        Some(committed_bank.bytes[(reference.offset_bytes + relative_offset) as i64])
+            self._profile_is_frozen() and end_is_bounded
 
 fn relaxed_allocation_profile_canonical_v1(profile: RelaxedAllocationProfileV1) -> text:
     # Decimal values and byte-counted text make this independent of host word
@@ -643,14 +434,9 @@ fn domain_arena_committed_state_hash_v1(arena: DomainArenaV1) -> text:
         "|generation=" + arena.committed_state.generation.to_text() +
         "|cursor_bytes=" + arena.committed_state.cursor_bytes.to_text() +
         "|allocation_count=" + arena.committed_state.allocation_count.to_text() +
-        "|publication_epoch=" + arena.committed_state.publication_epoch.to_text())
-    sha256_text(canonical)
-
-fn domain_arena_committed_bytes_hash_v1(arena: DomainArenaV1) -> text:
-    arena_storage_hash_v1(
-        arena.arena_id, arena.profile, arena._committed_bank().bytes,
-        arena.committed_state
+        "|publication_epoch=" + arena.committed_state.publication_epoch.to_text()
     )
+    sha256_text(canonical)
 
 fn domain_arena_evidence_scenario_row_v1(scenario_id: text) -> text:
     "MCI_DOMAIN_ARENA_EVIDENCE|schema=1|kind=scenario|id=" + scenario_id + "|result=pass"
@@ -687,14 +473,12 @@ export ARENA_EXHAUSTION_QUOTA, ARENA_EXHAUSTION_ALLOCATION_COUNT,
     ARENA_CONTEXT_NORMAL, ARENA_CONTEXT_KERNEL, ARENA_CONTEXT_ISR,
     ARENA_CONTEXT_STORAGE_COMMIT, ARENA_CONTEXT_OWNERSHIP_PUBLICATION,
     ARENA_CONTEXT_ISOLATION_TRANSITION, ARENA_CONTEXT_CRITICAL_MASK,
-    DOMAIN_ARENA_V1_MAX_QUOTA_BYTES,
     RelaxedAllocationProfileV1, ArenaCheckpointV1, ArenaExhaustionV1,
     ArenaFailureInjectionLedgerEntryV1, ArenaCommittedSnapshotV1,
     DomainArenaRefV1, DomainArenaAllocationV1, DomainArenaV1
 export relaxed_allocation_profile_fingerprint_v1
 export relaxed_allocation_profile_canonical_v1, relaxed_allocation_profile_hash_v1,
-    domain_arena_committed_state_hash_v1, domain_arena_committed_bytes_hash_v1,
-    arena_failure_point_count_v1,
+    domain_arena_committed_state_hash_v1, arena_failure_point_count_v1,
     arena_failure_point_at_v1, arena_failure_point_name_v1,
     arena_failure_point_registered_v1, arena_failure_injection_ledger_entry_valid_v1
 export arena_sha256_lower_hex_valid_v1, arena_failure_injection_ledger_complete_v1

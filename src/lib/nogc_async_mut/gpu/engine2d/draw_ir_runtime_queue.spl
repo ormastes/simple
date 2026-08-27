@@ -30,6 +30,7 @@ use std.nogc_async_mut.gpu.engine2d.host_gpu_event_queue.{
     engine2d_host_gpu_runtime_drain,
     engine2d_host_gpu_runtime_dispatch_draw_ir
 }
+use std.diag.{dbg_stage, dbg_stage_on, dbg_event_hop, dbg_events_on, dbg_count, dbg_provenance}
 
 struct Engine2dDrawIrPayloadSummary:
     schema: text
@@ -119,9 +120,24 @@ fn engine2d_draw_ir_runtime_queue_dispatch(batch: DrawIrBatch, selected_backend:
         runtime_submit = engine2d_host_gpu_event_submit_to_runtime_payload_text(queue, decision, lane_result, payload.command_checksum, payload.payload_sdn)
         runtime_submit = engine2d_host_gpu_runtime_submit_with_payload(runtime_submit, payload.payload_sdn)
         queued_for_gpu = runtime_submit.submitted
+        if dbg_stage_on() or dbg_events_on():
+            dbg_stage("gpu_queue", "schedule")
+            dbg_event_hop(batch.batch_id, "schedule", "backend={selected_backend} target={decision.target_lane} queue_required={decision.queue_required}")
+            dbg_event_hop(batch.batch_id, "submit", "submitted={runtime_submit.submitted} status={runtime_submit.status} bytes={packet_bytes}")
     if queued_for_gpu:
         runtime_drain = engine2d_host_gpu_runtime_drain(queue, 1)
         runtime_dispatch = engine2d_host_gpu_runtime_dispatch_draw_ir(queue, runtime_drain, payload.command_checksum)
+    if dbg_stage_on() or dbg_events_on():
+        dbg_event_hop(batch.batch_id, "complete", "dispatched={runtime_dispatch.dispatched} status={runtime_dispatch.status}")
+    if runtime_dispatch.dispatched:
+        dbg_count("host_gpu.dispatched", 1)
+    # Always-on provenance: claimed reflects our queue decision, actual reflects
+    # the real runtime dispatch receipt. Fires loud only on a silent host<->gpu
+    # divergence (e.g. queued for GPU but never dispatched). Reflects real state
+    # only — never the removed fabricated estimated_ms speedup.
+    val claimed_provenance = if queued_for_gpu: "gpu_batched" else: "host_committed"
+    val actual_provenance = if runtime_dispatch.dispatched: "gpu_batched" else: "host_committed"
+    dbg_provenance(claimed_provenance, actual_provenance, "engine2d_draw_ir_dispatch batch={batch.batch_id}")
     Engine2dDrawIrQueueDispatchResult(runtime_submit: runtime_submit, runtime_drain: runtime_drain, runtime_dispatch: runtime_dispatch, queued_for_gpu: queued_for_gpu, payload: payload)
 
 fn engine2d_draw_ir_runtime_queue_dispatch_only(batch: DrawIrBatch, gpu_available: bool, queue: Engine2dHostGpuRuntimeQueue) -> Engine2dDrawIrQueueDispatchResult:

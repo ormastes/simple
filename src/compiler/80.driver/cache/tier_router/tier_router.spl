@@ -1,220 +1,180 @@
-# Tier Router — process -> workspace -> machine -> remote-main lookup.
+# Tier Router — exact-key lookup across the two local cache tiers.
 #
-# Contract: doc/03_plan/compiler/cache/c0_schema_freeze_2026-08-09.md
-# Design:   doc/05_design/compiler/semantic_incremental_build_cache_aop_formal_2026-08-09.md §14.2
+# Plan: doc/03_plan/compiler/cache/semantic_incremental_build_v2_plan_2026-08-09.md
+# (Agent C1 row) §5 first milestone. Design: tiered cache architecture,
+# doc/05_design/compiler/semantic_incremental_build_cache_aop_formal_2026-08-09.md
+# §14, crash safety §18.7.
 #
-# Lookup order (design §14.2, unchanged here):
-#   process -> workspace action index -> machine action index -> remote-main
-#   action index -> [matching remote-branch, when policy permits] -> execute
+# Tiers (first milestone — local only, no remote client):
+#   L1 workspace  <workspace_root>/.simple/build-cache/
+#   L2 machine    $SIMPLE_CACHE, or <workspace_root>/.simple/machine-cache/
+#                 as a test-friendly fallback when the env var is unset.
 #
-# This file implements the first three tiers plus the STUB remote interface.
-# Agent C2 owns the real remote client (see `RemoteActionIndex` below); this
-# file must not, and does not, implement remote fetch/publish.
+# Lookup is EXACT ActionDigest only — no prefix or fallback matching of any
+# kind, per the plan's first-milestone scope.
 #
-# EXACT-KEY ONLY, everywhere. No prefix, restore-key, nearest-branch,
-# timestamp, or filename fallback exists anywhere in this file. Git identity
-# (branch/commit/PR/user) never enters an ActionDigest lookup key here — it is
-# provenance, handled elsewhere (PromotionReceipt / CacheNamespace).
+# An L2 hit is read-through: the referenced artifacts are copied into L1's
+# CAS, the ResultManifest is republished into L1, and the L1 action index is
+# updated — so the next lookup for the same key is an L1 hit.
 #
-# Phase 1: standalone module, NOT wired into any load path.
+# Single-flight: this is a per-process, non-threaded module (no actor/thread
+# use here), so "single-flight" is a simple in-memory memo dict keyed by
+# (namespace, action_digest) guarding duplicate concurrent lookups within one
+# process from re-walking both tiers.
 
-use compiler.driver.cache.cas_store.{cas_open, cas_put, cas_get, result_manifest_get, result_manifest_put, result_manifest_parse, result_manifest_serialize, ResultManifest}
-use compiler.driver.cache.action_index.action_index.{action_index_put, action_index_get, action_index_has, ActionIndexPutOutcome}
-
-# ============================================================================
-# Remote tier — STUB ONLY. Agent C2 fills a real implementation.
-# ============================================================================
-
-# A remote-main (and, later, remote-branch) action index. Exact-key only:
-# a real implementation must still refuse anything but an exact ActionDigest
-# match — no restore-keys, no nearest-branch fallback.
-trait RemoteActionIndex:
-    fn remote_lookup_action(action_digest: text) -> text?
-    fn remote_fetch_result_manifest(result_manifest_digest: text) -> text?
-
-# Always-miss stub: makes the router's fallthrough behaviour testable and
-# correct today (process/workspace/machine tiers fully functional) without
-# any actual network/remote-cache dependency. C2 replaces this with a real
-# client; the trait above is the whole of the contract between the two.
-impl RemoteActionIndex for null_remote:
-    fn remote_lookup_action(action_digest: text) -> text?:
-        nil
-    fn remote_fetch_result_manifest(result_manifest_digest: text) -> text?:
-        nil
+use compiler.driver.cache.cas_store.{
+    ResultManifest, cas_open, cas_has, cas_get, cas_put,
+    result_manifest_get, result_manifest_put, result_manifest_closure_complete,
+    result_manifest_encode
+}
+use compiler.driver.cache.action_index.action_index.{
+    CacheNamespace, IndexLookupResult, IndexPutResult,
+    action_index_get, action_index_put
+}
+use std.crypto.sha256.{sha256_text}
+use std.io_runtime.{env_get_opt}
 
 # ============================================================================
-# Process tier (L0) — in-memory, single-flight per action key.
+# Root resolution
 # ============================================================================
 
-# Module-level process cache: ActionDigest -> ResultManifestDigest. Immutable
-# once written (matches design §14.2 "Immutable in-memory values").
-var process_cache: {text: text} = {}
+fn tier_router_l1_root(workspace_root: text) -> text:
+    "{workspace_root}/.simple/build-cache"
 
-# Module-level single-flight guard: action digests currently being computed
-# on THIS call stack. Since compilation in this process is single-threaded,
-# "single-flight" here means: a reentrant/cyclic request for a key already
-# being computed is detected and refused (never silently recomputed, never
-# silently served a partial/nonexistent result) rather than raced. A future
-# multi-threaded/async driver needs a real mutex/notify pair around this same
-# dict; that is out of this file's scope (LOCAL_STATE runtime concern, not a
-# cache-identity concern) and is not implemented here.
-var in_flight: {text: bool} = {}
+fn tier_router_l2_root(workspace_root: text) -> text:
+    val env = env_get_opt("SIMPLE_CACHE") ?? ""
+    if env != "":
+        return env
+    "{workspace_root}/.simple/machine-cache"
 
-fn tier_router_process_get(action_digest: text) -> text?:
-    if process_cache.contains_key(action_digest):
-        return process_cache[action_digest]
-    nil
+struct TierRouter:
+    workspace_root: text
+    l1_root: text
+    l2_root: text
+    memo: Dict<text, ResultManifest>
 
-fn tier_router_process_put(action_digest: text, result_manifest_digest: text):
-    process_cache[action_digest] = result_manifest_digest
+fn tier_router_open(workspace_root: text) -> TierRouter:
+    val l1 = tier_router_l1_root(workspace_root)
+    val l2 = tier_router_l2_root(workspace_root)
+    cas_open(l1)
+    cas_open(l2)
+    TierRouter(workspace_root: workspace_root, l1_root: l1, l2_root: l2, memo: {})
 
-fn tier_router_is_in_flight(action_digest: text) -> bool:
-    if in_flight.contains_key(action_digest):
-        return in_flight[action_digest]
-    false
+fn tier_router_memo_key(ns: CacheNamespace, action_digest: text) -> text:
+    "{cache_namespace_dir_for(ns)}:{action_digest}"
 
-fn tier_router_begin_single_flight(action_digest: text) -> bool:
-    if tier_router_is_in_flight(action_digest):
-        return false
-    in_flight[action_digest] = true
-    true
-
-fn tier_router_end_single_flight(action_digest: text):
-    in_flight[action_digest] = false
+fn cache_namespace_dir_for(ns: CacheNamespace) -> text:
+    match ns:
+        case CacheNamespace.WorkspaceLocal: "workspace_local"
+        case CacheNamespace.MachineLocal: "machine_local"
 
 # ============================================================================
-# Tier roots (workspace / machine)
+# Lookup result
 # ============================================================================
 
-# Namespace layout per design §14.4: `<root>/actions/workspace/<workspace-id>/`
-# and `<root>/actions/machine/<repo-id>/<user-or-trust-id>/`. `workspace_id`
-# is LOCAL_STATE (freeze note §1, class table) — a directory selector only,
-# never encoded into any digest.
-struct TierRoots:
-    workspace_index_root: text   # e.g. "<workspace-cache-root>/actions/workspace/<workspace-id>"
-    workspace_cas_root: text     # e.g. "<workspace-cache-root>"
-    machine_index_root: text     # e.g. "$SIMPLE_CACHE/actions/machine/<repo-id>/<user-or-trust-id>"
-    machine_cas_root: text       # e.g. "$SIMPLE_CACHE"
+enum TierLookupResult:
+    HitL1(ResultManifest)
+    HitL2Backfilled(ResultManifest)
+    Miss
 
-fn tier_roots_open(roots: TierRoots) -> bool:
-    val a = cas_open(roots.workspace_cas_root)
-    val b = cas_open(roots.machine_cas_root)
-    a and b
+fn tier_lookup_result_manifest(r: TierLookupResult) -> ResultManifest?:
+    match r:
+        case TierLookupResult.HitL1(m): return m
+        case TierLookupResult.HitL2Backfilled(m): return m
+        case TierLookupResult.Miss: return nil
 
-# ============================================================================
-# Backfill (read-through)
-# ============================================================================
-
-# Materialize a hit found at a lower tier into every faster tier above it, so
-# the next lookup for the same exact key is served locally. Never demotes a
-# result: only ever copies a verified hit UP toward process.
-fn tier_router_backfill(roots: TierRoots, action_digest: text, result_manifest_digest: text, manifest_content: text, to_workspace: bool, to_machine: bool):
-    if to_machine:
-        cas_put(roots.machine_cas_root, manifest_content)
-        action_index_put(roots.machine_index_root, action_digest, result_manifest_digest)
-    if to_workspace:
-        cas_put(roots.workspace_cas_root, manifest_content)
-        action_index_put(roots.workspace_index_root, action_digest, result_manifest_digest)
-    tier_router_process_put(action_digest, result_manifest_digest)
+fn result_manifest_digest(m: ResultManifest) -> text:
+    sha256_text(result_manifest_encode(m))
 
 # ============================================================================
-# Lookup — process -> workspace -> machine -> remote-main
+# Backfill: copy every referenced artifact + the manifest itself from L2 into
+# L1, then record the L1 action-index entry. Only called on an L2 hit.
 # ============================================================================
 
-struct TierLookupResult:
-    found: bool
-    result_manifest_digest: text
-    manifest: ResultManifest?
-    tier: text   # "process" | "workspace" | "machine" | "remote-main" | "miss"
-
-fn tier_lookup_miss() -> TierLookupResult:
-    TierLookupResult(found: false, result_manifest_digest: "", manifest: nil, tier: "miss")
-
-# EXACT-KEY lookup across all tiers in the frozen order, with read-through
-# backfill on every hit. `remote` is nilable so callers with no remote wiring
-# (or running the null_remote stub) still get correct process/workspace/
-# machine behaviour.
-fn tier_router_lookup(roots: TierRoots, action_digest: text, remote: RemoteActionIndex?) -> TierLookupResult:
-    # L0 process.
-    val process_hit = tier_router_process_get(action_digest)
-    match process_hit:
-        case Some(rmd):
-            return TierLookupResult(found: true, result_manifest_digest: rmd, manifest: nil, tier: "process")
-        case nil:
-            pass_do_nothing("no process-tier hit; fall through to workspace tier", "L0 miss")
-
-    # L1 workspace action index.
-    if action_index_has(roots.workspace_index_root, action_digest):
-        val rmd = action_index_get(roots.workspace_index_root, action_digest)
-        match rmd:
-            case Some(digest):
-                val manifest = result_manifest_get(roots.workspace_cas_root, digest)
-                match manifest:
-                    case Some(m):
-                        tier_router_process_put(action_digest, digest)
-                        return TierLookupResult(found: true, result_manifest_digest: digest, manifest: m, tier: "workspace")
-                    case nil:
-                        pass_do_nothing("workspace index pointed at a manifest that failed verification/parse; fall through to machine tier", "L1 manifest miss")
-            case nil:
-                pass_do_nothing("workspace index entry was quarantined (tampered/mismatched key); fall through to machine tier", "L1 index miss")
-
-    # L2 machine action index.
-    if action_index_has(roots.machine_index_root, action_digest):
-        val rmd = action_index_get(roots.machine_index_root, action_digest)
-        match rmd:
-            case Some(digest):
-                val manifest = result_manifest_get(roots.machine_cas_root, digest)
-                match manifest:
-                    case Some(m):
-                        val content = result_manifest_serialize(m)
-                        tier_router_backfill(roots, action_digest, digest, content, true, false)
-                        return TierLookupResult(found: true, result_manifest_digest: digest, manifest: m, tier: "machine")
-                    case nil:
-                        pass_do_nothing("machine index pointed at a manifest that failed verification/parse; fall through to remote tier", "L2 manifest miss")
-            case nil:
-                pass_do_nothing("machine index entry was quarantined (tampered/mismatched key); fall through to remote tier", "L2 index miss")
-
-    # L3 remote-main (stub unless C2's real client is passed in).
-    match remote:
-        case Some(r):
-            val remote_rmd = r.remote_lookup_action(action_digest)
-            match remote_rmd:
-                case Some(digest):
-                    val remote_content = r.remote_fetch_result_manifest(digest)
-                    match remote_content:
-                        case Some(content):
-                            val parsed = result_manifest_parse(content)
-                            match parsed:
-                                case Some(m):
-                                    tier_router_backfill(roots, action_digest, digest, content, true, true)
-                                    return TierLookupResult(found: true, result_manifest_digest: digest, manifest: m, tier: "remote-main")
-                                case nil:
-                                    pass_do_nothing("remote manifest content failed to parse; treat as an overall miss", "L3 parse miss")
-                        case nil:
-                            pass_do_nothing("remote had an action mapping but the manifest fetch failed; treat as an overall miss", "L3 fetch miss")
+fn tier_router_backfill(tr: TierRouter, ns: CacheNamespace, action_digest: text, m: ResultManifest) -> bool:
+    for d in m.artifact_digests:
+        if not cas_has(tr.l1_root, d):
+            val content = cas_get(tr.l2_root, d)
+            match content:
+                case Some(bytes):
+                    cas_put(tr.l1_root, bytes)
                 case nil:
-                    pass_do_nothing("remote had no exact-key mapping for this action_digest; overall miss", "L3 exact-key miss")
-        case nil:
-            pass_do_nothing("no remote client supplied (null_remote/nil); process/workspace/machine already exhausted", "no remote wired")
-
-    tier_lookup_miss()
+                    # L2 artifact vanished/corrupt between the manifest hit
+                    # and the copy — closure is broken, refuse the backfill.
+                    return false
+    if not result_manifest_closure_complete(tr.l1_root, m):
+        return false
+    if not result_manifest_put(tr.l1_root, action_digest, m):
+        return false
+    val digest = result_manifest_digest(m)
+    match action_index_put(tr.l1_root, ns, action_digest, digest):
+        case IndexPutResult.Ok: return true
+        case IndexPutResult.Conflict(existing, attempted): return false
 
 # ============================================================================
-# Publish — the "execute action" outcome path.
+# Exact-key lookup with L1 -> L2 fallthrough and L2 read-through backfill.
 # ============================================================================
 
-# Record a freshly computed result at the workspace tier (the tier every
-# local build is always allowed to write) plus the process tier, and detect
-# any action-digest conflict via action_index_put's quarantine behaviour
-# (never silently overwrites a different prior result for the same key).
-fn tier_router_publish_workspace(roots: TierRoots, action_digest: text, manifest: ResultManifest) -> ActionIndexPutOutcome:
-    val digest = result_manifest_put(roots.workspace_cas_root, manifest)
-    val outcome = action_index_put(roots.workspace_index_root, action_digest, digest)
-    match outcome:
-        case Stored:
-            tier_router_process_put(action_digest, digest)
-        case AlreadyPresentSame:
-            tier_router_process_put(action_digest, digest)
-        case ConflictQuarantined:
-            pass_do_nothing("action_index_put already quarantined both the existing and attempted mappings; nothing to warm here", "conflict, no warm")
-    outcome
+fn tier_router_lookup(tr: TierRouter, ns: CacheNamespace, action_digest: text) -> TierLookupResult:
+    val memo_key = tier_router_memo_key(ns, action_digest)
+    if tr.memo.has(memo_key):
+        return TierLookupResult.HitL1(tr.memo.get(memo_key))
+
+    # L1 exact hit.
+    match action_index_get(tr.l1_root, ns, action_digest):
+        case IndexLookupResult.Hit(expected_digest):
+            match result_manifest_get(tr.l1_root, action_digest):
+                case Some(m):
+                    if result_manifest_digest(m) == expected_digest:
+                        tr.memo[memo_key] = m
+                        return TierLookupResult.HitL1(m)
+                case nil:
+                    pass_do_nothing
+        case IndexLookupResult.Miss:
+            pass_do_nothing
+
+    # L2 exact hit -> backfill into L1.
+    match action_index_get(tr.l2_root, ns, action_digest):
+        case IndexLookupResult.Hit(expected_digest):
+            match result_manifest_get(tr.l2_root, action_digest):
+                case Some(m):
+                    if result_manifest_digest(m) == expected_digest:
+                        tier_router_backfill(tr, ns, action_digest, m)
+                        tr.memo[memo_key] = m
+                        return TierLookupResult.HitL2Backfilled(m)
+                case nil:
+                    pass_do_nothing
+        case IndexLookupResult.Miss:
+            pass_do_nothing
+
+    TierLookupResult.Miss
+
+# ============================================================================
+# Publish: write a ResultManifest (and its referenced artifacts, which the
+# caller must already have `cas_put` into the SAME tier) into L1, with
+# closure verification and action-index conflict detection.
+# ============================================================================
+
+enum TierPublishResult:
+    Published
+    ClosureIncomplete
+    Conflict(text, text)
+
+fn tier_router_publish(tr: TierRouter, ns: CacheNamespace, action_digest: text, m: ResultManifest) -> TierPublishResult:
+    if not result_manifest_closure_complete(tr.l1_root, m):
+        return TierPublishResult.ClosureIncomplete
+    val digest = result_manifest_digest(m)
+    match action_index_put(tr.l1_root, ns, action_digest, digest):
+        case IndexPutResult.Conflict(existing, attempted):
+            return TierPublishResult.Conflict(existing, attempted)
+        case IndexPutResult.Ok:
+            pass_do_nothing
+    if not result_manifest_put(tr.l1_root, action_digest, m):
+        return TierPublishResult.ClosureIncomplete
+    tr.memo[tier_router_memo_key(ns, action_digest)] = m
+    TierPublishResult.Published
+
+export TierRouter, TierLookupResult, TierPublishResult
+export tier_router_l1_root, tier_router_l2_root, tier_router_open
+export tier_router_lookup, tier_router_publish, tier_lookup_result_manifest
+export result_manifest_digest

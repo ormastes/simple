@@ -20,70 +20,6 @@ extern fn rt_coverage_decision_probe(decision_id: i64, result: bool,
     file: text, line: i64, column: i64)
 extern fn rt_coverage_condition_probe(decision_id: i64, condition_id: i64,
     result: bool, file: text, line: i64, column: i64)
-extern fn rt_mcdc_record_vector_v1(session_id: u64, decision_id: u64,
-    condition_count: u32, source_digest: u64,
-    evaluated_mask: u64, true_mask: u64,
-    owner_id: u64, owner_sequence: u64, outcome: u8) -> i32
-extern fn rt_mcdc_claim_interpreter_owner_v1(session_id: u64,
-                                              owner_id: u64) -> i32
-extern fn rt_mcdc_release_interpreter_owner_v1(session_id: u64,
-                                                owner_id: u64) -> i32
-
-var coverage_mcdc_session_id: u64 = 0u64
-var coverage_mcdc_owner_id: u64 = 0u64
-var coverage_mcdc_owner_sequence: u64 = 0u64
-var coverage_mcdc_evaluated_mask: u64 = 0u64
-var coverage_mcdc_true_mask: u64 = 0u64
-var coverage_mcdc_condition_count: i64 = 0
-var coverage_mcdc_last_status: i32 = 0
-var coverage_mcdc_source_digest_by_path: Dict<text, u64> = {}
-
-fn mcdc_interpreter_configure(session_id: u64, owner_id: u64) -> bool:
-    if session_id == 0u64 or owner_id == 0u64: return false
-    if rt_mcdc_claim_interpreter_owner_v1(session_id, owner_id) != 0: return false
-    coverage_mcdc_session_id = session_id
-    coverage_mcdc_owner_id = owner_id
-    coverage_mcdc_owner_sequence = 0u64
-    coverage_mcdc_last_status = 0
-    coverage_mcdc_source_digest_by_path = {}
-    true
-
-fn mcdc_interpreter_disable():
-    if coverage_mcdc_session_id != 0u64 and coverage_mcdc_owner_id != 0u64:
-        val release_status = rt_mcdc_release_interpreter_owner_v1(
-            coverage_mcdc_session_id, coverage_mcdc_owner_id)
-        mcdc_interpreter_note_status(release_status)
-    coverage_mcdc_session_id = 0u64
-    coverage_mcdc_owner_id = 0u64
-    coverage_mcdc_owner_sequence = 0u64
-
-fn mcdc_interpreter_last_status() -> i32:
-    coverage_mcdc_last_status
-
-fn mcdc_interpreter_note_status(status: i32):
-    if coverage_mcdc_last_status == 0 and status != 0:
-        coverage_mcdc_last_status = status
-
-fn mcdc_stable_text_hash(value: text, seed: i64, multiplier: i64,
-                         modulus: i64) -> i64:
-    var digest = seed
-    var index: i64 = 0
-    while index < value.len():
-        digest = ((digest * multiplier) + char_code(value[index:index + 1])) % modulus
-        index = index + 1
-    digest
-
-fn mcdc_interpreter_register_source(path: text, source: text):
-    if coverage_mcdc_session_id == 0u64: return
-    var first = mcdc_stable_text_hash(path, 5381, 33, 2147483647)
-    first = ((first * 33) + 31) % 2147483647
-    first = mcdc_stable_text_hash(source, first, 33, 2147483647)
-    var second = mcdc_stable_text_hash(path, 7919, 37, 2147483629)
-    second = ((second * 37) + 31) % 2147483629
-    second = mcdc_stable_text_hash(source, second, 37, 2147483629)
-    var combined = ((first as u64) << 32) | (second as u64)
-    if combined == 0u64: combined = 1u64
-    coverage_mcdc_source_digest_by_path[path] = combined
 
 # The runtime SFFI ABI is decision-id/result/file/line/column.  Keep the
 # compiler-owned ID stable for one parsed AST: an execution counter produces a
@@ -110,30 +46,9 @@ fn coverage_span_decision_id(span_id: i64) -> i64:
     if span_is_valid(span_id): return span_start(span_id) + 1
     -1
 
-fn coverage_source_digest(file: text) -> u64:
-    coverage_mcdc_source_digest_by_path[file] ?? 0u64
-
 fn record_control_decision(file: text, line: i64, column: i64, decision_id: i64, taken: bool):
     if rt_coverage_enabled():
         rt_coverage_decision_probe(decision_id, taken, file, line, column)
-    if coverage_mcdc_session_id != 0u64 and coverage_mcdc_owner_id != 0u64:
-        if decision_id > 0 and coverage_mcdc_condition_count > 0:
-            val source_digest = coverage_source_digest(file)
-            if source_digest == 0u64:
-                mcdc_interpreter_note_status(2)
-                return
-            if coverage_mcdc_owner_sequence == 18446744073709551615u64:
-                mcdc_interpreter_note_status(3)
-                return
-            val status = rt_mcdc_record_vector_v1(
-                coverage_mcdc_session_id, decision_id as u64,
-                coverage_mcdc_condition_count as u32,
-                source_digest,
-                coverage_mcdc_evaluated_mask, coverage_mcdc_true_mask,
-                coverage_mcdc_owner_id, coverage_mcdc_owner_sequence,
-                if taken: 1u8 else: 0u8)
-            mcdc_interpreter_note_status(status)
-            coverage_mcdc_owner_sequence = coverage_mcdc_owner_sequence + 1u64
 
 fn record_control_condition(decision_id: i64, condition_eid: i64, taken: bool):
     if rt_coverage_enabled():
@@ -154,43 +69,24 @@ fn record_control_condition(decision_id: i64, condition_eid: i64, taken: bool):
 # Evaluates a control predicate while preserving language short-circuit
 # semantics.  Only leaf operands are conditions: the enclosing `and`/`or`
 # expression is a decision composition, not an independently evaluated input.
-fn coverage_condition_leaf_count_at(condition_eid: i64, remaining_depth: i64) -> i64:
-    if remaining_depth <= 0: return 63
-    val condition_node = expr_get(condition_eid)
-    if condition_node.tag == EXPR_BINARY and (condition_node.i_val == 55 or condition_node.i_val == 56):
-        val left_count = coverage_condition_leaf_count_at(
-            condition_node.left, remaining_depth - 1)
-        if left_count >= 63: return 63
-        val right_count = coverage_condition_leaf_count_at(
-            condition_node.right, remaining_depth - 1)
-        if right_count >= 63 - left_count: return 63
-        return left_count + right_count
-    1
-
-fn coverage_condition_leaf_count(condition_eid: i64) -> i64:
-    coverage_condition_leaf_count_at(condition_eid, 63)
-
-fn eval_control_condition_legacy(condition_eid: i64, decision_id: i64) -> i64:
+fn eval_control_condition(condition_eid: i64, decision_id: i64) -> i64:
     val condition_node = expr_get(condition_eid)
     if condition_node.tag == EXPR_BINARY and condition_node.i_val == 55:
-        val left_value = eval_control_condition_legacy(condition_node.left, decision_id)
+        val left_value = eval_control_condition(condition_node.left, decision_id)
         if eval_had_error: return -1
-        if val_is_truthy(left_value) == false: return val_make_bool(false)
-        val right_value = eval_control_condition_legacy(condition_node.right, decision_id)
+        if val_is_truthy(left_value) == false:
+            return val_make_bool(false)
+        val right_value = eval_control_condition(condition_node.right, decision_id)
         if eval_had_error: return -1
         return val_make_bool(val_is_truthy(right_value))
     if condition_node.tag == EXPR_BINARY and condition_node.i_val == 56:
-        val left_value = eval_control_condition_legacy(condition_node.left, decision_id)
+        val left_value = eval_control_condition(condition_node.left, decision_id)
         if eval_had_error: return -1
-        if val_is_truthy(left_value): return val_make_bool(true)
-        val right_value = eval_control_condition_legacy(condition_node.right, decision_id)
+        if val_is_truthy(left_value):
+            return val_make_bool(true)
+        val right_value = eval_control_condition(condition_node.right, decision_id)
         if eval_had_error: return -1
         return val_make_bool(val_is_truthy(right_value))
-    if condition_node.tag == EXPR_UNARY and condition_node.i_val == 57:
-        val operand_value = eval_control_condition_legacy(
-            condition_node.left, decision_id)
-        if eval_had_error: return -1
-        return val_make_bool(not val_is_truthy(operand_value))
     val condition_value = eval_expr(condition_eid)
     if eval_had_error: return -1
     val taken = val_is_truthy(condition_value)
@@ -222,13 +118,8 @@ fn coverage_owner_file() -> text:
 # Basic runtime type checking for function parameters
 
 use compiler.core.types.{TYPE_VOID, TYPE_BOOL, TYPE_I64, TYPE_F64, TYPE_TEXT, TYPE_ANY}
+use compiler.core.types.{TYPE_U8, TYPE_U16, TYPE_U32, TYPE_U64, TYPE_I8, TYPE_I16, TYPE_I32}
 use compiler.core.types.{TYPE_NAMED_BASE, TYPE_STRUCT, named_type_name, type_tag_name}
-use compiler.frontend.core.if_chain_nodes.{ARM_CONDITION, ARM_VALUE_BIND, ARM_PATTERN_BIND}
-use compiler.frontend.core.if_chain_nodes.{flat_if_chain_first_arm_get, flat_if_chain_arm_count_get}
-use compiler.frontend.core.if_chain_nodes.{flat_if_chain_else_expr_get, flat_if_arm_next_get}
-use compiler.frontend.core.if_chain_nodes.{flat_if_arm_kind_get, flat_if_arm_head_get}
-use compiler.frontend.core.if_chain_nodes.{flat_if_arm_init_get, flat_if_arm_then_expr_get}
-use compiler.frontend.core.if_chain_nodes.{flat_if_arm_span_get}
 
 # ===== Structural Subtyping =====
 # Check if a struct value has all the fields declared in a named struct type.
@@ -264,7 +155,7 @@ fn type_check_value(value_id: i64, expected_type: i64) -> bool:
         return true
 
     # Get actual type from value
-    val kind = val_kind(value_id)
+    val kind = val_get_kind(value_id)
 
     # Value kind constants (from value.spl)
     val VAL_NIL: i64 = 0
@@ -286,9 +177,7 @@ fn type_check_value(value_id: i64, expected_type: i64) -> bool:
     # Structural subtyping for named struct types (TYPE_NAMED_BASE + id)
     # If expected type is a named struct, check structural compatibility:
     # the actual value must be a struct with all required fields.
-    if is_array_sized_tag(expected_type):
-        return kind == VAL_ARRAY
-    if is_named_type_tag(expected_type):
+    if expected_type >= TYPE_NAMED_BASE:
         if kind != VAL_STRUCT:
             # Non-struct value cannot satisfy a struct type
             return false
@@ -310,6 +199,14 @@ fn type_check_value(value_id: i64, expected_type: i64) -> bool:
     # Default: allow if we don't recognize the type
     true
 
+fn eval_option_binding_value(value_id: i64) -> i64:
+    if val_is_struct(value_id):
+        val option_name = val_get_struct_name(value_id)
+        if option_name == "Option::None": return val_make_nil()
+        if option_name == "Option::Some":
+            return val_struct_get_field_idx(value_id, 1)
+    value_id
+
 # ===== Type Erasure / Monomorphization Support =====
 # Cache and specialization logic live in core.monomorphize (shared module).
 # Interpreter-specific type inference from runtime values stays here.
@@ -320,7 +217,7 @@ fn infer_type_args_from_values(arg_values: [i64]) -> text:
     # Simple approach: concatenate type kinds
     var type_str: text = ""
     for av in arg_values:
-        val kind = val_kind(av)
+        val kind = val_get_kind(av)
         if type_str != "":
             type_str = type_str + "_"
         type_str = type_str + str(kind)
@@ -338,7 +235,7 @@ fn infer_type_tags_from_values(arg_values: [i64]) -> [i64]:
     """
     var type_tags: [i64] = []
     for av in arg_values:
-        val kind = val_kind(av)
+        val kind = val_get_kind(av)
         # Value kinds align with type tags for primitives
         if kind == 1:  # VAL_BOOL
             type_tags.push(TYPE_BOOL)
@@ -393,6 +290,7 @@ var eval_yield_stack: [[i64]] = []
 
 # ===== LOAD_FAST: Current Function Tracking =====
 var eval_current_decl_id: i64 = -1
+var eval_implicit_new_stack: [i64] = []
 
 # ===== Warning Tracking =====
 var eval_warnings: [text] = []
@@ -415,14 +313,19 @@ fn eval_reset():
     teardown_functions = []
     when_disabled_decls = []
     eval_current_decl_id = -1
+    eval_implicit_new_stack = []
     eval_defer_eids = []
     eval_defer_depths = []
     eval_defer_depth = 0
     eval_errdefer_eids = []
     eval_errdefer_depths = []
     eval_yield_stack = []
-    enum_reg_names = []
-    enum_reg_variants = []
+    # Full enum-registry reset. Clearing only the two payload arrays left
+    # `enum_hm_buckets`/`enum_hm_nexts` holding indices into the now-empty
+    # arrays, so the next module's first enum lookup indexed out of bounds
+    # (or hit a stale entry) — the re-entrancy defect tracked in
+    # doc/08_tracking/bug/pure_simple_interpreter_core_jit_interpret_not_reentrant_2026-08-20.md
+    enum_table_reset()
 
 fn eval_set_error(msg: text):
     eval_had_error = true
@@ -436,12 +339,49 @@ fn eval_has_error() -> bool:
 
 # ===== Expression Evaluation =====
 
+fn eval_integer_cast_type(type_tag: i64) -> bool:
+    if type_tag == TYPE_I64 or type_tag == TYPE_U8 or type_tag == TYPE_U16: return true
+    if type_tag == TYPE_U32 or type_tag == TYPE_U64 or type_tag == TYPE_I8: return true
+    type_tag == TYPE_I16 or type_tag == TYPE_I32
+
+fn eval_cast_expr(eid: i64) -> i64:
+    val cast_node = expr_get(eid)
+    if not eval_integer_cast_type(cast_node.i_val):
+        eval_set_error("core interpreter only supports enum/integer casts to integer types")
+        return -1
+    val operand_id = cast_node.left
+    val operand = expr_get(operand_id)
+    if operand.tag == EXPR_FIELD_ACCESS:
+        val base = expr_get(operand.left)
+        if base.tag == EXPR_IDENT:
+            val variants = enum_table_lookup(base.s_val)
+            if variants != "":
+                for variant_name in variants.split(","):
+                    if variant_name == operand.s_val:
+                        val discriminant = env_lookup_global(base.s_val + "." + variant_name)
+                        if val_is_int(discriminant):
+                            return discriminant
+    val value = eval_expr(operand_id)
+    if val_is_int(value):
+        return value
+    if val_is_struct(value):
+        val full_name = val_get_struct_name(value)
+        for enum_name in enum_reg_names:
+            val prefix = enum_name + "::"
+            if full_name.starts_with(prefix):
+                val variant_name = full_name.substring(prefix.len())
+                val discriminant = env_lookup_global(enum_name + "." + variant_name)
+                if val_is_int(discriminant):
+                    return discriminant
+    eval_set_error("cast operand is not an enum discriminant or integer")
+    -1
+
 fn eval_expr(eid: i64) -> i64:
     if eid < 0: return val_make_nil()
     if eval_had_error: return -1
     if eval_returning: return eval_return_value
 
-    val tag = expr_get_tag(eid)
+    val tag = expr_get(eid).tag
 
     # Range-partitioned dispatch: tags 1-12 (hot), 13-24 (medium), 25+ (rare)
     if tag <= 12:
@@ -478,19 +418,23 @@ fn eval_expr(eid: i64) -> i64:
             return val_make_nil()
     else:
         # Rare: lambda, struct, tuple, async, pass, interpolation, etc.
-        if tag == EXPR_IF_CHAIN: return eval_if_chain_expr(eid)
         if tag == EXPR_LAMBDA: return eval_lambda(eid)
         if tag == EXPR_STRUCT_LIT: return eval_struct_lit(eid)
         if tag == EXPR_TUPLE: return eval_tuple_lit(eid)
+        if tag == EXPR_DICT_LIT: return eval_dict_lit(eid)
         if tag == EXPR_INTERPOLATED_STRING: return eval_interpolated_string(eid)
         if tag == EXPR_SLICE: return eval_slice_expr(eid)
         if tag == EXPR_NULL_COALESCE: return eval_null_coalesce(eid)
+        if tag == EXPR_CAST: return eval_cast_expr(eid)
         if tag == EXPR_UNIT: return val_make_nil()
         if tag == EXPR_PASS: return val_make_nil()
         if tag == EXPR_PASS_TODO: return val_make_nil()
         if tag == EXPR_PASS_DO_NOTHING: return val_make_nil()
         if tag == EXPR_PASS_DN: return val_make_nil()
         if tag == EXPR_DO_BLOCK: return eval_do_block(eid)
+        # unsafe:/danger: block — evaluates its body like a do-block; the
+        # unsafe distinction is a compile-time safety-checker concern only.
+        if tag == EXPR_UNSAFE_BLOCK: return eval_do_block(eid)
         if tag == EXPR_LIST_COMP: return eval_list_comp(eid)
         if tag == EXPR_DICT_COMP: return eval_dict_comp(eid)
         if tag == EXPR_ATOM: return eval_atom_expr(eid)
@@ -503,8 +447,9 @@ fn eval_expr(eid: i64) -> i64:
             val ec_node = expr_get(eid)
             val base_vid = eval_expr(ec_node.left)
             if eval_had_error: return -1
-            if val_exists(base_vid):
-                return base_vid
+            val normalized_vid = eval_option_binding_value(base_vid)
+            if val_exists(normalized_vid):
+                return normalized_vid
             else:
                 return val_make_nil()
         # `expr!` force-unwrap. Distinct from `.?` above: `.?` YIELDS nil when
@@ -613,6 +558,10 @@ fn eval_binary(eid: i64) -> i64:
     val op = e_node.i_val
     val left = eval_expr(e_node.left)
     if eval_had_error: return -1
+    if op == 55 and val_is_truthy(left) == false:
+        return val_make_bool(false)
+    if op == 56 and val_is_truthy(left):
+        return val_make_bool(true)
     val right = eval_expr(e_node.right)
     if eval_had_error: return -1
     val result = val_binary_op(op, left, right)
@@ -642,16 +591,11 @@ fn eval_if_expr(eid: i64) -> i64:
     val then_id = e_node.right
     val else_id = e_node.extra
 
-    # Keep interpreter and MIR/native decision identity identical: the MIR
-    # owner keys an authored decision by the condition span, not by the
-    # enclosing `if` expression span.  Reading the already-interned span is
-    # constant-time and does not allocate on the control-flow hot path.
-    val cond_span_id = expr_get(cond_id).span_id
-    val cond_val = eval_control_condition(cond_id, coverage_span_decision_id(cond_span_id))
+    val cond_val = eval_control_condition(cond_id, coverage_span_decision_id(e_node.span_id))
     if eval_had_error: return -1
 
     val taken = val_is_truthy(cond_val)
-    val span_id = cond_span_id
+    val span_id = e_node.span_id
     var source_line = 0
     var source_column = 0
     if span_is_valid(span_id):
@@ -664,74 +608,6 @@ fn eval_if_expr(eid: i64) -> i64:
         return eval_expr(then_id)
     if else_id >= 0:
         return eval_expr(else_id)
-    val_make_nil()
-
-fn record_if_chain_decision(span_id: i64, taken: bool):
-    if span_is_valid(span_id):
-        record_control_decision(
-            coverage_owner_file(), span_line(span_id), span_col(span_id),
-            span_start(span_id) + 1, taken)
-
-fn eval_if_chain_expr(eid: i64) -> i64:
-    val chain_id = expr_get_extra(eid)
-    var arm_id = flat_if_chain_first_arm_get(chain_id)
-    var remaining = flat_if_chain_arm_count_get(chain_id)
-
-    while arm_id >= 0 and remaining > 0:
-        val arm_kind = flat_if_arm_kind_get(arm_id)
-        val arm_head = flat_if_arm_head_get(arm_id)
-        val arm_span = flat_if_arm_span_get(arm_id)
-        var taken = false
-
-        if arm_kind == ARM_CONDITION:
-            val condition_value = eval_control_condition(
-                arm_head, coverage_span_decision_id(arm_span))
-            if eval_had_error: return -1
-            taken = val_is_truthy(condition_value)
-            record_if_chain_decision(arm_span, taken)
-            if taken:
-                return eval_expr(flat_if_arm_then_expr_get(arm_id))
-        elif arm_kind == ARM_VALUE_BIND:
-            val init_value = eval_expr(flat_if_arm_init_get(arm_id))
-            if eval_had_error: return -1
-            val bound_value = val_copy_if_value_struct(
-                eval_option_binding_value(init_value))
-            taken = val_exists(bound_value)
-            record_control_condition(
-                coverage_span_decision_id(arm_span), arm_head, taken)
-            record_if_chain_decision(arm_span, taken)
-            if taken:
-                env_push_scope()
-                env_define(expr_get_str(arm_head), bound_value)
-                val branch_value = eval_expr(flat_if_arm_then_expr_get(arm_id))
-                env_pop_scope()
-                return branch_value
-        elif arm_kind == ARM_PATTERN_BIND:
-            val init_value = eval_expr(flat_if_arm_init_get(arm_id))
-            if eval_had_error: return -1
-            env_push_scope()
-            taken = match_pattern(init_value, arm_head)
-            if eval_had_error:
-                env_pop_scope()
-                return -1
-            record_control_condition(
-                coverage_span_decision_id(arm_span), arm_head, taken)
-            record_if_chain_decision(arm_span, taken)
-            if taken:
-                val branch_value = eval_expr(flat_if_arm_then_expr_get(arm_id))
-                env_pop_scope()
-                return branch_value
-            env_pop_scope()
-        else:
-            eval_set_error("unsupported if-chain arm kind: " + "{arm_kind}")
-            return -1
-
-        arm_id = flat_if_arm_next_get(arm_id)
-        remaining = remaining - 1
-
-    val else_eid = flat_if_chain_else_expr_get(chain_id)
-    if else_eid >= 0:
-        return eval_expr(else_eid)
     val_make_nil()
 
 # ===== Block Expression =====
@@ -937,13 +813,10 @@ fn eval_while_expr(eid: i64) -> i64:
         if eval_had_error: break
         if eval_returning: break
         if eval_breaking: break
-        # Match MIR/native's condition-span identity without constructing a
-        # string or allocating per iteration.
-        val cond_span_id = expr_get(cond_eid).span_id
-        val cond_val = eval_control_condition(cond_eid, coverage_span_decision_id(cond_span_id))
+        val cond_val = eval_control_condition(cond_eid, coverage_span_decision_id(e_node.span_id))
         if eval_had_error: break
         val taken = val_is_truthy(cond_val)
-        val span_id = cond_span_id
+        val span_id = e_node.span_id
         var source_line: i64 = 0
         var source_column: i64 = 0
         if span_is_valid(span_id):
@@ -953,12 +826,14 @@ fn eval_while_expr(eid: i64) -> i64:
             record_control_decision(coverage_owner_file(), source_line, source_column, span_start(span_id) + 1, taken)
         if taken == false: break
         eval_continuing = false
+        env_push_scope()
         for sid in body_stmts:
             if eval_had_error: break
             if eval_returning: break
             if eval_breaking: break
             if eval_continuing: break
             last_val = eval_stmt(sid)
+        env_pop_scope()
         iterations = iterations + 1
 
     if iterations >= max_iterations:
@@ -985,7 +860,11 @@ fn eval_match_expr(eid: i64) -> i64:
         val guard_eid = arm_get_guard(arm_id)
         val body_stmts = arm_get_body(arm_id)
 
+        env_push_scope()
         val matched = match_pattern(scrutinee, pattern_eid)
+        if eval_had_error:
+            env_pop_scope()
+            return -1
         if matched:
             # Check guard
             if guard_eid >= 0:
@@ -1016,7 +895,6 @@ fn eval_match_expr(eid: i64) -> i64:
                     inferred_type, val_enum_variant_name(scrutinee), val_kind_name(val_get_kind(scrutinee))
                 )
             # Execute arm body
-            env_push_scope()
             # Pattern binding: case X as name: — bind scrutinee to name
             val binding_name = arm_get_binding(arm_id)
             if binding_name != "":
@@ -1028,11 +906,17 @@ fn eval_match_expr(eid: i64) -> i64:
                 last_val = eval_stmt(sid)
             env_pop_scope()
             return last_val
+        env_pop_scope()
 
-    # No arm matched — emit exhaustiveness warning
+    # No arm matched. The old diagnostic named only the runtime KIND ("enum"),
+    # which is not enough to find the bug — report the enum, the value, the
+    # covered arms and the location. See report_match_fallthrough.
     val kind = val_get_kind(scrutinee)
     val val_name = val_kind_name(kind)
-    eval_warnings.push("warning: non-exhaustive match - no arm matched value of type " + val_name)
+    report_match_fallthrough(inferred_type, val_enum_variant_name(scrutinee), val_name, arm_ids)
+    if match_fallthrough_get_abort():
+        eval_set_error(eval_warnings[eval_warnings.len() - 1])
+        return -1
     val_make_nil()
 
 fn pattern_is_wildcard_catch(pattern_eid: i64) -> bool:
@@ -1117,6 +1001,42 @@ fn match_pattern(value_id: i64, pattern_eid: i64) -> bool:
     #     what adapts -- the same choice `??`, `?` and `if val` already made
     #     (see eval_option_binding_value above, eval_null_coalesce/eval_try in
     #     eval_access.spl).
+    # `case i64 v:` type-pattern arm (bug doc
+    # union_narrowing_has_no_grammar_or_runtime_2026-08-21.md). The parser
+    # lowers it to the marker call `__type_test(<Type>, <binder>)`, so it
+    # arrives here as an EXPR_CALL and must be recognized BEFORE the
+    # enum-variant branch below -- otherwise `__type_test` would be looked up
+    # as a variant name and the arm would silently not match. The test is on
+    # the RUNTIME value kind, which is exactly the union's discriminant in
+    # this engine, and the binder is bound to the narrowed value.
+    if tag == EXPR_CALL:
+        val tt_callee = expr_get(e_node.left)
+        if tt_callee.tag == EXPR_IDENT and tt_callee.s_val == "__type_test":
+            if e_node.args.len() < 2:
+                return false
+            val tt_type_name = expr_get(e_node.args[0]).s_val
+            val tt_binder_name = expr_get(e_node.args[1]).s_val
+            val tt_kind = val_get_kind(value_id)
+            var tt_ok = false
+            if tt_type_name == "nil":
+                tt_ok = val_is_nil(value_id)
+            elif tt_type_name == "bool":
+                tt_ok = tt_kind == VAL_BOOL
+            elif tt_type_name == "text" or tt_type_name == "str":
+                tt_ok = tt_kind == VAL_TEXT
+            elif tt_type_name == "f32" or tt_type_name == "f64":
+                tt_ok = tt_kind == VAL_FLOAT
+            elif tt_type_name == "i8" or tt_type_name == "i16" or tt_type_name == "i32" or tt_type_name == "i64" or tt_type_name == "u8" or tt_type_name == "u16" or tt_type_name == "u32" or tt_type_name == "u64":
+                tt_ok = tt_kind == VAL_INT
+            else:
+                # A NAMED type: the runtime value is a struct whose recorded
+                # type name is the discriminator.
+                tt_ok = tt_kind == VAL_STRUCT and val_get_struct_name(value_id) == tt_type_name
+            if not tt_ok:
+                return false
+            env_define(tt_binder_name, value_id)
+            return true
+
     if tag == EXPR_CALL:
         val callee_variant = pattern_enum_variant_name(e_node.left, val_is_boxed_enum(value_id))
         if callee_variant != "":
@@ -1245,9 +1165,6 @@ use compiler.core.interpreter.eval_ops.*
 # ===== Exports =====
 # Symbols defined in this file
 export eval_warnings, eval_get_warnings, eval_clear_warnings
-export mcdc_interpreter_configure, mcdc_interpreter_disable
-export mcdc_interpreter_last_status
-export mcdc_interpreter_register_source
 
 # Re-exports from eval_tables.spl
 

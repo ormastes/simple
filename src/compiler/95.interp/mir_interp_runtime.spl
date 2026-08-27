@@ -8,10 +8,34 @@
 use compiler.mir.mir_data.*
 
 # Async runtime SFFI bindings
-extern fn rt_actor_spawn(handler: i64) -> i64
+@unsafe(reason: "raw actor spawn handle/status ABI", capabilities: [ffi])
+extern fn rt_actor_spawn(handler: i64, context: i64) -> i64
+@unsafe(reason: "raw actor send status ABI", capabilities: [ffi])
 extern fn rt_actor_send(target: i64, message: i64) -> i64
-extern fn rt_actor_recv(timeout: i64) -> i64
+@unsafe(reason: "raw actor receive value/status ABI", capabilities: [ffi])
+extern fn rt_actor_recv() -> i64
+@unsafe(reason: "raw scheduler yield status ABI", capabilities: [ffi])
 extern fn rt_thread_yield() -> i64
+
+@always_inline
+fn _mir_interp_actor_spawn_raw(handler: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_actor_spawn(handler, 0)
+
+@always_inline
+fn _mir_interp_actor_send_raw(target: i64, message: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_actor_send(target, message)
+
+@always_inline
+fn _mir_interp_actor_recv_raw() -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_actor_recv()
+
+@always_inline
+fn _mir_interp_thread_yield_raw() -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_thread_yield()
 
 # ============================================================================
 # Async Runtime Support
@@ -25,14 +49,18 @@ fn mir_interp_call_runtime_fn(name: text, args: [i64]) -> i64:
         case "__simple_runtime_await":
             if args.len() > 0: args[0] else: 0
         case "__simple_runtime_spawn":
-            if args.len() > 0: rt_actor_spawn(args[0]) else: 0
+            if args.len() > 0: _mir_interp_actor_spawn_raw(args[0]) else: 0
         case "__simple_runtime_send":
-            if args.len() >= 2: rt_actor_send(args[0], args[1]) else: 0
+            if args.len() >= 2: _mir_interp_actor_send_raw(args[0], args[1]) else: 0
         case "__simple_runtime_receive":
-            if args.len() > 0: rt_actor_recv(args[0]) else: rt_actor_recv(-1)
+            _mir_interp_actor_recv_raw()
         case "__simple_runtime_yield":
-            rt_thread_yield()
+            _mir_interp_thread_yield_raw()
         case _:
+            # Lane C8: every caller passes one of the literal names above, so
+            # this is reachable only by a new name with no arm. Was a silent 0.
+            eprint("[mir-interp] E-INTERP-RUNTIME-Unknown name={name}\n")
+            print "PANIC: E-INTERP-RUNTIME-Unknown: MIR interpreter has no runtime hook named '{name}'"
             0
 
 # ============================================================================

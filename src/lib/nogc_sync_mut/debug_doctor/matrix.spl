@@ -42,10 +42,6 @@ use std.common.debug.session_core.{
 use std.common.debug.debug_profiler.{DebugProfiler, dp_trace_run}
 use std.common.debug.ref_debug_session.{RefDebugSession, ref_debug_profiler}
 use std.notebook.gpu_mode_resolver.{GpuBackendProbe, GPU_AUTO_PROBE_ORDER}
-use std.common.debug.contracts_v1.{
-    DebugVerificationV1, DebugPerturbationV1,
-    debug_verification_name_v1, debug_perturbation_name_v1
-}
 
 use std.io_runtime.{time_now_unix_micros}
 use std.io_runtime.{file_exists}
@@ -124,7 +120,7 @@ impl CapabilityRegistry:
 # The pending-stream note a target reports when nothing has registered it.
 fn pending_note(target: text) -> text:
     if target == "host":
-        return "host DebugTarget was not live-verified — provide a readable program to doctor"
+        return "no DebugTarget registered for 'host' — pending P3 src/app/dap/host_debug_target.spl"
     if target == "cuda" or target == "vulkan":
         return "no DebugTarget registered for '{target}' — pending P6 {target}_debug_session.spl"
     if target == "metal":
@@ -141,19 +137,6 @@ struct DoctorRow:
     debug_level: CapLevel
     debug_detail: text
     profile: ProfileReport
-
-# Operation-level doctor output.  This intentionally lives beside DoctorRow:
-# existing callers keep their compact debug/profile matrix, while V1 clients
-# receive enough evidence metadata to distinguish presence from verification.
-pub struct DoctorCapabilityReportV1:
-    target: text
-    operation: text
-    support: CapLevel
-    verification: DebugVerificationV1
-    perturbation: DebugPerturbationV1
-    required_privilege: text
-    tool_version: text
-    reason: text
 
 fn row_is_attachable(row: DoctorRow) -> bool:
     attach_is_ok(row.attach)
@@ -363,71 +346,8 @@ pub fn doctor_detail_lines(rows: [DoctorRow]) -> text:
             lines.push("  {row.target} profile: {row.profile.detail}")
     lines.join("\n")
 
-fn _blocked_verification(row: DoctorRow) -> DebugVerificationV1:
-    if row_is_attachable(row):
-        return DebugVerificationV1.Unverified
-    DebugVerificationV1.Blocked
-
-fn _debug_report_v1(row: DoctorRow, tool_version: text) -> DoctorCapabilityReportV1:
-    var verification = _blocked_verification(row)
-    var reason = row.debug_detail
-    # ref_row exercised attach + the acquired DebugProfiler.  A host row is
-    # live only when debug_doctor_registry registered it after constructing a
-    # HostDebugTarget and reading its state.  GPU registration is intentionally
-    # not promoted: probe_backend proves device presence, not debug control.
-    if row.target == "ref" and row_can_debug(row):
-        verification = DebugVerificationV1.LiveVerified
-        reason = "attach and DebugProfiler acquisition succeeded"
-    else if row.target == "host" and row_can_debug(row) and row_is_attachable(row):
-        verification = DebugVerificationV1.LiveVerified
-        reason = "HostDebugTarget launch, kind, level, and line state succeeded"
-    else if not row_is_attachable(row):
-        reason = row.attach
-    DoctorCapabilityReportV1(
-        target: row.target, operation: "debug", support: row.debug_level,
-        verification: verification, perturbation: DebugPerturbationV1.Stopping,
-        required_privilege: "debug", tool_version: tool_version, reason: reason)
-
-fn _profile_report_v1(row: DoctorRow, tool_version: text) -> DoctorCapabilityReportV1:
-    var verification = _blocked_verification(row)
-    var reason = row.profile.detail
-    if row_is_attachable(row) and cap_level_is_usable(row.profile.level):
-        # Only ref execution and the host clock are actually exercised here.
-        # Registered GPU profile levels remain Unverified until a timed launch
-        # or counter readback is performed by their adapter.
-        if row.target == "ref" or row.target == "host":
-            verification = DebugVerificationV1.LiveVerified
-    if not row_is_attachable(row):
-        reason = row.attach
-    DoctorCapabilityReportV1(
-        target: row.target, operation: "profile", support: row.profile.level,
-        verification: verification, perturbation: DebugPerturbationV1.Passive,
-        required_privilege: "observe", tool_version: tool_version, reason: reason)
-
-pub fn doctor_capabilities_v1(rows: [DoctorRow], tool_version: text) -> [DoctorCapabilityReportV1]:
-    """Return one independently evidenced debug and profile capability per target."""
-    var reports: [DoctorCapabilityReportV1] = []
-    for row in rows:
-        reports.push(_debug_report_v1(row, tool_version))
-        reports.push(_profile_report_v1(row, tool_version))
-    reports
-
-pub fn render_doctor_capabilities_v1(reports: [DoctorCapabilityReportV1]) -> text:
-    var lines: [text] = []
-    lines.push("DebugCapabilityV1:")
-    for report in reports:
-        lines.push(
-            "  target={report.target} operation={report.operation}" +
-            " support={cap_level_name(report.support)}" +
-            " verification={debug_verification_name_v1(report.verification)}" +
-            " perturbation={debug_perturbation_name_v1(report.perturbation)}" +
-            " privilege={report.required_privilege}" +
-            " tool_version={report.tool_version} reason={report.reason}")
-    lines.join("\n")
-
 export RegisteredCapability, CapabilityRegistry, DoctorRow
 export doctor_rows, host_row, gpu_row, ref_row, render_doctor_matrix
 export doctor_detail_lines, measure_host_wall_ns, pending_note
-export DoctorCapabilityReportV1, doctor_capabilities_v1, render_doctor_capabilities_v1
 export row_is_attachable, row_can_debug, row_debug_cell, row_attach_cell
 export DOCTOR_REF_PROGRAM

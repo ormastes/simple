@@ -5,25 +5,29 @@
 
 use common.ui.draw_ir.{
     DRAW_IR_COMMAND_EDGE,
-    DRAW_IR_COMMAND_IMAGE,
     DRAW_IR_COMMAND_RECT,
-    DRAW_IR_COMMAND_TEXT,
     DRAW_IR_SCHEMA_VERSION,
+    DrawEdge,
     DrawIrBatch,
     DrawIrCommand,
     DrawIrComposition,
+    DrawIrGlyphRunPayload,
+    DrawIrPoint,
+    DrawIrRect,
     DrawIrSourceInfo,
+    DrawIrStyleProp,
     draw_edge,
     draw_ir_batch_with_source,
     draw_ir_composition,
-    draw_ir_edge_command,
     draw_ir_embedding_config,
-    draw_ir_image_command,
+    draw_ir_empty_glyph_run_payload,
+    draw_ir_glyph_run_payload,
+    draw_ir_point,
     draw_ir_rect,
     draw_ir_source_info,
-    draw_ir_text
+    draw_ir_style_prop
 }
-use std.common.base_encoding.utilities.{bytes_to_text}
+use std.common.base_encoding.utilities.{base_encoding_bytes_to_text as bytes_to_text}
 
 val _DRAW_IR_SDN_MAX_GLYPHS: i32 = 4096
 
@@ -41,12 +45,38 @@ fn _draw_ir_sdn_unescape(value: text) -> text:
     unescaped = unescaped.replace("%09", "\t")
     unescaped.replace("%25", "%")
 
+fn _draw_ir_sdn_token_starts_with(line_bytes: [i64], start: i64, end: i64, prefix_bytes: [i64]) -> bool:
+    if end - start < prefix_bytes.len():
+        return false
+    var index: i64 = 0
+    while index < prefix_bytes.len():
+        if line_bytes[start + index] != prefix_bytes[index]:
+            return false
+        index = index + 1
+    true
+
+fn _draw_ir_sdn_byte_slice(source_bytes: [i64], start: i64, end: i64) -> text:
+    var bytes: [u8] = []
+    var index = start
+    while index < end:
+        bytes.push(source_bytes[index].to_u8())
+        index = index + 1
+    bytes_to_text(bytes)
+
 fn _draw_ir_sdn_field(line: text, key: text) -> text:
     val prefix = "{key}="
-    val parts = line.split(" ")
-    for part in parts:
-        if part.starts_with(prefix):
-            return _draw_ir_sdn_unescape(part.substring(prefix.len(), part.len()))
+    val line_bytes = line.bytes()
+    val prefix_bytes = prefix.bytes()
+    var start: i64 = 0
+    while start < line.len():
+        while start < line.len() and line_bytes[start] == 32:
+            start = start + 1
+        var end = start
+        while end < line.len() and line_bytes[end] != 32:
+            end = end + 1
+        if _draw_ir_sdn_token_starts_with(line_bytes, start, end, prefix_bytes):
+            return _draw_ir_sdn_unescape(_draw_ir_sdn_byte_slice(line_bytes, start + prefix_bytes.len(), end))
+        start = end + 1
     ""
 
 fn _draw_ir_sdn_i32(line: text, key: text) -> i32:
@@ -87,77 +117,280 @@ fn _draw_ir_sdn_parse_i32(value: text) -> i32:
     if value[0] == "-":
         sign = -1
         i = 1
-    var parsed = 0
+    var parsed: i64 = 0
+    val limit: i64 = if sign < 0: 2147483648 else: 2147483647
     val value_len = value.len()
     while i < value_len:
         val digit = _draw_ir_sdn_digit(value[i])
         if digit < 0:
-            return parsed * sign
-        parsed = parsed * 10 + digit
+            return 0
+        if parsed > (limit - digit.to_i64()) / 10:
+            return 0
+        parsed = parsed * 10 + digit.to_i64()
         i = i + 1
-    parsed * sign
+    (parsed * sign.to_i64()) as i32
 
 fn _draw_ir_sdn_parse_u32(value: text) -> u32:
     var i = 0
-    var parsed = 0u32
+    var parsed: i64 = 0
     val value_len = value.len()
     while i < value_len:
         val digit = _draw_ir_sdn_digit(value[i])
         if digit < 0:
-            return parsed
-        parsed = parsed * 10u32 + digit.to_u32()
+            return 0u32
+        if parsed > (4294967295 - digit.to_i64()) / 10:
+            return 0u32
+        parsed = parsed * 10 + digit.to_i64()
         i = i + 1
-    parsed
+    parsed as u32
 
 fn _draw_ir_sdn_u32(line: text, key: text) -> u32:
     val value = _draw_ir_sdn_field(line, key)
     _draw_ir_sdn_parse_u32(value)
 
+fn _draw_ir_sdn_emit_rect(line: text, key: text, rect: DrawIrRect) -> text:
+    line + " {key}_present={rect.present} {key}_x={rect.x} {key}_y={rect.y} {key}_width={rect.width} {key}_height={rect.height}"
+
+fn _draw_ir_sdn_emit_styles(line: text, key: text, styles: [DrawIrStyleProp]) -> text:
+    var parts: [text] = [line, " {key}_count={styles.len()}"]
+    var index = 0
+    for style in styles:
+        parts.push(" {key}_{index}_key={_draw_ir_sdn_escape(style.key)} {key}_{index}_value={_draw_ir_sdn_escape(style.value)}")
+        index = index + 1
+    parts.join("")
+
+fn _draw_ir_sdn_emit_points(line: text, key: text, points: [DrawIrPoint]) -> text:
+    var parts: [text] = [line, " {key}_count={points.len()}"]
+    var index = 0
+    for point in points:
+        parts.push(" {key}_{index}_x={point.x} {key}_{index}_y={point.y}")
+        index = index + 1
+    parts.join("")
+
+fn _draw_ir_sdn_emit_glyph_run(line: text, glyph_run: DrawIrGlyphRunPayload) -> text:
+    val lengths_match = (glyph_run.glyph_ids.len() == glyph_run.xs.len() and
+        glyph_run.glyph_ids.len() == glyph_run.ys.len() and
+        glyph_run.glyph_ids.len() == glyph_run.clusters.len())
+    val count = if glyph_run.valid and lengths_match: glyph_run.glyph_ids.len() else: 0
+    var parts: [text] = [line, " glyph_valid={count > 0} glyph_count={count}"]
+    var index = 0
+    while index < count:
+        parts.push(" glyph_{index}_id={glyph_run.glyph_ids[index]} glyph_{index}_x={glyph_run.xs[index]} glyph_{index}_y={glyph_run.ys[index]} glyph_{index}_cluster={glyph_run.clusters[index]}")
+        index = index + 1
+    parts.join("")
+
+fn _draw_ir_sdn_emit_advances(line: text, advances: [i32]) -> text:
+    var parts: [text] = [line, " advance_count={advances.len()}"]
+    var index = 0
+    for advance in advances:
+        parts.push(" advance_{index}={advance}")
+        index = index + 1
+    parts.join("")
+
 fn _draw_ir_sdn_emit_command(command: DrawIrCommand) -> text:
-    var line = "\t\tcommand kind={command.kind} id={_draw_ir_sdn_escape(command.component_id)} x={command.x} y={command.y} width={command.width} height={command.height} color={command.color} text={_draw_ir_sdn_escape(command.text_value)}"
-    if command.kind == DRAW_IR_COMMAND_EDGE and command.edge != nil:
-        line = line + " source={_draw_ir_sdn_escape(command.edge.source)} target={_draw_ir_sdn_escape(command.edge.target)} routing={_draw_ir_sdn_escape(command.edge.routing)}"
-    if command.kind == DRAW_IR_COMMAND_IMAGE:
-        line = line + " image_uri={_draw_ir_sdn_escape(command.image_uri)}"
-    line
+    var parts: [text] = ["\t\tcommand kind={command.kind} id={_draw_ir_sdn_escape(command.component_id)} x={command.x} y={command.y} width={command.width} height={command.height} color={command.color} text={_draw_ir_sdn_escape(command.text_value)} parent_id={_draw_ir_sdn_escape(command.parent_id)} image_uri={_draw_ir_sdn_escape(command.image_uri)}"]
+    parts.push(_draw_ir_sdn_emit_rect("", "border", command.border_rect))
+    parts.push(_draw_ir_sdn_emit_rect("", "content", command.content_rect))
+    parts.push(_draw_ir_sdn_emit_rect("", "hit", command.hit_rect))
+    parts.push(_draw_ir_sdn_emit_rect("", "clip", command.clip_rect))
+    parts.push(_draw_ir_sdn_emit_styles("", "style", command.computed_style))
+    parts.push(_draw_ir_sdn_emit_points("", "point", command.points))
+    parts.push(_draw_ir_sdn_emit_advances("", command.advance_widths))
+    parts.push(_draw_ir_sdn_emit_glyph_run("", command.glyph_run))
+    parts.push(" edge_present={command.edge != nil}")
+    if val edge = command.edge:
+        parts.push(" edge_id={_draw_ir_sdn_escape(edge.id)} edge_source={_draw_ir_sdn_escape(edge.source)} edge_target={_draw_ir_sdn_escape(edge.target)} edge_routing={_draw_ir_sdn_escape(edge.routing)}")
+        parts.push(_draw_ir_sdn_emit_styles("", "edge_style", edge.style))
+        parts.push(_draw_ir_sdn_emit_points("", "edge_point", edge.points))
+    parts.join("")
 
 fn _draw_ir_sdn_emit_batch(batch: DrawIrBatch) -> text:
     val command_count = batch.commands.len()
     var lines: [text] = [""; command_count + 1]
     var write_idx = 0
-    var line = "\tbatch id={_draw_ir_sdn_escape(batch.batch_id)} backend={batch.backend_target}"
-    line = line + " surface={_draw_ir_sdn_escape(batch.embedding.surface_id)} component={_draw_ir_sdn_escape(batch.embedding.component_id)}"
-    line = line + " x={batch.embedding.x} y={batch.embedding.y} width={batch.embedding.width} height={batch.embedding.height}"
-    line = line + " layer={batch.embedding.layer} opacity={batch.embedding.opacity_milli} clip={batch.embedding.clip}"
-    line = line + " source_kind={_draw_ir_sdn_escape(batch.source.source_kind)} source_id={_draw_ir_sdn_escape(batch.source.source_id)}"
-    line = line + " html_tag={_draw_ir_sdn_escape(batch.source.html_tag)} html_node_id={_draw_ir_sdn_escape(batch.source.html_node_id)}"
-    line = line + " css_selector={_draw_ir_sdn_escape(batch.source.css_selector)} css_class={_draw_ir_sdn_escape(batch.source.css_class)}"
-    line = line + " style_key={_draw_ir_sdn_escape(batch.source.style_key)} style_revision={_draw_ir_sdn_escape(batch.source.style_revision)}"
-    lines[write_idx] = line
+    val header_parts: [text] = [
+        "\tbatch id={_draw_ir_sdn_escape(batch.batch_id)} backend={batch.backend_target}",
+        " surface={_draw_ir_sdn_escape(batch.embedding.surface_id)} component={_draw_ir_sdn_escape(batch.embedding.component_id)}",
+        " x={batch.embedding.x} y={batch.embedding.y} width={batch.embedding.width} height={batch.embedding.height}",
+        " layer={batch.embedding.layer} opacity={batch.embedding.opacity_milli} clip={batch.embedding.clip}",
+        " source_kind={_draw_ir_sdn_escape(batch.source.source_kind)} source_id={_draw_ir_sdn_escape(batch.source.source_id)}",
+        " html_tag={_draw_ir_sdn_escape(batch.source.html_tag)} html_node_id={_draw_ir_sdn_escape(batch.source.html_node_id)}",
+        " css_selector={_draw_ir_sdn_escape(batch.source.css_selector)} css_class={_draw_ir_sdn_escape(batch.source.css_class)}",
+        " style_key={_draw_ir_sdn_escape(batch.source.style_key)} style_revision={_draw_ir_sdn_escape(batch.source.style_revision)}"
+    ]
+    lines[write_idx] = header_parts.join("")
     write_idx = write_idx + 1
     for command in batch.commands:
-        lines = lines.push(_draw_ir_sdn_emit_command(command))
+        lines[write_idx] = _draw_ir_sdn_emit_command(command)
+        write_idx = write_idx + 1
     lines.join("\n")
 
 fn draw_ir_to_sdn(composition: DrawIrComposition) -> text:
-    var lines: [text] = []
-    lines = lines.push("draw_ir schema={composition.schema}")
-    lines = lines.push("\tcomposition id={_draw_ir_sdn_escape(composition.composition_id)} scene_key={_draw_ir_sdn_escape(composition.scene_key)} backend={composition.backend_target}")
+    val batch_count = composition.batches.len()
+    var lines: [text] = [""; batch_count + 2]
+    var write_idx = 0
+    lines[write_idx] = "draw_ir schema={composition.schema}"
+    write_idx = write_idx + 1
+    lines[write_idx] = "\tcomposition id={_draw_ir_sdn_escape(composition.composition_id)} scene_key={_draw_ir_sdn_escape(composition.scene_key)} backend={composition.backend_target}"
+    write_idx = write_idx + 1
     for batch in composition.batches:
-        lines = lines.push(_draw_ir_sdn_emit_batch(batch))
+        lines[write_idx] = _draw_ir_sdn_emit_batch(batch)
+        write_idx = write_idx + 1
     lines.join("\n")
 
+fn _draw_ir_sdn_parse_rect(line: text, key: text) -> DrawIrRect:
+    DrawIrRect(
+        present: _draw_ir_sdn_bool(line, "{key}_present"),
+        x: _draw_ir_sdn_i32(line, "{key}_x"),
+        y: _draw_ir_sdn_i32(line, "{key}_y"),
+        width: _draw_ir_sdn_i32(line, "{key}_width"),
+        height: _draw_ir_sdn_i32(line, "{key}_height")
+    )
+
+fn _draw_ir_sdn_parse_styles(line: text, key: text) -> [DrawIrStyleProp]:
+    val count = _draw_ir_sdn_i32(line, "{key}_count")
+    var styles: [DrawIrStyleProp] = []
+    val parts = line.split(" ")
+    if count <= 0 or count > parts.len().to_i32():
+        return styles
+    val prefix = "{key}_"
+    var pending_key = ""
+    var have_key = false
+    for part in parts:
+        val separator = part.find("=")
+        if part.starts_with(prefix) and separator >= 0 and part.substring(0, separator).ends_with("_key"):
+            pending_key = _draw_ir_sdn_unescape(part.substring(separator + 1, part.len()))
+            have_key = true
+        elif have_key and part.starts_with(prefix) and separator >= 0 and part.substring(0, separator).ends_with("_value"):
+            styles.push(draw_ir_style_prop(pending_key, _draw_ir_sdn_unescape(part.substring(separator + 1, part.len()))))
+            have_key = false
+    if styles.len() != count:
+        return []
+    styles
+
+fn _draw_ir_sdn_parse_points(line: text, key: text) -> [DrawIrPoint]:
+    val count = _draw_ir_sdn_i32(line, "{key}_count")
+    var points: [DrawIrPoint] = []
+    val parts = line.split(" ")
+    if count <= 0 or count > parts.len().to_i32():
+        return points
+    val prefix = "{key}_"
+    var pending_x = 0
+    var have_x = false
+    for part in parts:
+        val separator = part.find("=")
+        if part.starts_with(prefix) and separator >= 0 and part.substring(0, separator).ends_with("_x"):
+            pending_x = _draw_ir_sdn_parse_i32(part.substring(separator + 1, part.len()))
+            have_x = true
+        elif have_x and part.starts_with(prefix) and separator >= 0 and part.substring(0, separator).ends_with("_y"):
+            points.push(draw_ir_point(pending_x, _draw_ir_sdn_parse_i32(part.substring(separator + 1, part.len()))))
+            have_x = false
+    if points.len() != count:
+        return []
+    points
+
+fn _draw_ir_sdn_parse_glyph_run(line: text) -> DrawIrGlyphRunPayload:
+    if not _draw_ir_sdn_bool(line, "glyph_valid"):
+        return draw_ir_empty_glyph_run_payload()
+    val count = _draw_ir_sdn_i32(line, "glyph_count")
+    if count <= 0 or count > _DRAW_IR_SDN_MAX_GLYPHS:
+        return draw_ir_empty_glyph_run_payload()
+    var glyph_ids: [u32] = []
+    var xs: [i32] = []
+    var ys: [i32] = []
+    var clusters: [i64] = []
+    var index = 0
+    var field = 0
+    for part in line.split(" "):
+        if index >= count:
+            break
+        val separator = part.find("=")
+        if separator <= 0:
+            continue
+        val key = part.substring(0, separator)
+        val value = part.substring(separator + 1, part.len())
+        if field == 0 and key == "glyph_{index}_id":
+            glyph_ids.push(_draw_ir_sdn_parse_u32(value))
+            field = 1
+        elif field == 1 and key == "glyph_{index}_x":
+            xs.push(_draw_ir_sdn_parse_i32(value))
+            field = 2
+        elif field == 2 and key == "glyph_{index}_y":
+            ys.push(_draw_ir_sdn_parse_i32(value))
+            field = 3
+        elif field == 3 and key == "glyph_{index}_cluster":
+            clusters.push(_draw_ir_sdn_parse_i32(value).to_i64())
+            field = 0
+            index = index + 1
+    if index != count or field != 0:
+        return draw_ir_empty_glyph_run_payload()
+    draw_ir_glyph_run_payload(glyph_ids, xs, ys, clusters, true)
+
+fn _draw_ir_sdn_parse_advances(line: text) -> [i32]:
+    val count = _draw_ir_sdn_i32(line, "advance_count")
+    if count <= 0 or count > _DRAW_IR_SDN_MAX_GLYPHS:
+        return []
+    var advances: [i32] = []
+    var index = 0
+    for part in line.split(" "):
+        if index >= count:
+            break
+        val separator = part.find("=")
+        if separator > 0 and part.substring(0, separator) == "advance_{index}":
+            val advance = _draw_ir_sdn_parse_i32(part.substring(separator + 1, part.len()))
+            if advance < 0:
+                return []
+            advances.push(advance)
+            index = index + 1
+    if index != count:
+        return []
+    advances
+
+fn _draw_ir_sdn_parse_edge(line: text) -> DrawEdge?:
+    val edge_present = _draw_ir_sdn_field(line, "edge_present")
+    if edge_present == "true":
+        return draw_edge(
+            _draw_ir_sdn_field(line, "edge_id"),
+            _draw_ir_sdn_field(line, "edge_source"),
+            _draw_ir_sdn_field(line, "edge_target"),
+            _draw_ir_sdn_field(line, "edge_routing"),
+            _draw_ir_sdn_parse_points(line, "edge_point"),
+            _draw_ir_sdn_parse_styles(line, "edge_style")
+        )
+    elif edge_present == "" and _draw_ir_sdn_field(line, "kind") == DRAW_IR_COMMAND_EDGE:
+        # Version-2 compatibility for payloads emitted before edge_present.
+        return draw_edge(
+            _draw_ir_sdn_field(line, "id"),
+            _draw_ir_sdn_field(line, "source"),
+            _draw_ir_sdn_field(line, "target"),
+            _draw_ir_sdn_field(line, "routing"),
+            [],
+            []
+        )
+    nil
+
 fn _draw_ir_sdn_parse_command(line: text) -> DrawIrCommand:
-    val kind = _draw_ir_sdn_field(line, "kind")
-    val component_id = _draw_ir_sdn_field(line, "id")
-    if kind == DRAW_IR_COMMAND_TEXT:
-        return draw_ir_text(component_id, _draw_ir_sdn_i32(line, "x"), _draw_ir_sdn_i32(line, "y"), _draw_ir_sdn_field(line, "text"), _draw_ir_sdn_u32(line, "color"))
-    if kind == DRAW_IR_COMMAND_EDGE:
-        val edge = draw_edge(component_id, _draw_ir_sdn_field(line, "source"), _draw_ir_sdn_field(line, "target"), _draw_ir_sdn_field(line, "routing"), [], [])
-        return draw_ir_edge_command(edge)
-    if kind == DRAW_IR_COMMAND_IMAGE:
-        return draw_ir_image_command(component_id, _draw_ir_sdn_i32(line, "x"), _draw_ir_sdn_i32(line, "y"), _draw_ir_sdn_i32(line, "width"), _draw_ir_sdn_i32(line, "height"), _draw_ir_sdn_field(line, "image_uri"), [])
-    draw_ir_rect(component_id, _draw_ir_sdn_i32(line, "x"), _draw_ir_sdn_i32(line, "y"), _draw_ir_sdn_i32(line, "width"), _draw_ir_sdn_i32(line, "height"), _draw_ir_sdn_u32(line, "color"))
+    DrawIrCommand(
+        kind: _draw_ir_sdn_field(line, "kind"),
+        component_id: _draw_ir_sdn_field(line, "id"),
+        x: _draw_ir_sdn_i32(line, "x"),
+        y: _draw_ir_sdn_i32(line, "y"),
+        width: _draw_ir_sdn_i32(line, "width"),
+        height: _draw_ir_sdn_i32(line, "height"),
+        color: _draw_ir_sdn_u32(line, "color"),
+        text_value: _draw_ir_sdn_field(line, "text"),
+        advance_widths: _draw_ir_sdn_parse_advances(line),
+        border_rect: _draw_ir_sdn_parse_rect(line, "border"),
+        content_rect: _draw_ir_sdn_parse_rect(line, "content"),
+        hit_rect: _draw_ir_sdn_parse_rect(line, "hit"),
+        clip_rect: _draw_ir_sdn_parse_rect(line, "clip"),
+        computed_style: _draw_ir_sdn_parse_styles(line, "style"),
+        edge: _draw_ir_sdn_parse_edge(line),
+        parent_id: _draw_ir_sdn_field(line, "parent_id"),
+        image_uri: _draw_ir_sdn_field(line, "image_uri"),
+        points: _draw_ir_sdn_parse_points(line, "point"),
+        glyph_run: _draw_ir_sdn_parse_glyph_run(line)
+    )
 
 fn _draw_ir_sdn_parse_source(line: text) -> DrawIrSourceInfo:
     draw_ir_source_info(

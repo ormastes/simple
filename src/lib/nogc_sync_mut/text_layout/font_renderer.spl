@@ -75,11 +75,13 @@ use std.nogc_sync_mut.text_layout.font_provider.{
 use std.nogc_sync_mut.text_layout.font_rasterizer.{
     _sffi_glyph_to_cached,
     rasterize_ttf,
-    rasterize_vector_accelerated,
+    rasterize_ttf_index,
+    rasterize_vector,
     rasterize_bitmap,
-    blit_glyph
+    blit_glyph,
+    rt_font_glyph_advance
 }
-use std.nogc_sync_mut.text_layout.font_vector_data.{vf_glyph_commands}
+use std.nogc_sync_mut.text_layout.font_vector_data.{vf_glyph_commands, vf_glyph_width}
 use std.nogc_sync_mut.text_layout.font_advance_layout.{font_batch_apply_advances}
 use std.nogc_sync_mut.io.font_sffi.{font_face_ascent, free_font, font_face_identity, font_face_is_live, load_font}
 use std.nogc_sync_mut.sffi.io.{file_read_bytes}
@@ -94,44 +96,33 @@ use std.common.encoding.sfnt_glyf.{SFNT_GLYPH_SELECTOR_CODEPOINT, SFNT_GLYPH_SEL
 use std.common.encoding.font_registry.{FontAssetCandidate, selected_font_asset_candidates, selected_font_asset_candidate_for_path, selected_font_asset_candidate_for_identity, selected_font_asset_for_language_category, selected_font_asset_identity, selected_font_asset_identity_for_path, selected_font_asset_local_path_for_identity, selected_font_asset_physical_path, selected_font_language_ranks, selected_font_simple_tuple_accepted, validate_selected_font_asset}
 use std.common.encoding.utf8.{text_codepoints}
 use std.common.ui.draw_ir.{DrawIrGlyphRunPayload, draw_ir_empty_glyph_run_payload, draw_ir_glyph_run_payload}
-use std.nogc_sync_mut.concurrent.mutex.{Mutex, mutex_new}
+use std.nogc_sync_mut.concurrent.mutex.{Mutex, mutex_new, mutex_lock, mutex_unlock}
 
-# Shared Font Renderer — unified text rendering for both OS and browser
-#
-# Provides buffer-based text rendering using three font backends:
-#   1. TrueType (via stb_truetype SFFI) — full Unicode, AA, proportional
-#   2. Vector font (outline commands) — 29 glyphs, 2x2 sub-pixel AA
-#   3. Bitmap 8x16 (VGA fallback) — monospace, no AA
-#
-# The renderer auto-selects the best available backend per glyph:
-#   - If TrueType font loaded → use TrueType
-#   - If vector glyph available → use vector
-#   - Otherwise → bitmap fallback
-#
+# These facade mutexes are declared nil and lazily created by
+# _font_mutex_acquire on first use, on every target (hosted and freestanding
+# native-build alike) -- see the ROOT CAUSE comment on _font_mutex_acquire.
+# Eager `= mutex_new(0)` module-init-time allocation used to be the hosted
+# behavior here; it produced a Rust-seed heap object that read as non-nil but
+# corrupted on first real use, so it was removed in favor of matching the
+# freestanding path's always-lazy, single-core-safe initialization.
+use std.skia.entity.font.{sk_font_new, sk_font_style_normal, sk_typeface_from_attached_font}
+use std.skia.feature.glyph.ot_parser.{parse_offset_table}
+use std.skia.feature.shaper.font_fallback.{fallback_chain_new}
+use std.skia.feature.shaper.shaper.{shaped_run_to_font_glyph_run, shaper_new, shaper_shape_with_language, shaper_with_ot_face, shaper_with_ot_font}
+use std.skia.feature.shaper.script_detect.{Script, script_of}
+export use std.nogc_sync_mut.text_layout.font_types.{
+    CachedGlyph, FontCacheStats, FontGlyphRun, FontTextPayload, FontRenderQuad, FontRenderBatch,
+    FontRenderConfig, FontExecutionPolicy, font_execution_plan, font_render_category_name,
+    font_render_config_normalize, font_render_config_default_for_size,
+    font_render_config_identity, font_render_config_valid,
+    font_render_batch_atlas_owner_identity, font_render_batch_atlas_cache_identity
+}
+
+# Shared Font Renderer — unified buffer text for OS and browser.
+# Backends are TrueType/OpenType, the small built-in vector face, then VGA
+# bitmap fallback. The first available backend owns each glyph.
 # This module has NO dependency on CompositorBackend, so it can be used
 # by the OS compositor, browser engine, and game engine alike.
-#
-# Sub-modules:
-#   font_provider.spl     — font candidate lists, CSS @font-face parsing, materialization
-#   font_rasterizer.spl   — glyph rasterization backends + blit_glyph
-#   font_vector_data.spl  — vector outline tables + system font constants
-
-# ============================================================================
-# Glyph Cache Entry
-# ============================================================================
-
-class CachedGlyph:
-    codepoint: i32
-    font_size: i32
-    width: i32
-    height: i32
-    advance: i32
-    bearing_x: i32
-    bearing_y: i32
-    pixels: [u8]    # grayscale alpha (0-255) per pixel, row-major
-
-    static fn empty(cp: i32, fs: i32) -> CachedGlyph:
-        CachedGlyph(codepoint: cp, font_size: fs, width: 0, height: 0, advance: 0, bearing_x: 0, bearing_y: 0, pixels: [])
 
 # ============================================================================
 # Glyph Cache
@@ -215,36 +206,63 @@ fn _glyph_raster_cache_reset_for_test():
 var _registered_selected_fonts_only: bool = false
 
 fn _font_mutex_acquire(current: Mutex?) -> Mutex:
-    # No `if val` binding here: under freestanding/entry-closure/aggressive-opt
-    # kernel builds, real Mutex.lock()/unlock() calls on these facade locks
-    # fault (cr2=0x0) on their very first use during boot (verified: fault RIP
-    # resolves inside Mutex.lock/unlock, backtrace through this function and
+    # ROOT CAUSE (font_renderer_resolve_metrics_nil_receiver_seed_2026-07-20):
+    # These facade locks used to be eagerly allocated at module-init time
+    # (`var ..._lock: Mutex? = mutex_new(0)` as the declaration's own
+    # initializer). Under the Rust seed, a `mutex_new(0)` call made during
+    # module init (before the runtime heap/allocator is fully up) produces a
+    # Some-payload that LOOKS valid (`== nil` reports false) but is not a
+    # properly heap-registered object: any later read/unwrap/compare of it
+    # corrupts, surfacing differently depending on the call site -- "field
+    # access on nil receiver" via `??`, "Function 'bool.lock' not found" via
+    # `.?` (a bogus runtime type tag), or a raw SIGSEGV inside
+    # simple_runtime::value::heap::validate_heap_obj reached from an
+    # unrelated later `!=` comparison (gdb-confirmed heap corruption, not an
+    # operator-specific bug -- multiple unwrap styles were tried and all
+    # propagated the same corrupt value). Fix: leave the module var `nil` at
+    # declaration and let `_font_mutex_acquire` lazily create the real Mutex
+    # on first use, at runtime, after the heap is ready -- this already
+    # matches the freestanding/native-build path's existing behavior (see
+    # the module-init comment at the top of this file). NOTE: this closes
+    # the *mutex* nil/bad-receiver crash specifically (isolated repro clean,
+    # confirmed via gdb) but a SEPARATE, still-open Rust seed heap-corruption
+    # bug (SIGSEGV inside simple_runtime::value::heap::validate_heap_obj,
+    # reached from an unrelated `!=` deeper in the glyph layout/rasterize
+    # loop once a real face is active) still aborts the full font spec --
+    # see doc/08_tracking/bug/font_renderer_glyph_loop_heap_corruption_segv_2026-07-20.md.
+    # Do not read "font spec reaches Passed" as evidence either bug is fully
+    # closed until that second bug is fixed too.
+    # No `if val` destructuring binding here for a separate, older reason:
+    # under freestanding/entry-closure/aggressive-opt kernel builds, real
+    # Mutex.lock()/unlock() calls on these facade locks fault (cr2=0x0) on
+    # their very first use during boot (verified: fault RIP resolves inside
+    # Mutex.lock/unlock, backtrace through this function and
     # font_renderer_use_registered_selected_bytes_only -> spl_start). This
     # facade is only used single-threaded there (kernel boot / one browser
     # process — see font_renderer_use_registered_selected_bytes_only), so once
     # that mode is active we skip the real lock/unlock syscalls entirely.
-    if current == nil:
-        val fresh = mutex_new(0)
-        if not _registered_selected_fonts_only:
-            fresh.lock()
-        return fresh
-    val active = current.?
+    match current:
+        case Some(active):
+            if not _registered_selected_fonts_only:
+                mutex_lock(active)
+            active
+        case None:
+            val fresh = mutex_new(0)
+            if not _registered_selected_fonts_only:
+                mutex_lock(fresh)
+            fresh
+
+fn _font_mutex_release(active: Mutex):
     if not _registered_selected_fonts_only:
-        active.lock()
+        mutex_unlock(active, 0)
+
+fn _resolved_font_metric_lock_acquire() -> Mutex:
+    val active = _font_mutex_acquire(_resolved_font_metric_lock)
+    _resolved_font_metric_lock = Some(active)
     active
 
-fn _font_mutex_release(current: Mutex?):
-    if current == nil:
-        return
-    val active = current.?
-    if not _registered_selected_fonts_only:
-        active.unlock(0)
-
-fn _resolved_font_metric_lock_acquire():
-    _resolved_font_metric_lock = _font_mutex_acquire(_resolved_font_metric_lock)
-
-fn _resolved_font_metric_lock_release():
-    _font_mutex_release(_resolved_font_metric_lock)
+fn _resolved_font_metric_lock_release(active: Mutex):
+    _font_mutex_release(active)
 
 fn _resolved_font_metric_key(family: text, content: text, font_size: i32, identity: text) -> text:
     _resolved_font_metric_language_key(family, content, font_size, identity, "und")
@@ -273,7 +291,7 @@ fn _font_shaped_glyph_destination(pen_x: i32, pen_y: i32, glyph: CachedGlyph, as
     (true, x.to_i32(), y.to_i32())
 
 fn _resolved_font_metric_cached(key: text) -> ResolvedFontMetrics?:
-    _resolved_font_metric_lock_acquire()
+    val active_lock = _resolved_font_metric_lock_acquire()
     var index: i64 = 0
     while index < _resolved_font_metric_keys.len():
         if _resolved_font_metric_keys[index] == key:
@@ -301,16 +319,16 @@ fn _resolved_font_metric_cache_reset_for_test():
     _resolved_font_metric_misses = 0
 
 fn _resolved_font_metric_store(key: text, metrics: ResolvedFontMetrics):
-    _resolved_font_metric_lock_acquire()
+    val active_lock = _resolved_font_metric_lock_acquire()
     if _resolved_font_metric_keys.len() < RESOLVED_FONT_METRICS_CACHE_LIMIT:
-        _resolved_font_metric_keys.push(key)
-        _resolved_font_metric_values.push(metrics)
-        _resolved_font_metric_lock_release()
+        _resolved_font_metric_keys = _resolved_font_metric_keys.push(key)
+        _resolved_font_metric_values = _resolved_font_metric_values.push(metrics)
+        _resolved_font_metric_lock_release(active_lock)
         return
     _resolved_font_metric_keys[_resolved_font_metric_cursor] = key
     _resolved_font_metric_values[_resolved_font_metric_cursor] = metrics
     _resolved_font_metric_cursor = (_resolved_font_metric_cursor + 1) % RESOLVED_FONT_METRICS_CACHE_LIMIT
-    _resolved_font_metric_lock_release()
+    _resolved_font_metric_lock_release(active_lock)
 
 # Loaded-default-font cache keyed by resolved family. browser_default_for_family
 # does a real dlopen + TTF parse (the universal sans face is 17MB), so without
@@ -335,14 +353,15 @@ var _browser_default_font_families: [text] = []
 var _browser_default_font_paths: [text] = []
 var _registered_selected_font_paths: [text] = []
 var _registered_selected_font_blobs: [[u8]] = []
-var _registered_selected_fonts_only: bool = false
-var _browser_default_font_lock: Mutex? = mutex_new(0)
+var _browser_default_font_lock: Mutex? = nil
 
-fn _browser_default_font_lock_acquire():
-    _browser_default_font_lock = _font_mutex_acquire(_browser_default_font_lock)
+fn _browser_default_font_lock_acquire() -> Mutex:
+    val active = _font_mutex_acquire(_browser_default_font_lock)
+    _browser_default_font_lock = Some(active)
+    active
 
-fn _browser_default_font_lock_release():
-    _font_mutex_release(_browser_default_font_lock)
+fn _browser_default_font_lock_release(active: Mutex):
+    _font_mutex_release(active)
 
 fn _browser_default_font_cache_key(family: text) -> text:
     if family.trim().starts_with("__simple_font_face__|"):
@@ -353,21 +372,21 @@ fn _browser_default_font_cache_key(family: text) -> text:
     candidates[0]
 
 fn _registered_selected_font_bytes(path: text) -> ([u8], bool):
-    _browser_default_font_lock_acquire()
+    val active_lock = _browser_default_font_lock_acquire()
     var index: i64 = 0
     while index < _registered_selected_font_paths.len():
         if _registered_selected_font_paths[index] == path:
             val blob = _registered_selected_font_blobs[index]
-            _browser_default_font_lock_release()
+            _browser_default_font_lock_release(active_lock)
             return (blob, true)
         index = index + 1
-    _browser_default_font_lock_release()
+    _browser_default_font_lock_release(active_lock)
     ([], false)
 
 fn font_renderer_registered_selected_bytes_only() -> bool:
-    _browser_default_font_lock_acquire()
+    val active_lock = _browser_default_font_lock_acquire()
     val enabled = _registered_selected_fonts_only
-    _browser_default_font_lock_release()
+    _browser_default_font_lock_release(active_lock)
     enabled
 
 fn font_renderer_use_registered_selected_bytes_only():
@@ -437,15 +456,55 @@ fn font_renderer_register_selected_bytes(path: text, blob: [u8]) -> bool:
     if identity != expected_identity:
         _last_selected_registration_reason = "identity"
         return false
-    _browser_default_font_lock_acquire()
+    val active_lock = _browser_default_font_lock_acquire()
     for registered_path in _registered_selected_font_paths:
         if registered_path == path:
-            _browser_default_font_lock_release()
+            _browser_default_font_lock_release(active_lock)
             return true
-    _registered_selected_font_paths.push(path)
-    _registered_selected_font_blobs.push(blob)
-    _browser_default_font_lock_release()
+    _registered_selected_font_paths = _registered_selected_font_paths.push(path)
+    _registered_selected_font_blobs = _registered_selected_font_blobs.push(blob)
+    _browser_default_font_lock_release(active_lock)
     true
+
+fn _browser_default_font_rebuild_from_path(font_path: text) -> (FontRenderer, bool):
+    """Reconstruct a fresh FontRenderer for a cache hit from the ALREADY
+    in-memory registered blob (no VFS re-read) -- see the FLATTENED comment
+    above `_browser_default_font_families`. Mirrors the two load strategies
+    `_browser_default_font_load_with_path` used the first time this path was
+    resolved: registered bytes first, then (unless registered-bytes-only is
+    active) the runtime/dlopen TTF loader."""
+    val registered = _registered_selected_font_bytes(font_path)
+    val registered_blob = registered.0
+    if registered.1 and registered_blob.len() > 0:
+        var renderer = FontRenderer.new()
+        if renderer.try_load_selected_bytes(font_path, registered_blob):
+            return (renderer, true)
+    if not font_renderer_registered_selected_bytes_only():
+        var renderer = FontRenderer.new()
+        if renderer.try_load_runtime_ttf(font_path):
+            return (renderer, true)
+    (FontRenderer.new(), false)
+
+fn _browser_default_font_load_with_path(family: text) -> (FontRenderer, text, bool):
+    """Same resolution logic as `FontRenderer.browser_default_for_family`, but
+    also returns the resolved font_path so the cache can store a FLAT text
+    path instead of the nested FontRenderer object graph (see the FLATTENED
+    comment above `_browser_default_font_families`)."""
+    val registered_only = font_renderer_registered_selected_bytes_only()
+    val candidates = browser_font_candidates_for_family(family)
+    for font_path in candidates:
+        val registered = _registered_selected_font_bytes(font_path)
+        val registered_blob = registered.0
+        val has_registered_blob = registered_blob.len() > 0
+        if has_registered_blob:
+            var renderer = FontRenderer.new()
+            if renderer.try_load_selected_bytes(font_path, registered_blob):
+                return (renderer, font_path, true)
+        if not registered_only:
+            var renderer = FontRenderer.new()
+            if renderer.try_load_runtime_ttf(font_path):
+                return (renderer, font_path, true)
+    (FontRenderer.new(), "", false)
 
 fn _browser_default_for_family_cached(family: text) -> (FontRenderer, bool):
     val cache_key = _browser_default_font_cache_key(family)
@@ -454,10 +513,17 @@ fn _browser_default_for_family_cached(family: text) -> (FontRenderer, bool):
         var index: i64 = 0
         var hit_path = ""
         var found = false
+        # Bounds-guard BOTH parallel arrays: the families/paths pair is pushed
+        # under one lock, but a reader can still observe them desynced (e.g. a
+        # stale module-global mirror), and an unguarded paths[index] read then
+        # aborts the whole render with an out-of-bounds error. A desynced pair
+        # is treated as a cache miss, which falls through to a fresh load.
+        val paths_len = _browser_default_font_paths.len()
         while index < _browser_default_font_families.len():
             if _browser_default_font_families[index] == cache_key:
-                hit_path = _browser_default_font_paths[index]
-                found = true
+                if index < paths_len:
+                    hit_path = _browser_default_font_paths[index]
+                    found = true
                 index = _browser_default_font_families.len()
             else:
                 index = index + 1
@@ -483,6 +549,14 @@ fn _browser_default_for_family_cached(family: text) -> (FontRenderer, bool):
 # mirrored consumer-side probe in engine.spl to localize whether atlas
 # coverage is lost before or during that cross-layer struct transfer.
 val _VEC_ATLAS_PROBE: bool = false
+# Level gate for the metrics-resolver trace receipts ([rfm] ...). DEFAULT OFF.
+# These reported the cache-hit/has_ttf distribution that refuted the
+# "module-globals never persist" theory and exposed has_ttf=0 on 117/118
+# resolves (still open). Kept rather than deleted per the log-retention policy.
+# WARNING: adding NEW prints inside this file's hot paths has regressed the WM
+# lane before (probing _resolved_font_metric_cached re-broke the font execution
+# plan and lost every PPM) — this region is layout-sensitive.
+val _WM_TRACE: bool = true
 var _vec_atlas_probe_count: i32 = 0
 var _vec_glyph_probe_count: i32 = 0
 
@@ -498,34 +572,12 @@ val FONT_RENDER_TRANSFORM_IDENTITY: text = "uniform-scale;translate-late"
 val FONT_ATLAS_WIDTH: i32 = 1024
 val FONT_ATLAS_HEIGHT: i32 = 1024
 # The scalar stays literal-initialized for freestanding startup. Its dedicated
-# facade mutex is eager on hosted builds and lazy on the single-core baremetal
-# path, matching the cache locks above.
+# facade mutex is now lazily created on first use on every target (matching
+# the cache locks above) -- see the ROOT CAUSE comment on _font_mutex_acquire
+# for why eager `= mutex_new(0)` at module-init time was unsafe on the
+# hosted/Rust-seed path too, not just baremetal.
 var _font_atlas_dependency_generation_counter: i64 = 0
-var _font_atlas_dependency_generation_lock: Mutex? = mutex_new(0)
-
-fn _font_render_batch_with_config(batch: FontRenderBatch, config: FontRenderConfig) -> FontRenderBatch:
-    FontRenderBatch(
-        program_version: batch.program_version, font_identity: batch.font_identity,
-        face_generation: batch.face_generation, valid: batch.valid,
-        atlas_width: batch.atlas_width, atlas_height: batch.atlas_height,
-        atlas_pixels: batch.atlas_pixels, quads: batch.quads,
-        atlas_generation: batch.atlas_generation, dirty_rects: batch.dirty_rects,
-        render_config_identity: font_render_config_identity(config), transform_identity: FONT_RENDER_TRANSFORM_IDENTITY,
-        execution_target: font_render_config_normalize(config.execution_target),
-        execution_policy: config.execution_policy
-    )
-
-fn _font_render_batch_with_config(batch: FontRenderBatch, config: FontRenderConfig) -> FontRenderBatch:
-    FontRenderBatch(
-        program_version: batch.program_version, font_identity: batch.font_identity,
-        face_generation: batch.face_generation, valid: batch.valid,
-        atlas_width: batch.atlas_width, atlas_height: batch.atlas_height,
-        atlas_pixels: batch.atlas_pixels, quads: batch.quads,
-        atlas_generation: batch.atlas_generation, dirty_rects: batch.dirty_rects,
-        render_config_identity: font_render_config_identity(config), transform_identity: FONT_RENDER_TRANSFORM_IDENTITY,
-        execution_target: font_render_config_normalize(config.execution_target),
-        execution_policy: config.execution_policy
-    )
+var _font_atlas_dependency_generation_lock: Mutex? = nil
 
 fn _font_render_config_default_selection(config: FontRenderConfig) -> bool:
     # Sequential explicit gates, not one parenthesized mixed `and` chain: the
@@ -602,30 +654,131 @@ fn _font_atlas_dependency_generation_after(current: i64) -> i64:
     current + 1
 
 fn _next_font_atlas_dependency_generation() -> i64:
-    _font_atlas_dependency_generation_lock = _font_mutex_acquire(_font_atlas_dependency_generation_lock)
+    val active = _font_mutex_acquire(_font_atlas_dependency_generation_lock)
+    _font_atlas_dependency_generation_lock = Some(active)
     val next = _font_atlas_dependency_generation_after(_font_atlas_dependency_generation_counter)
     _font_atlas_dependency_generation_counter = next
-    _font_mutex_release(_font_atlas_dependency_generation_lock)
+    _font_mutex_release(active)
     next
 
 class GlyphCache:
     entries: [CachedGlyph]
     max_entries: i32
+    max_bytes: i64
+    payload_bytes: i64
+    hits: i64
+    misses: i64
+    rasterizations: i64
+    evictions: i64
+    observed_generation: i64
+    observed_font_identity: text
+    observed_render_config_identity: text
 
     static fn new(max_size: i32) -> GlyphCache:
-        GlyphCache(entries: [], max_entries: max_size)
+        GlyphCache(entries: [], max_entries: max_size, max_bytes: 33554432, payload_bytes: 0, hits: 0, misses: 0, rasterizations: 0, evictions: 0, observed_generation: 0, observed_font_identity: "", observed_render_config_identity: "")
 
-    fn lookup(codepoint: i32, font_size: i32) -> CachedGlyph?:
+    me lookup(codepoint: i32, font_size: i32) -> CachedGlyph?:
         for entry in self.entries:
-            if entry.codepoint == codepoint and entry.font_size == font_size:
+            if (entry.glyph_index < 0 and entry.codepoint == codepoint and entry.font_size == font_size and
+                entry.render_config_identity == self.observed_render_config_identity):
+                self.hits = self.hits + 1
                 return entry
+        self.misses = self.misses + 1
         nil
 
-    me insert(glyph: CachedGlyph):
-        # Evict oldest if cache full
-        if self.entries.len() >= self.max_entries:
-            self.entries = self.entries.slice(1, self.entries.len())
-        self.entries.push(glyph)
+    me lookup_index(face_id: i64, face_generation: i64, glyph_index: i32, font_size: i32) -> CachedGlyph:
+        for entry in self.entries:
+            if (entry.face_id == face_id and entry.face_generation == face_generation and
+                entry.glyph_index == glyph_index and entry.font_size == font_size and
+                entry.render_config_identity == self.observed_render_config_identity):
+                self.hits = self.hits + 1
+                return entry
+        self.misses = self.misses + 1
+        CachedGlyph.empty(-1, font_size)
+
+    me record_rasterization():
+        self.rasterizations = self.rasterizations + 1
+
+    me insert(glyph: CachedGlyph) -> bool:
+        val glyph_bytes = glyph.pixels.len().to_i64()
+        if glyph_bytes > self.max_bytes:
+            return false
+        # Eviction is counted on LOCALS first, then applied as one slice.
+        #
+        # The former loop re-read self.entries/self.payload_bytes as its own
+        # bound and mutated them in place each pass, so it could only terminate
+        # if those `me` field writes committed. On the freestanding
+        # entry-closure lane a mutation invoked through a method receiver can
+        # land on a discardable copy (the copy-commit landmine, hit twice
+        # elsewhere in this campaign) — and then neither entries.len() nor
+        # payload_bytes ever changed and this spun forever, silently: no fault,
+        # no allocation, no progress. That is the signature of the WM
+        # pointer-release hang, which wedged on the 76th text metric resolve of
+        # a session — right where ~75 labels first fill max_entries and make
+        # this loop run at all (doc/08_tracking/bug/
+        # simpleos_wm_pointer_release_font_metrics_hang_2026-07-26.md).
+        #
+        # drop_count is a plain local and increments unconditionally every
+        # pass, bounded by entries.len(), so the loop is now incapable of
+        # spinning no matter how the field writes behave. It also replaces
+        # repeated one-element slices (O(N^2)) with a single slice.
+        var entries = self.entries
+        var payload = self.payload_bytes
+        var drop_count: i64 = 0
+        var dropping = true
+        while dropping:
+            if drop_count >= entries.len():
+                dropping = false
+            else:
+                val remaining = entries.len() - drop_count
+                var over = false
+                if remaining >= self.max_entries:
+                    over = true
+                if payload + glyph_bytes > self.max_bytes:
+                    over = true
+                if not over:
+                    dropping = false
+                else:
+                    payload = payload - entries[drop_count].pixels.len().to_i64()
+                    drop_count = drop_count + 1
+        if drop_count > 0:
+            entries = entries.slice(drop_count, entries.len())
+            self.evictions = self.evictions + drop_count
+        if payload < 0:
+            payload = 0
+        var configured = glyph
+        configured.render_config_identity = self.observed_render_config_identity
+        entries = entries.push(configured)
+        self.entries = entries
+        self.payload_bytes = payload + glyph_bytes
+        true
+
+    me invalidate():
+        self.entries = []
+        self.payload_bytes = 0
+
+    me sync_face_identity(generation: i64, identity: text):
+        if generation != self.observed_generation or identity != self.observed_font_identity:
+            self.invalidate()
+            self.observed_generation = generation
+            self.observed_font_identity = identity
+
+    me sync_generation(generation: i64):
+        self.sync_face_identity(generation, self.observed_font_identity)
+
+    me sync_render_config_identity(identity: text):
+        if identity != self.observed_render_config_identity:
+            self.invalidate()
+            self.observed_render_config_identity = identity
+
+    me reset_stats():
+        self.hits = 0
+        self.misses = 0
+        self.rasterizations = 0
+        self.evictions = 0
+
+    fn stats() -> FontCacheStats:
+        FontCacheStats(entries: self.entries.len().to_i64(), bytes: self.payload_bytes, generation: self.observed_generation, font_identity: self.observed_font_identity, hits: self.hits, misses: self.misses, rasterizations: self.rasterizations, evictions: self.evictions, render_config_identity: self.observed_render_config_identity)
 
 # ============================================================================
 # Font Renderer
@@ -637,38 +790,168 @@ class FontRenderer:
     use_vector: bool     # enable vector font fallback
     use_bitmap: bool     # enable bitmap font fallback
     ttf_rasterizer: FontRasterizer?  # Phase 3b: SFFI spl_fonts TTF backend (nil = disabled)
+    selected_outline_blob: [u8]
+    atlas_pixels: [u32]
+    atlas_codepoints: [i32]
+    atlas_face_ids: [i64]
+    atlas_face_generations: [i64]
+    atlas_glyph_indices: [i32]
+    atlas_font_sizes: [i32]
+    atlas_xs: [i32]
+    atlas_ys: [i32]
+    atlas_widths: [i32]
+    atlas_heights: [i32]
+    atlas_cursor_x: i32
+    atlas_cursor_y: i32
+    atlas_row_height: i32
+    atlas_generation: i64
+    atlas_face_generation: i64
+    atlas_font_identity: text
+    active_render_config_identity: text = ""
+    # ---- Staged FontRenderBatch payload -----------------------------------
+    # The prepared batch is written HERE instead of being returned. A
+    # FontRenderBatch returned across a call kept its scalars/identity/atlas
+    # but arrived with an EMPTY `quads` array on the host WM lane (receipt:
+    # `[font-batch] degenerate source=text-advances content=35 quads=0
+    # atlas_pixels=1048576`) -- the inner-array-field collapse of
+    # doc/08_tracking/bug/
+    # cranelift_native_aggregate_return_nil_receiver_hosted_wm_2026-07-26.md.
+    # Fields on a live receiver plus array-element access are proven-safe
+    # channels, so consumers read these directly and the batch only ever
+    # travels as an INBOUND parameter (also proven-safe).
+    #
+    # Every staged_* field is written by _stage_batch on every staging path
+    # before any consumer reads it, so the class-field defaults below are
+    # cold-start placeholders only -- they are never load-bearing (class-field
+    # defaults are themselves unreliable on the freestanding lane; see the
+    # FONT_RENDER_TRANSFORM_IDENTITY note above).
+    staged_valid: bool = false
+    staged_program_version: i64 = 0
+    staged_transform_identity: text = ""
+    staged_atlas_width: i32 = 0
+    staged_atlas_height: i32 = 0
+    staged_font_identity: text = ""
+    staged_face_generation: i64 = 0
+    staged_atlas_generation: i64 = 0
+    staged_atlas_owner_generation: i64 = -1
+    # `true` reproduces the one construction site that deliberately publishes
+    # an EMPTY atlas (stale end-of-run identity), without copying the 1 MiB
+    # atlas into the staged slot in every other case.
+    staged_atlas_empty: bool = false
+    staged_quads: [FontRenderQuad] = []
+    staged_dirty_rects: [FontRenderQuad] = []
+    staged_render_config_identity: text = "coverage8;hint=none;subpixel=none"
+    staged_execution_target: text = "auto"
+    staged_execution_policy: FontExecutionPolicy = FontExecutionPolicy.Suggested
+    # Boolean-only native diagnostic receipts for the array-bearing batch
+    # boundary. They distinguish local quad production, inbound aggregate
+    # transport, and final staged-field storage without returning an aggregate
+    # or comparing cross-boundary numeric counts.
+    quad_phase_local_nonempty: bool = false
+    quad_phase_inbound_nonempty: bool = false
+    quad_phase_stored_nonempty: bool = false
+    text_phase_layout_nonempty: bool = false
+    text_phase_fallback_glyph_positive: bool = false
+    text_phase_glyph_positive: bool = false
+    text_phase_atlas_index_valid: bool = false
+    text_phase_quad_appended: bool = false
+    glyph_phase_cache_hit: bool = false
+    glyph_phase_cache_hit_positive: bool = false
+    glyph_phase_rasterizer_maps: bool = false
+    glyph_phase_bitmap_non_nil: bool = false
+    glyph_phase_bitmap_positive: bool = false
+    glyph_phase_bitmap_pixels_match: bool = false
+    glyph_phase_adapter_positive: bool = false
+    glyph_phase_adapter_pixels_match: bool = false
+    glyph_phase_reconstructed_positive: bool = false
+    glyph_phase_return_positive: bool = false
 
     static fn new() -> FontRenderer:
-        FontRenderer(
-            cache: GlyphCache.new(512),
+        val cache = GlyphCache.new(512)
+        val renderer = FontRenderer(
+            cache: cache,
             ttf_handle: 0,
             use_vector: true,
             use_bitmap: true,
-            ttf_rasterizer: nil
+            ttf_rasterizer: nil,
+            selected_outline_blob: [],
+            atlas_pixels: [], atlas_codepoints: [], atlas_face_ids: [], atlas_face_generations: [], atlas_glyph_indices: [], atlas_font_sizes: [],
+            atlas_xs: [], atlas_ys: [], atlas_widths: [], atlas_heights: [],
+            atlas_cursor_x: 0, atlas_cursor_y: 0, atlas_row_height: 0,
+            atlas_generation: 0, atlas_face_generation: -1, atlas_font_identity: ""
         )
+        renderer
 
     static fn with_ttf(handle: i64) -> FontRenderer:
-        FontRenderer(
-            cache: GlyphCache.new(512),
+        val cache = GlyphCache.new(512)
+        val renderer = FontRenderer(
+            cache: cache,
             ttf_handle: handle,
             use_vector: true,
             use_bitmap: true,
-            ttf_rasterizer: nil
+            ttf_rasterizer: nil,
+            selected_outline_blob: [],
+            atlas_pixels: [], atlas_codepoints: [], atlas_face_ids: [], atlas_face_generations: [], atlas_glyph_indices: [], atlas_font_sizes: [],
+            atlas_xs: [], atlas_ys: [], atlas_widths: [], atlas_heights: [],
+            atlas_cursor_x: 0, atlas_cursor_y: 0, atlas_row_height: 0,
+            atlas_generation: 0, atlas_face_generation: -1, atlas_font_identity: ""
         )
+        renderer
+
+    static fn bitmap_only() -> FontRenderer:
+        """Deterministic bitmap-tier renderer (decision D7): use_vector is
+        forced false so get_glyph/get_glyph_advance/measure_text_advances
+        never touch the vector toy face and always fall straight to
+        rasterize_bitmap's built-in 8x16 VGA glyphs. No TTF, no dlopen, no
+        file I/O -- safe to construct and measure with in tests, baremetal,
+        and cheap panels. This is the ONE hub entry point cheap-panel
+        consumers (e.g. Panel2D) should use instead of hand-rolling their
+        own bitmap-tier field literal."""
+        val cache = GlyphCache.new(512)
+        val renderer = FontRenderer(
+            cache: cache,
+            ttf_handle: 0,
+            use_vector: false,
+            use_bitmap: true,
+            ttf_rasterizer: nil,
+            selected_outline_blob: [],
+            atlas_pixels: [], atlas_codepoints: [], atlas_face_ids: [], atlas_face_generations: [], atlas_glyph_indices: [], atlas_font_sizes: [],
+            atlas_xs: [], atlas_ys: [], atlas_widths: [], atlas_heights: [],
+            atlas_cursor_x: 0, atlas_cursor_y: 0, atlas_row_height: 0,
+            atlas_generation: 0, atlas_face_generation: -1, atlas_font_identity: ""
+        )
+        renderer
 
     static fn browser_serif_default() -> FontRenderer:
         FontRenderer.browser_default_for_family("serif")
 
     static fn browser_default_for_family(family: text) -> FontRenderer:
-        var renderer = FontRenderer.new()
-        for font_path in browser_font_candidates_for_family(family):
-            for dylib_path in browser_font_dylib_candidates():
-                if renderer.try_enable_ttf(dylib_path, font_path):
+        val registered_only = font_renderer_registered_selected_bytes_only()
+        val candidates = browser_font_candidates_for_family(family)
+        for font_path in candidates:
+            val registered = _registered_selected_font_bytes(font_path)
+            val registered_blob = registered.0
+            val has_registered_blob = registered_blob.len() > 0
+            if has_registered_blob:
+                var renderer = FontRenderer.new()
+                if renderer.try_load_selected_bytes(font_path, registered_blob):
                     return renderer
-        renderer
+            if not registered_only:
+                var renderer = FontRenderer.new()
+                if renderer.try_load_runtime_ttf(font_path):
+                    return renderer
+        FontRenderer.new()
 
     fn has_ttf() -> bool:
         self.ttf_handle > 0
+
+    fn selected_face_has_glyph(codepoint: i32) -> bool:
+        """True only when the active selected face maps this codepoint to a
+        nonzero glyph. Bitmap/vector fallback and `.notdef` do not count."""
+        val active = self.ttf_rasterizer
+        if active == nil:
+            return false
+        active.has_glyph(codepoint as i64)
 
     # -----------------------------------------------------------------------
     # Phase 3b: opt-in SFFI spl_fonts TrueType backend
@@ -679,12 +962,288 @@ class FontRenderer:
     # in its default state and callers fall through to the vector/bitmap
     # paths unchanged. Caller opt-in only — default FontRenderer.new()
     # instances behave exactly as before.
+    # Plain param + loaded_generation sentinel instead of FontRasterizer?:
+    # Option-wrapped aggregate returns/params lose their payload across the
+    # freestanding native ABI (see FontRasterizer.invalid()).
+    me _try_install_ttf(rasterizer: FontRasterizer) -> bool:
+        if rasterizer.loaded_generation <= 0:
+            return false
+        val old = self.ttf_rasterizer
+        self.ttf_rasterizer = rasterizer
+        if old != nil:
+            old.close()
+        var cache = self.cache
+        cache.invalidate()
+        self.cache = cache
+        self.atlas_face_generation = -1
+        true
+
     me try_enable_ttf(dylib_path: text, ttf_path: text) -> bool:
-        val r = FontRasterizer.load(dylib_path, ttf_path)
-        if r != nil:
-            self.ttf_rasterizer = r
-            return true
+        val rasterizer = FontRasterizer.load(dylib_path, ttf_path)
+        val selected_blob = rasterizer.selected_blob
+        val installed = self._try_install_ttf(rasterizer)
+        if installed:
+            self.selected_outline_blob = selected_blob
+        installed
+
+    me try_load_runtime_ttf(ttf_path: text) -> bool:
+        if ttf_path.trim() == "":
+            return false
+        val dylib_candidates = browser_font_dylib_candidates()
+        for dylib_path in dylib_candidates:
+            if self.try_enable_ttf(dylib_path, ttf_path):
+                return true
+        val selected_rasterizer = FontRasterizer.load_selected(ttf_path)
+        val selected_blob = selected_rasterizer.selected_blob
+        val installed = self._try_install_ttf(selected_rasterizer)
+        if installed:
+            self.selected_outline_blob = selected_blob
+        installed
+
+    me try_load_selected_bytes(ttf_path: text, blob: [u8]) -> bool:
+        val rasterizer = FontRasterizer.load_selected_bytes(ttf_path, blob)
+        val installed = self._try_install_ttf(rasterizer)
+        if installed:
+            self.selected_outline_blob = blob
+        installed
+
+    me try_load_registered_identity(identity: text) -> bool:
+        # Path-based helper instead of `candidate.?.local_path`: Option-unwrap
+        # field access faults on baremetal (cr2=0x0 class, 2026-07-18).
+        val local_path: text = selected_font_asset_local_path_for_identity(identity)
+        if local_path == "":
+            return false
+        val registered = _registered_selected_font_bytes(local_path)
+        registered.1 and self.try_load_selected_bytes(local_path, registered.0)
+
+    me clear_ttf():
+        val rast = self.ttf_rasterizer
+        if rast != nil:
+            rast.close()
+        self.ttf_rasterizer = nil
+        self.selected_outline_blob = []
+        var cache = self.cache
+        cache.sync_face_identity(0, "")
+        self.cache = cache
+        self.atlas_face_generation = -1
+
+    fn cache_stats() -> FontCacheStats: self.cache.stats()
+    me receipt_cache_rasterizations_positive() -> bool: self.cache.rasterizations > 0
+    me receipt_cache_rasterizations_zero() -> bool: self.cache.rasterizations == 0
+    me receipt_cache_hits_positive() -> bool: self.cache.hits > 0
+    me receipt_cache_hits_zero() -> bool: self.cache.hits == 0
+
+    me current_font_identity() -> text:
+        val rasterizer = self.ttf_rasterizer
+        if rasterizer == nil:
+            return ""
+        val face_generation = rasterizer.cache_identity_generation()
+        val face_identity = rasterizer.cache_identity()
+        var cache = self.cache
+        cache.sync_face_identity(face_generation, face_identity)
+        self.cache = cache
+        face_identity
+
+    me reset_cache_stats():
+        var cache = self.cache
+        cache.reset_stats()
+        self.cache = cache
+
+    me reset_cache_stats_receipt() -> bool:
+        """Reset and verify both counters in one mutating receiver call."""
+        var cache = self.cache
+        cache.reset_stats()
+        self.cache = cache
+        self.cache.rasterizations == 0 and self.cache.hits == 0
+
+    me _activate_render_config(config: FontRenderConfig):
+        val identity = font_render_config_identity(config)
+        if identity != self.active_render_config_identity:
+            var cache = self.cache
+            cache.sync_render_config_identity(identity)
+            self.cache = cache
+            if self.active_render_config_identity != "":
+                self._reset_font_atlas(self.atlas_face_generation, self.atlas_font_identity)
+            self.active_render_config_identity = identity
+
+    # Copy an inbound batch into the staged slot and answer with the quad
+    # count. The aggregate crosses only as an INBOUND parameter and the answer
+    # leaves as a scalar, so the returned-aggregate channel that dropped
+    # `quads` on the host WM lane is never used.
+    me _stage_batch(batch: FontRenderBatch) -> i64:
+        self.quad_phase_inbound_nonempty = batch.quads.len() > 0
+        self.staged_valid = batch.valid
+        self.staged_program_version = batch.program_version
+        self.staged_transform_identity = batch.transform_identity
+        self.staged_atlas_width = batch.atlas_width
+        self.staged_atlas_height = batch.atlas_height
+        self.staged_font_identity = batch.font_identity
+        self.staged_face_generation = batch.face_generation
+        self.staged_atlas_generation = batch.atlas_generation
+        self.staged_atlas_owner_generation = batch.atlas_owner_generation
+        self.staged_atlas_empty = batch.atlas_pixels.len() == 0
+        self.staged_quads = batch.quads
+        self.quad_phase_stored_nonempty = self.staged_quads.len() > 0
+        self.staged_dirty_rects = batch.dirty_rects
+        self.staged_render_config_identity = batch.render_config_identity
+        self.staged_execution_target = batch.execution_target
+        self.staged_execution_policy = batch.execution_policy
+        self.staged_quads.len()
+
+    me receipt_identity_matches(expected_identity: text) -> bool:
+        val identity = self.current_font_identity()
+        identity == expected_identity
+
+    me receipt_staged_valid() -> bool: self.staged_valid
+    me receipt_staged_quads_nonempty() -> bool: self.staged_quads.len() > 0
+    me receipt_quad_phase_local_nonempty(token: bool) -> bool:
+        token and self.quad_phase_local_nonempty
+    me receipt_quad_phase_inbound_nonempty(token: bool) -> bool:
+        token and self.quad_phase_inbound_nonempty
+    me receipt_quad_phase_stored_nonempty(token: bool) -> bool:
+        token and self.quad_phase_stored_nonempty
+    me receipt_text_phase_layout_nonempty(token: bool) -> bool:
+        token and self.text_phase_layout_nonempty
+    me receipt_text_phase_fallback_glyph_positive(token: bool) -> bool:
+        token and self.text_phase_fallback_glyph_positive
+    me receipt_text_phase_glyph_positive(token: bool) -> bool:
+        token and self.text_phase_glyph_positive
+    me receipt_text_phase_atlas_index_valid(token: bool) -> bool:
+        token and self.text_phase_atlas_index_valid
+    me receipt_text_phase_quad_appended(token: bool) -> bool:
+        token and self.text_phase_quad_appended
+    me receipt_glyph_phase_cache_hit(token: bool) -> bool:
+        token and self.glyph_phase_cache_hit
+    me receipt_glyph_phase_cache_hit_positive(token: bool) -> bool:
+        token and self.glyph_phase_cache_hit_positive
+    me receipt_glyph_phase_rasterizer_maps(token: bool) -> bool:
+        token and self.glyph_phase_rasterizer_maps
+    me receipt_glyph_phase_bitmap_non_nil(token: bool) -> bool:
+        token and self.glyph_phase_bitmap_non_nil
+    me receipt_glyph_phase_bitmap_positive(token: bool) -> bool:
+        token and self.glyph_phase_bitmap_positive
+    me receipt_glyph_phase_bitmap_pixels_match(token: bool) -> bool:
+        token and self.glyph_phase_bitmap_pixels_match
+    me receipt_glyph_phase_adapter_positive(token: bool) -> bool:
+        token and self.glyph_phase_adapter_positive
+    me receipt_glyph_phase_adapter_pixels_match(token: bool) -> bool:
+        token and self.glyph_phase_adapter_pixels_match
+    me receipt_glyph_phase_reconstructed_positive(token: bool) -> bool:
+        token and self.glyph_phase_reconstructed_positive
+    me receipt_glyph_phase_return_positive(token: bool) -> bool:
+        token and self.glyph_phase_return_positive
+    me receipt_glyph_scalar_metrics(codepoint: i32, font_size: i32, width: i32, height: i32, advance: i32) -> bool:
+        val glyph = self.get_glyph(codepoint, font_size)
+        glyph.width == width and glyph.height == height and glyph.advance == advance
+    me receipt_staged_atlas_nonempty() -> bool:
+        if self.staged_atlas_empty:
+            return false
+        self.atlas_pixels.len() > 0
+
+    me receipt_staged_atlas_has_alpha() -> bool:
+        if not self.staged_valid:
+            return false
+        if self.staged_quads.len() == 0:
+            return false
+        if self.staged_atlas_empty:
+            return false
+        for quad in self.staged_quads:
+            val atlas_x = quad.atlas_x
+            val atlas_y = quad.atlas_y
+            val width = quad.width
+            val height = quad.height
+            if width > 0:
+                if height > 0:
+                    var row = 0
+                    while row < height:
+                        var col = 0
+                        while col < width:
+                            val px_x = atlas_x + col
+                            val px_y = atlas_y + row
+                            if px_x >= 0:
+                                if px_x < self.staged_atlas_width:
+                                    if px_y >= 0:
+                                        if px_y < self.staged_atlas_height:
+                                            val index = px_y * self.staged_atlas_width + px_x
+                                            if index.to_i64() < self.atlas_pixels.len():
+                                                val pixel = self.atlas_pixels[index]
+                                                if ((pixel >> 24) & 0xFFu32) > 0u32:
+                                                    return true
+                            col = col + 1
+                        row = row + 1
         false
+
+    # Config-derived overrides, applied exactly as _font_render_batch_with_config
+    # used to apply them on the way out.
+    me _apply_staged_config(config: FontRenderConfig):
+        self.staged_render_config_identity = font_render_config_identity(config)
+        self.staged_execution_target = font_render_config_normalize(config.execution_target)
+        self.staged_execution_policy = config.execution_policy
+
+    me _stage_batch_with_config(batch: FontRenderBatch, config: FontRenderConfig) -> i64:
+        val count = self._stage_batch(batch)
+        self._apply_staged_config(config)
+        count
+
+    me _stage_invalid_config(config: FontRenderConfig) -> i64:
+        val stats = self.cache.stats()
+        self._stage_batch_with_config(FontRenderBatch(
+            program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY,
+            font_identity: stats.font_identity, face_generation: stats.generation, valid: false,
+            atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT,
+            atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation,
+            dirty_rects: []
+        ), config)
+
+    # Materialize the staged payload as a FontRenderBatch. This is the legacy
+    # aggregate-returning shape kept for callers that consume a batch value
+    # (specs, engine3d); the Engine2D present path reads the staged_* fields
+    # directly instead and never calls this.
+    me staged_batch() -> FontRenderBatch:
+        var atlas: [u32] = []
+        if not self.staged_atlas_empty:
+            atlas = self.atlas_pixels
+        FontRenderBatch(
+            program_version: self.staged_program_version,
+            transform_identity: self.staged_transform_identity,
+            font_identity: self.staged_font_identity,
+            face_generation: self.staged_face_generation,
+            valid: self.staged_valid,
+            atlas_width: self.staged_atlas_width, atlas_height: self.staged_atlas_height,
+            atlas_pixels: atlas, quads: self.staged_quads,
+            atlas_generation: self.staged_atlas_generation,
+            dirty_rects: self.staged_dirty_rects,
+            atlas_owner_generation: self.staged_atlas_owner_generation,
+            render_config_identity: self.staged_render_config_identity,
+            execution_target: self.staged_execution_target,
+            execution_policy: self.staged_execution_policy
+        )
+
+    me _ensure_render_config_face(config: FontRenderConfig) -> bool:
+        if _font_render_config_default_selection(config):
+            return true
+        val selected = _font_render_config_candidate(config)
+        if selected == nil:
+            return false
+        val candidate = selected.?
+        val expected_identity = selected_font_asset_identity(candidate)
+        val active = self.ttf_rasterizer
+        if active != nil:
+            if active.?.cache_identity() == expected_identity:
+                return true
+        if self.try_load_registered_identity(expected_identity):
+            return self.current_font_identity() == expected_identity
+        if font_renderer_registered_selected_bytes_only():
+            return false
+        if not self.try_load_runtime_ttf(candidate.local_path):
+            return false
+        self.current_font_identity() == expected_identity
+
+    fn _render_config_matches_run(config: FontRenderConfig, run: FontGlyphRun) -> bool:
+        if _font_render_config_default_selection(config):
+            return true
+        val selected = _font_render_config_candidate(config)
+        selected != nil and font_face_identity(run.face_id, run.face_generation) == selected_font_asset_identity(selected.?)
 
     me try_enable_browser_serif_default() -> bool:
         for dylib_path in browser_font_dylib_candidates():
@@ -694,18 +1253,28 @@ class FontRenderer:
         false
 
     fn has_sffi_ttf() -> bool:
-        self.ttf_rasterizer != nil
+        val rasterizer = self.ttf_rasterizer
+        if rasterizer == nil:
+            return false
+        rasterizer.is_current()
 
     me horizontal_kern(left_codepoint: i32, right_codepoint: i32, font_size: i32) -> i32:
         val rast = self.ttf_rasterizer
         if rast != nil:
-            return rast.horizontal_kern(left_codepoint.to_i64(), right_codepoint.to_i64(), font_size.to_i64()).to_i32()
+            # Typed intermediate + `as i32`: bare `.to_i32()` on an erased
+            # method-call result misdispatches to the lone user method
+            # Px.to_i32 on the native lane (a06bc1d5 class; guest fault at
+            # Px.to_i32 from this frame, 2026-07-18).
+            val kern_value: i64 = rast.horizontal_kern(left_codepoint as i64, right_codepoint as i64, font_size as i64)
+            return kern_value as i32
         0
 
     me horizontal_line_metric(font_size: i32, field: i32) -> i32:
         val rast = self.ttf_rasterizer
         if rast != nil:
-            return rast.horizontal_line_metric(font_size.to_i64(), field.to_i64()).to_i32()
+            # Same erased-result `.to_i32()` misdispatch class as horizontal_kern.
+            val metric_value: i64 = rast.horizontal_line_metric(font_size as i64, field as i64)
+            return metric_value as i32
         0
 
     me layout_text(content: text, font_size: i32, max_width: i32) -> [LayoutGlyph]:
@@ -723,7 +1292,31 @@ class FontRenderer:
     # -----------------------------------------------------------------------
     # Get glyph (cached) — returns rasterized alpha bitmap
     # -----------------------------------------------------------------------
+    # Returns ONE aggregate (the CachedGlyph); the GlyphCache is updated in
+    # place on `self` rather than riding back beside it. The former
+    # `glyph_with_cache(...) -> (CachedGlyph, GlyphCache)` shape returned a
+    # tuple of two array-bearing aggregates — a confirmed-lost channel on the
+    # freestanding/cranelift lane (doc/08_tracking/bug/
+    # cranelift_native_aggregate_return_nil_receiver_hosted_wm_2026-07-26.md),
+    # where losing the cache half degrades silently to blank glyphs.
     me get_glyph(codepoint: i32, font_size: i32) -> CachedGlyph:
+        var cache = self.cache
+        # GLYPH-FIX-4 diagnostic: cache state on entry, printed before any
+        # other call in this function (the safest possible read -- a first
+        # touch of the `cache` snapshot taken above, not a re-read after an
+        # intervening call). Discriminates whether a same-codepoint second
+        # call re-rasterizes because the cache is genuinely empty (miss is
+        # legitimate/expected) or because it holds a stale entry that
+        # lookup() rejects (a cache-key bug, fixable without touching the
+        # rasterize path at all).
+        if _VEC_ATLAS_PROBE and _vec_glyph_probe_count < 8:
+            _vec_glyph_probe_count = _vec_glyph_probe_count + 1
+            print("[vec-glyph-probe] gwc-entry cp={codepoint} font_size={font_size} cache_entries={cache.entries.len()} cache_rcfg_id_len={cache.observed_render_config_identity.len()}")
+        if codepoint < 0 or codepoint > 1114111 or font_size <= 0 or font_size > 512:
+            return CachedGlyph.empty(codepoint, font_size)
+        val active_rasterizer = self.ttf_rasterizer
+        if active_rasterizer != nil:
+            cache.sync_face_identity(active_rasterizer.cache_identity_generation(), active_rasterizer.cache_identity())
         # Check cache first
         val cached = cache.lookup(codepoint, font_size)
         # `if val Some(...)` narrowing — NOT `.unwrap()` and NOT bare field
@@ -769,6 +1362,7 @@ class FontRenderer:
         _glyph_raster_misses = _glyph_raster_misses + 1
 
         # Rasterize
+        cache.record_rasterization()
         var glyph = CachedGlyph.empty(codepoint, font_size)
 
         # Phase 3b: prefer SFFI spl_fonts TrueType backend when the caller
@@ -777,12 +1371,100 @@ class FontRenderer:
         # static-fn Option<T> returns are typed as T directly, so we use
         # `!= nil` rather than `if val Some(x) =` destructuring.
         var handled = false
-        val rast = self.ttf_rasterizer
-        if rast != nil:
-            val gb = rast.rasterize(codepoint.to_i64(), font_size.to_i64())
-            if gb != nil:
-                glyph = _sffi_glyph_to_cached(gb, codepoint, font_size)
-                handled = true
+        val rast = active_rasterizer
+        val rast_has_glyph = rast != nil and rast.has_glyph(codepoint.to_i64())
+        if rast_has_glyph:
+            self.glyph_phase_rasterizer_maps = true
+        if _VEC_ATLAS_PROBE and _vec_glyph_probe_count < 8:
+            _vec_glyph_probe_count = _vec_glyph_probe_count + 1
+            print("[vec-glyph-probe] gwc-pre-rasterize cp={codepoint} rast_nil={rast == nil} has_glyph={rast_has_glyph}")
+        if rast_has_glyph:
+            if self.selected_outline_blob.len() > 0:
+                var direct_meta: [i64] = [0; 20]
+                sfnt_measure_glyph_into(self.selected_outline_blob, SFNT_GLYPH_SELECTOR_CODEPOINT, codepoint.to_i64(), font_size.to_i64(), direct_meta)
+                val direct_count = direct_meta[5]
+                if direct_meta[7] == 310031 and direct_count >= 0 and direct_count <= 16777216:
+                    var direct_pixels: [u8] = [0u8; direct_count]
+                    sfnt_render_glyph_into(self.selected_outline_blob, SFNT_GLYPH_SELECTOR_CODEPOINT, codepoint.to_i64(), font_size.to_i64(), direct_meta, direct_pixels)
+                    if direct_meta[8] == 310032 and (direct_count == 0 or direct_meta[9] > 0):
+                        val direct_width = direct_meta[0] as i32
+                        val direct_height = direct_meta[1] as i32
+                        val direct_advance_raw = direct_meta[2] as i32
+                        val direct_advance = if direct_advance_raw > 0: direct_advance_raw else: direct_width + 1
+                        val direct_bearing_x = direct_meta[3] as i32
+                        val direct_bearing_y = direct_meta[4] as i32
+                        self.glyph_phase_bitmap_non_nil = true
+                        if direct_width > 0 and direct_height > 0:
+                            self.glyph_phase_bitmap_positive = true
+                            self.glyph_phase_adapter_positive = true
+                            self.glyph_phase_reconstructed_positive = true
+                        if direct_count == direct_width.to_i64() * direct_height.to_i64():
+                            self.glyph_phase_bitmap_pixels_match = true
+                            self.glyph_phase_adapter_pixels_match = true
+                            glyph = CachedGlyph(codepoint: codepoint, face_id: 0, face_generation: 0, glyph_index: -1, font_size: font_size, width: direct_width, height: direct_height, advance: direct_advance, bearing_x: direct_bearing_x, bearing_y: direct_bearing_y, pixels: direct_pixels)
+                            handled = true
+            else:
+                val gb = rast.rasterize(codepoint.to_i64(), font_size.to_i64())
+                val gb_is_nil = gb == nil
+                if _VEC_ATLAS_PROBE and _vec_glyph_probe_count < 8:
+                    _vec_glyph_probe_count = _vec_glyph_probe_count + 1
+                    print("[vec-glyph-probe] gwc-post-rasterize cp={codepoint} gb_nil={gb_is_nil}")
+                if not gb_is_nil:
+                    self.glyph_phase_bitmap_non_nil = true
+                    val gbw = gb.gbm_width
+                    val gbh = gb.gbm_height
+                    val gbplen = gb.gbm_pixels.len()
+                    if gbw > 0 and gbh > 0:
+                        self.glyph_phase_bitmap_positive = true
+                    if gbw > 0 and gbh > 0 and gbplen == gbw * gbh:
+                        self.glyph_phase_bitmap_pixels_match = true
+                    val raw_glyph = _sffi_glyph_to_cached(gb, codepoint, font_size)
+                # ROOT CAUSE (GLYPH-FIX-4, 2026-07-19): raw_glyph was built in
+                # font_rasterizer.spl (a different module) and crosses back
+                # into this module on return. Boot serial (build/os/_wkheap/
+                # serial-ovmf.log, cr2=0 null deref) shows the fault lands
+                # AFTER this call's own first-read probe below succeeds but
+                # BEFORE the next get_glyph probe -- i.e. inside the OLD tail
+                # of this function, which re-read glyph.width/glyph.height/
+                # glyph.pixels.len() a SECOND time (once here for the probe,
+                # again down in the expected_pixels/cache.insert block) after
+                # the print() call had already run in between. That is the
+                # exact "field read after an intervening call resolves to
+                # unrelated heap memory" landmine already fixed once in
+                # spl_fonts.spl's _rasterize_selected_outline (see the
+                # `val gadv = metrics[2]`-style snapshot-to-locals comment
+                # there, 2026-07-19). Fix: read every field exactly ONCE,
+                # immediately, before any further call, into locals -- then
+                # rebuild `glyph` as a fresh same-module struct literal and
+                # never touch raw_glyph again.
+                    val gw = raw_glyph.width
+                    val gh = raw_glyph.height
+                    val gadv_raw = raw_glyph.advance
+                    val gbx = raw_glyph.bearing_x
+                    val gby = raw_glyph.bearing_y
+                    val gpixels = raw_glyph.pixels
+                    val gplen = gpixels.len()
+                    val gadv = if gadv_raw > 0: gadv_raw else: gw + 1
+                    if gw > 0 and gh > 0:
+                        self.glyph_phase_adapter_positive = true
+                    if gw > 0 and gh > 0 and gplen == gw.to_i64() * gh.to_i64():
+                        self.glyph_phase_adapter_pixels_match = true
+                    if gw <= 0 or gh <= 0:
+                    # Degenerate (0x0) glyph: cache an advance-only entry.
+                    # Use a fresh empty literal (not gpixels) so no
+                    # pixel-buffer deref or atlas insert is even reachable
+                    # for this entry downstream.
+                        glyph = CachedGlyph(codepoint: codepoint, face_id: 0, face_generation: 0, glyph_index: -1, font_size: font_size, width: 0, height: 0, advance: gadv, bearing_x: gbx, bearing_y: gby, pixels: [])
+                    else if gplen == gw.to_i64() * gh.to_i64():
+                        glyph = CachedGlyph(codepoint: codepoint, face_id: 0, face_generation: 0, glyph_index: -1, font_size: font_size, width: gw, height: gh, advance: gadv, bearing_x: gbx, bearing_y: gby, pixels: gpixels)
+                    else:
+                        glyph = CachedGlyph.empty(codepoint, font_size)
+                    if glyph.width > 0 and glyph.height > 0:
+                        self.glyph_phase_reconstructed_positive = true
+                    if _VEC_ATLAS_PROBE and _vec_glyph_probe_count < 8:
+                        _vec_glyph_probe_count = _vec_glyph_probe_count + 1
+                        print("[vec-glyph-probe] gwc-post-to_cached cp={codepoint} w={gw} h={gh} pixels_len={gplen}")
+                    handled = true
 
         if not handled:
             if self.has_ttf():
@@ -797,13 +1479,12 @@ class FontRenderer:
                 glyph = rasterize_bitmap(codepoint, font_size)
 
         # GLYPH-FIX-4 checkpoint probe: last print before cache.insert(glyph)
-        # / the (glyph, cache) tuple return / get_glyph's unpack. `glyph`
-        # here is a same-module local (freshly reconstructed above for the
-        # SFFI path, or freshly returned by rasterize_ttf/vector/bitmap for
-        # the fallback path) so this read is not expected to hit the
-        # cross-module landmine above -- if the fault still reproduces AFTER
-        # this probe prints, it names cache.insert/the tuple return/
-        # get_glyph's unpack as the real site instead.
+        # / the CachedGlyph return. `glyph` here is a same-module local
+        # (freshly reconstructed above for the SFFI path, or freshly returned
+        # by rasterize_ttf/vector/bitmap for the fallback path) so this read
+        # is not expected to hit the cross-module landmine above -- if the
+        # fault still reproduces AFTER this probe prints, it names
+        # cache.insert or the CachedGlyph return as the real site instead.
         if _VEC_ATLAS_PROBE and _vec_glyph_probe_count < 8:
             _vec_glyph_probe_count = _vec_glyph_probe_count + 1
             print("[vec-glyph-probe] gwc-pre-insert cp={codepoint} w={glyph.width} h={glyph.height} adv={glyph.advance} plen={glyph.pixels.len()}")
@@ -903,13 +1584,34 @@ class FontRenderer:
         if self.use_vector:
             val vector_cmds = vf_glyph_commands(codepoint)
             if vector_cmds.len() > 0:
-                glyph = rasterize_vector_accelerated(vector_cmds, codepoint, font_size)
-            else if self.use_bitmap:
-                glyph = rasterize_bitmap_accelerated(codepoint, font_size)
-        else if self.use_bitmap:
-            glyph = rasterize_bitmap_accelerated(codepoint, font_size)
+                val glyph_w = vf_glyph_width(codepoint)
+                val pixel_w = glyph_w * font_size / 24
+                return pixel_w + 1
+            if self.use_bitmap:
+                val scale = if font_size > 16: font_size / 16 else: 1
+                return 8 * scale
+            return 0
+        if self.use_bitmap:
+            val scale = if font_size > 16: font_size / 16 else: 1
+            return 8 * scale
+        0
 
-        self.cache.insert(glyph)
+    # Same single-aggregate-return shape as get_glyph above (was
+    # `glyph_index_with_cache(...) -> (CachedGlyph, GlyphCache)`).
+    me get_glyph_index(face_id: i64, face_generation: i64, glyph_index: i32, font_size: i32) -> CachedGlyph:
+        var cache = self.cache
+        if not font_face_is_live(face_id, face_generation) or glyph_index < 0 or font_size <= 0 or font_size > 512:
+            return CachedGlyph(codepoint: -1, face_id: face_id, face_generation: face_generation, glyph_index: glyph_index, font_size: font_size, width: 0, height: 0, advance: 0, bearing_x: 0, bearing_y: 0, pixels: [])
+        val cached = cache.lookup_index(face_id, face_generation, glyph_index, font_size)
+        if cached.glyph_index == glyph_index:
+            self.cache = cache
+            return cached
+        cache.record_rasterization()
+        val glyph = rasterize_ttf_index(face_id, face_generation, glyph_index, font_size)
+        val expected_pixels = glyph.width.to_i64() * glyph.height.to_i64()
+        if glyph.advance > 0 and expected_pixels == glyph.pixels.len().to_i64():
+            cache.insert(glyph)
+        self.cache = cache
         glyph
 
     # -----------------------------------------------------------------------
@@ -918,7 +1620,6 @@ class FontRenderer:
     me measure_text_width(content: text, font_size: i32) -> i32:
         var total_w = 0
         var prev_cp = -1
-        var cache = self.cache
         # indexed loop: for-in over text yields corrupted bindings (doc/08_tracking/bug/for_loop_over_text_char_code_at_zero_len_crash_2026-07-19.md)
         var ci = 0
         val content_cps = text_codepoints(content)
@@ -927,19 +1628,19 @@ class FontRenderer:
             val cp = content_cps[ci] as i32
             if prev_cp >= 0:
                 total_w = total_w + self.horizontal_kern(prev_cp, cp, font_size)
-            val glyph = self.get_glyph(cp, font_size)
-            if glyph.advance > 0:
-                total_w = total_w + glyph.advance
+            val glyph_advance = self.get_glyph_advance(cp, font_size)
+            if glyph_advance > 0:
+                total_w = total_w + glyph_advance
             else:
                 # Fallback: approximate
                 total_w = total_w + font_size * 55 / 100
             prev_cp = cp
+            ci = ci + 1
         total_w
 
     me measure_text_advances(content: text, font_size: i32) -> [i32]:
         var advances: [i32] = []
         var prev_cp = -1
-        var cache = self.cache
         # indexed loop: for-in over text yields corrupted bindings (doc/08_tracking/bug/for_loop_over_text_char_code_at_zero_len_crash_2026-07-19.md)
         var ci = 0
         val content_cps = text_codepoints(content)
@@ -949,14 +1650,11 @@ class FontRenderer:
             if prev_cp >= 0:
                 val previous = advances.len() - 1
                 advances[previous] = advances[previous] + self.horizontal_kern(prev_cp, cp, font_size)
-            val result = self.glyph_with_cache(cp, font_size, cache)
-            cache = result.1
-            val glyph_advance = result.0.advance
+            val glyph_advance = self.get_glyph_advance(cp, font_size)
             val advance = if glyph_advance > 0: glyph_advance else: font_size * 55 / 100
-            advances.push(advance)
+            advances = advances.push(advance)
             prev_cp = cp
             ci = ci + 1
-        self.cache = cache
         advances
 
     # -----------------------------------------------------------------------
@@ -969,7 +1667,6 @@ class FontRenderer:
         var out = buffer
         var cx = x
         var prev_cp = -1
-        var cache = self.cache
         # indexed loop: for-in over text yields corrupted bindings (doc/08_tracking/bug/for_loop_over_text_char_code_at_zero_len_crash_2026-07-19.md)
         var ci = 0
         val content_cps = text_codepoints(content)
@@ -978,13 +1675,12 @@ class FontRenderer:
             val cp = content_cps[ci] as i32
             if prev_cp >= 0:
                 cx = cx + self.horizontal_kern(prev_cp, cp, font_size)
-            val result = self.glyph_with_cache(cp, font_size, cache)
-            val glyph = result.0
-            cache = result.1
+            val glyph = self.get_glyph(cp, font_size)
             if glyph.width > 0 and glyph.height > 0:
                 out = blit_glyph(out, buf_w, buf_h, cx, y, glyph, color)
             cx = cx + glyph.advance
             prev_cp = cp
+            ci = ci + 1
         out
 
     me render_text_payload(content: text, color: u32, font_size: i32) -> FontTextPayload:
@@ -1003,13 +1699,14 @@ class FontRenderer:
             while ci < content_len:
                 val codepoint = content_cps[ci] as i32
                 val glyph = self.get_glyph(codepoint, font_size)
-                layout.push(LayoutGlyph(
+                layout = layout.push(LayoutGlyph(
                     codepoint: codepoint.to_i64(), x: fallback_x, y: 0,
                     width: glyph.width.to_i64(), height: glyph.height.to_i64(),
                     byte_offset: fallback_byte_offset
                 ))
                 fallback_x = fallback_x + glyph.advance.to_i64()
-                fallback_byte_offset = fallback_byte_offset + ch.len().to_i64()
+                fallback_byte_offset = fallback_byte_offset + 1
+                ci = ci + 1
         if layout.len() == 0:
             return FontTextPayload(valid: false, width: 0, height: 0, offset_x: 0, offset_y: 0, pixels: [])
         var glyphs: [CachedGlyph] = []
@@ -1017,14 +1714,11 @@ class FontRenderer:
         var min_y = 2147483647
         var max_x = -2147483647
         var max_y = -2147483647
-        var cache = self.cache
         var i = 0
         while i < layout.len():
             val positioned = layout[i]
-            val result = self.glyph_with_cache(positioned.codepoint.to_i32(), font_size, cache)
-            val glyph = result.0
-            cache = result.1
-            glyphs.push(glyph)
+            val glyph = self.get_glyph(positioned.codepoint.to_i32(), font_size)
+            glyphs = glyphs.push(glyph)
             if glyph.width > 0 and glyph.height > 0:
                 val gx = positioned.x.to_i32()
                 val gy = positioned.y.to_i32()
@@ -1037,7 +1731,6 @@ class FontRenderer:
                 if gy + glyph.height > max_y:
                     max_y = gy + glyph.height
             i = i + 1
-        self.cache = cache
         if max_x <= min_x or max_y <= min_y:
             return FontTextPayload(valid: true, width: 0, height: 0, offset_x: 0, offset_y: 0, pixels: [])
         val width = max_x - min_x
@@ -1093,11 +1786,13 @@ class FontRenderer:
         while i < self.atlas_face_ids.len():
             val identity = font_face_identity(self.atlas_face_ids[i], self.atlas_face_generations[i])
             if identity == "": return ""
-            if not identities.contains(identity): identities.push(identity)
+            if not identities.contains(identity):
+                identities = identities.push(identity)
             i = i + 1
         val pending = font_face_identity(face_id, face_generation)
         if pending == "": return ""
-        if not identities.contains(pending): identities.push(pending)
+        if not identities.contains(pending):
+            identities = identities.push(pending)
         if identities.len() == 1: return identities[0]
         var combined = "font-faces-v1"
         for identity in identities:
@@ -1134,25 +1829,28 @@ class FontRenderer:
         if y + padded_height > FONT_ATLAS_HEIGHT:
             return -1
         var row = 0
+        var _probe_glyph_nz = 0
         while row < glyph.height:
             var col = 0
             while col < glyph.width:
                 val alpha = glyph.pixels[row * glyph.width + col].to_u32()
+                if alpha > 0u32:
+                    _probe_glyph_nz = _probe_glyph_nz + 1
                 self.atlas_pixels[(y + row) * FONT_ATLAS_WIDTH + x + col] = (alpha << 24) | 0x00FFFFFFu32
                 col = col + 1
             row = row + 1
         if _VEC_ATLAS_PROBE and _vec_glyph_probe_count < 8:
             _vec_glyph_probe_count = _vec_glyph_probe_count + 1
             print("[vec-glyph-probe] insert cp={glyph.codepoint} w={glyph.width} h={glyph.height} src_pixels_len={glyph.pixels.len()} src_nz={_probe_glyph_nz} ax={x} ay={y}")
-        self.atlas_codepoints.push(glyph.codepoint)
-        self.atlas_face_ids.push(glyph.face_id)
-        self.atlas_face_generations.push(glyph.face_generation)
-        self.atlas_glyph_indices.push(glyph.glyph_index)
-        self.atlas_font_sizes.push(glyph.font_size)
-        self.atlas_xs.push(x)
-        self.atlas_ys.push(y)
-        self.atlas_widths.push(glyph.width)
-        self.atlas_heights.push(glyph.height)
+        self.atlas_codepoints = self.atlas_codepoints.push(glyph.codepoint)
+        self.atlas_face_ids = self.atlas_face_ids.push(glyph.face_id)
+        self.atlas_face_generations = self.atlas_face_generations.push(glyph.face_generation)
+        self.atlas_glyph_indices = self.atlas_glyph_indices.push(glyph.glyph_index)
+        self.atlas_font_sizes = self.atlas_font_sizes.push(glyph.font_size)
+        self.atlas_xs = self.atlas_xs.push(x)
+        self.atlas_ys = self.atlas_ys.push(y)
+        self.atlas_widths = self.atlas_widths.push(glyph.width)
+        self.atlas_heights = self.atlas_heights.push(glyph.height)
         self.atlas_cursor_x = x + padded_width
         self.atlas_cursor_y = y
         self.atlas_row_height = if padded_height > row_height: padded_height else: row_height
@@ -1162,12 +1860,39 @@ class FontRenderer:
         self.prepare_text_configured(content, color, font_render_config_default_for_size(font_size))
 
     me prepare_text_configured(content: text, color: u32, config: FontRenderConfig) -> FontRenderBatch:
-        if not font_render_config_selection_supported(config) or not self._ensure_render_config_face(config):
-            return self._invalid_config_batch(config)
-        self._activate_render_config(config)
-        _font_render_batch_with_config(self._prepare_text_active(content, color, config.size), config)
+        self.stage_text_configured(content, color, config)
+        self.staged_batch()
 
-    me _prepare_text_active(content: text, color: u32, font_size: i32) -> FontRenderBatch:
+    # Scalar-returning staging entry point used by the Engine2D present path.
+    # Answers with the staged quad count; the payload itself is read from the
+    # staged_* fields on this renderer.
+    me stage_text_configured(content: text, color: u32, config: FontRenderConfig) -> i64:
+        self.quad_phase_local_nonempty = false
+        self.quad_phase_inbound_nonempty = false
+        self.quad_phase_stored_nonempty = false
+        self.text_phase_layout_nonempty = false
+        self.text_phase_fallback_glyph_positive = false
+        self.text_phase_glyph_positive = false
+        self.text_phase_atlas_index_valid = false
+        self.text_phase_quad_appended = false
+        self.glyph_phase_cache_hit = false
+        self.glyph_phase_cache_hit_positive = false
+        self.glyph_phase_rasterizer_maps = false
+        self.glyph_phase_bitmap_non_nil = false
+        self.glyph_phase_bitmap_positive = false
+        self.glyph_phase_bitmap_pixels_match = false
+        self.glyph_phase_adapter_positive = false
+        self.glyph_phase_adapter_pixels_match = false
+        self.glyph_phase_reconstructed_positive = false
+        self.glyph_phase_return_positive = false
+        if not font_render_config_selection_supported(config) or not self._ensure_render_config_face(config):
+            return self._stage_invalid_config(config)
+        self._activate_render_config(config)
+        val staged = self._stage_text_active(content, color, config.size)
+        self._apply_staged_config(config)
+        staged
+
+    me _stage_text_active(content: text, color: u32, font_size: i32) -> i64:
         if _VEC_ATLAS_PROBE and _vec_glyph_probe_count < 24:
             _vec_glyph_probe_count = _vec_glyph_probe_count + 1
             print("[vec-glyph-probe] prepare-entry content_len={content.len()} font_size={font_size}")
@@ -1176,16 +1901,30 @@ class FontRenderer:
         var font_identity = cache_stats.font_identity
         val active_rasterizer = self.ttf_rasterizer
         if active_rasterizer != nil:
-            val identity_snapshot = active_rasterizer.cache_identity_snapshot()
-            face_generation = identity_snapshot.0
-            font_identity = identity_snapshot.1
+            face_generation = active_rasterizer.cache_identity_generation()
+            font_identity = active_rasterizer.cache_identity()
         if font_size <= 0 or font_size > 512:
-            return FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: font_identity, face_generation: face_generation, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: [])
+            return self._stage_batch(FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: font_identity, face_generation: face_generation, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: []))
         if content == "":
-            return FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: font_identity, face_generation: face_generation, valid: true, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: [])
+            return self._stage_batch(FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: font_identity, face_generation: face_generation, valid: true, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: []))
         if self.atlas_face_generation != face_generation or self.atlas_font_identity != font_identity:
             self._reset_font_atlas(face_generation, font_identity)
         var layout = self.layout_text(content, font_size, 0)
+        # Scalar mirrors of the fallback layout entries. On the freestanding
+        # native lane, an i64 field written into a struct pushed into an
+        # array reads back tag-shifted (probe: push cp=83/w=5/h=12 ->
+        # re-read cp=0 w=0 h=0 glyph_index=0x1FFFFFFFFFFFFFFF nil sentinel),
+        # which emptied every quad batch and killed all glyph text (taskbar
+        # clock ink=0). Same "BoxInt <<3 / tag-shifted view" codegen family
+        # as GLYPH-FIX-3's retraction note above. Scalar arrays of
+        # primitives (see PMM refcounts) round-trip correctly, so the quad
+        # loop below prefers these mirrors over re-reading the LayoutGlyph
+        # structs whenever the fallback produced them.
+        var fallback_cps: [i32] = []
+        var fallback_xs: [i64] = []
+        if _VEC_ATLAS_PROBE and _vec_glyph_probe_count < 8:
+            _vec_glyph_probe_count = _vec_glyph_probe_count + 1
+            print("[vec-glyph-probe] active-after-layout_text layout_len={layout.len()} use_vector={self.use_vector} use_bitmap={self.use_bitmap} content_len={content.len()}")
         if layout.len() == 0 and (self.use_vector or self.use_bitmap):
             var fallback_x: i64 = 0
             var fallback_byte_offset: i64 = 0
@@ -1194,7 +1933,7 @@ class FontRenderer:
             # `ch.char_code_at(0)`, hoping to route around a suspected
             # char_code_at bug (cp printed as 0 for a command that can't
             # legitimately be U+0000). That "fix" is retracted: the raw byte
-            # read back 11 while `glyph_with_cache` further downstream showed
+            # read back 11 while `get_glyph` further downstream showed
             # the SAME logical value as 88 (11 << 3) -- i.e. char_code_at's 0
             # (88 & 7), bytes()'s 11 (88 >> 3), and 88 itself are three
             # tag-shifted views of one pervasive integer-boxing codegen
@@ -1216,21 +1955,24 @@ class FontRenderer:
                     _vec_glyph_probe_count = _vec_glyph_probe_count + 1
                     print("[vec-glyph-probe] active-before-get_glyph cp={codepoint} font_size={font_size}")
                 val glyph = self.get_glyph(codepoint, font_size)
+                if glyph.width > 0 and glyph.height > 0:
+                    self.text_phase_fallback_glyph_positive = true
                 if _VEC_ATLAS_PROBE and _vec_glyph_probe_count < 8:
                     _vec_glyph_probe_count = _vec_glyph_probe_count + 1
                     print("[vec-glyph-probe] active-after-get_glyph cp={codepoint} w={glyph.width} h={glyph.height} adv={glyph.advance} pixels_len={glyph.pixels.len()}")
-                layout.push(LayoutGlyph(
+                layout = layout.push(LayoutGlyph(
                     codepoint: codepoint.to_i64(), x: fallback_x, y: 0,
                     width: glyph.width.to_i64(), height: glyph.height.to_i64(),
                     byte_offset: fallback_byte_offset
                 ))
-                fallback_cps.push(codepoint)
-                fallback_xs.push(fallback_x)
+                fallback_cps = fallback_cps.push(codepoint)
+                fallback_xs = fallback_xs.push(fallback_x)
                 fallback_x = fallback_x + glyph.advance.to_i64()
                 fallback_byte_offset = fallback_byte_offset + 1
                 ci = ci + 1
+        self.text_phase_layout_nonempty = layout.len() > 0
         if layout.len() == 0:
-            return FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: font_identity, face_generation: face_generation, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: [])
+            return self._stage_batch(FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: font_identity, face_generation: face_generation, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: []))
         var attempt = 0
         while attempt < 2:
             var quads: [FontRenderQuad] = []
@@ -1239,46 +1981,74 @@ class FontRenderer:
             var i = 0
             while i < layout.len():
                 val positioned = layout[i]
-                val glyph = self.get_glyph(positioned.codepoint.to_i32(), font_size)
+                # Prefer the scalar mirrors over the LayoutGlyph fields: the
+                # struct-in-array i64 round-trip reads back tag-shifted on
+                # the freestanding native lane (cp=0/w=0/h=0 + nil-sentinel
+                # glyph_index), which produced n_quads=0 for every draw and
+                # zero glyph ink on screen. See the mirror declaration above.
+                var requad_cp = positioned.codepoint.to_i32()
+                var quad_dst_x: i64 = positioned.x
+                var quad_dst_y: i64 = positioned.y
+                var quad_byte_offset: i64 = positioned.byte_offset
+                if i < fallback_cps.len():
+                    requad_cp = fallback_cps[i]
+                    quad_dst_x = fallback_xs[i]
+                    quad_dst_y = 0
+                    quad_byte_offset = i.to_i64()
+                val glyph = self.get_glyph(requad_cp, font_size)
+                if _VEC_ATLAS_PROBE and _vec_glyph_probe_count < 8:
+                    _vec_glyph_probe_count = _vec_glyph_probe_count + 1
+                    print("[vec-glyph-probe] quadloop-after-reget i={i} cp={positioned.codepoint} w={glyph.width} h={glyph.height} face_id={glyph.face_id} face_gen={glyph.face_generation} glyph_index={glyph.glyph_index}")
                 if glyph.width > 0 and glyph.height > 0:
+                    self.text_phase_glyph_positive = true
                     var atlas_index = self._font_atlas_entry_index(glyph.face_id, glyph.face_generation, glyph.glyph_index, glyph.codepoint, font_size)
+                    if _VEC_ATLAS_PROBE and _vec_glyph_probe_count < 8:
+                        _vec_glyph_probe_count = _vec_glyph_probe_count + 1
+                        print("[vec-glyph-probe] quadloop-after-entry_index i={i} atlas_index={atlas_index}")
                     var inserted = false
                     if atlas_index < 0:
                         atlas_index = self._insert_font_atlas_glyph(glyph)
+                        if _VEC_ATLAS_PROBE and _vec_glyph_probe_count < 8:
+                            _vec_glyph_probe_count = _vec_glyph_probe_count + 1
+                            print("[vec-glyph-probe] quadloop-after-insert i={i} atlas_index={atlas_index}")
                         inserted = atlas_index >= 0
                     if atlas_index < 0:
                         overflow = true
                     else:
+                        self.text_phase_atlas_index_valid = true
                         val quad = FontRenderQuad(
                             codepoint: glyph.codepoint,
-                            byte_offset: positioned.byte_offset,
-                            dst_x: positioned.x.to_i32(), dst_y: positioned.y.to_i32(),
+                            byte_offset: quad_byte_offset,
+                            dst_x: quad_dst_x.to_i32(), dst_y: quad_dst_y.to_i32(),
                             width: self.atlas_widths[atlas_index], height: self.atlas_heights[atlas_index],
                             atlas_x: self.atlas_xs[atlas_index], atlas_y: self.atlas_ys[atlas_index],
                             color: color
                         )
-                        quads.push(quad)
+                        quads = quads.push(quad)
+                        self.text_phase_quad_appended = true
                         if inserted:
-                            dirty.push(quad)
+                            dirty = dirty.push(quad)
                 i = i + 1
             if not overflow:
                 if dirty.len() > 0:
                     val generation = _next_font_atlas_dependency_generation()
                     if generation == 0:
                         self._reset_font_atlas(face_generation, font_identity)
-                        return FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: font_identity, face_generation: face_generation, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: 0, dirty_rects: [])
+                        return self._stage_batch(FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: font_identity, face_generation: face_generation, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: 0, dirty_rects: []))
                     self.atlas_generation = generation
                 if quads.len() > 0:
                     val end_cache_stats = self.cache.stats()
                     var end_generation = end_cache_stats.generation
                     var end_identity = end_cache_stats.font_identity
                     if active_rasterizer != nil:
-                        val end_snapshot = active_rasterizer.cache_identity_snapshot()
-                        end_generation = end_snapshot.0
-                        end_identity = end_snapshot.1
+                        end_generation = active_rasterizer.cache_identity_generation()
+                        end_identity = active_rasterizer.cache_identity()
                     if end_generation != face_generation or end_identity != font_identity:
+                        if _VEC_ATLAS_PROBE and _vec_atlas_probe_count < 8:
+                            _vec_atlas_probe_count = _vec_atlas_probe_count + 1
+                            print("[vec-atlas-probe] producer identity-mismatch-reset end_gen={end_generation} face_gen={face_generation} end_id_len={end_identity.len()} font_id_len={font_identity.len()}")
                         self._reset_font_atlas(end_generation, end_identity)
-                        return FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: end_identity, face_generation: end_generation, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: [], quads: [], atlas_generation: self.atlas_generation, dirty_rects: [])
+                        return self._stage_batch(FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: end_identity, face_generation: end_generation, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: [], quads: [], atlas_generation: self.atlas_generation, dirty_rects: []))
                 if _VEC_ATLAS_PROBE and _vec_atlas_probe_count < 8:
                     _vec_atlas_probe_count = _vec_atlas_probe_count + 1
                     # GLYPH-FIX-5 (2026-07-19): ROOT CAUSE of the residual
@@ -1312,10 +2082,11 @@ class FontRenderer:
                         print("[vec-atlas-probe] producer n_quads={quads.len()} atlas_len={self.atlas_pixels.len()} first_w={fq.width} first_h={fq.height} first_ax={fq.atlas_x} first_ay={fq.atlas_y} first_cov_nz={nz} color_a={(fq.color >> 24) & 0xFFu32}")
                     else:
                         print("[vec-atlas-probe] producer-empty n_quads=0 overflow={overflow} content_len={content.len()}")
-                return FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: font_identity, face_generation: face_generation, valid: true, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: quads, atlas_generation: self.atlas_generation, dirty_rects: dirty)
+                self.quad_phase_local_nonempty = quads.len() > 0
+                return self._stage_batch(FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: font_identity, face_generation: face_generation, valid: true, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: quads, atlas_generation: self.atlas_generation, dirty_rects: dirty))
             self._reset_font_atlas(face_generation, font_identity)
             attempt = attempt + 1
-        FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: font_identity, face_generation: face_generation, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: [])
+        self._stage_batch(FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: font_identity, face_generation: face_generation, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: []))
 
     me prepare_text_with_advances(content: text, advance_widths: [i32], color: u32, font_size: i32) -> FontRenderBatch:
         self.prepare_text_with_advances_configured(
@@ -1323,40 +2094,62 @@ class FontRenderer:
         )
 
     me prepare_text_with_advances_configured(content: text, advance_widths: [i32], color: u32, config: FontRenderConfig) -> FontRenderBatch:
+        self.stage_text_with_advances_configured(content, advance_widths, color, config)
+        self.staged_batch()
+
+    me stage_text_with_advances_configured(content: text, advance_widths: [i32], color: u32, config: FontRenderConfig) -> i64:
         if not font_render_config_selection_supported(config) or not self._ensure_render_config_face(config):
-            return self._invalid_config_batch(config)
+            return self._stage_invalid_config(config)
         self._activate_render_config(config)
         val natural_advances = self.measure_text_advances(content, config.size)
-        _font_render_batch_with_config(
-            font_batch_apply_advances(content, natural_advances, advance_widths,
-                self._prepare_text_active(content, color, config.size)), config
-        )
+        self._stage_text_active(content, color, config.size)
+        # The advance re-layout rewrites the staged quads IN PLACE (array
+        # element assignment on a local, then one field store) instead of the
+        # old batch-in/batch-out call. That returned aggregate is where the
+        # host WM lane lost `quads` while keeping every scalar.
+        var quads = self.staged_quads
+        if not font_batch_apply_advances(content, natural_advances, advance_widths, quads):
+            self.staged_valid = false
+        self.staged_quads = quads
+        self._apply_staged_config(config)
+        self.staged_quads.len()
 
-    fn _selected_glyph_index_with_cache(rasterizer: FontRasterizer, generation: i64, glyph_index: i32, font_size: i32, initial_cache: GlyphCache) -> (CachedGlyph, GlyphCache):
-        var cache = initial_cache
+    # Single-aggregate return (was `(CachedGlyph, GlyphCache)`); the cache half
+    # now updates `self.cache` in place — see get_glyph above for the channel
+    # rationale.
+    me _selected_glyph_index_cached(generation: i64, glyph_index: i32, font_size: i32) -> CachedGlyph:
+        var cache = self.cache
         val cached = cache.lookup_index(0, generation, glyph_index, font_size)
-        if cached != nil:
-            return (cached.?, cache)
+        if cached.glyph_index == glyph_index:
+            self.cache = cache
+            return cached
         cache.record_rasterization()
-        val bitmap = rasterizer.rasterize_glyph_index(glyph_index.to_i64(), font_size.to_i64())
-        if bitmap == nil:
-            return (CachedGlyph(codepoint: -1, face_id: 0, face_generation: generation,
+        var meta: [i64] = [0; 20]
+        sfnt_measure_glyph_into(self.selected_outline_blob, SFNT_GLYPH_SELECTOR_INDEX,
+            glyph_index.to_i64(), font_size.to_i64(), meta)
+        val count = meta[5]
+        if meta[7] != 310031 or count < 0 or count > 16777216:
+            self.cache = cache
+            return CachedGlyph(codepoint: -1, face_id: 0, face_generation: generation,
                 glyph_index: glyph_index, font_size: font_size, width: 0, height: 0,
-                advance: 0, bearing_x: 0, bearing_y: 0, pixels: []), cache)
-        val owned = bitmap.?
-        # `owned` is a GlyphBitmap crossing a module boundary (declared in
-        # spl_fonts.spl); use its `gbm_*`-prefixed fields, not the ambiguous
-        # `width`/`height`/`advance`/`bearing_x`/`bearing_y`/`pixels` names —
-        # see the GlyphBitmap class doc comment (cross-module ambiguous-field
-        # "most fields wins" mis-resolution).
+                advance: 0, bearing_x: 0, bearing_y: 0, pixels: [])
+        var pixels: [u8] = [0u8; count]
+        sfnt_render_glyph_into(self.selected_outline_blob, SFNT_GLYPH_SELECTOR_INDEX,
+            glyph_index.to_i64(), font_size.to_i64(), meta, pixels)
+        if meta[8] != 310032 or (count > 0 and meta[9] <= 0):
+            self.cache = cache
+            return CachedGlyph(codepoint: -1, face_id: 0, face_generation: generation,
+                glyph_index: glyph_index, font_size: font_size, width: 0, height: 0,
+                advance: 0, bearing_x: 0, bearing_y: 0, pixels: [])
         val glyph = CachedGlyph(codepoint: -1, face_id: 0, face_generation: generation,
             glyph_index: glyph_index, font_size: font_size,
-            width: owned.gbm_width.to_i32(), height: owned.gbm_height.to_i32(),
-            advance: owned.gbm_advance.to_i32(), bearing_x: owned.gbm_bearing_x.to_i32(),
-            bearing_y: owned.gbm_bearing_y.to_i32(), pixels: owned.gbm_pixels)
+            width: meta[0].to_i32(), height: meta[1].to_i32(),
+            advance: meta[2].to_i32(), bearing_x: meta[3].to_i32(),
+            bearing_y: meta[4].to_i32(), pixels: pixels)
         if glyph.width > 0 and glyph.height > 0 and glyph.pixels.len() == glyph.width.to_i64() * glyph.height.to_i64():
             cache.insert(glyph)
-        (glyph, cache)
+        self.cache = cache
+        glyph
 
     me prepare_selected_glyph_run(payload: DrawIrGlyphRunPayload, color: u32, font_size: i32) -> FontRenderBatch:
         self.prepare_selected_glyph_run_configured(
@@ -1364,33 +2157,41 @@ class FontRenderer:
         )
 
     me prepare_selected_glyph_run_configured(payload: DrawIrGlyphRunPayload, color: u32, config: FontRenderConfig) -> FontRenderBatch:
-        if not font_render_config_selection_supported(config) or not self._ensure_render_config_face(config):
-            return self._invalid_config_batch(config)
-        self._activate_render_config(config)
-        _font_render_batch_with_config(
-            self._prepare_selected_glyph_run_active(payload, color, config.size), config
-        )
+        self.stage_selected_glyph_run_configured(payload, color, config)
+        self.staged_batch()
 
-    me _prepare_selected_glyph_run_active(payload: DrawIrGlyphRunPayload, color: u32, font_size: i32) -> FontRenderBatch:
+    me stage_selected_glyph_run_configured(payload: DrawIrGlyphRunPayload, color: u32, config: FontRenderConfig) -> i64:
+        if not font_render_config_selection_supported(config) or not self._ensure_render_config_face(config):
+            return self._stage_invalid_config(config)
+        self._activate_render_config(config)
+        val staged = self._stage_selected_glyph_run_active(payload, color, config.size)
+        self._apply_staged_config(config)
+        staged
+
+    me _stage_selected_glyph_run_active(payload: DrawIrGlyphRunPayload, color: u32, font_size: i32) -> i64:
         val active = self.ttf_rasterizer
         if active == nil:
-            return FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: "", face_generation: 0, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: [])
-        val rasterizer = active.?
-        val snapshot = rasterizer.cache_identity_snapshot()
-        val generation = snapshot.0
-        val identity = snapshot.1
+            return self._stage_batch(FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: "", face_generation: 0, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: []))
+        val generation = active.cache_identity_generation()
+        val identity = active.cache_identity()
         val lengths_match = payload.glyph_ids.len() == payload.xs.len() and payload.glyph_ids.len() == payload.ys.len() and payload.glyph_ids.len() == payload.clusters.len()
         if (not payload.valid or not lengths_match or payload.glyph_ids.len() == 0 or
             generation <= 0 or identity == "" or font_size <= 0 or font_size > 512):
-            return FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: identity, face_generation: generation, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: [])
+            return self._stage_batch(FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: identity, face_generation: generation, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: []))
         var cache = self.cache
         cache.sync_face_identity(generation, identity)
         self.cache = cache
         if self.atlas_face_generation != generation or self.atlas_font_identity != identity:
             self._reset_font_atlas(generation, identity)
-        val ascent = self.horizontal_line_metric(font_size, 0)
+        var ascent = self.horizontal_line_metric(font_size, 0)
+        if self.selected_outline_blob.len() > 0:
+            var ascent_meta: [i64] = [0; 20]
+            sfnt_measure_glyph_into(self.selected_outline_blob, SFNT_GLYPH_SELECTOR_INDEX,
+                payload.glyph_ids[0].to_i64(), font_size.to_i64(), ascent_meta)
+            if ascent_meta[7] == 310031:
+                ascent = ascent_meta[17].to_i32()
         if ascent <= 0:
-            return FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: identity, face_generation: generation, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: [])
+            return self._stage_batch(FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: identity, face_generation: generation, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: []))
         var attempt = 0
         while attempt < 2:
             var quads: [FontRenderQuad] = []
@@ -1400,13 +2201,11 @@ class FontRenderer:
             while i < payload.glyph_ids.len():
                 val raw_gid = payload.glyph_ids[i]
                 if raw_gid == 0u32 or raw_gid > 2147483647u32 or payload.clusters[i] < 0:
-                    return FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: identity, face_generation: generation, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: [])
+                    return self._stage_batch(FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: identity, face_generation: generation, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: []))
                 val glyph_id = raw_gid.to_i32()
-                val selected = self._selected_glyph_index_with_cache(rasterizer, generation, glyph_id, font_size, self.cache)
-                val glyph = selected.0
-                self.cache = selected.1
+                val glyph = self._selected_glyph_index_cached(generation, glyph_id, font_size)
                 if glyph.width <= 0 or glyph.height <= 0:
-                    return FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: identity, face_generation: generation, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: [])
+                    return self._stage_batch(FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: identity, face_generation: generation, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: []))
                 var atlas_index = self._font_atlas_entry_index(0, generation, glyph_id, -1, font_size)
                 var inserted = false
                 if atlas_index < 0:
@@ -1417,54 +2216,64 @@ class FontRenderer:
                 else:
                     val destination = _font_shaped_glyph_destination(payload.xs[i], payload.ys[i], glyph, ascent)
                     if not destination.0:
-                        return FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: identity, face_generation: generation, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: [])
+                        return self._stage_batch(FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: identity, face_generation: generation, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: []))
                     val quad = FontRenderQuad(codepoint: -1, byte_offset: -1,
                         dst_x: destination.1, dst_y: destination.2,
                         width: self.atlas_widths[atlas_index], height: self.atlas_heights[atlas_index],
                         atlas_x: self.atlas_xs[atlas_index], atlas_y: self.atlas_ys[atlas_index],
                         color: color, cluster: payload.clusters[i])
-                    quads.push(quad)
-                    if inserted: dirty.push(quad)
+                    quads = quads.push(quad)
+                    if inserted: dirty = dirty.push(quad)
                 i = i + 1
             if not overflow:
                 if dirty.len() > 0:
                     val dependency_generation = _next_font_atlas_dependency_generation()
                     if dependency_generation == 0:
                         self._reset_font_atlas(generation, identity)
-                        return FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: identity, face_generation: generation, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: 0, dirty_rects: [])
+                        return self._stage_batch(FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: identity, face_generation: generation, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: 0, dirty_rects: []))
                     self.atlas_generation = dependency_generation
-                val after = rasterizer.cache_identity_snapshot()
-                if after.0 != generation or after.1 != identity:
-                    self._reset_font_atlas(after.0, after.1)
-                    return FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: after.1, face_generation: after.0, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: [], quads: [], atlas_generation: self.atlas_generation, dirty_rects: [])
-                return FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: identity, face_generation: generation, valid: true, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: quads, atlas_generation: self.atlas_generation, dirty_rects: dirty)
+                val after_generation = active.cache_identity_generation()
+                val after_identity = active.cache_identity()
+                if after_generation != generation or after_identity != identity:
+                    self._reset_font_atlas(after_generation, after_identity)
+                    return self._stage_batch(FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: after_identity, face_generation: after_generation, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: [], quads: [], atlas_generation: self.atlas_generation, dirty_rects: []))
+                return self._stage_batch(FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: identity, face_generation: generation, valid: true, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: quads, atlas_generation: self.atlas_generation, dirty_rects: dirty))
             self._reset_font_atlas(generation, identity)
             attempt = attempt + 1
-        FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: identity, face_generation: generation, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: [])
+        self._stage_batch(FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: identity, face_generation: generation, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: []))
 
     me prepare_glyph_run(run: FontGlyphRun, color: u32, font_size: i32) -> FontRenderBatch:
         self.prepare_glyph_run_configured(run, color, font_render_config_default_for_size(font_size))
 
-    me prepare_glyph_run_configured(run: FontGlyphRun, color: u32, config: FontRenderConfig) -> FontRenderBatch:
-        if not font_render_config_selection_supported(config) or not self._render_config_matches_run(config, run):
-            return self._invalid_config_batch(config)
-        self._activate_render_config(config)
-        _font_render_batch_with_config(self._prepare_glyph_run_active(run, color, config.size), config)
+    me stage_glyph_run(run: FontGlyphRun, color: u32, font_size: i32) -> i64:
+        self.stage_glyph_run_configured(run, color, font_render_config_default_for_size(font_size))
 
-    me _prepare_glyph_run_active(run: FontGlyphRun, color: u32, font_size: i32) -> FontRenderBatch:
+    me prepare_glyph_run_configured(run: FontGlyphRun, color: u32, config: FontRenderConfig) -> FontRenderBatch:
+        self.stage_glyph_run_configured(run, color, config)
+        self.staged_batch()
+
+    me stage_glyph_run_configured(run: FontGlyphRun, color: u32, config: FontRenderConfig) -> i64:
+        if not font_render_config_selection_supported(config) or not self._render_config_matches_run(config, run):
+            return self._stage_invalid_config(config)
+        self._activate_render_config(config)
+        val staged = self._stage_glyph_run_active(run, color, config.size)
+        self._apply_staged_config(config)
+        staged
+
+    me _stage_glyph_run_active(run: FontGlyphRun, color: u32, font_size: i32) -> i64:
         val face_id = run.face_id
         var font_identity = font_face_identity(face_id, run.face_generation)
         val face_generation = run.face_generation
         var cluster_index: i64 = 0
         while cluster_index < run.clusters.len():
             if run.clusters[cluster_index] < 0:
-                return FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: font_identity, face_generation: face_generation, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: [])
+                return self._stage_batch(FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: font_identity, face_generation: face_generation, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: []))
             cluster_index = cluster_index + 1
         if (not run.valid or font_identity == "" or not font_face_is_live(face_id, run.face_generation) or
             font_size <= 0 or font_size > 512 or
             run.glyph_ids.len() != run.xs.len() or run.glyph_ids.len() != run.ys.len() or
             run.glyph_ids.len() != run.clusters.len()):
-            return FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: font_identity, face_generation: face_generation, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: [])
+            return self._stage_batch(FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: font_identity, face_generation: face_generation, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: []))
         if self.atlas_face_generation != -2:
             self._reset_font_atlas(-2, font_identity)
         else:
@@ -1476,7 +2285,7 @@ class FontRenderer:
                 self.atlas_font_identity = dependencies
         val ascent = font_face_ascent(face_id, run.face_generation, font_size)
         if ascent <= 0:
-            return FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: font_identity, face_generation: face_generation, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: [])
+            return self._stage_batch(FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: font_identity, face_generation: face_generation, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: []))
         var attempt = 0
         while attempt < 2:
             var quads: [FontRenderQuad] = []
@@ -1486,7 +2295,7 @@ class FontRenderer:
             while i < run.glyph_ids.len():
                 val raw_gid = run.glyph_ids[i]
                 if raw_gid > 2147483647u32:
-                    return FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: font_identity, face_generation: face_generation, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: [])
+                    return self._stage_batch(FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: font_identity, face_generation: face_generation, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: []))
                 val glyph_id = raw_gid.to_i32()
                 val glyph = self.get_glyph_index(face_id, run.face_generation, glyph_id, font_size)
                 if glyph.width > 0 and glyph.height > 0:
@@ -1500,7 +2309,7 @@ class FontRenderer:
                     else:
                         val destination = _font_shaped_glyph_destination(run.xs[i], run.ys[i], glyph, ascent)
                         if not destination.0:
-                            return FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: font_identity, face_generation: face_generation, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: [])
+                            return self._stage_batch(FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: font_identity, face_generation: face_generation, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: []))
                         val quad = FontRenderQuad(
                             codepoint: -1, byte_offset: -1, cluster: run.clusters[i],
                             dst_x: destination.1, dst_y: destination.2,
@@ -1508,21 +2317,21 @@ class FontRenderer:
                             atlas_x: self.atlas_xs[atlas_index], atlas_y: self.atlas_ys[atlas_index],
                             color: color
                         )
-                        quads.push(quad)
+                        quads = quads.push(quad)
                         if inserted:
-                            dirty.push(quad)
+                            dirty = dirty.push(quad)
                 i = i + 1
             if not overflow:
                 if dirty.len() > 0:
                     val generation = _next_font_atlas_dependency_generation()
                     if generation == 0:
                         self._reset_font_atlas(-2, font_identity)
-                        return FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: font_identity, face_generation: face_generation, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: 0, dirty_rects: [])
+                        return self._stage_batch(FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: font_identity, face_generation: face_generation, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: 0, dirty_rects: []))
                     self.atlas_generation = generation
-                return FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: font_identity, face_generation: face_generation, valid: true, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: quads, atlas_generation: self.atlas_generation, dirty_rects: dirty)
+                return self._stage_batch(FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: font_identity, face_generation: face_generation, valid: true, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: quads, atlas_generation: self.atlas_generation, dirty_rects: dirty))
             self._reset_font_atlas(-2, font_identity)
             attempt = attempt + 1
-        FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: font_identity, face_generation: face_generation, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: [])
+        self._stage_batch(FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: font_identity, face_generation: face_generation, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: []))
 
 class _ResolvedShapedGlyphRun:
     valid: bool
@@ -1582,7 +2391,7 @@ fn _resolve_selected_shaped_glyph_run(candidate: FontAssetCandidate, content: te
     for codepoint in decoded:
         if codepoint < 0 or codepoint > 1114111:
             return _resolved_font_empty_shaped()
-        codepoints.push(codepoint as u32)
+        codepoints = codepoints.push(codepoint as u32)
     val font_path = if registered_only:
         candidate.local_path
     else:
@@ -1625,10 +2434,10 @@ fn _resolve_selected_shaped_glyph_run(candidate: FontAssetCandidate, content: te
             valid = false
         var i: i64 = 0
         while i < material.glyph_ids.len() and i < run.glyphs.len():
-            glyph_ids.push(material.glyph_ids[i])
-            xs.push(material.xs[i])
-            ys.push(material.ys[i])
-            clusters.push(material.clusters[i])
+            glyph_ids = glyph_ids.push(material.glyph_ids[i])
+            xs = xs.push(material.xs[i])
+            ys = ys.push(material.ys[i])
+            clusters = clusters.push(material.clusters[i])
             val cluster = material.clusters[i]
             val before = total_advance.to_i32()
             total_advance = total_advance + run.glyphs[i].x_advance
@@ -1671,10 +2480,24 @@ fn _resolve_font_metrics_with_language_config(family: text, content: text, font_
         _resolve_selected_shaped_glyph_run(selected_candidate.?, content, font_size, normalized_language)
     else:
         _resolved_font_empty_shaped()
+    # Phase receipts for the WM pointer-release hang: the 76th call here never
+    # returns while 75 identical-shaped calls did. Placed at phase boundaries
+    # only. NOTE: a previous attempt to probe INSIDE _resolved_font_metric_cached
+    # regressed the whole lane (rerun48 lost every PPM to a re-broken font
+    # execution plan) because this region is layout-sensitive — if that recurs,
+    # revert these immediately rather than reading the regression as new data.
+    if _WM_TRACE: print("[rfm] at=default-font family={resolved_family}")
     val default_font = _browser_default_for_family_cached(resolved_family)
     var renderer = default_font.0
     val renderer_from_cache = default_font.1
-    if not renderer.has_sffi_ttf():
+    # from_cache is the direct test of the root-cause hypothesis: if the
+    # loaded-face module-global cache never persists, this is false on EVERY
+    # call and each text re-attempts a dlopen + 17MB TTF parse (the dominant
+    # render cost by this file's own comment). has_ttf is bound once and
+    # reused by the guard below rather than calling the predicate twice.
+    val dbg_has_ttf = renderer.has_sffi_ttf()
+    if _WM_TRACE: print("[rfm] at=renderer-bound from_cache={renderer_from_cache} has_ttf={dbg_has_ttf}")
+    if not dbg_has_ttf:
         return ResolvedFontMetrics(valid: false, family: resolved_family, identity: "", advances: [], width: 0, line_height: 0, reason: "font-runtime-unavailable", glyph_run: draw_ir_empty_glyph_run_payload(), shaping_required: complex_script != 0)
     val identity = renderer.current_font_identity()
     val cache_key = if cacheable:
@@ -1683,12 +2506,16 @@ fn _resolve_font_metrics_with_language_config(family: text, content: text, font_
         )
     else:
         ""
+    if _WM_TRACE: print("[rfm] at=cache-lookup cacheable={cacheable}")
     if cacheable:
         if val cached = _resolved_font_metric_cached(cache_key):
             if not renderer_from_cache:
                 renderer.clear_ttf()
+            if _WM_TRACE: print("[rfm] at=cache-hit")
             return cached
+    if _WM_TRACE: print("[rfm] at=measure shaped_valid={shaped.valid}")
     val advances = if shaped.valid: shaped.advances else: renderer.measure_text_advances(content, font_size)
+    if _WM_TRACE: print("[rfm] at=measured advances={advances.len()}")
     var width = 0
     if shaped.valid:
         width = shaped.width
@@ -1722,6 +2549,17 @@ fn _resolve_font_metrics_with_language_config(family: text, content: text, font_
         _resolved_font_metric_store(cache_key, resolved)
     resolved
 
+pub fn font_renderer_debug_resolve(family: text, content: text, font_size: i32, language: text) -> text:
+    """Permanent debug entry point: exposes resolve_font_metrics_with_language
+    directly (identity + line 100/family echoed as one string), bypassing the
+    whole HTML/CSS pipeline. Used to bisect the second vector-font-evidence
+    defect (Draw-IR font identity/pixel size still wrong even after the
+    CSS-level BeDomNode.element fix) -- see doc/08_tracking/bug/
+    jit_run_file_pipeline_gaps_2026-07-30.md section 16.4."""
+    val m = resolve_font_metrics_with_language(family, content, font_size, language)
+    "valid=" + m.valid.to_text() + " family=" + m.family + " identity=" + m.identity +
+        " reason=" + m.reason
+
 fn resolve_font_metrics_with_language(family: text, content: text, font_size: i32, language: text) -> ResolvedFontMetrics:
     val config = font_render_config_default_for_size(font_size)
     val config_identity = font_render_config_identity(config)
@@ -1729,7 +2567,7 @@ fn resolve_font_metrics_with_language(family: text, content: text, font_size: i3
     resolved
 
 fn resolve_font_metrics_configured(config: FontRenderConfig, content: text) -> ResolvedFontMetrics:
-    if not config.valid():
+    if not font_render_config_valid(config):
         return ResolvedFontMetrics(valid: false, family: config.family, identity: "", advances: [],
             width: 0, line_height: 0, reason: "invalid-font-config",
             glyph_run: draw_ir_empty_glyph_run_payload(), shaping_required: false)

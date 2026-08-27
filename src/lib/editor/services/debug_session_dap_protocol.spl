@@ -5,8 +5,6 @@
 
 use std.editor.services.debug_session_registry.*
 
-val EDITOR_DEBUG_DAP_FRAME_BODY_MAX: i64 = 65000
-
 fn editor_debug_dap_request(seq: i64, command: text, arguments_json: text) -> text:
     var json = "{\"seq\":" + str(seq) + ",\"type\":\"request\",\"command\":\"" + _ed_json_escape(command) + "\""
     if arguments_json != "":
@@ -17,54 +15,41 @@ fn editor_debug_dap_frame_message(json: text) -> text:
     "Content-Length: " + str(json.len()) + "\r\n\r\n" + json
 
 fn editor_debug_dap_parse_frame(buf: text) -> (text, i64):
-    editor_debug_dap_parse_frame_at(buf, 0)
-
-fn editor_debug_dap_parse_frame_at(buf: text, offset: i64) -> (text, i64):
     if buf == "":
         return ("", 0)
-    val buf_len = buf.len()
-    if offset < 0 or offset >= buf_len:
-        return ("", 0)
-    val header_end = _ed_dap_find_header_end_from(buf, offset)
+    val header_end = _ed_dap_find_header_end(buf)
     if header_end < 0:
         return ("", 0)
+    val header = buf.slice(0, header_end)
     val content_start = header_end + 4
-    val content_length = _ed_dap_parse_content_length_range(buf, offset, header_end)
+    val content_length = _ed_dap_parse_content_length(header)
     if content_length <= 0:
         return ("", 0)
     val total = content_start + content_length
-    if buf_len < total:
+    if buf.len() < total:
         return ("", 0)
     (buf.slice(content_start, total), total)
 
 fn _ed_dap_find_header_end(buf: text) -> i64:
-    _ed_dap_find_header_end_from(buf, 0)
-
-fn _ed_dap_find_header_end_from(buf: text, offset: i64) -> i64:
-    val buf_len = buf.len()
-    if buf_len < 4:
+    if buf.len() < 4:
         return -1
     var i = 0
     while i < buf.len() - 3:
-        if buf.char_at(i) == "\r" and buf.char_at(i + 1) == "\n" and buf.char_at(i + 2) == "\r" and buf.char_at(i + 3) == "\n":
+        if buf[i:i + 1] == "\r" and buf[i + 1:i + 1 + 1] == "\n" and buf[i + 2:i + 2 + 1] == "\r" and buf[i + 3:i + 3 + 1] == "\n":
             return i
         i = i + 1
     -1
 
 fn _ed_dap_parse_content_length(header: text) -> i64:
-    val header_len = header.len()
-    _ed_dap_parse_content_length_range(header, 0, header_len)
-
-fn _ed_dap_parse_content_length_range(buf: text, start: i64, end: i64) -> i64:
-    var i = start
-    while i < end:
-        if i + 15 <= end and buf[i:i + 15] == "Content-Length:":
+    var i = 0
+    while i < header.len():
+        if header.slice(i, header.len()).starts_with("Content-Length:"):
             var j = i + 15
-            while j < header.len() and header.char_at(j) == " ":
+            while j < header.len() and header[j:j + 1] == " ":
                 j = j + 1
             var num = ""
-            while j < header.len() and header.char_at(j) != "\r" and header.char_at(j) != "\n":
-                num = num + header.char_at(j)
+            while j < header.len() and header[j:j + 1] != "\r" and header[j:j + 1] != "\n":
+                num = num + header[j:j + 1]
                 j = j + 1
             return num.trim().to_i64() ?? 0
         i = i + 1
@@ -261,12 +246,12 @@ fn _ed_json_number(json: text, field: text) -> i64:
         return 0
     var i = start + field.len()
     while i < json.len():
-        val ch = json.char_at(i)
+        val ch = json[i:i + 1]
         if _ed_is_digit(ch) or ch == "-":
             var digits = ""
             var negative = false
             while i < json.len():
-                val c = json.char_at(i)
+                val c = json[i:i + 1]
                 if c == "-":
                     negative = true
                     digits = digits + c
@@ -288,19 +273,19 @@ fn _ed_json_number_key(json: text, key: text) -> i64:
     while i + marker.len() <= json.len():
         if json.slice(i, i + marker.len()) == marker:
             var j = i + marker.len()
-            while j < json.len() and json.char_at(j) != ":":
+            while j < json.len() and json[j:j + 1] != ":":
                 j = j + 1
             if j < json.len():
                 j = j + 1
             while j < json.len():
-                val ch = json.char_at(j)
+                val ch = json[j:j + 1]
                 if ch == " " or ch == "\n" or ch == "\r" or ch == "\t":
                     j = j + 1
                 elif _ed_is_digit(ch) or ch == "-":
                     var digits = ""
                     var negative = false
                     while j < json.len():
-                        val c = json.char_at(j)
+                        val c = json[j:j + 1]
                         if c == "-":
                             negative = true
                             digits = digits + c
@@ -323,19 +308,19 @@ fn _ed_dap_number_field(json: text, key: text) -> i64:
     if start < 0:
         return 0
     var i = start + marker.len()
-    while i < json.len() and json.char_at(i) != ":":
+    while i < json.len() and json[i:i + 1] != ":":
         i = i + 1
     if i < json.len():
         i = i + 1
-    while i < json.len() and (json.char_at(i) == " " or json.char_at(i) == "\n" or json.char_at(i) == "\r" or json.char_at(i) == "\t"):
+    while i < json.len() and (json[i:i + 1] == " " or json[i:i + 1] == "\n" or json[i:i + 1] == "\r" or json[i:i + 1] == "\t"):
         i = i + 1
     var negative = false
-    if i < json.len() and json.char_at(i) == "-":
+    if i < json.len() and json[i:i + 1] == "-":
         negative = true
         i = i + 1
     var result: i64 = 0
-    while i < json.len() and _ed_is_digit(json.char_at(i)):
-        result = result * 10 + _ed_digit_value(json.char_at(i))
+    while i < json.len() and _ed_is_digit(json[i:i + 1]):
+        result = result * 10 + _ed_digit_value(json[i:i + 1])
         i = i + 1
     if negative:
         return 0 - result
@@ -369,7 +354,7 @@ fn _ed_digits_to_i64(digits: text, negative: bool) -> i64:
     var result: i64 = 0
     var i = 0
     while i < digits.len():
-        val ch = digits.char_at(i)
+        val ch = digits[i:i + 1]
         if _ed_is_digit(ch):
             result = result * 10 + _ed_digit_value(ch)
         i = i + 1
@@ -382,24 +367,25 @@ fn _ed_json_value(json: text, field: text) -> text:
     if start < 0:
         return ""
     var i = start + field.len()
-    while i < json.len() and (json.char_at(i) == " " or json.char_at(i) == "\n" or json.char_at(i) == "\r" or json.char_at(i) == "\t" or json.char_at(i) == ":"):
+    while i < json.len() and (json[i:i + 1] == " " or json[i:i + 1] == "\n" or json[i:i + 1] == "\r" or json[i:i + 1] == "\t" or json[i:i + 1] == ":"):
         i = i + 1
     if i >= json.len():
         return ""
-    val ch = json.char_at(i)
+    val ch = json[i:i + 1]
     if ch == "{":
         return _ed_json_balanced(json, i, "{")
     if ch == "[":
         return _ed_json_balanced(json, i, "[")
     if ch == "\"":
         return "\"" + _ed_json_escape(_ed_extract_string(json, i)) + "\""
-    val value_start = i
+    var result = ""
     while i < json.len():
-        val c = json.char_at(i)
+        val c = json[i:i + 1]
         if c == "," or c == "}":
-            return json.slice(value_start, i).trim()
+            return result.trim()
+        result = result + c
         i = i + 1
-    json.slice(value_start, i).trim()
+    result.trim()
 
 fn _ed_json_array(json: text, field: text) -> [text]:
     var result: [text] = []
@@ -407,7 +393,7 @@ fn _ed_json_array(json: text, field: text) -> [text]:
     if field_start < 0:
         return result
     var array_start = field_start + field.len()
-    while array_start < json.len() and json.char_at(array_start) != "[":
+    while array_start < json.len() and json[array_start:array_start + 1] != "[":
         array_start = array_start + 1
     if array_start >= json.len():
         return result
@@ -416,7 +402,7 @@ fn _ed_json_array(json: text, field: text) -> [text]:
         return result
     var i = 1
     while i < array_json.len() - 1:
-        val ch = array_json.char_at(i)
+        val ch = array_json[i:i + 1]
         if ch == " " or ch == "\n" or ch == "\r" or ch == "\t" or ch == ",":
             i = i + 1
         elif ch == "{":
@@ -436,7 +422,7 @@ fn _ed_json_balanced(json: text, start: i64, open_ch: text) -> text:
     var i = start
     var in_str = false
     while i < json.len():
-        val ch = json.char_at(i)
+        val ch = json[i:i + 1]
         if in_str:
             if ch == "\\":
                 i = i + 1
@@ -458,7 +444,7 @@ fn _ed_json_escape(s: text) -> text:
     var result = ""
     var i = 0
     while i < s.len():
-        val ch = s.char_at(i)
+        val ch = s[i:i + 1]
         if ch == "\"":
             result = result + "\\\""
         elif ch == "\\":

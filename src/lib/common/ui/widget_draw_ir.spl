@@ -14,7 +14,7 @@
 # and applies clipping per-batch (batch.embedding.clip). Scroll areas therefore
 # become their own clipped batch with content offset by the scroll amount.
 #
-use common.ui.layout.{compute_layout, find_rect}
+use common.ui.layout.{compute_layout, find_rect_index}
 use common.ui.widget.{WidgetNode, WidgetRect}
 use common.ui.theme_render_snapshot.{ThemeRenderSnapshot, theme_role_color}
 use common.ui.theme_draw_ir_material.{
@@ -38,10 +38,13 @@ use common.ui.draw_ir.{
     DrawIrComposition,
     DrawIrCommand,
     draw_ir_batch_with_source,
+    draw_ir_box_with_style,
     draw_ir_composition,
     draw_ir_embedding_config,
     draw_ir_image_command,
+    draw_ir_no_rect,
     draw_ir_rect,
+    draw_ir_rect_bounds,
     draw_ir_source_gui_ast,
     DrawIrGlyphRunPayload,
     draw_ir_empty_glyph_run_payload,
@@ -55,7 +58,7 @@ use std.common.encoding.font_registry.{simpleos_default_font_asset_candidate}
 use std.nogc_sync_mut.text_layout.font_renderer.{resolve_font_metrics_with_language}
 
 # =========================================================================
-# Palette (ARGB u32, 0xff = opaque)
+# Semantic widget roles
 # =========================================================================
 
 struct WidgetDrawIrTheme:
@@ -70,22 +73,29 @@ struct WidgetDrawIrTheme:
     field: u32
     track: u32
     placeholder: u32
+    status_info: u32
+    status_success: u32
+    status_warning: u32
+    status_error: u32
 
 fn widget_draw_ir_theme_from_snapshot(snapshot: ThemeRenderSnapshot) -> WidgetDrawIrTheme:
-    """Resolve renderer-neutral material values into widget semantic roles."""
-    val material = snapshot.material
+    """Resolve the canonical L5 roles once for Draw-IR widget projection."""
     WidgetDrawIrTheme(
-        surface: material.window_fill_rgba,
-        text_primary: material.text_rgba,
-        text_secondary: material.secondary_text_rgba,
-        accent: snapshot.accent_rgba,
-        border: material.border_rgba,
-        control_normal: snapshot.accent_rgba,
-        control_hover: material.active_title_fill_rgba,
-        control_pressed: material.inactive_title_fill_rgba,
-        field: material.solid_fallback_rgba,
-        track: material.inactive_title_fill_rgba,
-        placeholder: snapshot.background_rgba
+        surface: theme_role_color(snapshot, "workbench.panel").rgba,
+        text_primary: theme_role_color(snapshot, "document.text").rgba,
+        text_secondary: theme_role_color(snapshot, "slide.placeholder").rgba,
+        accent: theme_role_color(snapshot, "wm.controls").rgba,
+        border: theme_role_color(snapshot, "wm.border").rgba,
+        control_normal: theme_role_color(snapshot, "wm.controls").rgba,
+        control_hover: theme_role_color(snapshot, "wm.titlebar").rgba,
+        control_pressed: theme_role_color(snapshot, "workbench.tab_bar").rgba,
+        field: theme_role_color(snapshot, "workbench.editor").rgba,
+        track: theme_role_color(snapshot, "workbench.tab_bar").rgba,
+        placeholder: theme_role_color(snapshot, "slide.placeholder").rgba,
+        status_info: theme_role_color(snapshot, "semantic.info").rgba,
+        status_success: theme_role_color(snapshot, "semantic.success").rgba,
+        status_warning: theme_role_color(snapshot, "semantic.warning").rgba,
+        status_error: theme_role_color(snapshot, "semantic.error").rgba
     )
 
 fn _widget_draw_ir_theme_from_wm_chrome(chrome: WmChromeColors) -> WidgetDrawIrTheme:
@@ -102,7 +112,11 @@ fn _widget_draw_ir_theme_from_wm_chrome(chrome: WmChromeColors) -> WidgetDrawIrT
         control_pressed: chrome.title_unfocused,
         field: chrome.host_window_body,
         track: chrome.title_unfocused,
-        placeholder: chrome.compositor_bg
+        placeholder: chrome.compositor_bg,
+        status_info: chrome.accent,
+        status_success: chrome.accent,
+        status_warning: chrome.accent,
+        status_error: chrome.accent
     )
 
 fn _widget_draw_ir_theme_from_ui_theme(ui_theme: UITheme) -> WidgetDrawIrTheme:
@@ -162,12 +176,12 @@ fn _label_text(node: WidgetNode) -> text:
         return lbl
     node.get_prop("content")
 
-fn _button_color(node: WidgetNode) -> u32:
+fn _button_color(node: WidgetNode, theme: WidgetDrawIrTheme) -> u32:
     if node.get_prop("ui_pressed") == "true":
-        return BTN_PRESSED
+        return theme.control_pressed
     if node.get_prop("ui_hover") == "true":
-        return BTN_HOVER
-    BTN_NORMAL
+        return theme.control_hover
+    theme.control_normal
 
 fn _status_color(node: WidgetNode, theme: WidgetDrawIrTheme) -> u32:
     val status = node.get_prop("status")
@@ -313,22 +327,22 @@ fn _emit_widget(node: WidgetNode, rects: [WidgetRect], rect_index: i64, ox: i32,
     val mid_y = y + rect.h / 2
 
     if kind == "button":
-        result.push(draw_ir_rect(rect.id, x, y, rect.w, rect.h, _button_color(node)))
+        result.push(draw_ir_rect(rect.id, x, y, rect.w, rect.h, _button_color(node, theme)))
         val lbl = _label_text(node)
         if lbl != "":
-            result.push(_default_text_centered(node, "{rect.id}-label", x + 6, mid_y, y, rect.h, lbl, BTN_LABEL))
+            result.push(_default_text_centered(node, "{rect.id}-label", x + 6, mid_y, y, rect.h, lbl, theme.text_primary))
     elif kind == "checkbox":
         val box = 18
         val box_y = y + (rect.h - box) / 2
-        result.push(draw_ir_rect("{rect.id}-box", x, box_y, box, box, CHECK_BORDER))
-        val inner_color = if node.get_prop("checked") == "true": CHECK_MARK else: CHECK_BG
+        result.push(draw_ir_rect("{rect.id}-box", x, box_y, box, box, theme.border))
+        val inner_color = if node.get_prop("checked") == "true": theme.accent else: theme.field
         result.push(draw_ir_rect("{rect.id}-mark", x + 2, box_y + 2, box - 4, box - 4, inner_color))
         val lbl = _label_text(node)
         if lbl != "":
-            result.push(_default_text_centered(node, "{rect.id}-label", x + box + 6, mid_y, y, rect.h, lbl, LABEL_FG))
+            result.push(_default_text_centered(node, "{rect.id}-label", x + box + 6, mid_y, y, rect.h, lbl, theme.text_primary))
     elif kind == "input" or kind == "textfield":
-        result.push(draw_ir_rect("{rect.id}-border", x, y, rect.w, rect.h, INPUT_BORDER))
-        result.push(draw_ir_rect("{rect.id}-field", x + 2, y + 2, rect.w - 4, rect.h - 4, INPUT_BG))
+        result.push(draw_ir_rect(rect.id, x, y, rect.w, rect.h, theme.border))
+        result.push(draw_ir_rect("{rect.id}-field", x + 2, y + 2, rect.w - 4, rect.h - 4, theme.field))
         val value = node.get_prop("value")
         if value != "":
             result.push(_default_text_centered(node, "{rect.id}-value", x + 5, mid_y, y, rect.h, value, theme.text_primary))
@@ -342,11 +356,11 @@ fn _emit_widget(node: WidgetNode, rects: [WidgetRect], rect_index: i64, ox: i32,
         if node.get_prop("ui_focus") == "true":
             val caret = _prop_int(node, "caret")
             val prefix = if caret > 0 and caret < value.len(): value.slice(0, caret) elif caret >= value.len(): value else: ""
-            val prefix_command = _default_text(node, "{rect.id}-caret-metrics", 0, 0, prefix, INPUT_TEXT)
+            val prefix_command = _default_text(node, "{rect.id}-caret-metrics", 0, 0, prefix, theme.text_primary)
             val caret_x = x + 5 + (if prefix_command.computed_style.len() > 0: prefix_command.width else: caret * GLYPH_ADVANCE)
-            result.push(draw_ir_rect("{rect.id}-caret", caret_x, y + 3, 2, rect.h - 6, CARET_COLOR))
+            result.push(draw_ir_rect("{rect.id}-caret", caret_x, y + 3, 2, rect.h - 6, theme.accent))
     elif kind == "progress":
-        result.push(draw_ir_rect("{rect.id}-track", x, y, rect.w, rect.h, PROGRESS_TRACK))
+        result.push(draw_ir_rect("{rect.id}-track", x, y, rect.w, rect.h, theme.track))
         var value = _prop_int(node, "value")
         if value < 0:
             value = 0
@@ -354,9 +368,9 @@ fn _emit_widget(node: WidgetNode, rects: [WidgetRect], rect_index: i64, ox: i32,
             value = 100
         val fill_w = rect.w * value / 100
         if fill_w > 0:
-            result.push(draw_ir_rect("{rect.id}-fill", x, y, fill_w, rect.h, PROGRESS_FILL))
+            result.push(draw_ir_rect("{rect.id}-fill", x, y, fill_w, rect.h, theme.accent))
     elif kind == "image":
-        result.push(draw_ir_rect("{rect.id}-bg", x, y, rect.w, rect.h, IMAGE_PLACEHOLDER))
+        result.push(draw_ir_rect("{rect.id}-bg", x, y, rect.w, rect.h, theme.placeholder))
         val src = node.get_prop("src")
         if src != "":
             result.push(draw_ir_image_command(rect.id, x, y, rect.w, rect.h, src, []))
@@ -364,6 +378,11 @@ fn _emit_widget(node: WidgetNode, rects: [WidgetRect], rect_index: i64, ox: i32,
         val lbl = _label_text(node)
         if lbl != "":
             result.push(_default_text_centered(node, rect.id, x + 2, mid_y, y, rect.h, lbl, theme.text_primary))
+    elif kind == "status_chip" or kind == "toast":
+        result.push(draw_ir_rect(rect.id, x, y, rect.w, rect.h, _status_color(node, theme)))
+        val text = _status_text(node)
+        if text != "":
+            result.push(_default_text_centered(node, "{rect.id}-label", x + 6, mid_y, y, rect.h, text, theme.text_primary))
     elif kind == "scroll":
         result.push(draw_ir_rect("{rect.id}-track", x, y, rect.w, rect.h, theme.track))
         val bar_w = if rect.w >= 12: 8 else: rect.w
@@ -551,11 +570,11 @@ fn _collect_scroll_batches(node: WidgetNode, rects: [WidgetRect], backend: text,
     if not node.is_visible():
         return
     if node.kind_name() == "scroll":
-        match _build_scroll_batch(node, rects, backend, theme):
-            case Some(batch):
-                result.push(batch)
-            case _:
-                pass
+        val rect_index = find_rect_index(rects, node.id)
+        if rect_index >= 0:
+            result.push(_build_scroll_batch(
+                node, rects, rect_index, backend, theme
+            ))
     for child in node.children():
         _collect_scroll_batches(child, rects, backend, result, theme)
 
@@ -619,7 +638,7 @@ fn _widget_draw_ir_root_surface_commands(root: WidgetNode, width: i32, height: i
 # Public API
 # =========================================================================
 
-fn widget_tree_to_draw_ir(root: WidgetNode, w: i32, h: i32, backend: text) -> DrawIrComposition:
+fn widget_tree_to_draw_ir_with_theme(root: WidgetNode, w: i32, h: i32, backend: text, snapshot: ThemeRenderSnapshot) -> DrawIrComposition:
     """Lay out `root` at (w, h) and project it to a Draw-IR composition.
 
     Batch 0 is the whole tree in absolute coordinates (unclipped). Each scroll
@@ -627,6 +646,7 @@ fn widget_tree_to_draw_ir(root: WidgetNode, w: i32, h: i32, backend: text) -> Dr
     its `scroll_offset`. The result renders through
     `engine2d_draw_ir_adv_composition[_with_images]`.
     """
+    val theme = widget_draw_ir_theme_from_snapshot(snapshot)
     val rects = compute_layout(root, 0, 0, w, h)
     var main_cmds: [DrawIrCommand] = []
     _walk_main(root, rects, main_cmds, theme)
@@ -634,7 +654,8 @@ fn widget_tree_to_draw_ir(root: WidgetNode, w: i32, h: i32, backend: text) -> Dr
         root, w, h, backend, snapshot, main_cmds
     )
     val embedding = draw_ir_embedding_config("widget-root", root.id, 0, 0, w, h, 0, 1000, false)
-    val main_batch = draw_ir_batch("widget-main", backend, embedding, main_cmds)
+    val source = draw_ir_source_gui_ast(root.id, "widget-tree", "1")
+    val main_batch = draw_ir_batch_with_source("widget-main", backend, embedding, main_cmds, source)
     var batches: [DrawIrBatch] = [main_batch]
     _collect_scroll_batches(root, rects, backend, batches, theme)
     draw_ir_composition("widget-composition", "widget:{w}x{h}", backend, batches)
@@ -654,4 +675,5 @@ fn widget_tree_to_draw_ir(root: WidgetNode, w: i32, h: i32, backend: text) -> Dr
 fn widget_tree_to_draw_ir_cpu(root: WidgetNode, w: i32, h: i32) -> DrawIrComposition:
     widget_tree_to_draw_ir(root, w, h, DRAW_IR_BACKEND_CPU)
 
-export widget_tree_to_draw_ir, widget_tree_to_draw_ir_cpu
+export WidgetDrawIrTheme, widget_draw_ir_theme_from_snapshot
+export widget_tree_to_draw_ir, widget_tree_to_draw_ir_with_theme, widget_tree_to_draw_ir_cpu

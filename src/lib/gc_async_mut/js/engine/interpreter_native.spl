@@ -8,7 +8,7 @@ use std.js.engine.vm_object_store.{ObjectStore}
 use std.js.engine.runtime.{dispatch_native, NATIVE_BLOB_TEXT, NATIVE_FETCH, NATIVE_JSON_PARSE, NATIVE_NODE_BUFFER_ALLOC, NATIVE_NODE_BUFFER_BYTE_LENGTH, NATIVE_NODE_BUFFER_COMPARE, NATIVE_NODE_BUFFER_CONCAT, NATIVE_NODE_BUFFER_EQUALS, NATIVE_NODE_BUFFER_FROM, NATIVE_NODE_BUFFER_IS_BUFFER, NATIVE_NODE_BUFFER_READ_UINT16_BE, NATIVE_NODE_BUFFER_READ_UINT16_LE, NATIVE_NODE_BUFFER_READ_UINT32_BE, NATIVE_NODE_BUFFER_READ_UINT32_LE, NATIVE_NODE_BUFFER_READ_UINT8, NATIVE_NODE_BUFFER_SLICE, NATIVE_NODE_BUFFER_SUBARRAY, NATIVE_NODE_BUFFER_TO_STRING, NATIVE_NODE_BUFFER_WRITE_UINT16_BE, NATIVE_NODE_BUFFER_WRITE_UINT16_LE, NATIVE_NODE_BUFFER_WRITE_UINT32_BE, NATIVE_NODE_BUFFER_WRITE_UINT32_LE, NATIVE_NODE_BUFFER_WRITE_UINT8, NATIVE_NODE_OS_ARCH, NATIVE_NODE_OS_ENDIANNESS, NATIVE_NODE_OS_HOMEDIR, NATIVE_NODE_OS_PLATFORM, NATIVE_NODE_OS_RELEASE, NATIVE_NODE_OS_TMPDIR, NATIVE_NODE_OS_TYPE, NATIVE_NODE_PATH_BASENAME, NATIVE_NODE_PATH_DIRNAME, NATIVE_NODE_PATH_EXTNAME, NATIVE_NODE_PATH_IS_ABSOLUTE, NATIVE_NODE_PATH_JOIN, NATIVE_NODE_PATH_NORMALIZE, NATIVE_NODE_PROCESS_CWD, NATIVE_NODE_PROCESS_EXIT, NATIVE_NODE_PROCESS_NEXT_TICK, NATIVE_NODE_REQUIRE, NATIVE_PROMISE_CATCH, NATIVE_PROMISE_FINALLY, NATIVE_PROMISE_REJECT, NATIVE_PROMISE_RESOLVE, NATIVE_PROMISE_THEN, NATIVE_RESPONSE_ARRAY_BUFFER, NATIVE_RESPONSE_BLOB, NATIVE_RESPONSE_JSON, NATIVE_RESPONSE_TEXT, NATIVE_SET_TIMEOUT, NATIVE_SET_INTERVAL, NATIVE_CLEAR_TIMEOUT, NATIVE_CLEAR_INTERVAL, NATIVE_STORAGE_GET_ITEM, NATIVE_STORAGE_SET_ITEM, NATIVE_STORAGE_REMOVE_ITEM, NATIVE_STORAGE_CLEAR, NATIVE_STORAGE_KEY, NATIVE_WEBASSEMBLY_INSTANTIATE, NATIVE_WEBASSEMBLY_INSTANTIATE_CATCH, NATIVE_WEBASSEMBLY_INSTANTIATE_THEN, NATIVE_WEBASSEMBLY_INSTANCE_CONSTRUCTOR, NATIVE_WEBASSEMBLY_MODULE_CONSTRUCTOR, NATIVE_WEBASSEMBLY_VALIDATE, NATIVE_NAVIGATOR_GPU_REQUEST_ADAPTER}
 use std.js.engine.parser.{JsParser}
 use std.js.builtins.json.{json_is_valid}
-use std.js.node.path_module.{path_join, path_dirname, path_basename, path_extname, path_isAbsolute, path_normalize}
+use std.js.node.path_module.{js_path_join, path_dirname, path_basename, path_extname, path_isAbsolute, path_normalize}
 use std.js.node.buffer_module.{buffer_byteLength, NodeBuffer}
 use std.js.node.os_module.{os_platform, os_arch, os_type, os_release, os_homedir, os_tmpdir, os_endianness, os_eol}
 use std.js.node.process_module.{process_cwd, process_exit, process_nextTick}
@@ -16,6 +16,9 @@ use std.gc_async_mut.js.engine.interpreter.{JsInterpreter, PendingAsyncRequest, 
 use std.gc_async_mut.js.engine.interpreter.{filter_response_headers_for_script, parse_non_negative_i64_text, text_equals_exact, _simple_fetch_state, _simple_fetch_value, _simple_fetch_marker, _simple_fetch_base_url, _simple_fetch_cookie_header, _resolve_fetch_url}
 use std.gc_async_mut.js.engine.interpreter_string_methods.{JsInterpreter}
 use std.gc_async_mut.js.engine.interpreter_object.{JsInterpreter}
+
+val MAX_PENDING_BROWSER_FETCHES: i32 = 1024
+val MAX_PENDING_TIMER_TASKS: i32 = 4096
 
 impl JsInterpreter:
     me _dispatch_native_with_receiver(native_id: i64, this_val: JsValue, arg_vals: [JsValue], env: i64) -> JsValue:
@@ -74,7 +77,7 @@ impl JsInterpreter:
         if native_id == NATIVE_NODE_REQUIRE:
             return self._native_node_require(arg_vals)
         if native_id == NATIVE_NODE_PATH_JOIN:
-            return path_join(arg_vals)
+            return js_path_join(arg_vals)
         if native_id == NATIVE_NODE_PATH_DIRNAME:
             return path_dirname(arg_vals)
         if native_id == NATIVE_NODE_PATH_BASENAME:
@@ -1070,13 +1073,16 @@ impl JsInterpreter:
         -1
 
     me _native_set_timer(arg_vals: [JsValue], is_interval: bool) -> JsValue:
-        val timer_id = self.next_timer_id
-        self.next_timer_id = self.next_timer_id + 1
         var callback_id = -1
         if arg_vals.len() > 0:
             match arg_vals[0]:
                 JsValue.Function(id): callback_id = id
                 _: pass_dn
+        if callback_id < 0 or
+           self.pending_timer_tasks.len() >= MAX_PENDING_TIMER_TASKS:
+            return JsValue.Undefined
+        val timer_id = self.next_timer_id
+        self.next_timer_id = self.next_timer_id + 1
         var delay_ms = 0
         if arg_vals.len() > 1:
             delay_ms = f64_to_i64(to_number(arg_vals[1]))
@@ -1084,21 +1090,23 @@ impl JsInterpreter:
                 delay_ms = 0
         if is_interval and delay_ms < 1:
             delay_ms = 1
-        self.pending_timer_tasks = self.pending_timer_tasks + [PendingTimerTask.create(timer_id, callback_id, delay_ms, 0, is_interval)]
+        self.pending_timer_tasks = self.pending_timer_tasks + [PendingTimerTask.create(
+            timer_id, callback_id, delay_ms,
+            self.timer_current_time_ms, is_interval
+        )]
         JsValue.Number(v: (timer_id as f64))
 
     me _native_clear_timer(arg_vals: [JsValue]) -> JsValue:
         if arg_vals.len() == 0:
             return JsValue.Undefined
         val timer_id = f64_to_i64(to_number(arg_vals[0]))
-        var rest: [PendingTimerTask] = []
         var i = 0
         while i < self.pending_timer_tasks.len():
             val task = self.pending_timer_tasks[i]
-            if task.id != timer_id:
-                rest = rest + [task]
+            if task.id == timer_id:
+                self.pending_timer_tasks.remove(i)
+                break
             i = i + 1
-        self.pending_timer_tasks = rest
         JsValue.Undefined
 
     me _native_fetch(this_val: JsValue, arg_vals: [JsValue], env: i64) -> JsValue:
@@ -1114,24 +1122,15 @@ impl JsInterpreter:
         if not _simple_fetch_marker(host_obj_id, self.object_store):
             return JsValue.Undefined
 
-        var raw_request_url = ""
         var request_url = _simple_fetch_base_url(host_obj_id, self.object_store)
         if arg_vals.len() > 0:
-            raw_request_url = js_to_string(arg_vals.get(0))
-            request_url = _resolve_fetch_url(request_url, raw_request_url)
-        var script_document_url = ""
-        if self.host_location_id >= 0:
-            match self.get_object_property(self.host_location_id, "href"):
-                JsValue.String(v):
-                    if v.len() <= 8192:
-                        script_document_url = v
-                _:
-                    pass_dn
+            request_url = _resolve_fetch_url(request_url, js_to_string(arg_vals.get(0)))
 
         var method = "GET"
         var headers_text = ""
         var body = ""
         var content_type = ""
+        var credentials = "same-origin"
         if arg_vals.len() > 1:
             match arg_vals.get(1):
                 JsValue.Object(opts_id):
@@ -1153,6 +1152,14 @@ impl JsInterpreter:
                     match self.get_object_property(opts_id, "contentType"):
                         JsValue.String(v): content_type = v
                         _: pass_dn
+                    match self.get_object_property(opts_id, "credentials"):
+                        JsValue.String(v):
+                            val normalized = v.trim().lower()
+                            if (normalized == "omit" or
+                                normalized == "same-origin" or
+                                normalized == "include"):
+                                credentials = normalized
+                        _: pass_dn
                 JsValue.String(v):
                     headers_text = v
                 _:
@@ -1169,6 +1176,13 @@ impl JsInterpreter:
             headers_text = headers_text + "Content-Type: " + content_type
 
         val promise_id = self._create_pending_promise_object()
+        if self.pending_async_request_registry.len() >= MAX_PENDING_BROWSER_FETCHES:
+            self._settle_promise(
+                promise_id,
+                JsValue.String(v: "resource-limit:too-many-pending-fetches"),
+                true
+            )
+            return JsValue.Object(id: promise_id)
         val request_obj_id = self.create_object()
         val request_id = "fetch-{self.next_async_request_seq}"
         self.next_async_request_seq = self.next_async_request_seq + 1
@@ -1176,15 +1190,20 @@ impl JsInterpreter:
         self.set_object_property(request_obj_id, "request_id", JsValue.String(v: request_id))
         self.set_object_property(request_obj_id, "kind", JsValue.String(v: "fetch"))
         self.set_object_property(request_obj_id, "url", JsValue.String(v: request_url))
-        self.set_object_property(request_obj_id, "raw_url", JsValue.String(v: raw_request_url))
         self.set_object_property(request_obj_id, "method", JsValue.String(v: if method.trim() != "": method else: "GET"))
         self.set_object_property(request_obj_id, "headers", JsValue.String(v: headers_text))
         self.set_object_property(request_obj_id, "body", JsValue.String(v: body))
         self.set_object_property(request_obj_id, "content_type", JsValue.String(v: content_type))
+        self.set_object_property(request_obj_id, "credentials", JsValue.String(v: credentials))
         self.set_object_property(request_obj_id, "promise_id", JsValue.String(v: "{promise_id}"))
-        val request_record = PendingAsyncRequest.create(request_obj_id)
+        val request_record = PendingAsyncRequest.create(
+            request_obj_id, self.pending_host_document_cookie_writes
+        )
+        self.pending_host_document_cookie_writes = []
         self.pending_async_requests = self.pending_async_requests + [request_record]
-        self.pending_async_request_registry = self.pending_async_request_registry + [request_record]
+        self.pending_async_request_registry = self.pending_async_request_registry + [
+            PendingAsyncRequest.create(request_obj_id)
+        ]
         JsValue.Object(id: promise_id)
 
     me _native_promise_then(this_val: JsValue, arg_vals: [JsValue]) -> JsValue:
@@ -1203,35 +1222,8 @@ impl JsInterpreter:
         match _simple_fetch_state(promise_id, self.object_store):
             "pending": JsValue.Object(id: next_promise_id)
             _:
-                self._settle_already_settled_promise_then(promise_id, on_fulfilled, on_rejected, next_promise_id)
+                self._run_promise_task(promise_id, handler_id)
                 JsValue.Object(id: next_promise_id)
-
-    me _settle_already_settled_promise_then(promise_id: i64, on_fulfilled: i64, on_rejected: i64, next_promise_id: i64):
-        val state = _simple_fetch_state(promise_id, self.object_store)
-        var settled_value = _simple_fetch_value(promise_id, self.object_store)
-        match settled_value:
-            JsValue.Object(id: settled_obj_id):
-                match self.get_object_property(settled_obj_id, "__simple_promise_host"):
-                    JsValue.Boolean(is_host):
-                        if is_host and _simple_fetch_state(settled_obj_id, self.object_store) == "fulfilled":
-                            settled_value = _simple_fetch_value(settled_obj_id, self.object_store)
-                    _:
-                        pass_dn
-            _:
-                pass_dn
-        var callback_id = if state == "fulfilled": on_fulfilled else: on_rejected
-        var propagate_rejection = state == "rejected"
-        var next_value = settled_value
-        if callback_id >= 0:
-            val result = self._invoke_promise_callback(callback_id, [settled_value])
-            match result:
-                Ok(callback_result):
-                    next_value = callback_result
-                    propagate_rejection = state == "rejected" and on_rejected < 0
-                Err(e):
-                    next_value = JsValue.String(v: e.message)
-                    propagate_rejection = true
-        val _ = self._resolve_promise_from_callback_result(next_promise_id, next_value, propagate_rejection)
 
     me _native_promise_catch(this_val: JsValue, arg_vals: [JsValue]) -> JsValue:
         val promise_id = _get_obj_id(this_val)
@@ -1283,36 +1275,68 @@ impl JsInterpreter:
         val value = if arg_vals.len() > 0: arg_vals.get(0) else: JsValue.Undefined
         JsValue.Object(id: self._create_settled_promise_object(value, true))
 
+    me _consume_response_body(response_id: i64) -> Result<text, text>:
+        match self._get_internal_object_property(
+            response_id, "__simple_internal_response_body_consumed"
+        ):
+            JsValue.Boolean(true):
+                self.set_object_property(
+                    response_id, "bodyUsed", JsValue.Boolean(v: true)
+                )
+                return Err("TypeError: Body is unusable")
+            _:
+                pass_dn("unconsumed response body")
+        self._set_internal_object_property(
+            response_id, "__simple_internal_response_body_consumed",
+            JsValue.Boolean(v: true)
+        )
+        self.set_object_property(
+            response_id, "bodyUsed", JsValue.Boolean(v: true)
+        )
+        match self.get_object_property(response_id, "body"):
+            JsValue.String(v): Ok(v)
+            _: Ok("")
+
     me _native_response_text(this_val: JsValue) -> JsValue:
         val response_id = _get_obj_id(this_val)
         if response_id < 0:
             return JsValue.Undefined
-        self.set_object_property(response_id, "bodyUsed", JsValue.Boolean(v: true))
-        match self.get_object_property(response_id, "body"):
-            JsValue.String(v): JsValue.Object(id: self._create_settled_promise_object(JsValue.String(v: v), false))
-            _: JsValue.Undefined
+        match self._consume_response_body(response_id):
+            Ok(body):
+                JsValue.Object(id: self._create_settled_promise_object(
+                    JsValue.String(v: body), false
+                ))
+            Err(e):
+                JsValue.Object(id: self._create_settled_promise_object(
+                    JsValue.String(v: e), true
+                ))
 
     me _native_response_json(this_val: JsValue) -> JsValue:
         val response_id = _get_obj_id(this_val)
         if response_id < 0:
             return JsValue.Undefined
-        self.set_object_property(response_id, "bodyUsed", JsValue.Boolean(v: true))
-        match self.get_object_property(response_id, "body"):
-            JsValue.String(v):
-                match self._json_parse_allocated(v, self.global_env):
+        match self._consume_response_body(response_id):
+            Ok(body):
+                match self._json_parse_allocated(body, self.global_env):
                     Ok(value): JsValue.Object(id: self._create_settled_promise_object(value, false))
                     Err(e): JsValue.Object(id: self._create_settled_promise_object(JsValue.String(v: e.message), true))
-            _: JsValue.Undefined
+            Err(e):
+                JsValue.Object(id: self._create_settled_promise_object(
+                    JsValue.String(v: e), true
+                ))
 
     me _native_response_blob(this_val: JsValue) -> JsValue:
         val response_id = _get_obj_id(this_val)
         if response_id < 0:
             return JsValue.Undefined
-        self.set_object_property(response_id, "bodyUsed", JsValue.Boolean(v: true))
+        val consumed = self._consume_response_body(response_id)
         var body = ""
-        match self.get_object_property(response_id, "body"):
-            JsValue.String(v): body = v
-            _: pass_dn
+        match consumed:
+            Ok(v): body = v
+            Err(e):
+                return JsValue.Object(id: self._create_settled_promise_object(
+                    JsValue.String(v: e), true
+                ))
         var blob_type = self._response_content_type(response_id)
         if blob_type == "":
             blob_type = "application/octet-stream"
@@ -1328,11 +1352,14 @@ impl JsInterpreter:
         val response_id = _get_obj_id(this_val)
         if response_id < 0:
             return JsValue.Undefined
-        self.set_object_property(response_id, "bodyUsed", JsValue.Boolean(v: true))
+        val consumed = self._consume_response_body(response_id)
         var body = ""
-        match self.get_object_property(response_id, "body"):
-            JsValue.String(v): body = v
-            _: pass_dn
+        match consumed:
+            Ok(v): body = v
+            Err(e):
+                return JsValue.Object(id: self._create_settled_promise_object(
+                    JsValue.String(v: e), true
+                ))
         val body_hex = self._native_webassembly_normalize_hex(body)
         val use_hex_body = self._native_webassembly_valid_header(body_hex)
         val byte_len = if use_hex_body: body_hex.len() / 2 else: body.bytes().len()

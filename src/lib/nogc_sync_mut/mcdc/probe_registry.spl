@@ -10,38 +10,6 @@ extern fn spl_thread_current_id() -> i64
 
 # Conservative fixed hash-table accounting charged once per admitted owner.
 pub val MCDC_PROBE_REGISTRY_BYTES_PER_OWNER = 64
-# Accounted scalar payload per fixed hash slot.  The arrays themselves are
-# created once by configure; cold retries reuse them and never grow them.
-pub val MCDC_PROBE_REGISTRY_SLOT_PAYLOAD_BYTES = 32
-pub val MCDC_PROBE_REGISTRY_SCALAR_PAYLOAD_BYTES = 24
-
-fn mcdc_probe_registry_capacity_for(owner_limit: i64) -> i64:
-    var capacity = 2
-    while capacity < owner_limit * 2: capacity = capacity * 2
-    capacity
-
-pub fn mcdc_probe_registry_owner_limit(global_bytes: i64, owner_bytes: i64) -> i64:
-    if global_bytes <= 0 or owner_bytes <= MCDC_PROBE_REGISTRY_BYTES_PER_OWNER:
-        return 0
-    var high = global_bytes / owner_bytes
-    if high > 4096: high = 4096
-    val capsule_bytes = owner_bytes - MCDC_PROBE_REGISTRY_BYTES_PER_OWNER
-    var low = 1
-    var admitted = 0
-    # Retained payload is monotonic in owner count (the table capacity only
-    # steps upward), so find the largest admissible count in O(log 4096).
-    while low <= high:
-        val candidate = low + (high - low) / 2
-        val capacity = mcdc_probe_registry_capacity_for(candidate)
-        val retained_payload = MCDC_PROBE_REGISTRY_SCALAR_PAYLOAD_BYTES +
-            capacity * MCDC_PROBE_REGISTRY_SLOT_PAYLOAD_BYTES +
-            candidate * capsule_bytes
-        if retained_payload <= global_bytes:
-            admitted = candidate
-            low = candidate + 1
-        else:
-            high = candidate - 1
-    admitted
 
 pub fn mcdc_probe_current_owner_id() -> i64:
     val task_id = rt_current_task_id()
@@ -63,8 +31,11 @@ pub class McdcProbeRegistry:
 
 impl McdcProbeRegistry:
     static fn create(global_bytes: i64, owner_bytes: i64) -> McdcProbeRegistry:
-        val owner_capacity = mcdc_probe_registry_owner_limit(global_bytes, owner_bytes)
-        val capacity = mcdc_probe_registry_capacity_for(owner_capacity)
+        var owner_capacity = if owner_bytes > 0: global_bytes / owner_bytes else: 1
+        if owner_capacity < 1: owner_capacity = 1
+        if owner_capacity > 4096: owner_capacity = 4096
+        var capacity = 2
+        while capacity < owner_capacity * 2: capacity = capacity * 2
         var owner_ids: [i64] = []
         var states: [i64] = []
         var aspects: [McdcDynamicAspect?] = []
@@ -129,17 +100,6 @@ impl McdcProbeRegistry:
         if self.states[slot] != 1: return nil
         self.aspects[slot]
 
-    # Cold controller traversal.  This exposes neither an allocating owner-id
-    # snapshot nor mutable storage; unload can walk the fixed SoA directly.
-    fn owner_id_at(slot: i64) -> i64:
-        if slot < 0 or slot >= self.capacity: return 0
-        if self.states[slot] != 1: return 0
-        self.owner_ids[slot]
-
-    fn retained_payload_bytes() -> i64:
-        MCDC_PROBE_REGISTRY_SCALAR_PAYLOAD_BYTES +
-            self.capacity * MCDC_PROBE_REGISTRY_SLOT_PAYLOAD_BYTES
-
     fn reader_pin_acquire_at(slot: i64) -> bool:
         if slot < 0 or slot >= self.capacity: return false
         val prior = self.reader_pins[slot].fetch_add(1, MemoryOrdering.AcqRel)
@@ -184,10 +144,6 @@ impl McdcProbeRegistry:
             if self.states[slot] == 1 and self.owner_ids[slot] == owner_id:
                 self.states[slot] = 2
                 self.aspects[slot] = nil
-                # Tombstones preserve the probe chain, but never retain owner
-                # identity or a stale pin count after the capsule is removed.
-                self.owner_ids[slot] = 0
-                self.reader_pins[slot].store(0, MemoryOrdering.Release)
                 self.count = self.count - 1
                 return true
             slot = slot + 1

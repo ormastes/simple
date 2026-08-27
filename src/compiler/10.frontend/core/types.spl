@@ -11,7 +11,10 @@
 # ===== String Operations (delegated to runtime built-ins) =====
 # Call runtime externs directly to avoid method-dispatch recursion in compiled mode.
 
+use compiler.frontend.core.flat_pool_codec.*
+
 extern fn rt_string_contains(s: text, substr: text) -> bool
+extern fn rt_string_len(s: text) -> i64
 extern fn rt_string_starts_with(s: text, prefix: text) -> bool
 extern fn rt_string_ends_with(s: text, suffix: text) -> bool
 extern fn rt_string_trim(s: text) -> text
@@ -22,7 +25,7 @@ fn str_concat(a: text, b: text) -> text:
     a + b
 
 fn str_len(s: text) -> i64:
-    s.len()
+    rt_string_len(s)
 
 fn str_eq(a: text, b: text) -> bool:
     a == b
@@ -95,7 +98,7 @@ var span_pool_end: [i64] = []
 var span_pool_line: [i64] = []
 var span_pool_col: [i64] = []
 
-fn span_new(start: i64, end_pos: i64, line: i64, col: i64) -> i64:
+fn flat_span_new(start: i64, end_pos: i64, line: i64, col: i64) -> i64:
     val idx = span_pool_start.len()
     span_pool_start.push(start)
     span_pool_end.push(end_pos)
@@ -115,8 +118,11 @@ fn span_line(span_id: i64) -> i64:
 fn span_col(span_id: i64) -> i64:
     span_pool_col[span_id]
 
+fn span_is_valid(span_id: i64) -> bool:
+    span_id >= 0 and span_id < span_pool_start.len()
+
 fn span_dummy() -> i64:
-    span_new(0, 0, 0, 0)
+    flat_span_new(0, 0, 0, 0)
 
 # ===== Token =====
 # A token is (kind: i64, span: i64, text: text)
@@ -351,7 +357,7 @@ fn intersection_tag_to_id(tag: i64) -> i64:
     tag - TYPE_INTERSECTION_BASE
 
 fn is_refinement_tag(tag: i64) -> bool:
-    tag >= TYPE_REFINEMENT_BASE and tag < TYPE_NAMED_BASE
+    tag >= TYPE_REFINEMENT_BASE and tag < TYPE_DICT_BASE
 
 fn refinement_tag_to_id(tag: i64) -> i64:
     tag - TYPE_REFINEMENT_BASE
@@ -454,6 +460,54 @@ fn fixed_type_tag_name(tag: i64) -> text:
         return "bool"
     if tag == TYPE_I64:
         return "i64"
+    if tag == TYPE_F64:
+        return "f64"
+    if tag == TYPE_TEXT:
+        return "text"
+    if tag == TYPE_ARRAY_I64:
+        return "[i64]"
+    if tag == TYPE_ARRAY_TEXT:
+        return "[text]"
+    if tag == TYPE_ARRAY_BOOL:
+        return "[bool]"
+    if tag == TYPE_ARRAY_ANY:
+        return "[any]"
+    if tag == TYPE_DICT:
+        return "dict"
+    if tag == TYPE_STRUCT:
+        return "struct"
+    if tag == TYPE_FN:
+        return "fn"
+    if tag == TYPE_ANY:
+        return "any"
+    if tag == TYPE_NIL:
+        return "nil"
+    if tag == TYPE_OPTION:
+        return "Option"
+    if tag == TYPE_OPTION_I64:
+        return "Option<i64>"
+    if tag == TYPE_OPTION_F64:
+        return "Option<f64>"
+    if tag == TYPE_OPTION_TEXT:
+        return "Option<text>"
+    if tag == TYPE_OPTION_BOOL:
+        return "Option<bool>"
+    if tag == TYPE_RESULT:
+        return "Result"
+    if tag == TYPE_FUTURE:
+        return "Future"
+    if tag == TYPE_POLL:
+        return "Poll"
+    if tag == TYPE_TASK:
+        return "Task"
+    if tag == TYPE_GENERIC_ERASED:
+        return "Generic"
+    if tag == TYPE_UNION:
+        return "Union"
+    if tag == TYPE_INTERSECTION:
+        return "Intersection"
+    if tag == TYPE_REFINEMENT:
+        return "Refinement"
     if tag == TYPE_U8:
         return "u8"
     if tag == TYPE_U16:
@@ -490,6 +544,20 @@ fn type_tag_name(tag: i64) -> text:
         return "bool"
     if tag == TYPE_I64:
         return "i64"
+    if tag == TYPE_U8:
+        return "u8"
+    if tag == TYPE_U16:
+        return "u16"
+    if tag == TYPE_U32:
+        return "u32"
+    if tag == TYPE_U64:
+        return "u64"
+    if tag == TYPE_I8:
+        return "i8"
+    if tag == TYPE_I16:
+        return "i16"
+    if tag == TYPE_I32:
+        return "i32"
     if tag == TYPE_F64:
         return "f64"
     if tag == TYPE_TEXT:
@@ -552,6 +620,14 @@ fn type_tag_name(tag: i64) -> text:
     if is_refinement_tag(tag):
         val rid = refinement_tag_to_id(tag)
         return "Refinement_" + int_to_str(rid)
+    if is_dict_tag(tag):
+        val did = dict_tag_to_id(tag)
+        val key_name = type_tag_name(dict_type_get_key(did))
+        val value_name = type_tag_name(dict_type_get_value(did))
+        return "Dict<" + key_name + "," + value_name + ">"
+    if is_result_tag(tag):
+        val rid = result_tag_to_id(tag)
+        return "Result<" + type_tag_name(result_type_get_ok(rid)) + "," + type_tag_name(result_type_get_err(rid)) + ">"
     "unknown"
 
 fn type_tag_to_c(tag: i64) -> text:
@@ -561,6 +637,20 @@ fn type_tag_to_c(tag: i64) -> text:
         return "int"
     if tag == TYPE_I64:
         return "int64_t"
+    if tag == TYPE_U8:
+        return "uint8_t"
+    if tag == TYPE_U16:
+        return "uint16_t"
+    if tag == TYPE_U32:
+        return "uint32_t"
+    if tag == TYPE_U64:
+        return "uint64_t"
+    if tag == TYPE_I8:
+        return "int8_t"
+    if tag == TYPE_I16:
+        return "int16_t"
+    if tag == TYPE_I32:
+        return "int32_t"
     if tag == TYPE_F64:
         return "double"
     if tag == TYPE_TEXT:
@@ -572,8 +662,6 @@ fn type_tag_to_c(tag: i64) -> text:
     if tag == TYPE_ARRAY_BOOL:
         return "SplArray*"
     if tag == TYPE_ARRAY_ANY:
-        return "SplArray*"
-    if is_array_sized_tag(tag):
         return "SplArray*"
     if tag == TYPE_DICT:
         return "SplDict*"
@@ -618,6 +706,10 @@ fn type_tag_to_c(tag: i64) -> text:
         return "SplValue"
     if is_refinement_tag(tag):
         return "SplValue"
+    if is_dict_tag(tag):
+        return "SplDict*"
+    if is_result_tag(tag):
+        return "SplResult*"
     if tag >= TYPE_NAMED_BASE:
         val nid = tag - TYPE_NAMED_BASE
         val nm = named_type_name(nid)
@@ -641,9 +733,12 @@ var custom_primitive_underlying_type_tags: [i64] = []
 var custom_primitive_symbol_ids: [i64] = []
 
 fn named_type_register(name: text, field_names: [text], field_types: [i64]) -> i64:
+    val existing = named_type_find(name)
+    if existing >= 0:
+        if field_names.len() > 0 or field_types.len() > 0:
+            named_type_update(existing, field_names, field_types)
+        return existing
     val idx = named_type_names.len()
-    if idx >= TYPE_NAMED_LIMIT - TYPE_NAMED_BASE:
-        return -1
     named_type_names.push(name)
     named_type_field_names.push(field_names)
     named_type_field_types.push(field_types)
@@ -758,6 +853,46 @@ fn custom_primitive_bind_symbol(name: text, symbol_id: i64):
     val idx = custom_primitive_find(name)
     if idx >= 0:
         custom_primitive_symbol_ids[idx] = symbol_id
+
+# Newunit registry.
+# `newunit Name: T as suffix` declarations are recorded here at parse time
+# (see enum_module_body.spl) so the unit registry builder
+# (compiler.types.units.unit_registry) can collect them after parsing.
+var newunit_names: [text] = []
+var newunit_suffixes: [text] = []
+var newunit_underlying_type_tags: [i64] = []
+
+fn newunit_find(name: text) -> i64:
+    var i = 0
+    while i < newunit_names.len():
+        if newunit_names[i] == name:
+            return i
+        i = i + 1
+    -1
+
+fn newunit_register(name: text, suffix: text, underlying_type_tag: i64) -> i64:
+    val existing = newunit_find(name)
+    if existing >= 0:
+        newunit_suffixes[existing] = suffix
+        newunit_underlying_type_tags[existing] = underlying_type_tag
+        return existing
+    val idx = newunit_names.len()
+    newunit_names.push(name)
+    newunit_suffixes.push(suffix)
+    newunit_underlying_type_tags.push(underlying_type_tag)
+    idx
+
+fn newunit_count() -> i64:
+    newunit_names.len()
+
+fn newunit_name_at(idx: i64) -> text:
+    newunit_names[idx]
+
+fn newunit_suffix_at(idx: i64) -> text:
+    newunit_suffixes[idx]
+
+fn newunit_underlying_tag_at(idx: i64) -> i64:
+    newunit_underlying_type_tags[idx]
 
 fn custom_primitive_is_name(name: text) -> bool:
     custom_primitive_find(name) >= 0
@@ -936,14 +1071,60 @@ fn generic_param_count() -> i64:
 
 var union_type_members: [[i64]] = []
 
+fn type_tag_list_find(items: [[i64]], target: [i64]) -> i64:
+    var i = 0
+    while i < items.len():
+        val item = items[i]
+        if item.len() == target.len():
+            var j = 0
+            while j < target.len() and item[j] == target[j]:
+                j = j + 1
+            if j == target.len():
+                return i
+        i = i + 1
+    -1
+
+fn type_tag_pair_find(firsts: [i64], seconds: [i64], first: i64, second: i64) -> i64:
+    var i = 0
+    while i < firsts.len():
+        if firsts[i] == first and seconds[i] == second:
+            return i
+        i = i + 1
+    -1
+
 fn union_type_register(member_types: [i64]) -> i64:
+    val existing = type_tag_list_find(union_type_members, member_types)
+    if existing >= 0:
+        return TYPE_UNION_BASE + existing
     val idx = union_type_members.len()
+    if idx >= TYPE_INTERSECTION_BASE - TYPE_UNION_BASE:
+        return -1
     union_type_members.push(member_types)
     TYPE_UNION_BASE + idx
 
 fn union_type_get_members(union_id: i64) -> [i64]:
-    if union_id < union_type_members.len():
+    if union_id >= 0 and union_id < union_type_members.len():
         return union_type_members[union_id]
+    []
+
+# ===== Tuple Type Registry =====
+# Tracks tuple type annotations `(A, B, C)` -- see TYPE_TUPLE_BASE.
+
+var tuple_type_elem_tags: [[i64]] = []
+
+fn tuple_type_register(elem_types: [i64]) -> i64:
+    val existing = type_tag_list_find(tuple_type_elem_tags, elem_types)
+    if existing >= 0:
+        return TYPE_TUPLE_BASE + existing
+    val idx = tuple_type_elem_tags.len()
+    if idx >= TYPE_TUPLE_LIMIT - TYPE_TUPLE_BASE:
+        return -1
+    tuple_type_elem_tags.push(elem_types)
+    TYPE_TUPLE_BASE + idx
+
+fn tuple_type_get_elems(tuple_id: i64) -> [i64]:
+    if tuple_id >= 0 and tuple_id < tuple_type_elem_tags.len():
+        return tuple_type_elem_tags[tuple_id]
     []
 
 # ===== Intersection Type Registry =====
@@ -952,12 +1133,17 @@ fn union_type_get_members(union_id: i64) -> [i64]:
 var intersection_type_members: [[i64]] = []
 
 fn intersection_type_register(member_types: [i64]) -> i64:
+    val existing = type_tag_list_find(intersection_type_members, member_types)
+    if existing >= 0:
+        return TYPE_INTERSECTION_BASE + existing
     val idx = intersection_type_members.len()
+    if idx >= TYPE_REFINEMENT_BASE - TYPE_INTERSECTION_BASE:
+        return -1
     intersection_type_members.push(member_types)
     TYPE_INTERSECTION_BASE + idx
 
 fn intersection_type_get_members(inter_id: i64) -> [i64]:
-    if inter_id < intersection_type_members.len():
+    if inter_id >= 0 and inter_id < intersection_type_members.len():
         return intersection_type_members[inter_id]
     []
 
@@ -968,18 +1154,25 @@ var refinement_base_types: [i64] = []
 var refinement_predicates: [text] = []
 
 fn refinement_type_register(base_type: i64, predicate: text) -> i64:
+    var existing = 0
+    while existing < refinement_base_types.len():
+        if refinement_base_types[existing] == base_type and refinement_predicates[existing] == predicate:
+            return TYPE_REFINEMENT_BASE + existing
+        existing = existing + 1
     val idx = refinement_base_types.len()
+    if idx >= TYPE_DICT_BASE - TYPE_REFINEMENT_BASE:
+        return -1
     refinement_base_types.push(base_type)
     refinement_predicates.push(predicate)
     TYPE_REFINEMENT_BASE + idx
 
 fn refinement_type_base(ref_id: i64) -> i64:
-    if ref_id < refinement_base_types.len():
+    if ref_id >= 0 and ref_id < refinement_base_types.len():
         return refinement_base_types[ref_id]
     TYPE_ANY
 
 fn refinement_type_predicate(ref_id: i64) -> text:
-    if ref_id < refinement_predicates.len():
+    if ref_id >= 0 and ref_id < refinement_predicates.len():
         return refinement_predicates[ref_id]
     ""
 
@@ -992,6 +1185,9 @@ var dict_type_keys: [i64] = []
 var dict_type_values: [i64] = []
 
 fn dict_type_register(key_tag: i64, value_tag: i64) -> i64:
+    val existing = type_tag_pair_find(dict_type_keys, dict_type_values, key_tag, value_tag)
+    if existing >= 0:
+        return TYPE_DICT_BASE + existing
     val idx = dict_type_keys.len()
     if idx >= TYPE_RESULT_BASE - TYPE_DICT_BASE:
         return -1
@@ -1000,12 +1196,12 @@ fn dict_type_register(key_tag: i64, value_tag: i64) -> i64:
     TYPE_DICT_BASE + idx
 
 fn dict_type_get_key(dict_id: i64) -> i64:
-    if dict_id < dict_type_keys.len():
+    if dict_id >= 0 and dict_id < dict_type_keys.len():
         return dict_type_keys[dict_id]
     TYPE_ANY
 
 fn dict_type_get_value(dict_id: i64) -> i64:
-    if dict_id < dict_type_values.len():
+    if dict_id >= 0 and dict_id < dict_type_values.len():
         return dict_type_values[dict_id]
     TYPE_ANY
 
@@ -1015,6 +1211,9 @@ var result_type_ok: [i64] = []
 var result_type_err: [i64] = []
 
 fn result_type_register(ok_tag: i64, err_tag: i64) -> i64:
+    val existing = type_tag_pair_find(result_type_ok, result_type_err, ok_tag, err_tag)
+    if existing >= 0:
+        return TYPE_RESULT_BASE + existing
     val idx = result_type_ok.len()
     if idx >= TYPE_RESULT_LIMIT - TYPE_RESULT_BASE:
         return -1
@@ -1023,12 +1222,12 @@ fn result_type_register(ok_tag: i64, err_tag: i64) -> i64:
     TYPE_RESULT_BASE + idx
 
 fn result_type_get_ok(result_id: i64) -> i64:
-    if result_id < result_type_ok.len():
+    if result_id >= 0 and result_id < result_type_ok.len():
         return result_type_ok[result_id]
     TYPE_ANY
 
 fn result_type_get_err(result_id: i64) -> i64:
-    if result_id < result_type_err.len():
+    if result_id >= 0 and result_id < result_type_err.len():
         return result_type_err[result_id]
     TYPE_ANY
 
@@ -1231,144 +1430,65 @@ fn weak_type_get_inner(weak_id: i64) -> i64:
 # ===== Pool Reset =====
 # Call before parsing a new file to reset all pools.
 
-fn clear_i64_pool(pool: [i64]) -> [i64]:
-    if pool == nil:
-        return []
-    pool.clear()
-    pool
-
-fn clear_text_pool(pool: [text]) -> [text]:
-    if pool == nil:
-        return []
-    pool.clear()
-    pool
-
-fn clear_i64_list_pool(pool: [[i64]]) -> [[i64]]:
-    if pool == nil:
-        return []
-    pool.clear()
-    pool
-
-fn clear_text_list_pool(pool: [[text]]) -> [[text]]:
-    if pool == nil:
-        return []
-    pool.clear()
-    pool
-
-var all_pool_shells_prepared: bool = false
-
-fn prepare_all_pool_shells():
-    span_pool_start = clear_i64_pool(span_pool_start)
-    span_pool_end = clear_i64_pool(span_pool_end)
-    span_pool_line = clear_i64_pool(span_pool_line)
-    span_pool_col = clear_i64_pool(span_pool_col)
-    tok_pool_kind = clear_i64_pool(tok_pool_kind)
-    tok_pool_span = clear_i64_pool(tok_pool_span)
-    tok_pool_text = clear_text_pool(tok_pool_text)
-    sym_names = clear_text_pool(sym_names)
-    sym_types = clear_i64_pool(sym_types)
-    sym_depths = clear_i64_pool(sym_depths)
-    sym_decl_ids = clear_i64_pool(sym_decl_ids)
-    sym_mutable = clear_i64_pool(sym_mutable)
-    scope_starts = clear_i64_pool(scope_starts)
-    current_scope_depth = 0
-    named_type_names = clear_text_pool(named_type_names)
-    named_type_field_names = clear_text_list_pool(named_type_field_names)
-    named_type_field_types = clear_i64_list_pool(named_type_field_types)
-    custom_primitive_names = clear_text_pool(custom_primitive_names)
-    custom_primitive_underlying_type_tags = clear_i64_pool(custom_primitive_underlying_type_tags)
-    custom_primitive_symbol_ids = clear_i64_pool(custom_primitive_symbol_ids)
-    fn_sig_names = clear_text_pool(fn_sig_names)
-    fn_sig_param_names = clear_text_list_pool(fn_sig_param_names)
-    fn_sig_param_types = clear_i64_list_pool(fn_sig_param_types)
-    fn_sig_ret_types = clear_i64_pool(fn_sig_ret_types)
-    fn_sig_is_extern = clear_i64_pool(fn_sig_is_extern)
-    generic_param_names = clear_text_pool(generic_param_names)
-    generic_param_contexts = clear_text_pool(generic_param_contexts)
-    generic_param_ids = clear_i64_pool(generic_param_ids)
-    union_type_members = clear_i64_list_pool(union_type_members)
-    tuple_type_elem_tags = clear_i64_list_pool(tuple_type_elem_tags)
-    intersection_type_members = clear_i64_list_pool(intersection_type_members)
-    refinement_base_types = clear_i64_pool(refinement_base_types)
-    refinement_predicates = clear_text_pool(refinement_predicates)
-    dict_type_keys = clear_i64_pool(dict_type_keys)
-    dict_type_values = clear_i64_pool(dict_type_values)
-    result_type_ok = clear_i64_pool(result_type_ok)
-    result_type_err = clear_i64_pool(result_type_err)
-    array_generic_elem_tags = clear_i64_pool(array_generic_elem_tags)
-    option_generic_inner_tags = clear_i64_pool(option_generic_inner_tags)
-    isolated_inner_tags = clear_i64_pool(isolated_inner_tags)
-    exclusive_inner_tags = clear_i64_pool(exclusive_inner_tags)
-    reference_inner_tags = clear_i64_pool(reference_inner_tags)
-    reference_mutable_flags = clear_i64_pool(reference_mutable_flags)
-    pointer_inner_tags = clear_i64_pool(pointer_inner_tags)
-    pointer_mutable_flags = clear_i64_pool(pointer_mutable_flags)
-    atomic_inner_tags = clear_i64_pool(atomic_inner_tags)
-    weak_inner_tags = clear_i64_pool(weak_inner_tags)
-    all_pool_shells_prepared = true
-
 fn reset_all_pools():
-    # Native module globals may be nil on first entry.  That first owner setup
-    # is performed by frontend_prepare_transient_parse_scope outside any scope;
-    # every per-file reset below then mutates the durable shells in place.
-    if not all_pool_shells_prepared:
-        prepare_all_pool_shells()
-    span_pool_start.clear()
-    span_pool_end.clear()
-    span_pool_line.clear()
-    span_pool_col.clear()
-    tok_pool_kind.clear()
-    tok_pool_span.clear()
-    tok_pool_text.clear()
-    sym_names.clear()
-    sym_types.clear()
-    sym_depths.clear()
-    sym_decl_ids.clear()
-    sym_mutable.clear()
-    scope_starts.clear()
+    # These owners are process-global, but their backing may grow while a
+    # transient parser scope is active. Scope teardown reclaims that backing.
+    # Never inspect or clear the preceding file's possibly stale header; whole
+    # owner replacement gives this file fresh scope-local scratch pools.
+    span_pool_start = []
+    span_pool_end = []
+    span_pool_line = []
+    span_pool_col = []
+    tok_pool_kind = []
+    tok_pool_span = []
+    tok_pool_text = []
+    sym_names = []
+    sym_types = []
+    sym_depths = []
+    sym_decl_ids = []
+    sym_mutable = []
+    scope_starts = []
     current_scope_depth = 0
-    named_type_names.clear()
-    named_type_field_names.clear()
-    named_type_field_types.clear()
-    custom_primitive_names.clear()
-    custom_primitive_underlying_type_tags.clear()
-    custom_primitive_symbol_ids.clear()
-    fn_sig_names.clear()
-    fn_sig_param_names.clear()
-    fn_sig_param_types.clear()
-    fn_sig_ret_types.clear()
-    fn_sig_is_extern.clear()
-    generic_param_names.clear()
-    generic_param_contexts.clear()
-    generic_param_ids.clear()
-    union_type_members.clear()
-    tuple_type_elem_tags.clear()
-    intersection_type_members.clear()
-    refinement_base_types.clear()
-    refinement_predicates.clear()
-    dict_type_keys.clear()
-    dict_type_values.clear()
-    result_type_ok.clear()
-    result_type_err.clear()
-    array_generic_elem_tags.clear()
-    option_generic_inner_tags.clear()
-    isolated_inner_tags.clear()
-    exclusive_inner_tags.clear()
-    reference_inner_tags.clear()
-    reference_mutable_flags.clear()
-    pointer_inner_tags.clear()
-    pointer_mutable_flags.clear()
-    atomic_inner_tags.clear()
-    weak_inner_tags.clear()
+    named_type_names = []
+    named_type_field_names = []
+    named_type_field_types = []
+    custom_primitive_names = []
+    custom_primitive_underlying_type_tags = []
+    custom_primitive_symbol_ids = []
+    fn_sig_names = []
+    fn_sig_param_names = []
+    fn_sig_param_types = []
+    fn_sig_ret_types = []
+    fn_sig_is_extern = []
+    generic_param_names = []
+    generic_param_contexts = []
+    generic_param_ids = []
+    union_type_members = []
+    tuple_type_elem_tags = []
+    intersection_type_members = []
+    refinement_base_types = []
+    refinement_predicates = []
+    dict_type_keys = []
+    dict_type_values = []
+    result_type_ok = []
+    result_type_err = []
+    array_generic_elem_tags = []
+    option_generic_inner_tags = []
+    isolated_inner_tags = []
+    exclusive_inner_tags = []
+    reference_inner_tags = []
+    reference_mutable_flags = []
+    pointer_inner_tags = []
+    pointer_mutable_flags = []
+    atomic_inner_tags = []
+    weak_inner_tags = []
 
 export TYPE_VOID, TYPE_BOOL, TYPE_I64, TYPE_F64, TYPE_TEXT
+export TYPE_U8, TYPE_U16, TYPE_U32, TYPE_U64, TYPE_I8, TYPE_I16, TYPE_I32
 export TYPE_ARRAY_I64, TYPE_ARRAY_TEXT, TYPE_ARRAY_BOOL, TYPE_ARRAY_ANY
-export TYPE_ARRAY_SIZED_BASE, is_array_sized_tag, array_sized_tag_to_id
-export array_sized_type_register, array_sized_type_get_elem, array_sized_type_get_expr
-export array_sized_type_runtime_tag
 export TYPE_STRUCT, TYPE_FN, TYPE_DICT, TYPE_ANY, TYPE_NIL
 export TYPE_OPTION, TYPE_OPTION_I64, TYPE_OPTION_F64, TYPE_OPTION_TEXT, TYPE_OPTION_BOOL, TYPE_RESULT
-export TYPE_UNION, TYPE_INTERSECTION, TYPE_REFINEMENT, TYPE_NAMED_BASE, TYPE_NAMED_LIMIT, is_named_type_tag
+export TYPE_UNION, TYPE_INTERSECTION, TYPE_REFINEMENT, TYPE_NAMED_BASE
 export TYPE_FUTURE, TYPE_POLL, TYPE_TASK, TYPE_GENERIC_ERASED
 export TYPE_UNION_BASE, TYPE_INTERSECTION_BASE, TYPE_REFINEMENT_BASE
 export fixed_type_tag_name, is_union_base_or_above
@@ -1399,3 +1519,130 @@ export union_type_register, union_type_get_members
 export named_type_field_type_tags
 export SYM_UNKNOWN, SYM_FN, SYM_VAL, SYM_VAR, SYM_STRUCT, SYM_ENUM, SYM_CLASS
 export scope_push, scope_pop, scope_depth
+
+# --- flat-AST pool codec: flat_type ------------------------------
+#
+# Dump/restore for this file's 49 pools, in a FIXED SORTED ORDER that
+# dump and restore share. Order is the whole contract: the blob carries no
+# pool names, so a reordering on one side silently pairs each pool with its
+# neighbour's data. Sorting by name keeps the two sides in step.
+#
+# current_scope_depth is scalar state that reset_all_pools also resets, so it
+# rides along at the end of the blob. It cannot appear in an array-derived
+# pool list, so the completeness guard cannot see it -- hence this note.
+
+pub fn flat_type_pools_dump() -> text:
+    # Sub-blobs are collected and joined once. `out = out + <sub-blob>` across
+    # ~165 pools re-copied the whole growing multi-megabyte blob on every pool,
+    # which is quadratic in the pool count and paid on every cache-MISS store.
+    # The bytes emitted are unchanged: the same pieces, in the same order.
+    # doc/08_tracking/bug/frontend_shard_and_cache_hit_cost_2026-08-21.md
+    var parts: [text] = []
+    parts = parts.push(flat_pool_enc_i64(array_generic_elem_tags))
+    parts = parts.push(flat_pool_enc_i64(atomic_inner_tags))
+    parts = parts.push(flat_pool_enc_text(custom_primitive_names))
+    parts = parts.push(flat_pool_enc_i64(custom_primitive_symbol_ids))
+    parts = parts.push(flat_pool_enc_i64(custom_primitive_underlying_type_tags))
+    parts = parts.push(flat_pool_enc_i64(dict_type_keys))
+    parts = parts.push(flat_pool_enc_i64(dict_type_values))
+    parts = parts.push(flat_pool_enc_i64(exclusive_inner_tags))
+    parts = parts.push(flat_pool_enc_i64(fn_sig_is_extern))
+    parts = parts.push(flat_pool_enc_text(fn_sig_names))
+    parts = parts.push(flat_pool_enc_text_list(fn_sig_param_names))
+    parts = parts.push(flat_pool_enc_i64_list(fn_sig_param_types))
+    parts = parts.push(flat_pool_enc_i64(fn_sig_ret_types))
+    parts = parts.push(flat_pool_enc_text(generic_param_contexts))
+    parts = parts.push(flat_pool_enc_i64(generic_param_ids))
+    parts = parts.push(flat_pool_enc_text(generic_param_names))
+    parts = parts.push(flat_pool_enc_i64_list(intersection_type_members))
+    parts = parts.push(flat_pool_enc_i64(isolated_inner_tags))
+    parts = parts.push(flat_pool_enc_text_list(named_type_field_names))
+    parts = parts.push(flat_pool_enc_i64_list(named_type_field_types))
+    parts = parts.push(flat_pool_enc_text(named_type_names))
+    parts = parts.push(flat_pool_enc_text(newunit_names))
+    parts = parts.push(flat_pool_enc_text(newunit_suffixes))
+    parts = parts.push(flat_pool_enc_i64(newunit_underlying_type_tags))
+    parts = parts.push(flat_pool_enc_i64(option_generic_inner_tags))
+    parts = parts.push(flat_pool_enc_i64(pointer_inner_tags))
+    parts = parts.push(flat_pool_enc_i64(pointer_mutable_flags))
+    parts = parts.push(flat_pool_enc_i64(reference_inner_tags))
+    parts = parts.push(flat_pool_enc_i64(reference_mutable_flags))
+    parts = parts.push(flat_pool_enc_i64(refinement_base_types))
+    parts = parts.push(flat_pool_enc_text(refinement_predicates))
+    parts = parts.push(flat_pool_enc_i64(result_type_err))
+    parts = parts.push(flat_pool_enc_i64(result_type_ok))
+    parts = parts.push(flat_pool_enc_i64(scope_starts))
+    parts = parts.push(flat_pool_enc_i64(span_pool_col))
+    parts = parts.push(flat_pool_enc_i64(span_pool_end))
+    parts = parts.push(flat_pool_enc_i64(span_pool_line))
+    parts = parts.push(flat_pool_enc_i64(span_pool_start))
+    parts = parts.push(flat_pool_enc_i64(sym_decl_ids))
+    parts = parts.push(flat_pool_enc_i64(sym_depths))
+    parts = parts.push(flat_pool_enc_i64(sym_mutable))
+    parts = parts.push(flat_pool_enc_text(sym_names))
+    parts = parts.push(flat_pool_enc_i64(sym_types))
+    parts = parts.push(flat_pool_enc_i64(tok_pool_kind))
+    parts = parts.push(flat_pool_enc_i64(tok_pool_span))
+    parts = parts.push(flat_pool_enc_text(tok_pool_text))
+    parts = parts.push(flat_pool_enc_i64_list(tuple_type_elem_tags))
+    parts = parts.push(flat_pool_enc_i64_list(union_type_members))
+    parts = parts.push(flat_pool_enc_i64(weak_inner_tags))
+    parts = parts.push(flat_pool_enc_scalar_i64(current_scope_depth))
+    parts.join("")
+
+# Returns false when the blob ran short or was malformed; the caller must
+# treat that as a cache MISS and reparse, never as an empty parse.
+pub fn flat_type_pools_restore(r: FlatPoolReader) -> bool:
+    array_generic_elem_tags = flat_pool_dec_i64(r)
+    atomic_inner_tags = flat_pool_dec_i64(r)
+    custom_primitive_names = flat_pool_dec_text(r)
+    custom_primitive_symbol_ids = flat_pool_dec_i64(r)
+    custom_primitive_underlying_type_tags = flat_pool_dec_i64(r)
+    dict_type_keys = flat_pool_dec_i64(r)
+    dict_type_values = flat_pool_dec_i64(r)
+    exclusive_inner_tags = flat_pool_dec_i64(r)
+    fn_sig_is_extern = flat_pool_dec_i64(r)
+    fn_sig_names = flat_pool_dec_text(r)
+    fn_sig_param_names = flat_pool_dec_text_list(r)
+    fn_sig_param_types = flat_pool_dec_i64_list(r)
+    fn_sig_ret_types = flat_pool_dec_i64(r)
+    generic_param_contexts = flat_pool_dec_text(r)
+    generic_param_ids = flat_pool_dec_i64(r)
+    generic_param_names = flat_pool_dec_text(r)
+    intersection_type_members = flat_pool_dec_i64_list(r)
+    isolated_inner_tags = flat_pool_dec_i64(r)
+    named_type_field_names = flat_pool_dec_text_list(r)
+    named_type_field_types = flat_pool_dec_i64_list(r)
+    named_type_names = flat_pool_dec_text(r)
+    newunit_names = flat_pool_dec_text(r)
+    newunit_suffixes = flat_pool_dec_text(r)
+    newunit_underlying_type_tags = flat_pool_dec_i64(r)
+    option_generic_inner_tags = flat_pool_dec_i64(r)
+    pointer_inner_tags = flat_pool_dec_i64(r)
+    pointer_mutable_flags = flat_pool_dec_i64(r)
+    reference_inner_tags = flat_pool_dec_i64(r)
+    reference_mutable_flags = flat_pool_dec_i64(r)
+    refinement_base_types = flat_pool_dec_i64(r)
+    refinement_predicates = flat_pool_dec_text(r)
+    result_type_err = flat_pool_dec_i64(r)
+    result_type_ok = flat_pool_dec_i64(r)
+    scope_starts = flat_pool_dec_i64(r)
+    span_pool_col = flat_pool_dec_i64(r)
+    span_pool_end = flat_pool_dec_i64(r)
+    span_pool_line = flat_pool_dec_i64(r)
+    span_pool_start = flat_pool_dec_i64(r)
+    sym_decl_ids = flat_pool_dec_i64(r)
+    sym_depths = flat_pool_dec_i64(r)
+    sym_mutable = flat_pool_dec_i64(r)
+    sym_names = flat_pool_dec_text(r)
+    sym_types = flat_pool_dec_i64(r)
+    tok_pool_kind = flat_pool_dec_i64(r)
+    tok_pool_span = flat_pool_dec_i64(r)
+    tok_pool_text = flat_pool_dec_text(r)
+    tuple_type_elem_tags = flat_pool_dec_i64_list(r)
+    union_type_members = flat_pool_dec_i64_list(r)
+    weak_inner_tags = flat_pool_dec_i64(r)
+    current_scope_depth = r.next_i64()
+    r.ok
+
+export flat_type_pools_dump, flat_type_pools_restore

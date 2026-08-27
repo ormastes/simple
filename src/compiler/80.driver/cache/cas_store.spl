@@ -119,7 +119,7 @@ fn cas_action_path(root: text, digest: text) -> text:
     "{root}/actions/sha256/{digest.substring(0, 2)}/{digest.substring(2, digest.len())}"
 
 fn cas_parent_dir(path: text) -> text:
-    val slash = path.last_index_of("/") ?? -1
+    val slash = path.last_index_of("/")
     if slash <= 0:
         return ""
     path.substring(0, slash)
@@ -132,7 +132,7 @@ fn cas_parent_dir(path: text) -> text:
 # is found, the old entries are never trusted: cas/ and actions/ are moved
 # aside and the store starts empty under the current version.
 fn cas_open(root: text) -> bool:
-    rt_dir_create_all(root)
+    dir_create_all(root)
     val vpath = "{root}/VERSION"
     val current = cas_version_text()
     if cas_file_exists_raw(vpath):
@@ -258,122 +258,62 @@ fn action_get(root: text, action_digest: text) -> ActionManifest?:
             return nil
 
 # ============================================================================
-# ResultManifest (schema_version: 2) — C0 frozen extension (Agent C1)
-#
-# Superset of ActionManifest above (freeze note §4):
-#   kept:  action_digest, artifact_digests (schema_version -> renamed producer_schema)
-#   added: result_kind, output_fingerprint, dependency_manifest, aop_group_roots,
-#          block_manifest_root? (optional), diagnostics_digest? (optional)
-#
-# ResultManifest is content-addressed by ITS OWN digest (sha256 of its
-# serialized form), stored under the generic CAS blob path — NOT under
-# cas_action_path (that namespace stays ActionManifest's). The ActionDigest ->
-# ResultManifestDigest mapping is a separate concern owned by action_index/.
-#
-# artifact_digests stays an ORDERED list (freeze note §4 decision 5: position
-# is meaningful to the consumer). aop_group_roots is a SET and is sorted
-# before serialization so two manifests differing only in root-listing order
-# hash identically.
+# Result manifests (C1 — closure-checked publish over ActionManifest)
 # ============================================================================
 
-val RESULT_MANIFEST_HEADER: text = "simple-result-manifest-v1"
+# Canonical encoding reuses action_key.spl's domain-separated, length-prefixed
+# primitives so the manifest's own digest is collision-safe the same way
+# ActionKey is.
+fn result_manifest_encode(m: ResultManifest) -> text:
+    var artifact_items: [text] = []
+    for d in m.artifact_digests:
+        artifact_items.push(canon_str(d))
+    var fields: [text] = []
+    fields.push(canon_field("actionDigest", canon_str(m.action_digest)))
+    fields.push(canon_field("resultKind", canon_str(m.result_kind)))
+    fields.push(canon_field("artifactDigests", canon_seq(artifact_items)))
+    fields.push(canon_field("outputFingerprint", canon_str(m.output_fingerprint)))
+    fields.push(canon_field("dependencyManifest", canon_str(m.dependency_manifest)))
+    fields.push(canon_field("producerSchema", canon_nat(m.producer_schema)))
+    canon_field(RESULT_MANIFEST_HEADER, canon_seq(fields))
 
-struct ResultManifest:
-    action_digest: text
-    result_kind: text                  # enum encoded by name (see action_key.spl ResultKind)
-    artifact_digests: [text]           # ORDERED
-    output_fingerprint: text
-    dependency_manifest: text
-    aop_group_roots: [text]            # SET; sorted at serialize time
-    block_manifest_root: text          # "" means absent (optional)
-    diagnostics_digest: text           # "" means absent (optional)
-    producer_schema: i64
-
-fn result_manifest_sort_texts(items: [text]) -> [text]:
-    var out: [text] = []
-    for item in items:
-        var placed = false
-        var next: [text] = []
-        for s in out:
-            if not placed and item <= s:
-                next.push(item)
-                placed = true
-            next.push(s)
-        if not placed:
-            next.push(item)
-        out = next
-    out
-
-# Line-based canonical serialization (mirrors action_manifest_serialize's
-# style): a fixed header, then one field per line, then a length-prefixed
-# ORDERED artifact-digest block, then a length-prefixed SORTED aop-root block.
-fn result_manifest_serialize(manifest: ResultManifest) -> text:
-    val roots_sorted = result_manifest_sort_texts(manifest.aop_group_roots)
-    var lines: [text] = [
-        RESULT_MANIFEST_HEADER,
-        manifest.action_digest,
-        manifest.result_kind,
-        "{manifest.producer_schema}",
-        manifest.output_fingerprint,
-        manifest.dependency_manifest,
-        manifest.block_manifest_root,
-        manifest.diagnostics_digest,
-        "{manifest.artifact_digests.len()}"
-    ]
-    for d in manifest.artifact_digests:
+fn result_manifest_serialize(m: ResultManifest) -> text:
+    var lines: [text] = [RESULT_MANIFEST_HEADER, m.action_digest, m.result_kind,
+        m.output_fingerprint, m.dependency_manifest, "{m.producer_schema}"]
+    for d in m.artifact_digests:
         lines = lines.push(d)
-    lines = lines.push("{roots_sorted.len()}")
-    for r in roots_sorted:
-        lines = lines.push(r)
     lines.join("\n")
 
 fn result_manifest_parse(content: text) -> ResultManifest?:
     val lines = content.split("\n")
-    if lines.len() < 9:
+    if lines.len() < 6:
         return nil
     if lines[0] != RESULT_MANIFEST_HEADER:
         return nil
-    val artifact_count = lines[8].to_i64() ?? -1
-    if artifact_count < 0:
-        return nil
     var artifacts: [text] = []
-    var i = 9
-    val artifact_end = 9 + artifact_count
-    while i < artifact_end:
-        if i >= lines.len():
-            return nil
-        artifacts = artifacts.push(lines[i])
+    var i = 6
+    while i < lines.len():
+        if lines[i] != "":
+            artifacts = artifacts.push(lines[i])
         i = i + 1
-    if i >= lines.len():
-        return nil
-    val root_count = lines[i].to_i64() ?? -1
-    if root_count < 0:
-        return nil
-    i = i + 1
-    var roots: [text] = []
-    val root_end = i + root_count
-    while i < root_end:
-        if i >= lines.len():
-            return nil
-        roots = roots.push(lines[i])
-        i = i + 1
-    val producer_schema = lines[3].to_i64() ?? -1
-    if producer_schema < 0:
-        return nil
+    val producer_schema = lines[5].to_i64() ?? -1
     ResultManifest(
         action_digest: lines[1],
         result_kind: lines[2],
         artifact_digests: artifacts,
-        output_fingerprint: lines[4],
-        dependency_manifest: lines[5],
-        aop_group_roots: roots,
-        block_manifest_root: lines[6],
-        diagnostics_digest: lines[7],
+        output_fingerprint: lines[3],
+        dependency_manifest: lines[4],
         producer_schema: producer_schema
     )
 
-fn result_manifest_digest(manifest: ResultManifest) -> text:
-    sha256_text(result_manifest_serialize(manifest))
+# Closure check: every artifact digest a ResultManifest references must
+# already exist in CAS before the mapping is admitted. Never publish a
+# dangling reference.
+fn result_manifest_closure_complete(root: text, m: ResultManifest) -> bool:
+    for d in m.artifact_digests:
+        if not cas_has(root, d):
+            return false
+    true
 
 # Publish a ResultManifest under its action digest, ONLY if every referenced
 # artifact is already present in CAS (closure check). Refuses a mislabeled
@@ -407,4 +347,12 @@ fn result_manifest_get(root: text, action_digest: text) -> ResultManifest?:
                 return nil
             return manifest
         case nil:
+            cas_quarantine(root, path)
             return nil
+
+export ActionManifest, ResultManifest
+export cas_root, cas_open, cas_put, cas_get, cas_has, cas_quarantine
+export cas_blob_path, cas_action_path, cas_parent_dir
+export action_manifest_serialize, action_manifest_parse, action_put, action_get
+export result_manifest_encode, result_manifest_serialize, result_manifest_parse
+export result_manifest_closure_complete, result_manifest_put, result_manifest_get

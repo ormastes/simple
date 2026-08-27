@@ -13,6 +13,7 @@ use std.nogc_async_mut.io.driver.{IoDriver}
 use std.tls.types.{
     CONTENT_TYPE_CHANGE_CIPHER_SPEC,
     CONTENT_TYPE_HANDSHAKE,
+    EXTENSION_TYPE_ALPN,
     TLS_VERSION_1_2,
     HANDSHAKE_TYPE_CLIENT_HELLO,
     HANDSHAKE_TYPE_SERVER_HELLO,
@@ -62,6 +63,7 @@ use std.nogc_async_mut.io.tls_io.{
     build_gcm_nonce,
     build_aead_aad
 }
+use std.common.contracts.execution.simpleos_server_protocol_capabilities.{simpleos_http_select_alpn}
 
 # ============================================================================
 # TLS 1.2 Server Handshake
@@ -127,6 +129,11 @@ fn perform_server_handshake(driver: IoDriver, fd: i64, config: TlsConfig) -> Res
         case EchDecision.NotPresent:
             pass_dn
 
+    # --- ALPN negotiation (RFC 7301) ---
+    # Empty when the client offered no ALPN extension, or offered only
+    # protocols this server cannot serve.
+    val negotiated_alpn = negotiate_alpn(ch_extensions)
+
     # --- 2. Select cipher suite ---
     val selected_cipher = negotiate_cipher(ch_cipher_suites)
     if selected_cipher < 0:
@@ -137,7 +144,7 @@ fn perform_server_handshake(driver: IoDriver, fd: i64, config: TlsConfig) -> Res
     val server_random = generate_random(32)
 
     # --- 4. Build and send ServerHello ---
-    val sh_body = build_server_hello_bytes(TLS_VERSION_1_2, server_random, selected_cipher)
+    val sh_body = build_server_hello_bytes(TLS_VERSION_1_2, server_random, selected_cipher, negotiated_alpn)
     val sh_hs = build_handshake_wire(HANDSHAKE_TYPE_SERVER_HELLO, sh_body)
     all_handshake_bytes = concat_bytes(all_handshake_bytes, wire_to_bytes(sh_hs))
 
@@ -310,7 +317,8 @@ fn perform_server_handshake(driver: IoDriver, fd: i64, config: TlsConfig) -> Res
         handshake_messages: bytes_to_wire(all_handshake_bytes),
         session_keys: Some(session_keys),
         client_seq: 1,
-        server_seq: 1
+        server_seq: 1,
+        alpn: negotiated_alpn
     ))
 
 # ============================================================================
@@ -372,17 +380,22 @@ fn negotiate_cipher(client_ciphers: [i64]) -> i64:
         si = si + 1
     -1
 
-fn build_server_hello_bytes(version: i64, random: [i64], cipher_suite: i64) -> text:
+fn build_server_hello_bytes(version: i64, random: [i64], cipher_suite: i64, alpn: text) -> text:
     """Construct the ServerHello body as wire bytes.
 
-    Format: version(2) + random(32) + session_id_len(1) + cipher_suite(2) + compression(1)
+    Format: version(2) + random(32) + session_id_len(1) + cipher_suite(2) +
+            compression(1) [+ extensions]
+
+    When `alpn` is non-empty the selected protocol is echoed back in an ALPN
+    extension (RFC 7301 §3.1) — without that echo a client never considers
+    ALPN negotiated and keeps speaking HTTP/1.1.
     """
     var result = encode_u16_be(version)
     result = result + bytes_to_wire(random)
     result = result + encode_u8(0)
     result = result + encode_u16_be(cipher_suite)
     result = result + encode_u8(0)
-    result
+    result + build_alpn_extension_block(alpn)
 
 fn build_certificate_body(chain: TlsCertificateChain) -> text:
     """Build the Certificate handshake body.
@@ -466,15 +479,7 @@ fn negotiate_alpn(extensions: [i64]) -> text:
     if len(ext_data) == 0:
         return ""
 
-    val offered = parse_alpn_extension(ext_data)
-    val server_protocols = ["h2", "http/1.1"]
-    val server_count = len(server_protocols)
-    var i = 0
-    while i < server_count:
-        if server_protocols[i] == offered:
-            return offered
-        i = i + 1
-    ""
+    simpleos_http_select_alpn(parse_alpn_extension(ext_data))
 
 fn build_alpn_extension_block(protocol: text) -> text:
     """Build the ServerHello extensions block carrying the selected protocol.
@@ -538,22 +543,12 @@ fn parse_alpn_extension(ext_data: [i64]) -> text:
     if name_len == 0 or data_len < 3 + name_len:
         return ""
 
-    val name_bytes = slice(ext_data, 3, 3 + name_len)
-    _bytes_to_text(name_bytes)
-
-fn _bytes_to_text(bytes: [i64]) -> text:
-    """Convert a slice of ASCII byte values to a text string."""
-    var result = ""
+    # Build the name straight off `ext_data` via the shared byte->wire hook.
+    # slice() + a printable-ASCII lookup table was the previous route and
+    # yielded "" for every input while this function was dead code.
+    var name = ""
     var i = 0
-    while i < len(bytes):
-        result = result + _byte_to_char(byte_at(bytes, i))
+    while i < name_len:
+        name = name + bytes_to_wire([byte_at(ext_data, 3 + i)])
         i = i + 1
-    result
-
-fn _byte_to_char(b: i64) -> text:
-    """Convert a single ASCII byte value to a one-character text string."""
-    val chars = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
-    val offset = b - 32
-    if offset < 0 or offset >= len_text(chars):
-        return "?"
-    chars.char_at(offset)
+    name

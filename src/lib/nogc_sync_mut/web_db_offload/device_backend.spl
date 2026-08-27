@@ -22,11 +22,20 @@ struct GpuWdbDeviceBackend:
     native_device_execution: bool
     device_name: text
 
+struct GpuWdbDeviceReceipt:
+    completed: bool
+    backend_handle: i64
+    device_identity: i64
+    readback_source: text
+    expected_checksum: i64
+    actual_checksum: i64
+    mismatch_count: i64
+    cpu_fallback: bool
+
 struct GpuWdbDeviceRunResult:
     submission: GpuWdbQueueSubmission
     evidence: GpuWdbExecutionEvidence
     backend: GpuWdbDeviceBackend
-    receipt: GpuWdbDeviceReceipt
     production_device_claim: bool
     reason: text
 
@@ -38,6 +47,64 @@ fn gpu_wdb_device_backend_unavailable() -> GpuWdbDeviceBackend:
         native_device_execution: false,
         device_name: "unavailable"
     )
+
+fn gpu_wdb_device_receipt_unavailable() -> GpuWdbDeviceReceipt:
+    GpuWdbDeviceReceipt(
+        completed: false,
+        backend_handle: 0,
+        device_identity: 0,
+        readback_source: "unavailable",
+        expected_checksum: 0,
+        actual_checksum: 0,
+        mismatch_count: 0,
+        cpu_fallback: false
+    )
+
+fn gpu_wdb_device_receipt(completed: bool,
+                          backend_handle: i64,
+                          device_identity: i64,
+                          readback_source: text,
+                          expected_checksum: i64,
+                          actual_checksum: i64,
+                          mismatch_count: i64,
+                          cpu_fallback: bool) -> GpuWdbDeviceReceipt:
+    GpuWdbDeviceReceipt(
+        completed: completed,
+        backend_handle: backend_handle,
+        device_identity: device_identity,
+        readback_source: readback_source,
+        expected_checksum: expected_checksum,
+        actual_checksum: actual_checksum,
+        mismatch_count: mismatch_count,
+        cpu_fallback: cpu_fallback
+    )
+
+fn gpu_wdb_device_receipt_valid(receipt: GpuWdbDeviceReceipt) -> bool:
+    (receipt.completed and
+        receipt.backend_handle > 0 and
+        receipt.device_identity > 0 and
+        receipt.readback_source == "device_readback" and
+        receipt.expected_checksum > 0 and
+        receipt.actual_checksum == receipt.expected_checksum and
+        receipt.mismatch_count == 0 and
+        not receipt.cpu_fallback)
+
+fn gpu_wdb_device_receipt_reason(receipt: GpuWdbDeviceReceipt) -> text:
+    if not receipt.completed:
+        return "device-not-completed"
+    if receipt.backend_handle <= 0:
+        return "backend-handle-missing"
+    if receipt.device_identity <= 0:
+        return "device-identity-missing"
+    if receipt.readback_source != "device_readback":
+        return "device-readback-missing"
+    if receipt.expected_checksum <= 0:
+        return "expected-checksum-invalid"
+    if receipt.actual_checksum != receipt.expected_checksum or receipt.mismatch_count != 0:
+        return "device-readback-mismatch"
+    if receipt.cpu_fallback:
+        return "cpu-fallback-not-device"
+    "device-receipt-valid"
 
 fn gpu_wdb_device_backend(backend: text, generation: i64, available_targets: [text],
                           native_device_execution: bool,
@@ -60,25 +127,6 @@ fn gpu_wdb_device_timing_source(backend: GpuWdbDeviceBackend, source: text) -> t
         return source
     "{backend.backend}:{backend.device_name}"
 
-fn gpu_wdb_device_batch_preflight(state: GpuWdbQueueState,
-                                  backend: GpuWdbDeviceBackend,
-                                  kind: GpuWdbWorkKind,
-                                  total_batch_bytes: i64,
-                                  item_count: i64,
-                                  expected_generation: i64,
-                                  cpu_fallback_available: bool,
-                                  budget: GpuWdbBudget) -> GpuWdbQueueSubmission:
-    gpu_wdb_submit_registered_batch_for_generation(
-        state,
-        gpu_wdb_device_backend_registry(backend),
-        kind,
-        total_batch_bytes,
-        item_count,
-        backend.native_device_execution,
-        expected_generation,
-        cpu_fallback_available,
-        budget)
-
 fn gpu_wdb_run_device_batch(state: GpuWdbQueueState,
                             backend: GpuWdbDeviceBackend,
                             kind: GpuWdbWorkKind,
@@ -95,7 +143,7 @@ fn gpu_wdb_run_device_batch(state: GpuWdbQueueState,
     val registry = gpu_wdb_device_backend_registry(backend)
     val submission = gpu_wdb_submit_registered_batch_for_generation(
         state,
-        backend,
+        registry,
         kind,
         total_batch_bytes,
         item_count,
@@ -123,7 +171,6 @@ fn gpu_wdb_run_device_batch(state: GpuWdbQueueState,
         submission: submission,
         evidence: evidence,
         backend: backend,
-        receipt: device_receipt,
         production_device_claim: timing_valid,
         reason:
             if timing_valid:

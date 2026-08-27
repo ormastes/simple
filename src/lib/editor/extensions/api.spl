@@ -1,7 +1,66 @@
 # Extension API — base types for the editor extension system.
 #
 # Provides: ExtensionDebugAdapter, ExtensionContext, ExtensionCapability,
-#           ExtensionContribution, ExtensionActivationEvent.
+#           ExtensionContribution, ExtensionActivationEvent,
+#           Disposable, ExtensionLifetime, EditorCancellationToken.
+
+# ---- disposables and lifetime ----------------------------------------------
+
+# Handle for one registration (command handler, event listener, ...).
+# `kind` routes disposal back to the owning registry; `owner` is the
+# extension name that made the registration.
+struct Disposable:
+    id: text
+    kind: text
+    owner: text
+
+# Owns every Disposable an extension created while active. Deactivation
+# disposes them all in one sweep.
+class ExtensionLifetime:
+    owner: text
+    disposables: [Disposable]
+    disposed: bool
+
+    static fn new(owner: text) -> ExtensionLifetime:
+        ExtensionLifetime(owner: owner, disposables: [], disposed: false)
+
+    me add(d: Disposable):
+        self.disposables = self.disposables.push(d)
+        self.disposed = false
+
+    # Clears the lifetime and returns what was registered so the caller
+    # can route each Disposable to its registry for removal.
+    me dispose_all() -> [Disposable]:
+        val out = self.disposables
+        self.disposables = []
+        self.disposed = true
+        out
+
+    fn count(self) -> i64:
+        self.disposables.len()
+
+# Simple cooperative cancellation flag.
+#
+# Named EditorCancellationToken (not CancellationToken) to avoid colliding
+# with std.async.cancellation.CancellationToken: under the interpreter,
+# same-named classes in different modules share dispatch, so a `cancel()`/
+# `is_cancelled()` pair here previously shadowed the real async token's
+# methods and silently no-oped its `is_cancelled()` (see
+# doc/08_tracking/bug/ for the repro). This type has no external callers
+# today (grepped clean) so the rename is a pure disambiguation.
+class EditorCancellationToken:
+    cancelled: bool
+
+    static fn new() -> EditorCancellationToken:
+        EditorCancellationToken(cancelled: false)
+
+    me cancel():
+        self.cancelled = true
+
+    fn is_cancelled(self) -> bool:
+        self.cancelled
+
+# ---- legacy context types ---------------------------------------------------
 
 struct ExtensionDebugAdapter:
     id: text

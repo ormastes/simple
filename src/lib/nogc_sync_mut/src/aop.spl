@@ -551,10 +551,17 @@ pub fn init_aop(config: AopConfig):
     # SECURITY: only initialize once. Re-initialization would wipe all registered security aspects.
     if global_registry.is_some():
         return
-    global_registry = Some(AspectRegistry.empty())
-    global_weaver = Some(AspectWeaver.with_registry(get_registry()))
+    # SECURITY: a global write is not visible to callees until return — build
+    # local, publish once. Routing through get_registry()/_seal_registry() here
+    # made them observe the stale `None`, so the registry was never sealed and
+    # security aspects stayed removable.
+    var reg = AspectRegistry.empty()
+    global_registry = Some(reg)
+    global_weaver = Some(AspectWeaver.with_registry(reg))
     # Seal after creation so security aspects registered immediately after cannot be removed.
-    _seal_registry()
+    var sealed_reg = reg
+    sealed_reg.sealed = true
+    global_registry = Some(sealed_reg)
 
 pub fn get_registry() -> AspectRegistry:
     if global_registry.is_none():

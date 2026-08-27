@@ -10,13 +10,13 @@
 #   simple-compiler --check src/
 #   simple-compiler --sdn config.sdn
 
-use driver.*
 # NOTE: removed `use app.io.mod (rt_debug_stack_trace_lines)` and the dead
 # `format_runtime_error_message` helper that used it. `app.io.mod` is the heavy
 # app re-export hub; importing it drags the full app graph into the compiler
 # driver and makes `bin/simple run` of the driver silently abort during load
 # (run-mode large-graph trap). See selfhost_bootstrap bug doc.
-use compiler.common.driver_core_types.{driver_core_compile_options_default, compileoptions_normalize_mir_optimization}
+use compiler.driver.driver.{compiler_driver_create, compiler_driver_run_compile}
+use compiler.common.driver_core_types.{CompileMode, CompileOptions, CompileResult, driver_core_compile_options_default, compileoptions_normalize_mir_optimization}
 
 # Stem (filename without extension) computed with rfind + `>= 0`/`> 0`
 # checks, NOT std.path.stem/extension: those match rfind's raw i64 result
@@ -54,6 +54,15 @@ fn _compile_mode_or(mode_text: text, fallback_text: text) -> CompileMode:
     if val parsed_fallback = fallback:
         return parsed_fallback
     CompileMode.Interpret
+
+fn _canonical_compile_mode_text(mode_text: text) -> text:
+    match mode_text:
+        case "interpret" | "i": "interpret"
+        case "jit" | "j": "jit"
+        case "aot" | "a" | "compile" | "c": "aot"
+        case "check" | "k": "check"
+        case "sdn" | "s" | "data": "sdn"
+        case _: mode_text
 
 struct CliArgs:
     mode: CompileMode
@@ -93,7 +102,7 @@ struct CliArgs:
         )
         args
 
-    fn apply_legacy_opt_level(level: i64):
+    me apply_legacy_opt_level(level: i64):
         self.opt_level = Some(level)
         self.optimize = level > 0
 
@@ -148,18 +157,18 @@ class ArgParser:
         var result = CliArgs.default()
 
         while self.has_next():
-            val arg = if val next_arg = self.next():
-                next_arg
-            else:
+            val next_arg = self.next()
+            if not next_arg.?:
                 break
+            val arg = next_arg
 
             if arg == "--":
                 # End of options marker - rest are positional args
                 while self.has_next():
-                    val file = if val next_file = self.next():
-                        next_file
-                    else:
+                    val next_file = self.next()
+                    if not next_file.?:
                         break
+                    val file = next_file
                     var files = result.input_files
                     files.push(file)
                     result.input_files = files
@@ -188,7 +197,7 @@ class ArgParser:
 
         Ok(result)
 
-    me parse_long_option(arg: text, result: CliArgs) -> Result<CliArgs, text>:
+    me parse_long_option(arg: text, mut result: CliArgs) -> Result<CliArgs, text>:
         val opt = arg.slice(2, arg.len())
 
         # Options with values (--option=value or --option value)
@@ -253,38 +262,34 @@ class ArgParser:
 
         # Options requiring a value
         val value = self.next()
-        val option_value = if val provided_value = value:
-            provided_value
-        else:
+        if not value.?:
             return Err("Option --{opt} requires a value")
+        val option_value = value
 
         self.apply_option(opt, option_value, result)
 
-    fn apply_option(name: text, value: text, result: CliArgs) -> Result<CliArgs, text>:
+    fn apply_option(name: text, value: text, mut result: CliArgs) -> Result<CliArgs, text>:
         match name:
             case "mode" | "m":
                 val mode = CompileMode.from_text(value)
-                result.mode = if val parsed_mode = mode:
-                    parsed_mode
-                else:
+                if not mode.?:
                     return Err("Unknown mode: {value}")
+                result.mode = mode
 
             case "output" | "o":
                 result.output_file = Some(value)
 
             case "log-level" | "l":
                 val level = value.parse_int()
-                result.log_level = if val parsed_level = level:
-                    parsed_level
-                else:
+                if not level.?:
                     return Err("Invalid log level: {value}")
+                result.log_level = level
 
             case "opt-level":
                 val level = value.parse_int()
-                val lv = if val parsed_level = level:
-                    parsed_level
-                else:
+                if not level.?:
                     return Err("Invalid optimization level: {value}")
+                val lv = level
                 if lv < 0 or lv > 3:
                     return Err("Optimization level must be 0-3, got: {value}")
                 result.opt_level = Some(lv)
@@ -299,7 +304,7 @@ class ArgParser:
 
         Ok(result)
 
-    me parse_short_option(arg: text, result: CliArgs) -> Result<CliArgs, text>:
+    me parse_short_option(arg: text, mut result: CliArgs) -> Result<CliArgs, text>:
         val opts = arg.slice(1, arg.len())
         var i = 0
         while i < opts.len():
@@ -340,28 +345,24 @@ class ArgParser:
                 case 'm':
                     # -m requires a value
                     val value = self.next()
-                    val mode_text = if val provided_value = value:
-                        provided_value
-                    else:
+                    if not value.?:
                         return Err("Option -m requires a value")
+                    val mode_text = value
                     val mode = CompileMode.from_text(mode_text)
-                    result.mode = if val parsed_mode = mode:
-                        parsed_mode
-                    else:
+                    if not mode.?:
                         return Err("Unknown mode: {mode_text}")
+                    result.mode = mode
                     return Ok(result)
                 case 'l':
                     # -l requires a value
                     val value = self.next()
-                    val level_text = if val provided_value = value:
-                        provided_value
-                    else:
+                    if not value.?:
                         return Err("Option -l requires a value")
+                    val level_text = value
                     val level = level_text.parse_int()
-                    result.log_level = if val parsed_level = level:
-                        parsed_level
-                    else:
+                    if not level.?:
                         return Err("Invalid log level")
+                    result.log_level = level
                     return Ok(result)
                 case _:
                     return Err("Unknown option: -{c}")
@@ -453,6 +454,7 @@ fn main() -> i32:
     print "[boot] args.len={args.len()} first={if args.len() > 0: args[0] else: \"(none)\"}"
     var idx = 1
     var cli_args = CliArgs.default()
+    var requested_mode_text = "jit"
 
     while idx < args.len():
         print "[boot] loop idx={idx} len={args.len()}"
@@ -471,14 +473,19 @@ fn main() -> i32:
             print_version()
             return 0
         elif arg == "-c" or arg == "--aot" or arg == "--compile" or arg == "--native":
+            requested_mode_text = "aot"
             cli_args.mode = _compile_mode_or("aot", "jit")
         elif arg == "-i" or arg == "--interpret":
+            requested_mode_text = "interpret"
             cli_args.mode = _compile_mode_or("interpret", "jit")
         elif arg == "-j" or arg == "--jit":
+            requested_mode_text = "jit"
             cli_args.mode = _compile_mode_or("jit", "interpret")
         elif arg == "-k" or arg == "--check":
+            requested_mode_text = "check"
             cli_args.mode = _compile_mode_or("check", "jit")
         elif arg == "-s" or arg == "--sdn":
+            requested_mode_text = "sdn"
             cli_args.mode = _compile_mode_or("sdn", "jit")
         elif arg == "-O" or arg == "--optimize":
             cli_args.optimize = true
@@ -493,11 +500,10 @@ fn main() -> i32:
         elif arg.starts_with("--opt-level="):
             val level_str = arg.slice(12, arg.len())
             val parsed = level_str.parse_int()
-            val level = if val parsed_level = parsed:
-                parsed_level
-            else:
+            if parsed == nil:
                 print "Error: Invalid optimization level: {level_str}"
                 return 1
+            val level = parsed ?? 0
             if level < 0 or level > 3:
                 print "Error: Optimization level must be 0-3, got: {level_str}"
                 return 1
@@ -509,11 +515,10 @@ fn main() -> i32:
             val level_str = args[idx]
             idx = idx + 1
             val parsed = level_str.parse_int()
-            val level = if val parsed_level = parsed:
-                parsed_level
-            else:
+            if parsed == nil:
                 print "Error: Invalid optimization level: {level_str}"
                 return 1
+            val level = parsed ?? 0
             if level < 0 or level > 3:
                 print "Error: Optimization level must be 0-3, got: {level_str}"
                 return 1
@@ -528,7 +533,24 @@ fn main() -> i32:
             val text = arg.slice(7, arg.len())
             val m = CompileMode.from_text(text)
             if val parsed_mode = m:
+                requested_mode_text = _canonical_compile_mode_text(text)
                 cli_args.mode = parsed_mode
+            else:
+                print "Error: Unknown mode: {text}"
+                return 1
+        elif arg == "-m" or arg == "--mode":
+            if idx >= args.len():
+                print "Error: {arg} requires a value"
+                return 1
+            val text = args[idx]
+            idx = idx + 1
+            val m = CompileMode.from_text(text)
+            if val parsed_mode = m:
+                requested_mode_text = _canonical_compile_mode_text(text)
+                cli_args.mode = parsed_mode
+            else:
+                print "Error: Unknown mode: {text}"
+                return 1
         elif arg.starts_with("--profile="):
             cli_args.profile = arg.slice(10, arg.len())
         elif arg == "-p":
@@ -580,7 +602,10 @@ fn main() -> i32:
     print "[boot] parsed args ok; files={cli_args.input_files.len()} optimize={cli_args.optimize}"
 
     # Build compile options from CLI args
-    val options = cli_args.to_options()
+    var options = cli_args.to_options()
+    # Text survives the native aggregate copies that currently corrupt the
+    # CompileMode enum field. CompilerDriver restores it after the final copy.
+    options.cli_mode_text = requested_mode_text
     val result = run_compile_entry(options)
 
     match result:

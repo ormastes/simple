@@ -5,20 +5,9 @@
 # Uses Option/nil pattern for error handling.
 
 use std.path
-use file_system.types.{DirEntry as FsDirEntry}
-use file_system.file_ops.{file_copy as fs_file_copy}
-use file_system.metadata.{file_is_file as fs_file_is_file, file_is_directory as fs_file_is_directory, file_size as fs_file_size}
-
-# The admitted bootstrap compiler can lose imported module aliases in ordinary
-# function bodies.  Keep that compatibility boundary private: callers retain
-# the safe API and these leaves only forward existing values.
-@unsafe(reason: "private bootstrap-compatible imported type construction boundary", capabilities: [ffi])
-fn _dir_entry(name: text, entry_path: text, is_file: bool, is_directory: bool, size: i64) -> FsDirEntry:
-    FsDirEntry(name: name, path: entry_path, is_file: is_file, is_directory: is_directory, size: size)
-
-@unsafe(reason: "private bootstrap-compatible imported file-copy boundary", capabilities: [ffi])
-fn _dir_file_copy(src: text, dest: text) -> bool:
-    fs_file_copy(src, dest)
+mod file_system.types
+mod file_system.file_ops
+mod file_system.metadata
 
 fn dir_create(path: text) -> bool:
     """Create a directory.
@@ -68,7 +57,7 @@ fn dir_list(path: text) -> [text]?:
     # Mock: return some entries
     Some(["file1.txt", "file2.txt", "subdir"])
 
-fn dir_list_detailed(path: text) -> [FsDirEntry]?:
+fn dir_list_detailed(path: text) -> [types.DirEntry]?:
     """List directory with detailed entry information.
 
     Args:
@@ -86,7 +75,13 @@ fn dir_list_detailed(path: text) -> [FsDirEntry]?:
             var entries = []
             for name in names:
                 val full_path = path.join2(path, name)
-                val entry = _dir_entry(name, full_path, true, false, 1024)
+                val entry = types.DirEntry(
+                    name: name,
+                    path: full_path,
+                    is_file: true,
+                    is_directory: false,
+                    size: 1024
+                )
                 entries.push(entry)
 
             Some(entries)
@@ -194,7 +189,7 @@ fn dir_walk_files(root: text) -> [text]:
     val all_paths = dir_walk(root)
     var files = []
     for p in all_paths:
-        if fs_file_is_file(p):
+        if metadata.file_is_file(p):
             files.push(p)
     files
 
@@ -210,7 +205,7 @@ fn dir_walk_dirs(root: text) -> [text]:
     val all_paths = dir_walk(root)
     var dirs = []
     for p in all_paths:
-        if fs_file_is_directory(p):
+        if metadata.file_is_directory(p):
             dirs.push(p)
     dirs
 
@@ -249,7 +244,7 @@ fn dir_copy(src: text, dest: text) -> bool:
                     if not dir_copy(src_path, dest_path):
                         return false
                 else:
-                    if not _dir_file_copy(src_path, dest_path):
+                    if not file_ops.file_copy(src_path, dest_path):
                         return false
         nil:
             return false
@@ -286,8 +281,8 @@ fn dir_size(path: text) -> i64:
     var total_size = 0
     val entries = dir_walk(path)
     for entry in entries:
-        if fs_file_is_file(entry):
-            val size_opt = fs_file_size(entry)
+        if metadata.file_is_file(entry):
+            val size_opt = metadata.file_size(entry)
             match size_opt:
                 Some(size):
                     total_size = total_size + size

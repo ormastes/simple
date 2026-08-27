@@ -9,8 +9,7 @@
 #   Tests tagged with # @di_test bypass the lock (SIMPLE_DI_TEST=1).
 
 use compiler.common.config (CompilerProfile)
-
-extern fn rt_env_get(key: text) -> text
+use std.io_runtime.{env_get_opt}
 
 # Local panic function for DI errors
 fn di_panic(msg: text):
@@ -30,10 +29,10 @@ fn di_is_system_test_locked() -> bool:
     Set by test runner for test/03_system/ files.
     Tests with # @di_test tag set SIMPLE_DI_TEST=1 to bypass.
     """
-    val sys_test = rt_env_get("SIMPLE_SYSTEM_TEST") ?? ""
+    val sys_test = env_get_opt("SIMPLE_SYSTEM_TEST") ?? ""
     if sys_test != "1":
         return false
-    val di_test = rt_env_get("SIMPLE_DI_TEST") ?? ""
+    val di_test = env_get_opt("SIMPLE_DI_TEST") ?? ""
     di_test != "1"
 
 # ============================================================================
@@ -102,10 +101,8 @@ impl DiContainer:
         if self.is_locked():
             di_warn("DI bind('{name}') rejected: container locked in system test mode. Add '# @di_test' tag to allow.")
             return
-        var b = self.bindings
-        b[name] = factory
-        self.bindings = b
-        self.all_bindings = self.all_bindings.push(Binding(
+        self.bindings[name] = factory
+        self.all_bindings.push(Binding(
             factory: factory,
             profile: nil,
             tags: []
@@ -122,12 +119,10 @@ impl DiContainer:
             profile: Some(profile),
             tags: []
         )
-        self.all_bindings = self.all_bindings.push(binding)
+        self.all_bindings.push(binding)
         # If current profile matches, register as active binding
         if profile.to_text() == self.profile:
-            var b = self.bindings
-            b[name] = factory
-            self.bindings = b
+            self.bindings[name] = factory
 
     me bind_tagged(name: text, tags: [text], factory: any):
         """Bind with tags for filtered resolution.
@@ -135,10 +130,8 @@ impl DiContainer:
         if self.is_locked():
             di_warn("DI bind_tagged('{name}') rejected: container locked in system test mode. Add '# @di_test' tag to allow.")
             return
-        var b = self.bindings
-        b[name] = factory
-        self.bindings = b
-        self.all_bindings = self.all_bindings.push(Binding(
+        self.bindings[name] = factory
+        self.all_bindings.push(Binding(
             factory: factory,
             profile: nil,
             tags: tags
@@ -150,9 +143,7 @@ impl DiContainer:
         if self.is_locked():
             di_warn("DI bind_instance('{name}') rejected: container locked in system test mode. Add '# @di_test' tag to allow.")
             return
-        var s = self.singletons
-        s[name] = instance
-        self.singletons = s
+        self.singletons[name] = instance
 
     fn resolve(name: text) -> Any:
         """Resolve a binding by name. Singletons checked first."""
@@ -161,8 +152,7 @@ impl DiContainer:
         if self.bindings.contains(name):
             val instance = self.bindings[name]()
             return instance
-        di_panic("No binding found for: {name}")
-        nil
+        panic("No binding found for: {name}")
 
     fn resolve_or(name: text, default: Any) -> Any:
         """Resolve a binding, returning default if not found."""
@@ -176,18 +166,19 @@ impl DiContainer:
         """Check if a binding exists."""
         self.singletons.contains(name) or self.bindings.contains(name)
 
+    fn has(name: text) -> bool:
+        """Alias of has_binding — check if a binding exists."""
+        self.has_binding(name)
+
     me resolve_singleton(name: text) -> Any:
         """Resolve and cache as singleton for future calls."""
         if self.singletons.contains(name):
             return self.singletons[name]
         if self.bindings.contains(name):
             val instance = self.bindings[name]()
-            var s = self.singletons
-            s[name] = instance
-            self.singletons = s
+            self.singletons[name] = instance
             return instance
-        di_panic("No binding found for: {name}")
-        nil
+        panic("No binding found for: {name}")
 
 # ============================================================================
 # Global container access

@@ -1,5 +1,4 @@
 # HIR item lowering - bootstrap, platform, and module helper functions.
-use compiler.hir.hir_lowering.items.*
 # HIR Lowering - Item Lowering
 #
 # This module handles lowering of top-level items (functions, classes, structs, enums, traits, impls) from AST to HIR.
@@ -7,27 +6,45 @@ use compiler.hir.hir_lowering.items.*
 use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
 use compiler.frontend.parser_types.*
-use compiler.frontend.parser_types.{Function, ImportItem, Param}
+use compiler.frontend.parser_types.{ParserFunction, ImportItem, Param}
 use compiler.frontend.parser_types_expr.*
 use compiler.frontend.flat_ast_bridge.{flat_bootstrap_function_count, flat_bootstrap_function_at, flat_bootstrap_function_decl_at}
 use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_lowering.types.HirLowering
 use compiler.hir.hir_lowering.expressions.*
 use compiler.common.attributes.{parse_layout_attrs, parse_function_attrs, parse_export_attrs, parse_driver_manifest_attrs, parse_platform_attrs, parse_vhdl_hardware_attrs, vhdl_hardware_metadata_default, FunctionAttr, ExportAttr, DriverManifestAttr, DriverManifestAttrKind, VhdlHardwareMetadata}
-use compiler.types.type_layout.{LayoutAttr, LayoutKind, PlatformParseResult, PlatformDiagnosticLevel, PlatformLayoutDiagnostic}
+use compiler.types.type_layout.{LayoutAttr, TypeLayoutKind, PlatformParseResult, PlatformDiagnosticLevel, PlatformLayoutDiagnostic}
 use compiler.common.dependency.visibility.{Visibility}
 use compiler.core.ast.{decl_get_body, decl_get_name, decl_get_param_names, decl_get_param_types, decl_get_ret_type}
 use compiler.core.ast_stmt.{STMT_EXPR, STMT_VAL_DECL, STMT_VAR_DECL, STMT_RETURN, stmt_get_tag, stmt_get_expr, stmt_get_name, stmt_get_type}
 use compiler.core.ast_expr.{EXPR_INT_LIT, EXPR_STRING_LIT, EXPR_BOOL_LIT, EXPR_NIL_LIT, EXPR_IDENT, EXPR_BINARY, EXPR_CALL, EXPR_FIELD_ACCESS, EXPR_METHOD_CALL, EXPR_BLOCK, EXPR_RETURN, expr_get_tag, expr_get_int, expr_get_str, expr_get_left, expr_get_right, expr_get_args, expr_get_stmts}
 use compiler.core.tokens.{TOK_MINUS, TOK_STAR, TOK_SLASH, TOK_PERCENT, TOK_EQ, TOK_NOT_EQ, TOK_LT, TOK_LT_EQ, TOK_GT, TOK_GT_EQ}
-use compiler.core.types.{TYPE_VOID, TYPE_BOOL, TYPE_I64, TYPE_TEXT, custom_primitive_bind_symbol, custom_primitive_is_name}
-use compiler.core.types.{primitive_integer_bit_width_from_name, custom_primitive_integer_bit_width_by_name}
+use compiler.frontend.core.types.{TYPE_VOID, TYPE_BOOL, TYPE_I64, TYPE_TEXT, custom_primitive_bind_symbol, custom_primitive_is_name}
+use compiler.frontend.core.types.{primitive_integer_bit_width_from_name, custom_primitive_integer_bit_width_by_name}
 use compiler.core.types.{int_to_str}
 use std.nogc_sync_mut.io.process_ops.{eprint}
-use compiler.hir.hir_types.{HirModule}  # explicit: a glob is not an import-origin for surface projection
 
-extern fn rt_env_get(key: text) -> text
+@unsafe(reason: "raw nullable environment-read ABI", capabilities: [ffi])
+extern fn rt_env_get(key: text) -> text?
+@unsafe(reason: "raw process termination ABI", capabilities: [ffi])
+extern fn rt_exit(code: i64)
+@unsafe(reason: "raw transient-heap graph promotion ABI", capabilities: [ffi])
 extern fn rt_transient_heap_promote(value: Any) -> bool
+
+@always_inline
+fn _sffi_env_get(key: text) -> text?:
+    unsafe(capabilities: [ffi]):
+        rt_env_get(key)
+
+@always_inline
+fn _sffi_exit(code: i64):
+    unsafe(capabilities: [ffi]):
+        rt_exit(code)
+
+@always_inline
+fn _sffi_transient_heap_promote(value: Any) -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_transient_heap_promote(value)
 
 var _bootstrap_hir_functions: [HirFunction] = []
 var _bootstrap_hir_module_names: [text] = []
@@ -42,20 +59,39 @@ var _bootstrap_hir_module_constants: [[HirConst]] = []
 # Captured alongside functions/constants below and registered in the flat MIR
 # path (bootstrap_lower_flat_hir_module_to_mir). See bug
 # native_enum_variant_flat_undefined_2026-07-24.
+var _bootstrap_hir_module_enums: [[HirEnum]] = []
+var _bootstrap_hir_module_structs: [[HirStruct]] = []
 # Classes: the flat path needs these to register class field layout so `C(..)`
 # reclassifies to an inline aggregate instead of a call to an undefined `@C` ctor.
 var _bootstrap_hir_module_classes: [[HirClass]] = []
-var _bootstrap_hir_entry_index_slot: [i64] = [-1]
-var _bootstrap_hir_pending_names_len_slot: [i64] = [-1]
-var _bootstrap_hir_pending_symbols_len_slot: [i64] = [-1]
-var _bootstrap_hir_pending_functions_len_slot: [i64] = [-1]
-var _bootstrap_hir_pending_constants_len_slot: [i64] = [-1]
-var _bootstrap_hir_pending_enums_len_slot: [i64] = [-1]
-var _bootstrap_hir_pending_structs_len_slot: [i64] = [-1]
-var _bootstrap_hir_pending_classes_len_slot: [i64] = [-1]
-var _bootstrap_hir_pending_previous_entry_index_slot: [i64] = [-1]
+var _bootstrap_hir_entry_index: i64 = -1
+# Readers observe only fully published rows.  The parallel arrays above are a
+# bootstrap ABI constraint; this scalar is advanced only after every owner has
+# accepted the new row, so a partially appended row is never addressable.
+var _bootstrap_hir_module_committed_count: i64 = 0
+val _BOOTSTRAP_HIR_MODULE_LIMIT: i64 = 4096
+val _BOOTSTRAP_HIR_ITEMS_PER_MODULE_LIMIT: i64 = 131072
+
+fn bootstrap_hir_store_fail(message: text):
+    eprint("error: bootstrap HIR store rejected update: {message}\n")
+    _sffi_exit(1)
+    panic("rt_exit returned after bootstrap HIR store rejection")
+
+fn bootstrap_hir_store_aligned(expected: i64) -> bool:
+    _bootstrap_hir_module_names.len() == expected and
+    _bootstrap_hir_module_symbols.len() == expected and
+    _bootstrap_hir_module_functions.len() == expected and
+    _bootstrap_hir_module_constants.len() == expected and
+    _bootstrap_hir_module_enums.len() == expected and
+    _bootstrap_hir_module_structs.len() == expected and
+    _bootstrap_hir_module_classes.len() == expected
+
+fn bootstrap_hir_item_count_allowed(count: i64) -> bool:
+    count >= 0 and count <= _BOOTSTRAP_HIR_ITEMS_PER_MODULE_LIMIT
 
 fn bootstrap_hir_modules_reset():
+    _bootstrap_hir_module_committed_count = 0
+    _bootstrap_hir_entry_index = -1
     _bootstrap_hir_module_names = []
     _bootstrap_hir_module_symbols = []
     _bootstrap_hir_module_functions = []
@@ -63,27 +99,22 @@ fn bootstrap_hir_modules_reset():
     _bootstrap_hir_module_enums = []
     _bootstrap_hir_module_structs = []
     _bootstrap_hir_module_classes = []
-    _bootstrap_hir_entry_index_slot[0] = -1
-    _bootstrap_hir_pending_names_len_slot[0] = -1
-    _bootstrap_hir_pending_symbols_len_slot[0] = -1
-    _bootstrap_hir_pending_functions_len_slot[0] = -1
-    _bootstrap_hir_pending_constants_len_slot[0] = -1
-    _bootstrap_hir_pending_enums_len_slot[0] = -1
-    _bootstrap_hir_pending_structs_len_slot[0] = -1
-    _bootstrap_hir_pending_classes_len_slot[0] = -1
-    _bootstrap_hir_pending_previous_entry_index_slot[0] = -1
 
 fn bootstrap_hir_modules_add(name: text, is_entry: bool, symbols: [HirSymbol], functions: [HirFunction], constants: [HirConst], enums: [HirEnum], structs: [HirStruct], classes: [HirClass]):
-    val module_index = _bootstrap_hir_module_names.len()
-    _bootstrap_hir_pending_names_len_slot[0] = module_index
-    _bootstrap_hir_pending_symbols_len_slot[0] = _bootstrap_hir_module_symbols.len()
-    _bootstrap_hir_pending_functions_len_slot[0] = _bootstrap_hir_module_functions.len()
-    _bootstrap_hir_pending_constants_len_slot[0] = _bootstrap_hir_module_constants.len()
-    _bootstrap_hir_pending_enums_len_slot[0] = _bootstrap_hir_module_enums.len()
-    _bootstrap_hir_pending_structs_len_slot[0] = _bootstrap_hir_module_structs.len()
-    _bootstrap_hir_pending_classes_len_slot[0] = _bootstrap_hir_module_classes.len()
-    _bootstrap_hir_pending_previous_entry_index_slot[0] = _bootstrap_hir_entry_index_slot[0]
-    # `name` is a scalar reference to the pre-scope ParserModule.name string.
+    val module_index = _bootstrap_hir_module_committed_count
+    if module_index >= _BOOTSTRAP_HIR_MODULE_LIMIT:
+        bootstrap_hir_store_fail("module limit exceeded")
+    if not bootstrap_hir_store_aligned(module_index):
+        bootstrap_hir_store_fail("parallel owners are misaligned before publication")
+    if (not bootstrap_hir_item_count_allowed(symbols.len()) or
+        not bootstrap_hir_item_count_allowed(functions.len()) or
+        not bootstrap_hir_item_count_allowed(constants.len()) or
+        not bootstrap_hir_item_count_allowed(enums.len()) or
+        not bootstrap_hir_item_count_allowed(structs.len()) or
+        not bootstrap_hir_item_count_allowed(classes.len())):
+        bootstrap_hir_store_fail("per-module item limit exceeded")
+    if is_entry and _bootstrap_hir_entry_index >= 0:
+        bootstrap_hir_store_fail("multiple entry modules")
     _bootstrap_hir_module_names = _bootstrap_hir_module_names.push(name)
     _bootstrap_hir_module_symbols = _bootstrap_hir_module_symbols.push(symbols)
     _bootstrap_hir_module_functions = _bootstrap_hir_module_functions.push(functions)
@@ -95,89 +126,36 @@ fn bootstrap_hir_modules_add(name: text, is_entry: bool, symbols: [HirSymbol], f
         bootstrap_hir_store_fail("parallel owners are misaligned after append")
     _bootstrap_hir_module_committed_count = module_index + 1
     if is_entry:
-        _bootstrap_hir_entry_index_slot[0] = module_index
+        _bootstrap_hir_entry_index = module_index
 
-fn bootstrap_hir_modules_clear_pending_append():
-    _bootstrap_hir_pending_names_len_slot[0] = -1
-    _bootstrap_hir_pending_symbols_len_slot[0] = -1
-    _bootstrap_hir_pending_functions_len_slot[0] = -1
-    _bootstrap_hir_pending_constants_len_slot[0] = -1
-    _bootstrap_hir_pending_enums_len_slot[0] = -1
-    _bootstrap_hir_pending_structs_len_slot[0] = -1
-    _bootstrap_hir_pending_classes_len_slot[0] = -1
-    _bootstrap_hir_pending_previous_entry_index_slot[0] = -1
-
-pub fn bootstrap_hir_modules_commit_pending_tail():
-    bootstrap_hir_modules_clear_pending_append()
-
-fn bootstrap_hir_modules_rollback_pending_tail():
-    if _bootstrap_hir_pending_names_len_slot[0] >= 0:
-        while _bootstrap_hir_module_names.len() > _bootstrap_hir_pending_names_len_slot[0]:
-            _bootstrap_hir_module_names.pop()
-        while _bootstrap_hir_module_symbols.len() > _bootstrap_hir_pending_symbols_len_slot[0]:
-            _bootstrap_hir_module_symbols.pop()
-        while _bootstrap_hir_module_functions.len() > _bootstrap_hir_pending_functions_len_slot[0]:
-            _bootstrap_hir_module_functions.pop()
-        while _bootstrap_hir_module_constants.len() > _bootstrap_hir_pending_constants_len_slot[0]:
-            _bootstrap_hir_module_constants.pop()
-        while _bootstrap_hir_module_enums.len() > _bootstrap_hir_pending_enums_len_slot[0]:
-            _bootstrap_hir_module_enums.pop()
-        while _bootstrap_hir_module_structs.len() > _bootstrap_hir_pending_structs_len_slot[0]:
-            _bootstrap_hir_module_structs.pop()
-        while _bootstrap_hir_module_classes.len() > _bootstrap_hir_pending_classes_len_slot[0]:
-            _bootstrap_hir_module_classes.pop()
-        _bootstrap_hir_entry_index_slot[0] = _bootstrap_hir_pending_previous_entry_index_slot[0]
-    bootstrap_hir_modules_clear_pending_append()
-
-fn bootstrap_hir_modules_promote_transient_roots() -> bool:
-    # The seven outer arrays predate the per-file scope and remain persistent.
-    # The name tail is a scalar alias of ParserModule.name, itself the persistent
-    # SourceFile.path passed into the scope. Promote only the six scope-born HIR
-    # aggregate tails; each recursively retains its complete nested graph.
-    val names_len = _bootstrap_hir_module_names.len()
-    val symbols_len = _bootstrap_hir_module_symbols.len()
-    val functions_len = _bootstrap_hir_module_functions.len()
-    val constants_len = _bootstrap_hir_module_constants.len()
-    val enums_len = _bootstrap_hir_module_enums.len()
-    val structs_len = _bootstrap_hir_module_structs.len()
-    val classes_len = _bootstrap_hir_module_classes.len()
-    val expected_len = _bootstrap_hir_pending_names_len_slot[0] + 1
-    if (_bootstrap_hir_pending_names_len_slot[0] < 0 or names_len <= 0 or
-            _bootstrap_hir_pending_symbols_len_slot[0] != _bootstrap_hir_pending_names_len_slot[0] or
-            _bootstrap_hir_pending_functions_len_slot[0] != _bootstrap_hir_pending_names_len_slot[0] or
-            _bootstrap_hir_pending_constants_len_slot[0] != _bootstrap_hir_pending_names_len_slot[0] or
-            _bootstrap_hir_pending_enums_len_slot[0] != _bootstrap_hir_pending_names_len_slot[0] or
-            _bootstrap_hir_pending_structs_len_slot[0] != _bootstrap_hir_pending_names_len_slot[0] or
-            _bootstrap_hir_pending_classes_len_slot[0] != _bootstrap_hir_pending_names_len_slot[0] or
-            names_len != expected_len or symbols_len != expected_len or
-            functions_len != expected_len or constants_len != expected_len or
-            enums_len != expected_len or structs_len != expected_len or
-            classes_len != expected_len):
-        bootstrap_hir_modules_rollback_pending_tail()
-        return false
-    val last = names_len - 1
-    if not rt_transient_heap_promote(_bootstrap_hir_module_symbols[last]):
-        bootstrap_hir_modules_rollback_pending_tail()
-        return false
-    # A later failure can orphan an already-promoted tail graph, but rollback
-    # removes every persistent shell alias before the driver takes its fatal
-    # scope-end path, so no reclaimed tail remains reachable.
-    if not rt_transient_heap_promote(_bootstrap_hir_module_functions[last]):
-        bootstrap_hir_modules_rollback_pending_tail()
-        return false
-    if not rt_transient_heap_promote(_bootstrap_hir_module_constants[last]):
-        bootstrap_hir_modules_rollback_pending_tail()
-        return false
-    if not rt_transient_heap_promote(_bootstrap_hir_module_enums[last]):
-        bootstrap_hir_modules_rollback_pending_tail()
-        return false
-    if not rt_transient_heap_promote(_bootstrap_hir_module_structs[last]):
-        bootstrap_hir_modules_rollback_pending_tail()
-        return false
-    if not rt_transient_heap_promote(_bootstrap_hir_module_classes[last]):
-        bootstrap_hir_modules_rollback_pending_tail()
-        return false
-    true
+# HIR-cache replay of module_build.spl's bootstrap_flat_mode block: a cache
+# hit skips lowering, so the flat rows the bootstrap MIR bridge reads must be
+# published from the decoded module instead. Same flattening, same order
+# (Dict.keys() order), same mode gate; a no-op outside bootstrap_flat_mode.
+fn bootstrap_hir_modules_add_from_module(module: HirModule, registry_module_name: text, is_entry: bool):
+    val bootstrap_mode = (_sffi_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
+    val bootstrap_flat_mode = bootstrap_mode and (_sffi_env_get("SIMPLE_BOOTSTRAP_STAGE4") ?? "") != "1"
+    if not bootstrap_flat_mode:
+        return
+    var flat_symbols: [HirSymbol] = []
+    for symbol_key in module.symbols.symbols.keys():
+        flat_symbols = flat_symbols.push(module.symbols.symbols[symbol_key])
+    var flat_functions: [HirFunction] = []
+    for function_key in module.functions.keys():
+        flat_functions = flat_functions.push(module.functions[function_key])
+    var flat_constants: [HirConst] = []
+    for constant_key in module.constants.keys():
+        flat_constants = flat_constants.push(module.constants[constant_key])
+    var flat_enums: [HirEnum] = []
+    for enum_key in module.enums.keys():
+        flat_enums = flat_enums.push(module.enums[enum_key])
+    var flat_structs: [HirStruct] = []
+    for struct_key in module.structs.keys():
+        flat_structs = flat_structs.push(module.structs[struct_key])
+    var flat_classes: [HirClass] = []
+    for class_key in module.classes.keys():
+        flat_classes = flat_classes.push(module.classes[class_key])
+    bootstrap_hir_modules_add(registry_module_name, is_entry, flat_symbols, flat_functions, flat_constants, flat_enums, flat_structs, flat_classes)
 
 fn bootstrap_hir_modules_promote_last() -> bool:
     val committed = _bootstrap_hir_module_committed_count
@@ -188,20 +166,20 @@ fn bootstrap_hir_modules_promote_last() -> bool:
     # returned HirModule. Promote both the seven outer owners and the exact
     # newly committed row so ending the per-file scope cannot leave a dangling
     # global owner. Do not expose the raw arrays to the driver.
-    val name_ok = rt_transient_heap_promote(_bootstrap_hir_module_names[last])
-    val symbols_ok = rt_transient_heap_promote(_bootstrap_hir_module_symbols[last])
-    val functions_ok = rt_transient_heap_promote(_bootstrap_hir_module_functions[last])
-    val constants_ok = rt_transient_heap_promote(_bootstrap_hir_module_constants[last])
-    val enums_ok = rt_transient_heap_promote(_bootstrap_hir_module_enums[last])
-    val structs_ok = rt_transient_heap_promote(_bootstrap_hir_module_structs[last])
-    val classes_ok = rt_transient_heap_promote(_bootstrap_hir_module_classes[last])
-    val names_outer_ok = rt_transient_heap_promote(_bootstrap_hir_module_names)
-    val symbols_outer_ok = rt_transient_heap_promote(_bootstrap_hir_module_symbols)
-    val functions_outer_ok = rt_transient_heap_promote(_bootstrap_hir_module_functions)
-    val constants_outer_ok = rt_transient_heap_promote(_bootstrap_hir_module_constants)
-    val enums_outer_ok = rt_transient_heap_promote(_bootstrap_hir_module_enums)
-    val structs_outer_ok = rt_transient_heap_promote(_bootstrap_hir_module_structs)
-    val classes_outer_ok = rt_transient_heap_promote(_bootstrap_hir_module_classes)
+    val name_ok = _sffi_transient_heap_promote(_bootstrap_hir_module_names[last])
+    val symbols_ok = _sffi_transient_heap_promote(_bootstrap_hir_module_symbols[last])
+    val functions_ok = _sffi_transient_heap_promote(_bootstrap_hir_module_functions[last])
+    val constants_ok = _sffi_transient_heap_promote(_bootstrap_hir_module_constants[last])
+    val enums_ok = _sffi_transient_heap_promote(_bootstrap_hir_module_enums[last])
+    val structs_ok = _sffi_transient_heap_promote(_bootstrap_hir_module_structs[last])
+    val classes_ok = _sffi_transient_heap_promote(_bootstrap_hir_module_classes[last])
+    val names_outer_ok = _sffi_transient_heap_promote(_bootstrap_hir_module_names)
+    val symbols_outer_ok = _sffi_transient_heap_promote(_bootstrap_hir_module_symbols)
+    val functions_outer_ok = _sffi_transient_heap_promote(_bootstrap_hir_module_functions)
+    val constants_outer_ok = _sffi_transient_heap_promote(_bootstrap_hir_module_constants)
+    val enums_outer_ok = _sffi_transient_heap_promote(_bootstrap_hir_module_enums)
+    val structs_outer_ok = _sffi_transient_heap_promote(_bootstrap_hir_module_structs)
+    val classes_outer_ok = _sffi_transient_heap_promote(_bootstrap_hir_module_classes)
     name_ok and symbols_ok and functions_ok and constants_ok and enums_ok and
         structs_ok and classes_ok and names_outer_ok and symbols_outer_ok and
         functions_outer_ok and constants_outer_ok and enums_outer_ok and
@@ -229,10 +207,12 @@ fn bootstrap_hir_modules_rollback_last(expected_count: i64) -> bool:
     bootstrap_hir_store_aligned(expected_count)
 
 fn bootstrap_hir_entry_index() -> i64:
-    _bootstrap_hir_entry_index_slot[0]
+    if _bootstrap_hir_entry_index < 0 or _bootstrap_hir_entry_index >= _bootstrap_hir_module_committed_count:
+        return -1
+    _bootstrap_hir_entry_index
 
 fn bootstrap_hir_module_count() -> i64:
-    _bootstrap_hir_module_names.len()
+    _bootstrap_hir_module_committed_count
 
 fn bootstrap_hir_module_index_valid(index: i64) -> bool:
     index >= 0 and index < _bootstrap_hir_module_committed_count
@@ -246,27 +226,36 @@ fn bootstrap_hir_module_structs_outer_len() -> i64: _bootstrap_hir_module_struct
 fn bootstrap_hir_module_classes_outer_len() -> i64: _bootstrap_hir_module_classes.len()
 
 fn bootstrap_hir_module_name_at(index: i64) -> text:
+    if not bootstrap_hir_module_index_valid(index): return ""
     _bootstrap_hir_module_names[index]
 
-fn bootstrap_hir_module_symbols_at(index: i64) -> [HirSymbol]:
-    _bootstrap_hir_module_symbols[index]
+# Scalar projections keep the hot flat-MIR bridge from copying an entire
+# nested aggregate merely to inspect one element.
+fn bootstrap_hir_module_symbol_count(index: i64) -> i64:
+    if not bootstrap_hir_module_index_valid(index): return 0
+    _bootstrap_hir_module_symbols[index].len()
 
 fn bootstrap_hir_module_symbol_at(module_index: i64, item_index: i64) -> HirSymbol:
-    assert(bootstrap_hir_module_index_valid(module_index) and item_index >= 0 and item_index < _bootstrap_hir_module_symbols[module_index].len())
+    if not bootstrap_hir_module_index_valid(module_index) or item_index < 0 or item_index >= _bootstrap_hir_module_symbols[module_index].len():
+        bootstrap_hir_store_fail("symbol index out of range")
     _bootstrap_hir_module_symbols[module_index][item_index]
 
-fn bootstrap_hir_module_constants_at(index: i64) -> [HirConst]:
-    _bootstrap_hir_module_constants[index]
+fn bootstrap_hir_module_function_count(index: i64) -> i64:
+    if not bootstrap_hir_module_index_valid(index): return 0
+    _bootstrap_hir_module_functions[index].len()
 
 fn bootstrap_hir_module_function_at(module_index: i64, item_index: i64) -> HirFunction:
-    assert(bootstrap_hir_module_index_valid(module_index) and item_index >= 0 and item_index < _bootstrap_hir_module_functions[module_index].len())
+    if not bootstrap_hir_module_index_valid(module_index) or item_index < 0 or item_index >= _bootstrap_hir_module_functions[module_index].len():
+        bootstrap_hir_store_fail("function index out of range")
     _bootstrap_hir_module_functions[module_index][item_index]
 
-fn bootstrap_hir_module_structs_at(index: i64) -> [HirStruct]:
-    _bootstrap_hir_module_structs[index]
+fn bootstrap_hir_module_constant_count(index: i64) -> i64:
+    if not bootstrap_hir_module_index_valid(index): return 0
+    _bootstrap_hir_module_constants[index].len()
 
 fn bootstrap_hir_module_constant_at(module_index: i64, item_index: i64) -> HirConst:
-    assert(bootstrap_hir_module_index_valid(module_index) and item_index >= 0 and item_index < _bootstrap_hir_module_constants[module_index].len())
+    if not bootstrap_hir_module_index_valid(module_index) or item_index < 0 or item_index >= _bootstrap_hir_module_constants[module_index].len():
+        bootstrap_hir_store_fail("constant index out of range")
     _bootstrap_hir_module_constants[module_index][item_index]
 
 fn bootstrap_hir_module_enum_count(index: i64) -> i64:
@@ -274,7 +263,8 @@ fn bootstrap_hir_module_enum_count(index: i64) -> i64:
     _bootstrap_hir_module_enums[index].len()
 
 fn bootstrap_hir_module_enum_at(module_index: i64, item_index: i64) -> HirEnum:
-    assert(bootstrap_hir_module_index_valid(module_index) and item_index >= 0 and item_index < _bootstrap_hir_module_enums[module_index].len())
+    if not bootstrap_hir_module_index_valid(module_index) or item_index < 0 or item_index >= _bootstrap_hir_module_enums[module_index].len():
+        bootstrap_hir_store_fail("enum index out of range")
     _bootstrap_hir_module_enums[module_index][item_index]
 
 fn bootstrap_hir_module_struct_count(index: i64) -> i64:
@@ -282,7 +272,8 @@ fn bootstrap_hir_module_struct_count(index: i64) -> i64:
     _bootstrap_hir_module_structs[index].len()
 
 fn bootstrap_hir_module_struct_at(module_index: i64, item_index: i64) -> HirStruct:
-    assert(bootstrap_hir_module_index_valid(module_index) and item_index >= 0 and item_index < _bootstrap_hir_module_structs[module_index].len())
+    if not bootstrap_hir_module_index_valid(module_index) or item_index < 0 or item_index >= _bootstrap_hir_module_structs[module_index].len():
+        bootstrap_hir_store_fail("struct index out of range")
     _bootstrap_hir_module_structs[module_index][item_index]
 
 fn bootstrap_hir_module_class_count(index: i64) -> i64:
@@ -290,7 +281,8 @@ fn bootstrap_hir_module_class_count(index: i64) -> i64:
     _bootstrap_hir_module_classes[index].len()
 
 fn bootstrap_hir_module_class_at(module_index: i64, item_index: i64) -> HirClass:
-    assert(bootstrap_hir_module_index_valid(module_index) and item_index >= 0 and item_index < _bootstrap_hir_module_classes[module_index].len())
+    if not bootstrap_hir_module_index_valid(module_index) or item_index < 0 or item_index >= _bootstrap_hir_module_classes[module_index].len():
+        bootstrap_hir_store_fail("class index out of range")
     _bootstrap_hir_module_classes[module_index][item_index]
 
 fn bootstrap_hir_functions_reset():
@@ -303,15 +295,15 @@ fn bootstrap_hir_function_count() -> i64:
     _bootstrap_hir_functions.len()
 
 fn bootstrap_hir_function_at(index: i64) -> HirFunction:
-    if index < _bootstrap_hir_functions.len():
+    if index >= 0 and index < _bootstrap_hir_functions.len():
         return _bootstrap_hir_functions[index]
-    if index >= 0 and index < flat_bootstrap_function_count() and (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+    if index >= 0 and index < flat_bootstrap_function_count() and (_sffi_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
         val fn_: ParserFunction = flat_bootstrap_function_at(index)
         var lowering = HirLowering.new()
         return lowering.lower_function(fn_)
     eprint("error: bootstrap HIR function index out of range: {index}\n")
-    rt_exit(1)
-    _bootstrap_hir_functions[index]
+    _sffi_exit(1)
+    panic("rt_exit returned after bootstrap HIR function bounds failure")
 
 # Item Lowering (Functions, Classes, Structs, Enums, Traits, Impls)
 # ============================================================================
@@ -360,19 +352,19 @@ fn platform_attr_fields_for(platform: PlatformParseResult) -> PlatformAttrFields
 # interpreter and SIGILL/SIGSEGV in cranelift-compiled binaries (a nil is
 # yielded, then `.len()` in lower_function crashes with "field access on nil
 # receiver"). See doc/08_tracking/bug/positional_class_match_wide_destructure_2026-06-11.md.
-fn function_params(fn_: Function) -> [Param]:
+fn function_params(fn_: ParserFunction) -> [Param]:
     fn_.params
 
-fn module_functions_destructure(module: Module) -> Dict<text, Function>:
+fn module_functions_destructure(module: ParserModule) -> Dict<text, ParserFunction>:
     module.functions
 
 fn bootstrap_function_names_from_env() -> [text]:
     var names: [text] = []
     var i = 0
     while i < 64:
-        val tag = rt_env_get("SIMPLE_BOOTSTRAP_DECL_TAG_" + int_to_str(i)) ?? ""
+        val tag = _sffi_env_get("SIMPLE_BOOTSTRAP_DECL_TAG_" + int_to_str(i)) ?? ""
         if tag == "1":
-            val name = rt_env_get("SIMPLE_BOOTSTRAP_DECL_NAME_" + int_to_str(i)) ?? ""
+            val name = _sffi_env_get("SIMPLE_BOOTSTRAP_DECL_NAME_" + int_to_str(i)) ?? ""
             if name != "":
                 names.push(name)
         i = i + 1
@@ -397,7 +389,7 @@ fn bootstrap_function_names_from_env() -> [text]:
 # after `f`'s own body is lowered (i.e. inside `lower_function`) would fix
 # `f`'s own `ret` instruction but leave every caller still treating the call
 # as void. So the inference below runs directly over the pre-lowering
-# parser AST (`Function`/`Block`/`Stmt`/`Expr`), during that same signature
+# parser AST (`ParserFunction`/`Block`/`Stmt`/`Expr`), during that same signature
 # pass (see `infer_untyped_return_type` in module_lowering.spl); it never
 # runs under SIMPLE_BOOTSTRAP (that pass is skipped there entirely).
 #
@@ -506,8 +498,44 @@ fn bootstrap_hir_symbol_for_name(name: text) -> SymbolId:
         return SymbolId(id: 7)
     if name == "run_native_build_bootstrap":
         return SymbolId(id: 4)
+    if name == "rt_native_build":
+        return SymbolId(id: 8)
     if name == "get_cli_args":
         return SymbolId(id: 5)
     if name == "main":
         return SymbolId(id: 6)
     SymbolId(id: 100)
+
+fn bootstrap_hir_symbol_known_name(name: text) -> bool:
+    """True only for the small fixed set of the compiler's OWN bootstrap CLI
+    entry functions bootstrap_hir_symbol_for_name assigns a hardcoded id to.
+    Callers must gate on this BEFORE calling bootstrap_hir_symbol_for_name:
+    that function's fallback for any other name is a bare SymbolId(id: 100)
+    that is never inserted into self.symbols (no `define()` call), so it is
+    absent from the flat symbol table the --entry-closure MIR path builds
+    from `self.symbols.symbols.values()`. Every OTHER top-level function
+    (any real user program's `fn build() -> Reg: ...`, not just class
+    statics -- see native_flat_static_method_call_unknown_100) used to fall
+    into that same silent id=100 hole: the CALL SITE still linked fine
+    (bootstrap_flat_function_symbol_name emits a plain function's body under
+    its bare name unconditionally, independent of func.symbol), but
+    resolved_call_hir_return_type(id=100) always found nothing, so a
+    function returning a class/struct never threaded its return type onto
+    the call result -- struct_value_syms was never populated for `val r =
+    build()`, and every method call / field read on `r` afterward silently
+    misresolved (const-0 method calls, wrong field offsets). Routing any
+    unrecognized name through the qualified lookup-or-define path instead
+    (declaration_lowering.spl) reuses the SAME symbol module_lowering.spl's
+    declare-loop pre-pass already defined for it (present in the flat
+    table, carrying the real declared return type) -- exactly the fix
+    already proven for static methods, generalized to every function name
+    this fixed list does not own."""
+    if name == "bootstrap_version": return true
+    if name == "native_build_help": return true
+    if name == "compile_result_exit": return true
+    if name == "bootstrap_output_from_args": return true
+    if name == "run_native_build_bootstrap": return true
+    if name == "rt_native_build": return true
+    if name == "get_cli_args": return true
+    if name == "main": return true
+    false

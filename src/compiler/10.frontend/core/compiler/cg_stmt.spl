@@ -16,12 +16,11 @@ use compiler.core.ast.{arm_get_pattern, arm_get_body}
 use compiler.core.ast.{EXPR_INT_LIT, EXPR_IDENT, EXPR_CALL, EXPR_INDEX, EXPR_RANGE}
 use compiler.core.ast.{EXPR_STRUCT_LIT, EXPR_ARRAY_LIT}
 use compiler.core.ast.{STMT_EXPR, STMT_VAL_DECL, STMT_VAR_DECL, STMT_ASSIGN, STMT_RETURN}
-use compiler.core.ast.{STMT_IF, STMT_IF_CHAIN, STMT_FOR, STMT_WHILE, STMT_MATCH, STMT_BLOCK}
+use compiler.core.ast.{STMT_IF, STMT_FOR, STMT_WHILE, STMT_MATCH, STMT_BLOCK}
 use compiler.core.ast.{STMT_BREAK, STMT_CONTINUE, STMT_COMPOUND_ASSIGN}
 use compiler.core.tokens.{TOK_PLUS, TOK_MINUS, TOK_STAR, TOK_SLASH, TOK_PERCENT}
 use compiler.core.types.{TYPE_VOID, TYPE_I64, TYPE_TEXT}
 use compiler.core.types.{TYPE_ARRAY_I64, TYPE_ARRAY_TEXT, TYPE_ARRAY_BOOL, TYPE_ARRAY_ANY}
-use compiler.core.types.{is_named_type_tag}
 use compiler.core.types.{TYPE_NAMED_BASE}
 use compiler.core.types.{type_tag_to_c}
 use compiler.core.types.{named_type_find, named_type_name}
@@ -31,12 +30,6 @@ use compiler.core.compiler.cg_helpers.{st_add, st_find, sa_find}
 use compiler.core.compiler.cg_helpers.{is_text_type, is_array_type}
 use compiler.core.compiler.cg_helpers.{cg_infer_expr_type, cg_spl_wrap, cg_spl_access}
 use compiler.core.compiler.cg_helpers.{cg_compound_op_to_c}
-use compiler.core.compiler.cg_helpers.{cg_flat_if_chain_condition_only, cg_backend_unsupported_expr}
-use compiler.frontend.core.if_chain_nodes.{FORM_STMT}
-use compiler.frontend.core.if_chain_nodes.{flat_if_chain_form_get, flat_if_chain_first_arm_get, flat_if_chain_arm_count_get}
-use compiler.frontend.core.if_chain_nodes.{flat_if_chain_else_stmt_count_get, flat_if_chain_else_stmt_at}
-use compiler.frontend.core.if_chain_nodes.{flat_if_arm_next_get, flat_if_arm_head_get}
-use compiler.frontend.core.if_chain_nodes.{flat_if_arm_body_count_get, flat_if_arm_body_at}
 
 # ===== Block Expression =====
 
@@ -176,10 +169,6 @@ fn cg_stmt(idx: i64):
         cg_if_stmt(idx)
         return
 
-    if tag == STMT_IF_CHAIN:
-        cg_if_chain_stmt(idx)
-        return
-
     if tag == STMT_FOR:
         cg_for_stmt(idx)
         return
@@ -250,7 +239,7 @@ fn cg_val_decl_stmt(idx: i64):
                     cg_emit_line(cn + " " + name + " = " + init_c + ";")
                     return
         # Check if inferred type is a named struct type
-        if is_named_type_tag(type_tag):
+        if type_tag >= TYPE_NAMED_BASE:
             val nid = type_tag - TYPE_NAMED_BASE
             val sname = named_type_name(nid)
             if sname != "":
@@ -305,7 +294,7 @@ fn cg_var_decl_stmt(idx: i64):
                     cg_emit_line(cn + " " + name + " = " + init_c + ";")
                     return
         # Check if inferred type is a named struct type
-        if is_named_type_tag(type_tag):
+        if type_tag >= TYPE_NAMED_BASE:
             val nid = type_tag - TYPE_NAMED_BASE
             val sname = named_type_name(nid)
             if sname != "":
@@ -397,43 +386,6 @@ fn cg_if_stmt(idx: i64):
             for i in range(0, else_body.len()):
                 cg_stmt(else_body[i])
             cg_indent_dec()
-    cg_emit_line("}")
-
-fn cg_if_chain_stmt(idx: i64):
-    val chain_id = stmt_get_type(idx)
-    if flat_if_chain_form_get(chain_id) != FORM_STMT or not cg_flat_if_chain_condition_only(chain_id):
-        cg_emit_line(cg_backend_unsupported_expr("if val/var and pattern statement arms are not supported") + ";")
-        return
-
-    var arm_id = flat_if_chain_first_arm_get(chain_id)
-    var remaining = flat_if_chain_arm_count_get(chain_id)
-    var first = true
-    while arm_id >= 0 and remaining > 0:
-        val prefix = if first: "if (" else: "} else if ("
-        cg_emit_line(prefix + cg_expr(flat_if_arm_head_get(arm_id)) + ") {")
-        cg_indent_inc()
-        vt_push_scope()
-        var body_i = 0
-        while body_i < flat_if_arm_body_count_get(arm_id):
-            cg_stmt(flat_if_arm_body_at(arm_id, body_i))
-            body_i = body_i + 1
-        vt_pop_scope()
-        cg_indent_dec()
-        first = false
-        arm_id = flat_if_arm_next_get(arm_id)
-        remaining = remaining - 1
-
-    val else_count = flat_if_chain_else_stmt_count_get(chain_id)
-    if else_count > 0:
-        cg_emit_line("} else {")
-        cg_indent_inc()
-        vt_push_scope()
-        var else_i = 0
-        while else_i < else_count:
-            cg_stmt(flat_if_chain_else_stmt_at(chain_id, else_i))
-            else_i = else_i + 1
-        vt_pop_scope()
-        cg_indent_dec()
     cg_emit_line("}")
 
 # ===== For Statement =====

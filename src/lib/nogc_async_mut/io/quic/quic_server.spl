@@ -19,11 +19,14 @@ use std.io.event_loop.{EventLoop}
 use std.io.quic.quic_transport.{QuicTransport, TransportEvent}
 use std.io.quic.quic_connection.{QuicConnection, QuicAction}
 
+@unsafe(reason: "raw UDP descriptor; negative sentinel means bind failed", capabilities: [ffi])
 extern fn rt_io_udp_bind(addr: text) -> i64
+@unsafe(reason: "raw UDP receive writes one bounded runtime buffer; nil means provider failure or no datagram", capabilities: [ffi])
 extern fn rt_io_udp_recv_from(fd: i64, size: i64) -> ([u8], text)?
+@unsafe(reason: "raw UDP send borrows packed bytes for the call; negative result means provider failure", capabilities: [ffi])
 extern fn rt_io_udp_send_to(fd: i64, data: [u8], addr: text) -> i64
+@unsafe(reason: "raw UDP descriptor close consumes one live descriptor; false means close failed", capabilities: [ffi])
 extern fn rt_io_udp_close(fd: i64) -> bool
-extern fn rt_io_udp_set_nonblocking(fd: i64, enabled: bool) -> bool
 
 # ============================================================================
 # Constants
@@ -103,7 +106,8 @@ class QuicServer:
         if self.running or self.udp_fd >= 0:
             return false
         val addr = "0.0.0.0:{port}"
-        val fd = rt_io_udp_bind(addr)
+        val fd = unsafe(capabilities: [ffi]):
+            rt_io_udp_bind(addr)
         if fd < 0:
             return false
 
@@ -121,7 +125,8 @@ class QuicServer:
         self.running = false
         if self.udp_fd >= 0:
             self.driver.cancel_fd(self.udp_fd)
-            rt_io_udp_close(self.udp_fd)
+            unsafe(capabilities: [ffi]):
+                rt_io_udp_close(self.udp_fd)
             self.udp_fd = -1
         self.pending_recv_ops = []
 
@@ -133,8 +138,12 @@ class QuicServer:
         """Poll for incoming UDP datagrams and process through QUIC.
 
         Drives the IoDriver flush/poll cycle, feeds received datagrams
-        to QuicTransport.on_udp_data, sends any outbound packets,
-        re-arms recv ops, and returns transport events.
+        to QuicTransport.on_udp_data, re-arms recv ops, and returns
+        transport events.
+
+        Outbound packets are not queued here: QuicTransport.on_udp_data
+        sends each SendPacket action inline via rt_io_udp_send_to as it is
+        produced, so a datagram is on the wire before poll() returns.
         """
         var events: [TransportEvent] = []
 
@@ -182,9 +191,6 @@ class QuicServer:
         # Re-arm recv operations for continuous polling
         self._arm_recv_ops()
 
-        # Flush any outbound packets produced by transport
-        self._flush_outbound()
-
         return events
 
     # ------------------------------------------------------------------
@@ -198,7 +204,8 @@ class QuicServer:
         """
         if self.udp_fd < 0:
             return -1
-        val sent = rt_io_udp_send_to(self.udp_fd, data, peer_addr)
+        val sent = unsafe(capabilities: [ffi]):
+            rt_io_udp_send_to(self.udp_fd, data, peer_addr)
         if sent > 0:
             self.stats_packets_out = self.stats_packets_out + 1
             self.stats_bytes_out = self.stats_bytes_out + sent
@@ -278,12 +285,3 @@ class QuicServer:
 
     # UDP recv data is now accessed binary-safe via driver.poll_recv_bytes()
     # and the peer address via driver.poll_data() (see poll() method above).
-
-    me _flush_outbound():
-        """Send any outbound packets queued in the transport layer.
-
-        Currently QuicTransport.on_udp_data processes SendPacket actions
-        internally. This method is a hook for future batched sends.
-        """
-        # TODO: [quic-server][P2] wire transport-level send queue
-        pass

@@ -71,8 +71,10 @@ architecture sim of tb_soc_jtag_debug is
 begin
   clk <= not clk after CLK_PERIOD / 2;
 
+  -- NOTE: deliberately NO `generic map (IDCODE_VALUE => EXPECTED_IDCODE)` —
+  -- see tb_jtag_dtm_dmi.vhd. The DUT must carry its own default so the
+  -- IDCODE assertion below is independent of the DUT's configuration.
   dut : entity work.jtag_debug_chain
-    generic map (IDCODE_VALUE => EXPECTED_IDCODE)
     port map (
       clk => clk, rst_n => rst_n,
       tck => tck, tms => tms, tdi => tdi, trst_n => trst_n, tdo => tdo,

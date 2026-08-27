@@ -17,11 +17,6 @@ use compiler.mir.verification_call_identity.{ResolvedDirectCallManifestV1,
     validate_resolved_direct_call_manifest_v1,
     resolved_direct_call_callee_symbol_v1}
 use std.common.crypto.sha256.{sha256_text}
-export use compiler.mir.verification_semantic_coverage.{SemanticClass,
-    SemanticCoverageV1, semantic_coverage_for_mir_instruction_v2,
-    semantic_coverage_for_mir_terminator_v2,
-    semantic_coverage_for_mir_type_v2, semantic_coverage_hash_v2,
-    semantic_coverage_from_reachable_mir_v2}
 
 fn _vir_frame_text_v1(value: text) -> text:
     value.len().to_string() + ":" + value
@@ -30,6 +25,46 @@ fn _vir_frame_texts_v1(values: [text]) -> text:
     var framed: [text] = []
     for value in values: framed.push(_vir_frame_text_v1(value))
     values.len().to_string() + ":[" + framed.join("") + "]"
+
+enum SemanticClass:
+    Exact
+    AbstractedWithRefinement
+    ExternalWithContract
+    Unsupported
+
+impl SemanticClass:
+    fn name() -> text:
+        match self:
+            SemanticClass.Exact: "exact"
+            SemanticClass.AbstractedWithRefinement: "abstracted_with_refinement"
+            SemanticClass.ExternalWithContract: "external_with_contract"
+            SemanticClass.Unsupported: "unsupported"
+
+struct SemanticCoverageV1:
+    construct_variant: text
+    semantic_class: SemanticClass
+    lowering_owner: text
+    negative_test_owner: text
+
+impl SemanticCoverageV1:
+    fn diagnostic() -> text:
+        if self.construct_variant == "":
+            return "VIR-E-COVERAGE-VARIANT: construct variant is required"
+        if self.lowering_owner == "":
+            return "VIR-E-COVERAGE-LOWERING: lowering owner is required"
+        if self.negative_test_owner == "":
+            return "VIR-E-COVERAGE-NEGATIVE: negative-test owner is required"
+        ""
+
+    fn canonical_text() -> text:
+        "SemanticCoverageV1" + _vir_frame_text_v1(self.construct_variant) +
+            _vir_frame_text_v1(self.semantic_class.name()) +
+            _vir_frame_text_v1(self.lowering_owner) +
+            _vir_frame_text_v1(self.negative_test_owner)
+
+    fn hash() -> text:
+        if self.diagnostic() != "": return ""
+        sha256_text(self.canonical_text())
 
 fn _vir_effect_contains(effects: [VerificationEffectV1], candidate: VerificationEffectV1) -> bool:
     val atom = candidate.canonical_text()
@@ -421,20 +456,8 @@ struct VerificationIrFunction:
 
 impl VerificationIrFunction:
     fn closure_ready() -> bool:
-        if (self.schema != "VerificationIR-v1" or self.symbol.id < 0 or
-                self.name == "" or self.diagnostic != "" or
-                self.provenance.diagnostic() != ""):
+        if self.diagnostic != "" or self.provenance.diagnostic() != "":
             return false
-        var called_index = 0
-        while called_index < self.called_symbols.len():
-            if self.called_symbols[called_index].id < 0: return false
-            var prior_index = 0
-            while prior_index < called_index:
-                if self.called_symbols[prior_index].id ==
-                        self.called_symbols[called_index].id:
-                    return false
-                prior_index = prior_index + 1
-            called_index = called_index + 1
         if not self.return_type.closure_ready():
             return false
         var param_index = 0
@@ -573,28 +596,20 @@ struct VerificationIrModuleV1:
     semantic_hash: text
     diagnostic: text
 
+# Frozen public schema spelling; the module record is the V1 verification IR.
+type VerificationIrV1 = VerificationIrModuleV1
+
 impl VerificationIrModuleV1:
     fn closure_ready() -> bool:
         if (self.schema != "VerificationIRModule-v1" or self.module_name == "" or
                 self.effect_closure_hash == "" or self.semantic_hash == "" or
                 self.diagnostic != "" or self.functions.is_empty()): return false
-        var member_symbols: [i64] = []
-        var member_names: [text] = []
         var function_index = 0
         while function_index < self.functions.len():
-            val function = self.functions[function_index]
-            if not function.closure_ready() or
-                    not function.semantic_identity_valid():
+            if not self.functions[function_index].closure_ready() or
+                    not self.functions[function_index].semantic_identity_valid():
                 return false
-            if member_symbols.contains(function.symbol.id) or
-                    member_names.contains(function.name):
-                return false
-            member_symbols.push(function.symbol.id)
-            member_names.push(function.name)
             function_index = function_index + 1
-        for function in self.functions:
-            for called_symbol in function.called_symbols:
-                if not member_symbols.contains(called_symbol.id): return false
         self.semantic_hash == self.expected_semantic_hash()
 
     fn canonical_text() -> text:
@@ -615,34 +630,15 @@ impl VerificationIrModuleV1:
 pub struct ResolvedVerificationIrModuleV2:
     vir: VerificationIrModuleV1
     resolved_call_manifest_hash: text
-    semantic_coverage: [SemanticCoverageV1]
-    semantic_coverage_hash: text
     semantic_hash: text
     diagnostic: text
 
-    fn expected_semantic_hash() -> text:
-        sha256_text("ResolvedVerificationIRModule-v2|vir=" +
-            self.vir.semantic_hash + "|calls=" +
-            self.resolved_call_manifest_hash + "|coverage=" +
-            self.semantic_coverage_hash)
-
     fn closure_ready() -> bool:
-        if (not self.vir.closure_ready() or
-                self.resolved_call_manifest_hash == "" or
-                self.semantic_coverage.is_empty() or
-                self.diagnostic != "" or
-                self.semantic_coverage_hash !=
-                    semantic_coverage_hash_v2(self.semantic_coverage) or
-                self.semantic_hash != self.expected_semantic_hash()):
-            return false
-        var prior_variant = ""
-        for row in self.semantic_coverage:
-            if row.diagnostic() != "" or
-                    (prior_variant != "" and
-                        row.construct_variant <= prior_variant):
-                return false
-            prior_variant = row.construct_variant
-        true
+        self.vir.closure_ready() and self.resolved_call_manifest_hash != "" and
+            self.diagnostic == "" and self.semantic_hash ==
+                sha256_text("ResolvedVerificationIRModule-v2|vir=" +
+                    self.vir.semantic_hash + "|calls=" +
+                    self.resolved_call_manifest_hash)
 
 fn verification_ir_module_from_canonical_mir_v1(
     module: MirModule,
@@ -698,12 +694,12 @@ pub fn verification_ir_module_from_resolved_mir_v2(
     val call_closure = validate_resolved_direct_call_manifest_v1(module, calls)
     if not call_closure.closed(): return ResolvedVerificationIrModuleV2(
         VerificationIrModuleV1("VerificationIRModule-v1", module.name, "", [], "",
-            call_closure.diagnostic), "", [], "", "", call_closure.diagnostic)
+            call_closure.diagnostic), "", "", call_closure.diagnostic)
     val closure = verification_effect_closure_from_resolved_mir_module_v2(module,
         calls)
     if closure.diagnostic != "": return ResolvedVerificationIrModuleV2(
         VerificationIrModuleV1("VerificationIRModule-v1", module.name, "", [], "",
-            closure.diagnostic), "", [], "", "", closure.diagnostic)
+            closure.diagnostic), "", "", closure.diagnostic)
     var functions: [VerificationIrFunction] = []
     for function in verification_mir_functions_by_symbol_v1(module):
         val symbol_text = function.symbol.id.to_string()
@@ -712,7 +708,7 @@ pub fn verification_ir_module_from_resolved_mir_v2(
             case _: return ResolvedVerificationIrModuleV2(
                 VerificationIrModuleV1("VerificationIRModule-v1", module.name,
                     closure.hash(), [], "", "VIR-E-MODULE-EFFECTS: resolved closure omitted SymbolId " + symbol_text),
-                "", [], "", "", "VIR-E-MODULE-EFFECTS: resolved closure omitted SymbolId " + symbol_text)
+                "", "", "VIR-E-MODULE-EFFECTS: resolved closure omitted SymbolId " + symbol_text)
         var called_symbols: [SymbolId] = []
         for block_index in 0..function.blocks.len():
             val block = function.blocks[block_index]
@@ -724,7 +720,7 @@ pub fn verification_ir_module_from_resolved_mir_v2(
                             case Ok(value): value
                             case Err(message): return ResolvedVerificationIrModuleV2(
                                 VerificationIrModuleV1("VerificationIRModule-v1", module.name,
-                                    closure.hash(), [], "", message), "", [], "", "", message)
+                                    closure.hash(), [], "", message), "", "", message)
                         val symbol = SymbolId(id: callee.to_i64())
                         if not called_symbols.contains(symbol): called_symbols.push(symbol)
                     case _: continue
@@ -733,20 +729,16 @@ pub fn verification_ir_module_from_resolved_mir_v2(
             called_symbols)
         if not vir_function.closure_ready(): return ResolvedVerificationIrModuleV2(
             VerificationIrModuleV1("VerificationIRModule-v1", module.name,
-                closure.hash(), [], "", vir_function.diagnostic), "", [], "", "",
+                closure.hash(), [], "", vir_function.diagnostic), "", "",
             vir_function.diagnostic)
         functions.push(vir_function)
     val draft = VerificationIrModuleV1("VerificationIRModule-v1", module.name,
         closure.hash(), functions, "", "")
     val vir = VerificationIrModuleV1(draft.schema, draft.module_name,
         draft.effect_closure_hash, draft.functions, draft.expected_semantic_hash(), "")
-    val coverage = semantic_coverage_from_reachable_mir_v2(module)
-    val coverage_hash = semantic_coverage_hash_v2(coverage)
     val semantic_hash = sha256_text("ResolvedVerificationIRModule-v2|vir=" +
-        vir.semantic_hash + "|calls=" + calls.hash() + "|coverage=" +
-        coverage_hash)
-    ResolvedVerificationIrModuleV2(vir, calls.hash(), coverage, coverage_hash,
-        semantic_hash, "")
+        vir.semantic_hash + "|calls=" + calls.hash())
+    ResolvedVerificationIrModuleV2(vir, calls.hash(), semantic_hash, "")
 
 fn _verification_effect_sets_equal_v1(
     left: [VerificationEffectV1],

@@ -2,8 +2,7 @@
 
 use compiler.hir.hir_lowering.module_surface_types.{ModuleSurface, ModuleSurfaceBuilder, ModuleSurfaceExportOriginIndex, ModuleSurfaceOriginResolution, module_surface_export_origin_index_lookup, module_surface_export_origin_index_put, module_surface_validate_owner_index}
 use compiler.hir.hir_lowering.module_surface_source_identity.{module_surface_canonical_module_name, module_surface_package_name}
-
-extern fn rt_env_get(key: text) -> text
+use std.nogc_sync_mut.io_runtime.{env_get_opt}
 
 impl ModuleSurfaceBuilder:
     me resolve_export_origins() -> Result<(), text>:
@@ -17,12 +16,14 @@ impl ModuleSurfaceBuilder:
         # fixpoint pass; resolving that by scanning the aligned name arrays was
         # O(modules) per call and dominated the whole export_origins phase.
         val origin_trace = module_surface_origin_trace_enabled()
-        module_surface_origin_trace(origin_trace,
-            "enter surfaces={self.surfaces.len()} names={self.ordered_names.len()}")
+        if origin_trace:
+            module_surface_origin_trace(true,
+                "enter surfaces={self.surfaces.len()} names={self.ordered_names.len()}")
         val name_index = module_surface_name_index_build(
             self.ordered_names, self.ordered_indices)
-        module_surface_origin_trace(origin_trace,
-            "name_index built entries={name_index.len()}; step=owner_index")
+        if origin_trace:
+            module_surface_origin_trace(true,
+                "name_index built entries={name_index.len()}; step=owner_index")
         var owner_by_package_name: Dict<text, i64> = {}
         # Routing and collision identity are deliberately separate. A public
         # facade remains the route used by sibling consumers, while duplicate
@@ -37,7 +38,7 @@ impl ModuleSurfaceBuilder:
             # Keep category order and collision handling unchanged, but visit
             # each key array directly. Building one cumulative array retained
             # every intermediate concatenation in the no-GC Stage4 process.
-            for declaration_name in owner_surface.callables.keys():
+            for declaration_name in owner_surface.callable_names:
                 val owner_key = "{owner_package}::{declaration_name}"
                 if owner_by_package_name.contains_key(owner_key):
                     val previous_index = owner_by_package_name[owner_key]
@@ -53,7 +54,7 @@ impl ModuleSurfaceBuilder:
                     owner_source_by_package_name[owner_key] = declaration_name
                     owner_terminal_module_by_package_name[owner_key] = owner_surface.module_name
                     owner_terminal_source_by_package_name[owner_key] = declaration_name
-            for declaration_name in owner_surface.composites.keys():
+            for declaration_name in owner_surface.composite_names:
                 val owner_key = "{owner_package}::{declaration_name}"
                 if owner_by_package_name.contains_key(owner_key):
                     val previous_index = owner_by_package_name[owner_key]
@@ -69,7 +70,7 @@ impl ModuleSurfaceBuilder:
                     owner_source_by_package_name[owner_key] = declaration_name
                     owner_terminal_module_by_package_name[owner_key] = owner_surface.module_name
                     owner_terminal_source_by_package_name[owner_key] = declaration_name
-            for declaration_name in owner_surface.enums.keys():
+            for declaration_name in owner_surface.enum_names:
                 val owner_key = "{owner_package}::{declaration_name}"
                 if owner_by_package_name.contains_key(owner_key):
                     val previous_index = owner_by_package_name[owner_key]
@@ -85,7 +86,7 @@ impl ModuleSurfaceBuilder:
                     owner_source_by_package_name[owner_key] = declaration_name
                     owner_terminal_module_by_package_name[owner_key] = owner_surface.module_name
                     owner_terminal_source_by_package_name[owner_key] = declaration_name
-            for declaration_name in owner_surface.traits.keys():
+            for declaration_name in owner_surface.trait_names:
                 val owner_key = "{owner_package}::{declaration_name}"
                 if owner_by_package_name.contains_key(owner_key):
                     val previous_index = owner_by_package_name[owner_key]
@@ -101,7 +102,7 @@ impl ModuleSurfaceBuilder:
                     owner_source_by_package_name[owner_key] = declaration_name
                     owner_terminal_module_by_package_name[owner_key] = owner_surface.module_name
                     owner_terminal_source_by_package_name[owner_key] = declaration_name
-            for declaration_name in owner_surface.type_aliases.keys():
+            for declaration_name in owner_surface.type_alias_names:
                 val owner_key = "{owner_package}::{declaration_name}"
                 if owner_by_package_name.contains_key(owner_key):
                     val previous_index = owner_by_package_name[owner_key]
@@ -117,7 +118,7 @@ impl ModuleSurfaceBuilder:
                     owner_source_by_package_name[owner_key] = declaration_name
                     owner_terminal_module_by_package_name[owner_key] = owner_surface.module_name
                     owner_terminal_source_by_package_name[owner_key] = declaration_name
-            for declaration_name in owner_surface.constants.keys():
+            for declaration_name in owner_surface.constant_names:
                 val owner_key = "{owner_package}::{declaration_name}"
                 if owner_by_package_name.contains_key(owner_key):
                     val previous_index = owner_by_package_name[owner_key]
@@ -135,14 +136,16 @@ impl ModuleSurfaceBuilder:
                     owner_terminal_source_by_package_name[owner_key] = declaration_name
             owner_surface_index = owner_surface_index + 1
 
-        module_surface_origin_trace(origin_trace,
-            "owner_index built keys={owner_by_package_name.len()}; step=first_pass")
+        if origin_trace:
+            module_surface_origin_trace(true,
+                "owner_index built keys={owner_by_package_name.len()}; step=first_pass")
         var surface_index = 0
         while surface_index < self.surfaces.len():
             var surface = self.surfaces[surface_index]
             # In-flight receipt: names the surface about to be processed.
-            module_surface_origin_trace(origin_trace,
-                "first_pass {surface_index}/{self.surfaces.len()} in-flight {surface.module_name}")
+            if origin_trace:
+                module_surface_origin_trace(true,
+                    "first_pass {surface_index}/{self.surfaces.len()} in-flight {surface.module_name}")
             for export_decl in surface.exports:
                 for export_item in export_decl.items:
                     if export_item.ends_with(".*"):
@@ -233,12 +236,14 @@ impl ModuleSurfaceBuilder:
                     if not bounded_item.ends_with(".*"):
                         max_origin_passes = max_origin_passes + 1
         var origin_changed = true
-        module_surface_origin_trace(origin_trace,
-            "first_pass done; step=fixpoint max_passes={max_origin_passes}")
+        if origin_trace:
+            module_surface_origin_trace(true,
+                "first_pass done; step=fixpoint max_passes={max_origin_passes}")
         while origin_changed and origin_pass < max_origin_passes:
             origin_changed = false
-            module_surface_origin_trace(origin_trace,
-                "fixpoint pass {origin_pass}/{max_origin_passes} in-flight step=promote")
+            if origin_trace:
+                module_surface_origin_trace(true,
+                    "fixpoint pass {origin_pass}/{max_origin_passes} in-flight step=promote")
 
             var exported_owner_index = 0
             while exported_owner_index < self.surfaces.len():
@@ -287,13 +292,15 @@ impl ModuleSurfaceBuilder:
                     exported_origin_index = exported_origin_index + 1
                 exported_owner_index = exported_owner_index + 1
 
-            module_surface_origin_trace(origin_trace,
-                "fixpoint pass {origin_pass} step=revisit")
+            if origin_trace:
+                module_surface_origin_trace(true,
+                    "fixpoint pass {origin_pass} step=revisit")
             var revisit_index = 0
             while revisit_index < self.surfaces.len():
                 var revisit_surface = self.surfaces[revisit_index]
-                module_surface_origin_trace(origin_trace,
-                    "revisit pass {origin_pass} {revisit_index}/{self.surfaces.len()} in-flight {revisit_surface.module_name}")
+                if origin_trace:
+                    module_surface_origin_trace(true,
+                        "revisit pass {origin_pass} {revisit_index}/{self.surfaces.len()} in-flight {revisit_surface.module_name}")
                 for export_decl in revisit_surface.exports:
                     for export_item in export_decl.items:
                         if export_item.ends_with(".*"):
@@ -370,22 +377,24 @@ impl ModuleSurfaceBuilder:
                 self.surfaces[revisit_index] = revisit_surface
                 revisit_index = revisit_index + 1
             origin_pass = origin_pass + 1
-            module_surface_origin_trace(origin_trace,
-                "fixpoint pass {origin_pass} complete changed={origin_changed}")
+            if origin_trace:
+                module_surface_origin_trace(true,
+                    "fixpoint pass {origin_pass} complete changed={origin_changed}")
 
-        module_surface_origin_trace(origin_trace,
-            "exit passes_run={origin_pass} changed={origin_changed}")
+        if origin_trace:
+            module_surface_origin_trace(true,
+                "exit passes_run={origin_pass} changed={origin_changed}")
         if origin_changed:
             return Err("facade export origin resolution did not converge after {max_origin_passes} passes")
         Ok(())
 
 pub(package) fn module_surface_declares_item(surface: ModuleSurface, name: text) -> bool:
-    surface.callables.contains_key(name) or
-        surface.composites.contains_key(name) or
-        surface.enums.contains_key(name) or
-        surface.traits.contains_key(name) or
-        surface.type_aliases.contains_key(name) or
-        surface.constants.contains_key(name)
+    module_surface_name_position(surface.callable_names, name) >= 0 or
+        module_surface_name_position(surface.composite_names, name) >= 0 or
+        module_surface_name_position(surface.enum_names, name) >= 0 or
+        module_surface_name_position(surface.trait_names, name) >= 0 or
+        module_surface_name_position(surface.type_alias_names, name) >= 0 or
+        module_surface_name_position(surface.constant_names, name) >= 0
 
 pub(package) fn module_surface_origin_missing() -> ModuleSurfaceOriginResolution:
     ModuleSurfaceOriginResolution(
@@ -417,63 +426,70 @@ pub(package) fn module_surface_explicit_import_origin(
     # Named imports are the strict first tier. If a matching named route is
     # delayed, do not let a currently-resolved glob route replace it.
     var has_named_route = false
-    for import_decl in facade.imports:
-        if module_surface_import_owner_is_physical_self(
-            surfaces, name_index, facade, import_decl.module):
-            continue
-        for item in import_decl.items:
-            val imported_local = if item.has_alias: item.alias else: item.name
-            if imported_local == source_name or imported_local == local_name:
-                has_named_route = true
-
     var found = false
-    var selected = ModuleSurfaceExportOrigin(
-        owner_module: "", source_name: "", resolution_kind: "")
-    if has_named_route:
-        for import_decl in facade.imports:
-            val owner_index = module_surface_index_by_name(
-                name_index, import_decl.module)
-            if owner_index < 0 or owner_index >= surfaces.len():
-                continue
+    # Keep the selected route scalar.  The Stage2 native compiler can lose a
+    # class-valued loop local while retaining its adjacent `found` flag; the
+    # old aggregate then reached the return path as nil and crashed Stage3.
+    var selected_owner_module = ""
+    var selected_source_name = ""
+    var selected_resolution_kind = ""
+    var import_index = 0
+    while import_index < facade.import_target_indices.len() and
+          import_index + 1 < facade.import_item_offsets.len():
+        val owner_index = facade.import_target_indices[import_index]
+        val item_end = facade.import_item_offsets[import_index + 1]
+        var item_index = facade.import_item_offsets[import_index]
+        if owner_index >= 0 and owner_index < surfaces.len():
             val owner = surfaces[owner_index]
-            if owner.canonical_path == facade.canonical_path:
-                continue
-            for item in import_decl.items:
-                val imported_local = if item.has_alias: item.alias else: item.name
+            while owner.canonical_path != facade.canonical_path and
+                  item_index < item_end and
+                  item_index < facade.import_item_names.len():
+                val item_name = facade.import_item_names[item_index]
+                val has_alias = item_index < facade.import_item_has_alias.len() and
+                    facade.import_item_has_alias[item_index]
+                val imported_local = if has_alias and item_index < facade.import_item_aliases.len():
+                    facade.import_item_aliases[item_index]
+                else:
+                    item_name
                 if imported_local != source_name and imported_local != local_name:
+                    item_index = item_index + 1
                     continue
+                has_named_route = true
                 var candidate_found = false
-                var candidate = ModuleSurfaceExportOrigin(
-                    owner_module: "", source_name: "", resolution_kind: "")
-                if module_surface_declares_item(owner, item.name):
-                    candidate = ModuleSurfaceExportOrigin(
-                        owner_module: owner.module_name,
-                        source_name: item.name,
-                        resolution_kind: if item.has_alias: "alias" else: "explicit"
-                    )
+                var candidate_owner_module = ""
+                var candidate_source_name = ""
+                var candidate_resolution_kind = ""
+                if module_surface_declares_item(owner, item_name):
+                    candidate_owner_module = owner.module_name
+                    candidate_source_name = item_name
+                    candidate_resolution_kind = if has_alias: "alias" else: "explicit"
                     candidate_found = true
                 else:
                     val owner_origin_index_item: ModuleSurfaceExportOriginIndex = owner.export_origin_index
-                    val terminal_lookup = module_surface_export_origin_index_lookup(owner_origin_index_item, item.name)
+                    val terminal_lookup = module_surface_export_origin_index_lookup(owner_origin_index_item, item_name)
                     if terminal_lookup.found:
-                        candidate = ModuleSurfaceExportOrigin(
-                            owner_module: terminal_lookup.owner_module,
-                            source_name: terminal_lookup.source_name,
-                            resolution_kind: if item.has_alias: "alias" else: "explicit"
-                        )
+                        candidate_owner_module = terminal_lookup.owner_module
+                        candidate_source_name = terminal_lookup.source_name
+                        candidate_resolution_kind = if has_alias: "alias" else: "explicit"
                         candidate_found = true
                 if not candidate_found:
+                    item_index = item_index + 1
                     continue
                 if not found:
-                    selected = candidate
+                    selected_owner_module = candidate_owner_module
+                    selected_source_name = candidate_source_name
+                    selected_resolution_kind = candidate_resolution_kind
                     found = true
-                elif (selected.owner_module != candidate.owner_module or
-                      selected.source_name != candidate.source_name):
+                elif (selected_owner_module != candidate_owner_module or
+                      selected_source_name != candidate_source_name):
                     return module_surface_origin_error(
                         "ambiguous explicit facade export: module={facade.module_name} item={local_name}")
+                item_index = item_index + 1
+        import_index = import_index + 1
+    if has_named_route:
         if found:
             return module_surface_origin_found(
-                selected.owner_module, selected.source_name, selected.resolution_kind)
+                selected_owner_module, selected_source_name, selected_resolution_kind)
         return module_surface_origin_missing()
 
     # A wildcard import is encoded with no ImportItems. Resolve all matching
@@ -490,37 +506,36 @@ pub(package) fn module_surface_explicit_import_origin(
         if owner.canonical_path == facade.canonical_path:
             continue
         var candidate_found = false
-        var candidate = ModuleSurfaceExportOrigin(
-            owner_module: "", source_name: "", resolution_kind: "")
+        var candidate_owner_module = ""
+        var candidate_source_name = ""
+        var candidate_resolution_kind = ""
         if module_surface_declares_item(owner, source_name):
-            candidate = ModuleSurfaceExportOrigin(
-                owner_module: owner.module_name,
-                source_name: source_name,
-                resolution_kind: "glob"
-            )
+            candidate_owner_module = owner.module_name
+            candidate_source_name = source_name
+            candidate_resolution_kind = "glob"
             candidate_found = true
         else:
             val owner_origin_index_source: ModuleSurfaceExportOriginIndex = owner.export_origin_index
             val terminal_lookup = module_surface_export_origin_index_lookup(owner_origin_index_source, source_name)
             if terminal_lookup.found:
-                candidate = ModuleSurfaceExportOrigin(
-                    owner_module: terminal_lookup.owner_module,
-                    source_name: terminal_lookup.source_name,
-                    resolution_kind: "glob"
-                )
+                candidate_owner_module = terminal_lookup.owner_module
+                candidate_source_name = terminal_lookup.source_name
+                candidate_resolution_kind = "glob"
                 candidate_found = true
         if not candidate_found:
             continue
         if not found:
-            selected = candidate
+            selected_owner_module = candidate_owner_module
+            selected_source_name = candidate_source_name
+            selected_resolution_kind = candidate_resolution_kind
             found = true
-        elif (selected.owner_module != candidate.owner_module or
-              selected.source_name != candidate.source_name):
+        elif (selected_owner_module != candidate_owner_module or
+              selected_source_name != candidate_source_name):
             return module_surface_origin_error(
                 "ambiguous explicit facade export: module={facade.module_name} item={local_name}")
     if found:
         module_surface_origin_found(
-            selected.owner_module, selected.source_name, selected.resolution_kind)
+            selected_owner_module, selected_source_name, selected_resolution_kind)
     else:
         module_surface_origin_missing()
 
@@ -583,10 +598,10 @@ pub(package) fn module_surface_import_owner_is_physical_self(
 # (never the one just completed -- a prior fix in this area reported the
 # completed unit and so a stall named its predecessor).
 pub(package) fn module_surface_origin_trace_enabled() -> bool:
-    val trace = rt_env_get("SIMPLE_HIR_EXPORT_ORIGIN_TRACE") ?? ""
+    val trace = env_get_opt("SIMPLE_HIR_EXPORT_ORIGIN_TRACE") ?? ""
     if trace == "1":
         return true
-    (rt_env_get("SIMPLE_BOOTSTRAP_DIAG") ?? "") == "1"
+    (env_get_opt("SIMPLE_BOOTSTRAP_DIAG") ?? "") == "1"
 
 pub(package) fn module_surface_origin_trace(enabled: bool, msg: text):
     if enabled:

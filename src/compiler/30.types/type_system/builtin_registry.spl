@@ -12,15 +12,23 @@ from compiler.hir.inference.types import {Type, TypeVarId}
 # SFFI (to Rust type registry when available)
 # ============================================================================
 
+@unsafe(reason: "raw nullable builtin-type registry lookup ABI; nil cannot distinguish absence from provider failure", capabilities: [ffi])
 extern fn rt_type_registry_lookup(name: text) -> text?
+@unsafe(reason: "raw builtin-type registry membership ABI; false cannot distinguish absence from provider failure", capabilities: [ffi])
 extern fn rt_type_registry_has(name: text) -> bool
 
-# Wrapper functions
+# Zero-allocation lexical owners. Keep one direct provider call per query: this
+# registry is used during type lookup and must not gain admission or dispatch
+# work on its hot path.
+@always_inline
 fn type_registry_lookup(name: text) -> text?:
-    rt_type_registry_lookup(name)
+    unsafe(capabilities: [ffi]):
+        rt_type_registry_lookup(name)
 
+@always_inline
 fn type_registry_has(name: text) -> bool:
-    rt_type_registry_has(name)
+    unsafe(capabilities: [ffi]):
+        rt_type_registry_has(name)
 
 # ============================================================================
 # Builtin Category
@@ -76,9 +84,11 @@ impl BuiltinRegistry:
         self.entries.contains(name) or type_registry_has(name)
 
     fn get(name: text) -> BuiltinEntry?:
-        val entry = self.entries.get(name)
-        if entry != nil:
-            entry
+        # contains_key + index read: a native struct-valued `Dict.get()` HIT
+        # returns a corrupt Option that segfaults on field access.
+        # See doc/07_guide/language/dict_native_pitfalls.md
+        if self.entries.contains_key(name):
+            Some(self.entries[name])
         else:
             nil
 
@@ -103,6 +113,10 @@ impl BuiltinRegistry:
         self.register("eprint", BuiltinCategory.IO, 1, "Print to stderr")
         self.register("eprintln", BuiltinCategory.IO, 1, "Print to stderr with newline")
         self.register("input", BuiltinCategory.IO, 0, "Read line from stdin")
+
+        # Diagnostics — `assert COND[, MSG]` desugars to __assert(...) in
+        # parser_stmts.spl. Arity is the condition; the message is optional.
+        self.register("__assert", BuiltinCategory.IO, 1, "Runtime assertion; aborts on a false condition")
 
         # Math
         self.register("abs", BuiltinCategory.Math, 1, "Absolute value")

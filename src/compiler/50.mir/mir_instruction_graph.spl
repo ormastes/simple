@@ -19,6 +19,42 @@ impl MirInst:
             case StoreGlobal(symbol, _): symbol.id
             case _: -1
 
+    # Twins of bootstrap_store_global_symbol_id for LoadGlobal. The MirToLlvm
+    # LoadGlobal handler used to decode the payload RAW
+    # (rt_enum_payload + rt_tuple_get + `slot >> 32`) on the theory that a
+    # one-field SymbolId "decays to its raw i64 when crossing the staged
+    # enum-payload ABI". Measured 2026-08-24 on the seed's tree-walk
+    # interpreter (the engine the native-build worker runs): it does NOT decay
+    # there — tuple slot 1 is a live SymbolId Object, so `slot >> 32` reached
+    # Value::as_int and failed with `type mismatch: cannot convert object to
+    # int`, with no callee and no span. A typed match is the representation-
+    # independent read, and is exactly what the StoreGlobal sibling above has
+    # always used on the same lanes.
+    fn bootstrap_load_global_dest_local_id() -> i64:
+        match self.kind:
+            case LoadGlobal(dest, _): dest.id
+            case _: -1
+
+    fn bootstrap_load_global_symbol_id() -> i64:
+        match self.kind:
+            case LoadGlobal(_, symbol): symbol.id
+            case _: -1
+
+    fn bootstrap_global_addr_dest_local_id() -> i64:
+        match self.kind:
+            case GlobalAddr(dest, _, _): dest.id
+            case _: -1
+
+    fn bootstrap_global_addr_symbol_id() -> i64:
+        match self.kind:
+            case GlobalAddr(_, symbol, _): symbol.id
+            case _: -1
+
+    fn bootstrap_global_addr_is_mutable() -> bool:
+        match self.kind:
+            case GlobalAddr(_, _, mutable): mutable
+            case _: false
+
     fn bootstrap_store_global_value_kind() -> i64:
         """Return 1=Copy, 2=Move, 3=Const, or 0=not StoreGlobal."""
         match self.kind:
@@ -206,54 +242,8 @@ struct MirFunction:
     pipeline_ii: i64        # @pipeline(n)/@pipeline(ii=n) initiation interval
     memory_banks: i64       # @memory(n)/@memory(banks=n) port banking count
     verification_contract: HirContractBlock?
-    has_rt_hal: bool = false
-    rt_hal_manifest: text = ""
-    rt_hal_assurance_rank: i64 = 3
-    rt_hal_requires_sealed_archive: bool = false
 
 impl MirFunction:
-    fn has_scoped_aggregate_copies() -> bool:
-        for block in self.blocks:
-            for inst in block.instructions:
-                match inst.kind:
-                    case AggregateCopyScoped(_, _, _): return true
-                    case _: ()
-        false
-
-    fn scoped_aggregate_copies_may_escape() -> bool:
-        """Fail-closed first-tranche escape policy for parameter copies."""
-        if not self.has_scoped_aggregate_copies():
-            return false
-        var copy_out_dests: Dict<i64, bool> = {}
-        for block in self.blocks:
-            for inst in block.instructions:
-                match inst.kind:
-                    case Aggregate(dest, Struct(_), _):
-                        copy_out_dests[dest.id] = true
-                    case Call(_, _, _) | CallIndirect(_, _, _, _) | Intrinsic(_, _, _):
-                        return true
-                    case Store(_, _) | StoreGlobal(_, _):
-                        return true
-                    case Send(_, _) | Yield(_):
-                        return true
-                    case _:
-                        ()
-            match block.terminator:
-                case Ret(value):
-                    if value != nil:
-                        val returned = value ?? mir_operand_const_int(0)
-                        match returned.kind:
-                            case Copy(local) | Move(local):
-                                if not copy_out_dests.contains(local.id):
-                                    return true
-                            case _:
-                                return true
-                case CallTerminator(_, _, _, _, _):
-                    return true
-                case _:
-                    ()
-        false
-
     # update field list when MirFunction gains fields — spread operator fails cross-module
     static fn with_blocks(func: MirFunction, new_blocks: [MirBlock]) -> MirFunction:
         MirFunction(
@@ -282,11 +272,7 @@ impl MirFunction:
             unroll_factor: func.unroll_factor,
             pipeline_ii: func.pipeline_ii,
             memory_banks: func.memory_banks,
-            verification_contract: func.verification_contract,
-            has_rt_hal: func.has_rt_hal,
-            rt_hal_manifest: func.rt_hal_manifest,
-            rt_hal_assurance_rank: func.rt_hal_assurance_rank,
-            rt_hal_requires_sealed_archive: func.rt_hal_requires_sealed_archive
+            verification_contract: func.verification_contract
         )
 
 """Function body wrapper for borrow checking."""
@@ -298,38 +284,6 @@ struct MirBody:
     return_ty: MirType
 
 impl MirBody:
-    fn has_scoped_aggregate_copies() -> bool:
-        for block in self.blocks:
-            for inst in block.instructions:
-                match inst.kind:
-                    case AggregateCopyScoped(_, _, _): return true
-                    case _: ()
-        false
-
-    fn scoped_aggregate_copies_may_escape() -> bool:
-        if not self.has_scoped_aggregate_copies():
-            return false
-        var copy_out_dests: Dict<i64, bool> = {}
-        for block in self.blocks:
-            for inst in block.instructions:
-                match inst.kind:
-                    case Aggregate(dest, Struct(_), _): copy_out_dests[dest.id] = true
-                    case Call(_, _, _) | CallIndirect(_, _, _, _) | Intrinsic(_, _, _): return true
-                    case Store(_, _) | StoreGlobal(_, _): return true
-                    case Send(_, _) | Yield(_): return true
-                    case _: ()
-            match block.terminator:
-                case Ret(value):
-                    if value != nil:
-                        val returned = value ?? mir_operand_const_int(0)
-                        match returned.kind:
-                            case Copy(local) | Move(local):
-                                if not copy_out_dests.contains(local.id): return true
-                            case _: return true
-                case CallTerminator(_, _, _, _, _): return true
-                case _: ()
-        false
-
     static fn from_bootstrap_parts(
         name: text,
         blocks: [MirBlock],
@@ -446,12 +400,5 @@ struct MirModule:
     statics: Dict<SymbolId, MirStatic>
     constants: Dict<SymbolId, MirConstant>
     types: Dict<SymbolId, MirTypeDef>
-    externs: Dict<SymbolId, MirExternDecl> = {}
-    actors: Dict<SymbolId, MirActorDecl> = {}
-    bitfields: Dict<SymbolId, MirBitfieldDecl> = {}
-    enum_extensions: [MirEnumExtensionDecl] = []
-    declaration_metadata: [MirDeclarationMetadataRow] = []
-    declaration_shards: [MirDeclarationShard] = []
-    declaration_shard_index: Dict<i64, i64> = {}
 
 export MirInst, MirBlock, MirFunction, MirBody, MirModule, mir_fold_binop

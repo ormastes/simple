@@ -46,10 +46,13 @@ fn jsonrpc_parse_id(msg: String) -> String:
 # Extract the params object (as raw JSON string)
 fn jsonrpc_parse_params(msg: String) -> String:
     val search = Q() + "params" + Q() + ":"
-    var idx = -1
-    match msg.index_of(search):
-        Some(i): idx = i
-        nil: return ""
+    # index_of returns a plain i64 with a -1 "not found" sentinel — it is NOT an
+    # Option. Destructuring it with Some(..) silently yields a wrong index on the
+    # JIT and matches no arm at all on the interpreter.
+    # See doc/08_tracking/bug/option_pattern_accepted_on_non_option_scrutinee_2026-07-27.md
+    val idx = msg.index_of(search)
+    if idx < 0:
+        return ""
     val start = idx + search.len()
     val after = msg.substring(start).trim()
 
@@ -89,19 +92,16 @@ fn jsonrpc_is_notification(msg: String) -> bool:
 # Check if a JSON-RPC message has an error field
 fn jsonrpc_is_error(msg: String) -> bool:
     val search = Q() + "error" + Q() + ":"
-    var found = false
-    match msg.index_of(search):
-        Some(_): found = true
-        nil: found = false
-    found
+    # index_of -> plain i64, -1 == not found (see jsonrpc_parse_params note)
+    msg.index_of(search) >= 0
 
 # Extract error code from a JSON-RPC error response
 fn jsonrpc_error_code(msg: String) -> i64:
     val search = Q() + "error" + Q() + ":"
-    var idx = -1
-    match msg.index_of(search):
-        Some(i): idx = i
-        nil: return 0
+    # index_of -> plain i64, -1 == not found (see jsonrpc_parse_params note)
+    val idx = msg.index_of(search)
+    if idx < 0:
+        return 0
     val after = msg.substring(idx + search.len())
     val code_str = extract_json_value(after, "code")
     if code_str == "null":
@@ -111,10 +111,10 @@ fn jsonrpc_error_code(msg: String) -> i64:
 # Extract error message from a JSON-RPC error response
 fn jsonrpc_error_message(msg: String) -> String:
     val search = Q() + "error" + Q() + ":"
-    var idx = -1
-    match msg.index_of(search):
-        Some(i): idx = i
-        nil: return ""
+    # index_of -> plain i64, -1 == not found (see jsonrpc_parse_params note)
+    val idx = msg.index_of(search)
+    if idx < 0:
+        return ""
     val after = msg.substring(idx + search.len())
     extract_json_string(after, "message")
 

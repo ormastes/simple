@@ -249,20 +249,21 @@ impl MacroRegistry:
 fn expand_name_pattern(pattern: text, ctx: ConstEvalContext) -> text:
     """Expand interpolation in name patterns like '{name}_handler'."""
     var result = pattern
-    var start = result.find("{")
-    while start.?:
-        val idx = match start:
-            case Some(found_start): found_start
-            case nil: break
-        val end = result[idx:].find("}")
-        if val end_idx = end:
-            val key = result[idx + 1:idx + end_idx]
-            val value = ctx.get(key)
-            if val resolved_value = value:
-                result = result[:idx] + resolved_value.to_text() + result[idx + end_idx + 1:]
-            else:
-                break
-            start = result.find("{")
+    # find() returns a raw i64 (-1 = not found), NOT an Option, so `.?` / `match
+    # Some/nil` misbehave on it; and its tag-boxed result miscompiles when used
+    # directly as a `[:idx]` bracket-slice bound. Guard on >= 0 and slice via
+    # .substring() (which decodes the index) instead.
+    var idx = result.find("{")
+    while idx >= 0:
+        val rest = result.substring(idx, result.len())
+        val end = rest.find("}")
+        if end < 0:
+            break
+        val key = result.substring(idx + 1, idx + end)
+        val value = ctx.get(key)
+        if val resolved_value = value:
+            result = result.substring(0, idx) + resolved_value.to_text() + result.substring(idx + end + 1, result.len())
         else:
             break
+        idx = result.find("{")
     result

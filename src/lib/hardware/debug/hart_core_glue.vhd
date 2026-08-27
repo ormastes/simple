@@ -59,7 +59,12 @@ entity hart_core_glue is
     o_debug_sp  : out std_logic_vector(15 downto 0);
     -- Lane KK: full-width PC + full-regfile readback observation taps
     o_dbg_pc_full   : out std_logic_vector(31 downto 0);
-    o_dbg_reg_data  : out std_logic_vector(31 downto 0)
+    o_dbg_reg_data  : out std_logic_vector(31 downto 0);
+    -- Lane B (SoC debug integration): expose the wrapped core's UART so a
+    -- debug-enabled SoC keeps emitting its soak-loop markers while the JTAG DM
+    -- can independently halt/step the hart. Additive output; existing
+    -- named-association instantiations that omit it leave it `open` (harmless).
+    o_uart_tx       : out std_logic
   );
 end entity hart_core_glue;
 
@@ -276,4 +281,5 @@ begin
   o_debug_sp <= c_dbg_sp;
   o_dbg_pc_full  <= c_dbg_pc_full;
   o_dbg_reg_data <= c_dbg_reg_data;
+  o_uart_tx      <= c_uart_tx;  -- Lane B: soak-loop UART visible in debug builds
 end architecture rtl;

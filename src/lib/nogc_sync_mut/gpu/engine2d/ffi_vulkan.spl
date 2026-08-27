@@ -16,33 +16,22 @@ use std.sffi.dynamic.{DynLib}
 use std.gpu.engine2d.ffi_dispatch.{GpuFfiMode, FfiDispatchBase, try_load_gpu_lib}
 
 # ============================================================================
-# Static extern declarations (resolved at link time against Rust runtime)
+# Static ABI imports from the canonical engine2d Vulkan owner
 # ============================================================================
 
-extern fn rt_vulkan_init() -> bool
-extern fn rt_vulkan_shutdown() -> bool
-extern fn rt_vulkan_is_available() -> bool
-extern fn rt_vulkan_device_count() -> i64
-extern fn rt_vulkan_select_device(id: i64) -> bool
-extern fn rt_vulkan_alloc_buffer(size: i64, usage: i64) -> i64
-extern fn rt_vulkan_free_buffer(handle: i64) -> bool
-extern fn rt_vulkan_copy_to_buffer(handle: i64, data: [u8], offset: i64) -> bool
-extern fn rt_vulkan_copy_from_buffer(data: [u8], handle: i64, offset: i64) -> bool
-extern fn rt_vulkan_compile_glsl(glsl_source: text) -> i64
-extern fn rt_vulkan_destroy_shader(module: i64) -> bool
-extern fn rt_vulkan_create_compute_pipeline(shader_module: i64, entry_point: text, push_constant_size: i64) -> i64
-extern fn rt_vulkan_destroy_pipeline(pipe: i64) -> bool
-extern fn rt_vulkan_create_descriptor_set(pipe: i64) -> i64
-extern fn rt_vulkan_bind_buffer(descriptor_set: i64, binding: i64, buf: i64) -> bool
-extern fn rt_vulkan_destroy_descriptor_set(descriptor_set: i64) -> bool
-extern fn rt_vulkan_begin_compute() -> i64
-extern fn rt_vulkan_bind_pipeline(cmd: i64, pipe: i64) -> bool
-extern fn rt_vulkan_bind_descriptors(cmd: i64, descriptor_set: i64) -> bool
-extern fn rt_vulkan_push_constants(cmd: i64, pipe: i64, data: [u8]) -> bool
-extern fn rt_vulkan_dispatch(cmd: i64, x: i64, y: i64, z: i64) -> bool
-extern fn rt_vulkan_end_compute(cmd: i64) -> bool
-extern fn rt_vulkan_submit_and_wait(cmd: i64) -> bool
-extern fn rt_vulkan_wait_idle() -> bool
+use std.gpu.engine2d.sffi_vulkan.{
+    rt_vulkan_init, rt_vulkan_shutdown, rt_vulkan_is_available,
+    rt_vulkan_device_count, rt_vulkan_select_device,
+    rt_vulkan_alloc_buffer, rt_vulkan_free_buffer,
+    rt_vulkan_copy_to_buffer, rt_vulkan_copy_from_buffer,
+    rt_vulkan_compile_glsl, rt_vulkan_destroy_shader,
+    rt_vulkan_create_compute_pipeline, rt_vulkan_destroy_pipeline,
+    rt_vulkan_create_descriptor_set, rt_vulkan_bind_buffer,
+    rt_vulkan_destroy_descriptor_set, rt_vulkan_begin_compute,
+    rt_vulkan_bind_pipeline, rt_vulkan_bind_descriptors,
+    rt_vulkan_push_constants, rt_vulkan_dispatch,
+    rt_vulkan_end_compute, rt_vulkan_submit_and_wait, rt_vulkan_wait_idle
+}
 
 # ============================================================================
 # VulkanDynFfi
@@ -116,6 +105,7 @@ impl FfiDispatchBase for VulkanDynFfi:
 
     # --- Dispatch methods ---------------------------------------------------
 
+    @unsafe(reason: "raw canonical Vulkan provider probe", capabilities: [ffi])
     fn is_available() -> bool:
         """Static mode: real rt_vulkan_is_available() driver probe.
         Dynamic mode: always false. The loader can resolve the real
@@ -146,8 +136,21 @@ impl FfiDispatchBase for VulkanDynFfi:
             case Static: false
             case Dynamic:
                 if self._dyn_lib != nil:
-                    val result = self._dyn_lib.call0("vkEnumerateInstanceVersion")
-                    result != 0
+                    # Resolve the symbol; do NOT call it. Two separate
+                    # defects lived in the old `call0(...) != 0` form:
+                    #   * `call0` returns 0 both when the symbol is MISSING
+                    #     (see sffi/dynamic.spl:66-70) and when the call
+                    #     SUCCEEDS, because `vkEnumerateInstanceVersion`
+                    #     returns a VkResult and VK_SUCCESS is 0. So `!= 0`
+                    #     reported false for a healthy loader -- the verdict
+                    #     was inverted, and no value of the probe could ever
+                    #     mean "loader present".
+                    #   * that entry point takes a `uint32_t*` out-parameter;
+                    #     invoking it through a zero-argument thunk hands it
+                    #     an undefined pointer.
+                    # Symbol resolution is exactly the "raw signal" the
+                    # docstring above promises.
+                    self._dyn_lib.sym("vkEnumerateInstanceVersion") != 0
                 else:
                     false
 
@@ -193,6 +196,7 @@ impl FfiDispatchBase for VulkanDynFfi:
             case Static: rt_vulkan_copy_to_buffer(handle, data, offset)
             case Dynamic: false
 
+    @unsafe(reason: "raw Vulkan buffer-download dispatch facade", capabilities: [ffi])
     fn copy_from_buffer(data: [u8], handle: i64, offset: i64) -> bool:
         match self._mode:
             case Static: rt_vulkan_copy_from_buffer(data, handle, offset)
@@ -294,71 +298,94 @@ impl FfiDispatchBase for VulkanDynFfi:
 fn vulkan_ffi_init() -> bool:
     rt_vulkan_init()
 
+@unsafe(reason: "raw Vulkan shutdown alias", capabilities: [ffi])
 fn vulkan_ffi_shutdown() -> bool:
     rt_vulkan_shutdown()
 
+@unsafe(reason: "raw Vulkan availability alias", capabilities: [ffi])
 fn vulkan_ffi_is_available() -> bool:
     rt_vulkan_is_available()
 
+@unsafe(reason: "raw Vulkan device-count alias", capabilities: [ffi])
 fn vulkan_ffi_device_count() -> i64:
     rt_vulkan_device_count()
 
+@unsafe(reason: "raw Vulkan device-selection alias", capabilities: [ffi])
 fn vulkan_ffi_select_device(id: i64) -> bool:
     rt_vulkan_select_device(id)
 
+@unsafe(reason: "raw Vulkan buffer-allocation alias", capabilities: [ffi])
 fn vulkan_ffi_alloc_buffer(size: i64, usage: i64) -> i64:
     rt_vulkan_alloc_buffer(size, usage)
 
+@unsafe(reason: "raw Vulkan buffer-release alias", capabilities: [ffi])
 fn vulkan_ffi_free_buffer(handle: i64) -> bool:
     rt_vulkan_free_buffer(handle)
 
+@unsafe(reason: "raw Vulkan GLSL compilation alias", capabilities: [ffi])
 fn vulkan_ffi_compile_glsl(glsl_source: text) -> i64:
     rt_vulkan_compile_glsl(glsl_source)
 
+@unsafe(reason: "raw Vulkan shader-release alias", capabilities: [ffi])
 fn vulkan_ffi_destroy_shader(module: i64) -> bool:
     rt_vulkan_destroy_shader(module)
 
+@unsafe(reason: "raw Vulkan pipeline-creation alias", capabilities: [ffi])
 fn vulkan_ffi_create_compute_pipeline(shader_module: i64, entry_point: text, push_constant_size: i64) -> i64:
     rt_vulkan_create_compute_pipeline(shader_module, entry_point, push_constant_size)
 
+@unsafe(reason: "raw Vulkan pipeline-release alias", capabilities: [ffi])
 fn vulkan_ffi_destroy_pipeline(pipe: i64) -> bool:
     rt_vulkan_destroy_pipeline(pipe)
 
+@unsafe(reason: "raw Vulkan descriptor-set alias", capabilities: [ffi])
 fn vulkan_ffi_create_descriptor_set(pipe: i64) -> i64:
     rt_vulkan_create_descriptor_set(pipe)
 
+@unsafe(reason: "raw Vulkan buffer-binding alias", capabilities: [ffi])
 fn vulkan_ffi_bind_buffer(descriptor_set: i64, binding: i64, buf: i64) -> bool:
     rt_vulkan_bind_buffer(descriptor_set, binding, buf)
 
+@unsafe(reason: "raw Vulkan descriptor-release alias", capabilities: [ffi])
 fn vulkan_ffi_destroy_descriptor_set(descriptor_set: i64) -> bool:
     rt_vulkan_destroy_descriptor_set(descriptor_set)
 
+@unsafe(reason: "raw Vulkan command-creation alias", capabilities: [ffi])
 fn vulkan_ffi_begin_compute() -> i64:
     rt_vulkan_begin_compute()
 
+@unsafe(reason: "raw Vulkan pipeline-binding alias", capabilities: [ffi])
 fn vulkan_ffi_bind_pipeline(cmd: i64, pipe: i64) -> bool:
     rt_vulkan_bind_pipeline(cmd, pipe)
 
+@unsafe(reason: "raw Vulkan descriptor-binding alias", capabilities: [ffi])
 fn vulkan_ffi_bind_descriptors(cmd: i64, descriptor_set: i64) -> bool:
     rt_vulkan_bind_descriptors(cmd, descriptor_set)
 
+@unsafe(reason: "raw Vulkan push-constant alias", capabilities: [ffi])
 fn vulkan_ffi_push_constants(cmd: i64, pipe: i64, data: [u8]) -> bool:
     rt_vulkan_push_constants(cmd, pipe, data)
 
+@unsafe(reason: "raw Vulkan compute-dispatch alias", capabilities: [ffi])
 fn vulkan_ffi_dispatch(cmd: i64, x: i64, y: i64, z: i64) -> bool:
     rt_vulkan_dispatch(cmd, x, y, z)
 
+@unsafe(reason: "raw Vulkan command-finalization alias", capabilities: [ffi])
 fn vulkan_ffi_end_compute(cmd: i64) -> bool:
     rt_vulkan_end_compute(cmd)
 
+@unsafe(reason: "raw blocking Vulkan submission alias", capabilities: [ffi])
 fn vulkan_ffi_submit_and_wait(cmd: i64) -> bool:
     rt_vulkan_submit_and_wait(cmd)
 
+@unsafe(reason: "raw Vulkan buffer-download alias", capabilities: [ffi])
 fn vulkan_ffi_copy_from_buffer(data: [u8], handle: i64, offset: i64) -> bool:
     rt_vulkan_copy_from_buffer(data, handle, offset)
 
+@unsafe(reason: "raw Vulkan buffer-upload alias", capabilities: [ffi])
 fn vulkan_ffi_copy_to_buffer(handle: i64, data: [u8], offset: i64) -> bool:
     rt_vulkan_copy_to_buffer(handle, data, offset)
 
+@unsafe(reason: "raw blocking Vulkan idle alias", capabilities: [ffi])
 fn vulkan_ffi_wait_idle() -> bool:
     rt_vulkan_wait_idle()

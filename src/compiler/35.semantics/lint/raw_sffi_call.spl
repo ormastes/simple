@@ -6,7 +6,7 @@
 # the result outside that raw helper.
 
 use compiler.semantics.lint.lint_text.{
-    iter_code_lines, CodeLine
+    code_line_snapshot, CodeLine, CodeLineSnapshot
 }
 
 pub struct RawSffiCallFinding:
@@ -34,7 +34,15 @@ pub fn raw_sffi_code_snapshot(
 ) -> RawSffiCodeSnapshot:
     val excluded = _rsc_file_excluded(file_path)
     RawSffiCodeSnapshot(
-        lines: if excluded: [] else: iter_code_lines(source),
+        lines: if excluded: [] else: code_line_snapshot(source).lines,
+        excluded: excluded)
+
+pub fn raw_sffi_code_snapshot_from_snapshot(
+    snapshot: CodeLineSnapshot, file_path: text
+) -> RawSffiCodeSnapshot:
+    val excluded = _rsc_file_excluded(file_path)
+    RawSffiCodeSnapshot(
+        lines: if excluded: [] else: snapshot.lines,
         excluded: excluded)
 
 fn _rsc_indent(raw: text) -> i64:
@@ -119,29 +127,17 @@ fn _rsc_collect_imported_raw_names(
                 in_sffi_use = false
     externs
 
-fn _rsc_has_ffi_unsafe_boundary(
-    snapshot: RawSffiCodeSnapshot, header_index: i64
+fn _rsc_previous_ffi_unsafe_annotation(
+    snapshot: RawSffiCodeSnapshot, item_index: i64
 ) -> bool:
-    var i = header_index - 1
-    while i >= 0:
+    # Attribute blocks are bounded so lint cost stays linear even in generated
+    # or malformed input. Walk only contiguous annotations/blank separators;
+    # never inherit an @unsafe from a preceding declaration or function body.
+    var i = item_index - 1
+    var remaining = 32
+    while i >= 0 and remaining > 0:
         val previous = snapshot.lines[i].trimmed
-        if previous == "":
-            i = i - 1
-            continue
-        return previous.starts_with("@unsafe(") and previous.contains("capabilities") and
-            previous.contains("ffi")
-    false
-
-fn _rsc_has_ffi_unsafe_declaration(
-    snapshot: RawSffiCodeSnapshot, declaration_index: i64
-) -> bool:
-    val declaration = snapshot.lines[declaration_index].trimmed
-    if declaration.starts_with("unsafe extern fn ") or
-        declaration.starts_with("pub unsafe extern fn "):
-        return true
-    var i = declaration_index - 1
-    while i >= 0 and declaration_index - i <= 8:
-        val previous = snapshot.lines[i].trimmed
+        remaining = remaining - 1
         if previous == "":
             i = i - 1
             continue
@@ -168,6 +164,20 @@ fn _rsc_has_ffi_unsafe_declaration(
             continue
         return false
     false
+
+fn _rsc_has_ffi_unsafe_boundary(
+    snapshot: RawSffiCodeSnapshot, header_index: i64
+) -> bool:
+    _rsc_previous_ffi_unsafe_annotation(snapshot, header_index)
+
+fn _rsc_has_ffi_unsafe_declaration(
+    snapshot: RawSffiCodeSnapshot, declaration_index: i64
+) -> bool:
+    val declaration = snapshot.lines[declaration_index].trimmed
+    if declaration.starts_with("unsafe extern fn ") or
+        declaration.starts_with("pub unsafe extern fn "):
+        return true
+    _rsc_previous_ffi_unsafe_annotation(snapshot, declaration_index)
 
 fn _rsc_check_declarations(
     snapshot: RawSffiCodeSnapshot

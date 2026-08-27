@@ -17,6 +17,16 @@ var irt_structs: [[text]] = []     # per-module struct names
 var irt_enums: [[text]] = []       # per-module enum names
 var irt_globals: [[text]] = []     # per-module global var names
 
+# pure_interp_registry_2026-07-17: owning decl_id recorded alongside each
+# tracked name (parallel to irt_funcs/irt_structs), so unload can verify the
+# func_table/struct_table entry still belongs to THIS module before removing
+# it. -1 marks a legacy entry (registered via the plain irt_track_func /
+# irt_track_struct, no owner recorded) — unload falls back to the old
+# unguarded removal for those so behavior for any un-migrated caller is
+# unchanged.
+var irt_func_decls: [[i64]] = []   # per-module function owner decl_ids
+var irt_struct_decls: [[i64]] = [] # per-module struct owner decl_ids
+
 # ============================================================================
 # Init / Reset
 # ============================================================================
@@ -27,6 +37,8 @@ fn irt_init():
     irt_structs = []
     irt_enums = []
     irt_globals = []
+    irt_func_decls = []
+    irt_struct_decls = []
 
 # ============================================================================
 # Module Registration
@@ -45,6 +57,8 @@ fn irt_begin_module(module_path: text):
     irt_structs.push([])
     irt_enums.push([])
     irt_globals.push([])
+    irt_func_decls.push([])
+    irt_struct_decls.push([])
 
 fn irt_find_index(module_path: text) -> i64:
     """Find the index for a module path. Returns -1 if not tracked."""
@@ -60,20 +74,58 @@ fn irt_find_index(module_path: text) -> i64:
 # ============================================================================
 
 fn irt_track_func(module_path: text, name: text):
-    """Record that a function was registered for a module."""
+    """Record that a function was registered for a module.
+
+    Legacy (no owner decl_id) — pushes a -1 sentinel into irt_func_decls so
+    it stays lockstepped with irt_funcs. Unload falls back to the unguarded
+    removal for -1 entries. Prefer irt_track_func_owned for new call sites.
+    """
     val idx = irt_find_index(module_path)
     if idx < 0: return
     var names = irt_funcs[idx]
     names.push(name)
     irt_funcs[idx] = names
+    var decls = irt_func_decls[idx]
+    decls.push(-1)
+    irt_func_decls[idx] = decls
+
+fn irt_track_func_owned(module_path: text, name: text, decl_id: i64):
+    """pure_interp_registry_2026-07-17: like irt_track_func, but records the
+    owning decl_id so unload can guard against clobbering a different
+    module's registration that later overwrote this bare name (see
+    func_table_remove_owned in eval_tables.spl)."""
+    val idx = irt_find_index(module_path)
+    if idx < 0: return
+    var names = irt_funcs[idx]
+    names.push(name)
+    irt_funcs[idx] = names
+    var decls = irt_func_decls[idx]
+    decls.push(decl_id)
+    irt_func_decls[idx] = decls
 
 fn irt_track_struct(module_path: text, name: text):
-    """Record that a struct was registered for a module."""
+    """Record that a struct was registered for a module. Legacy — see
+    irt_track_func for the -1 sentinel / _owned rationale."""
     val idx = irt_find_index(module_path)
     if idx < 0: return
     var names = irt_structs[idx]
     names.push(name)
     irt_structs[idx] = names
+    var decls = irt_struct_decls[idx]
+    decls.push(-1)
+    irt_struct_decls[idx] = decls
+
+fn irt_track_struct_owned(module_path: text, name: text, decl_id: i64):
+    """pure_interp_registry_2026-07-17: like irt_track_struct, but records
+    the owning decl_id (see irt_track_func_owned)."""
+    val idx = irt_find_index(module_path)
+    if idx < 0: return
+    var names = irt_structs[idx]
+    names.push(name)
+    irt_structs[idx] = names
+    var decls = irt_struct_decls[idx]
+    decls.push(decl_id)
+    irt_struct_decls[idx] = decls
 
 fn irt_track_enum(module_path: text, name: text):
     """Record that an enum was registered for a module."""
@@ -108,18 +160,37 @@ fn irt_unload_module(module_path: text) -> i64:
 
     var removed: i64 = 0
 
-    # Remove functions
+    # Remove functions (pure_interp_registry_2026-07-17: owner-guarded when a
+    # decl_id was recorded, so a bare-name collision with a module registered
+    # later does not delete that OTHER module's live registration).
     val funcs = irt_funcs[idx]
+    val func_decls = irt_func_decls[idx]
+    var fi: i64 = 0
     for name in funcs:
-        if func_table_remove(name):
-            removed = removed + 1
-        func_remove_return_type(name)
+        val owner = func_decls[fi]
+        if owner < 0:
+            if func_table_remove(name):
+                removed = removed + 1
+            func_remove_return_type(name)
+        else:
+            if func_table_remove_owned(name, owner):
+                removed = removed + 1
+            func_remove_return_type_owned(name, owner)
+        fi = fi + 1
 
-    # Remove structs
+    # Remove structs (same owner-guard as functions above)
     val structs = irt_structs[idx]
+    val struct_decls = irt_struct_decls[idx]
+    var si: i64 = 0
     for name in structs:
-        if struct_table_remove(name):
-            removed = removed + 1
+        val owner2 = struct_decls[si]
+        if owner2 < 0:
+            if struct_table_remove(name):
+                removed = removed + 1
+        else:
+            if struct_table_remove_owned(name, owner2):
+                removed = removed + 1
+        si = si + 1
 
     # Remove enums
     val enums = irt_enums[idx]
@@ -139,6 +210,8 @@ fn irt_unload_module(module_path: text) -> i64:
     irt_structs[idx] = []
     irt_enums[idx] = []
     irt_globals[idx] = []
+    irt_func_decls[idx] = []
+    irt_struct_decls[idx] = []
 
     removed
 

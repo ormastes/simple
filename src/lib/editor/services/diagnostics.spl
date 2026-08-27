@@ -172,15 +172,17 @@ fn _diag_extract_uri(json: text) -> text:
     while i < json.len():
         if json.slice(i, json.len()).starts_with(marker):
             var j = i + marker.len()
-            while j < json.len() and json.char_at(j) == " ":
+            while j < json.len() and json[j:j + 1] == " ":
                 j = j + 1
-            if j < json.len() and json.char_at(j) == "\"":
-                var result = ""
+            if j < json.len() and json[j:j + 1] == "\"":
+                # Whole-SPAN extraction (single-byte appends corrupt
+                # multi-byte values under the interpreter — U+FFFD per
+                # byte; see the run_start comment in completion.spl).
                 j = j + 1
-                while j < json.len() and json.char_at(j) != "\"":
-                    result = result + json.char_at(j)
+                val run_start = j
+                while j < json.len() and json[j:j + 1] != "\"":
                     j = j + 1
-                return result
+                return json[run_start:j]
         i = i + 1
     ""
 
@@ -201,9 +203,9 @@ fn _diag_find_diagnostics_array(json: text) -> i64:
     while i < json.len():
         if json.slice(i, json.len()).starts_with(marker):
             var j = i + marker.len()
-            while j < json.len() and json.char_at(j) == " ":
+            while j < json.len() and json[j:j + 1] == " ":
                 j = j + 1
-            if j < json.len() and json.char_at(j) == "[":
+            if j < json.len() and json[j:j + 1] == "[":
                 return j
         i = i + 1
     -1
@@ -211,7 +213,7 @@ fn _diag_find_diagnostics_array(json: text) -> i64:
 fn _diag_find_array_start(json: text) -> i64:
     var i = 0
     while i < json.len():
-        if json.char_at(i) == "[":
+        if json[i:i + 1] == "[":
             return i
         i = i + 1
     -1
@@ -224,7 +226,7 @@ fn _diag_split_array_entries(json: text, arr_start: i64) -> [text]:
     var i = arr_start + 1
     var in_str = false
     while i < arr_end:
-        val ch = json.char_at(i)
+        val ch = json[i:i + 1]
         if in_str:
             if ch == "\\":
                 i = i + 1
@@ -250,7 +252,7 @@ fn _diag_extract_balanced_end(json: text, start: i64, open_ch: text) -> i64:
     var i = start
     var in_str = false
     while i < json.len():
-        val ch = json.char_at(i)
+        val ch = json[i:i + 1]
         if in_str:
             if ch == "\\":
                 i = i + 1
@@ -303,11 +305,11 @@ fn _diag_extract_optional_int(json: text, field: text, missing: i64) -> i64:
     while i < json.len():
         if json.slice(i, json.len()).starts_with(field):
             var j = i + field.len()
-            while j < json.len() and (json.char_at(j) == " " or json.char_at(j) == ":"):
+            while j < json.len() and (json[j:j + 1] == " " or json[j:j + 1] == ":"):
                 j = j + 1
             var num = ""
             while j < json.len():
-                val ch = json.char_at(j)
+                val ch = json[j:j + 1]
                 if ch == "0" or ch == "1" or ch == "2" or ch == "3" or ch == "4" or ch == "5" or ch == "6" or ch == "7" or ch == "8" or ch == "9":
                     num = num + ch
                 else:
@@ -345,19 +347,26 @@ fn _diag_extract_string(json: text, field: text) -> text:
     while i < json.len():
         if json.slice(i, json.len()).starts_with(field):
             var j = i + field.len()
-            while j < json.len() and (json.char_at(j) == " " or json.char_at(j) == ":"):
+            while j < json.len() and (json[j:j + 1] == " " or json[j:j + 1] == ":"):
                 j = j + 1
-            if j < json.len() and json.char_at(j) == "\"":
+            if j < json.len() and json[j:j + 1] == "\"":
                 var result = ""
                 j = j + 1
-                while j < json.len() and json.char_at(j) != "\"":
-                    if json.char_at(j) == "\\":
+                # Span-append between escapes (see completion.spl run_start
+                # comment: per-byte appends corrupt multi-byte values under
+                # the interpreter).
+                var run_start = j
+                while j < json.len() and json[j:j + 1] != "\"":
+                    if json[j:j + 1] == "\\":
+                        result = result + json[run_start:j]
                         j = j + 1
                         if j < json.len():
-                            result = result + json.char_at(j)
+                            result = result + json[j:j + 1]
+                        j = j + 1
+                        run_start = j
                     else:
-                        result = result + json.char_at(j)
-                    j = j + 1
+                        j = j + 1
+                result = result + json[run_start:j]
                 return result
         i = i + 1
     ""
@@ -367,23 +376,24 @@ fn _diag_extract_value_for_field(json: text, field: text) -> text:
     while i < json.len():
         if json.slice(i, json.len()).starts_with(field):
             var j = i + field.len()
-            while j < json.len() and (json.char_at(j) == " " or json.char_at(j) == ":"):
+            while j < json.len() and (json[j:j + 1] == " " or json[j:j + 1] == ":"):
                 j = j + 1
             if j >= json.len():
                 return ""
-            val ch = json.char_at(j)
+            val ch = json[j:j + 1]
             if ch == "{" or ch == "[":
                 return _diag_extract_balanced(json, j, ch)
             if ch == "\"":
                 return "\"" + _diag_extract_string(json, field) + "\""
-            var result = ""
+            # Whole-SPAN scalar extraction (same interpreter per-byte
+            # U+FFFD hazard as the string cases above).
+            val run_start = j
             while j < json.len():
-                val c = json.char_at(j)
+                val c = json[j:j + 1]
                 if c == "," or c == "}":
-                    return result.trim()
-                result = result + c
+                    return json[run_start:j].trim()
                 j = j + 1
-            return result.trim()
+            return json[run_start:j].trim()
         i = i + 1
     ""
 
@@ -393,7 +403,7 @@ fn _diag_extract_balanced(json: text, start: i64, open_ch: text) -> text:
     var i = start
     var in_str = false
     while i < json.len():
-        val ch = json.char_at(i)
+        val ch = json[i:i + 1]
         if in_str:
             if ch == "\\":
                 i = i + 1

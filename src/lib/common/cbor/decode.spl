@@ -4,11 +4,20 @@
 # sequence handling, and validation.
 
 use std.common.cbor.major_types.*
-use std.common.cbor.types.{byte_at, bytes_slice, bytes_to_text, get_additional_info, get_major_type, make_initial_byte}
+use std.common.cbor.types.{byte_at, bytes_slice, cbor_bytes_to_text, get_additional_info, get_major_type, make_initial_byte}
 
 # ============================================================================
 # DECODING - HEADER PARSING
 # ============================================================================
+
+fn is_valid_cbor_byte(value: i64) -> bool:
+    value >= 0 and value <= 255
+
+fn cbor_bytes_are_valid(bytes: [i64]) -> bool:
+    for byte_val in bytes:
+        if not is_valid_cbor_byte(byte_val):
+            return false
+    true
 
 fn decode_uint_value(bytes: [i64], offset: i64, additional_info: i64) -> (i64, i64):
     """Decode unsigned integer value from additional info.
@@ -21,6 +30,8 @@ fn decode_uint_value(bytes: [i64], offset: i64, additional_info: i64) -> (i64, i
     if additional_info == addl_uint8():
         if offset + 1 < bytes.len():
             val value = byte_at(bytes, offset + 1)
+            if not is_valid_cbor_byte(value):
+                return (0, 0)
             return (value, 2)
         return (0, 0)
 
@@ -29,6 +40,8 @@ fn decode_uint_value(bytes: [i64], offset: i64, additional_info: i64) -> (i64, i
         if offset + 2 < bytes.len():
             val high = byte_at(bytes, offset + 1)
             val low = byte_at(bytes, offset + 2)
+            if not is_valid_cbor_byte(high) or not is_valid_cbor_byte(low):
+                return (0, 0)
             val value = high * 256 + low
             return (value, 3)
         return (0, 0)
@@ -40,6 +53,8 @@ fn decode_uint_value(bytes: [i64], offset: i64, additional_info: i64) -> (i64, i
             var i = 0
             while i < 4:
                 val byte_val = byte_at(bytes, offset + 1 + i)
+                if not is_valid_cbor_byte(byte_val):
+                    return (0, 0)
                 val shift_amount = 24 - i * 8
                 var multiplier = 1
                 var j = 0
@@ -58,6 +73,8 @@ fn decode_uint_value(bytes: [i64], offset: i64, additional_info: i64) -> (i64, i
             var i = 0
             while i < 8:
                 val byte_val = byte_at(bytes, offset + 1 + i)
+                if not is_valid_cbor_byte(byte_val):
+                    return (0, 0)
                 val shift_amount = 56 - i * 8
                 var multiplier = 1
                 var j = 0
@@ -80,9 +97,12 @@ fn cbor_decode_type(bytes: [i64], offset: i64) -> (i64, i64, i64):
     """Decode CBOR item type information.
     Returns (major_type, additional_info, header_size) tuple."""
     if offset < 0 or offset >= bytes.len():
-        return (0, 0, 0)
+        return (-1, -1, 0)
 
     val initial_byte = byte_at(bytes, offset)
+    if initial_byte < 0 or initial_byte > 255:
+        return (-1, -1, 0)
+
     val major = get_major_type(initial_byte)
     val addl = get_additional_info(initial_byte)
 
@@ -215,12 +235,17 @@ fn cbor_decode_bytes(bytes: [i64], offset: i64) -> ([i64], i64):
         # Sequence of definite-length byte string chunks terminated by break (0xFF)
         var result: [i64] = []
         var pos = offset + 1  # Skip the initial indefinite-length header byte
+        var found_break = false
         while pos < bytes.len():
             val current_byte = bytes[pos]
             # Check for break code (0xFF)
             if current_byte == 0xFF:
                 pos = pos + 1
+                found_break = true
                 break
+            val chunk_type = cbor_decode_type(bytes, pos)
+            if chunk_type.1 == addl_indefinite():
+                return ([], 0)
             # Decode the next definite-length chunk
             val chunk = cbor_decode_bytes(bytes, pos)
             val chunk_data = chunk.0
@@ -230,6 +255,8 @@ fn cbor_decode_bytes(bytes: [i64], offset: i64) -> ([i64], i64):
             for b in chunk_data:
                 result = result.push(b)
             pos = pos + chunk_consumed
+        if not found_break:
+            return ([], 0)
         val total_consumed = pos - offset
         return (result, total_consumed)
 
@@ -242,6 +269,8 @@ fn cbor_decode_bytes(bytes: [i64], offset: i64) -> ([i64], i64):
 
     val data_start = offset + header_size
     val data = bytes_slice(bytes, data_start, length)
+    if not cbor_bytes_are_valid(data):
+        return ([], 0)
     val total_consumed = header_size + length
     (data, total_consumed)
 
@@ -260,12 +289,17 @@ fn cbor_decode_text(bytes: [i64], offset: i64) -> (text, i64):
         # Sequence of definite-length text string chunks terminated by break (0xFF)
         var result = ""
         var pos = offset + 1  # Skip the initial indefinite-length header byte
+        var found_break = false
         while pos < bytes.len():
             val current_byte = bytes[pos]
             # Check for break code (0xFF)
             if current_byte == 0xFF:
                 pos = pos + 1
+                found_break = true
                 break
+            val chunk_type = cbor_decode_type(bytes, pos)
+            if chunk_type.1 == addl_indefinite():
+                return ("", 0)
             # Decode the next definite-length text chunk
             val chunk = cbor_decode_text(bytes, pos)
             val chunk_text = chunk.0
@@ -274,6 +308,8 @@ fn cbor_decode_text(bytes: [i64], offset: i64) -> (text, i64):
                 return ("", 0)  # Error decoding chunk
             result = result + chunk_text
             pos = pos + chunk_consumed
+        if not found_break:
+            return ("", 0)
         val total_consumed = pos - offset
         return (result, total_consumed)
 
@@ -402,6 +438,8 @@ fn cbor_decode_simple_value(bytes: [i64], offset: i64) -> (i64, i64):
     if addl == addl_uint8():
         if offset + 1 < bytes.len():
             val value = byte_at(bytes, offset + 1)
+            if not is_valid_cbor_byte(value):
+                return (0, 0)
             return (value, 2)
         return (0, 0)
 
@@ -430,7 +468,7 @@ fn cbor_decode_tag(bytes: [i64], offset: i64) -> (i64, i64):
 fn cbor_item_size(bytes: [i64], offset: i64) -> i64:
     """Calculate size in bytes of CBOR item at offset.
     Returns total size including header and payload, or 0 on error."""
-    if offset >= bytes.len():
+    if offset < 0 or offset >= bytes.len():
         return 0
 
     val type_info = cbor_decode_type(bytes, offset)
@@ -440,9 +478,11 @@ fn cbor_item_size(bytes: [i64], offset: i64) -> i64:
 
     # Unsigned/negative integer - just header
     if major == major_unsigned_int():
-        return header_size
+        val int_info = decode_uint_value(bytes, offset, addl)
+        return int_info.1
     if major == major_negative_int():
-        return header_size
+        val int_info = decode_uint_value(bytes, offset, addl)
+        return int_info.1
 
     # Byte/text string - header + length
     if major == major_byte_string():
@@ -450,14 +490,26 @@ fn cbor_item_size(bytes: [i64], offset: i64) -> i64:
             return 0  # Not implemented
         val length_info = decode_uint_value(bytes, offset, addl)
         val length = length_info.0
-        return header_size + length
+        val consumed = length_info.1
+        if consumed == 0 or offset + consumed + length > bytes.len():
+            return 0
+        val data = bytes_slice(bytes, offset + consumed, length)
+        if not cbor_bytes_are_valid(data):
+            return 0
+        return consumed + length
 
     if major == major_text_string():
         if addl == addl_indefinite():
             return 0  # Not implemented
         val length_info = decode_uint_value(bytes, offset, addl)
         val length = length_info.0
-        return header_size + length
+        val consumed = length_info.1
+        if consumed == 0 or offset + consumed + length > bytes.len():
+            return 0
+        val data = bytes_slice(bytes, offset + consumed, length)
+        if not cbor_bytes_are_valid(data):
+            return 0
+        return consumed + length
 
     # Array - header + sum of item sizes
     if major == major_array():
@@ -465,8 +517,11 @@ fn cbor_item_size(bytes: [i64], offset: i64) -> i64:
             return 0  # Not implemented
         val length_info = decode_uint_value(bytes, offset, addl)
         val count = length_info.0
-        var total_size = header_size
-        var item_offset = offset + header_size
+        val consumed = length_info.1
+        if consumed == 0:
+            return 0
+        var total_size = consumed
+        var item_offset = offset + consumed
         var i = 0
         while i < count:
             val item_size = cbor_item_size(bytes, item_offset)
@@ -483,8 +538,11 @@ fn cbor_item_size(bytes: [i64], offset: i64) -> i64:
             return 0  # Not implemented
         val length_info = decode_uint_value(bytes, offset, addl)
         val pair_count = length_info.0
-        var total_size = header_size
-        var item_offset = offset + header_size
+        val consumed = length_info.1
+        if consumed == 0:
+            return 0
+        var total_size = consumed
+        var item_offset = offset + consumed
         var i = 0
         while i < pair_count * 2:  # Each pair = key + value
             val item_size = cbor_item_size(bytes, item_offset)
@@ -497,11 +555,15 @@ fn cbor_item_size(bytes: [i64], offset: i64) -> i64:
 
     # Tagged - header + value size
     if major == major_tag():
-        val value_offset = offset + header_size
+        val tag_info = decode_uint_value(bytes, offset, addl)
+        val consumed = tag_info.1
+        if consumed == 0:
+            return 0
+        val value_offset = offset + consumed
         val value_size = cbor_item_size(bytes, value_offset)
         if value_size == 0:
             return 0
-        return header_size + value_size
+        return consumed + value_size
 
     # Simple/float - just header for simple, header + payload for floats
     if major == major_simple_float():
@@ -513,14 +575,38 @@ fn cbor_item_size(bytes: [i64], offset: i64) -> i64:
             return 1
         if addl == simple_undefined():
             return 1
+        if addl == addl_uint8():
+            if offset + 2 > bytes.len():
+                return 0
+            val payload = byte_at(bytes, offset + 1)
+            if not is_valid_cbor_byte(payload):
+                return 0
+            return 2
         if addl == simple_float16():
+            if offset + 3 > bytes.len():
+                return 0
+            val payload = bytes_slice(bytes, offset + 1, 2)
+            if not cbor_bytes_are_valid(payload):
+                return 0
             return 3
         if addl == simple_float32():
+            if offset + 5 > bytes.len():
+                return 0
+            val payload = bytes_slice(bytes, offset + 1, 4)
+            if not cbor_bytes_are_valid(payload):
+                return 0
             return 5
         if addl == simple_float64():
+            if offset + 9 > bytes.len():
+                return 0
+            val payload = bytes_slice(bytes, offset + 1, 8)
+            if not cbor_bytes_are_valid(payload):
+                return 0
             return 9
         if addl == simple_break():
             return 1
+        if offset + header_size > bytes.len():
+            return 0
         return header_size
 
     0
@@ -567,7 +653,7 @@ fn cbor_validate(bytes: [i64]) -> bool:
     if bytes.len() == 0:
         return false
     val size = cbor_item_size(bytes, 0)
-    size > 0
+    size > 0 and size == bytes.len()
 
 fn cbor_validate_sequence(bytes: [i64]) -> bool:
     """Validate CBOR sequence (concatenated items).
@@ -589,6 +675,8 @@ fn cbor_validate_sequence(bytes: [i64]) -> bool:
 fn cbor_is_canonical_int(value: i64, encoding: [i64]) -> bool:
     """Check if integer encoding is canonical (minimal length)."""
     if encoding.len() == 0:
+        return false
+    if not cbor_validate(encoding):
         return false
 
     val initial_byte = encoding[0]

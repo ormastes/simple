@@ -44,7 +44,6 @@ const TOK_KW_IMPLEMENTS: i64 = 61
 const TOK_KW_ME: i64 = 34
 const TOK_KW_TYPE: i64 = 35
 const TOK_KW_ASM: i64 = 36 # clang-depend passthrough
-const TOK_KW_ACTOR: i64 = 222
 
 # ===== Keywords — Control Flow =====
 const TOK_KW_IF: i64 = 40
@@ -344,7 +343,6 @@ fn tok_kind_name(kind: i64) -> text:
     if kind == TOK_KW_AFTER: return "after"
     if kind == TOK_KW_INTERFACE: return "interface"
     if kind == TOK_KW_BITFIELD: return "bitfield"
-    if kind == TOK_KW_ACTOR: return "actor"
     if kind == TOK_AMP_COLON: return "&:"
     if kind == TOK_KW_NEW: return "new"
     if kind == TOK_KW_CLI: return "cli"
@@ -355,10 +353,13 @@ fn tok_kind_name(kind: i64) -> text:
     if kind == TOK_KW_FORBID: return "forbid"
     if kind == TOK_KW_ALLOW: return "allow"
     if kind == TOK_KW_AS: return "as"
-    "Unknown({kind})"
+    return "Unknown(" + kind.to_text() + ")"
 
 # ===== Keyword Lookup =====
 fn keyword_lookup(name: text) -> i64:
+    # `xor` is the textual bitwise-xor operator (Rust lexer: "xor" => Xor);
+    # map it straight to the caret operator kind.
+    if name == "xor": return TOK_CARET
     if name == "fn": return TOK_KW_FN
     if name == "val": return TOK_KW_VAL
     if name == "var": return TOK_KW_VAR
@@ -377,7 +378,6 @@ fn keyword_lookup(name: text) -> i64:
     if name == "me": return TOK_KW_ME
     if name == "type": return TOK_KW_TYPE
     if name == "asm": return TOK_KW_ASM
-    if name == "actor": return TOK_KW_ACTOR
     if name == "if": return TOK_KW_IF
     if name == "else": return TOK_KW_ELSE
     if name == "elif": return TOK_KW_ELIF
@@ -482,13 +482,7 @@ fn tok_precedence(kind: i64) -> i64:
 
 fn tok_is_right_assoc(kind: i64) -> bool:
     if kind == TOK_STAR_STAR: return true
-    if kind == TOK_ASSIGN: return true
-    if kind == TOK_PLUS_EQ: return true
-    if kind == TOK_MINUS_EQ: return true
-    if kind == TOK_STAR_EQ: return true
-    if kind == TOK_SLASH_EQ: return true
-    if kind == TOK_PERCENT_EQ: return true
-    if kind == TOK_WALRUS: return true
+    if tok_is_assignment(kind): return true
     false
 
 # ===== Classification Helpers =====
@@ -577,7 +571,12 @@ fn token_can_end_expr(kind: i64) -> bool:
         return true
     if kind == TOK_RPAREN or kind == TOK_RBRACKET or kind == TOK_RBRACE:
         return true
+    # Both postfix optional terminals can finish an expression.  `value.?` is
+    # tokenized as DOT_QUESTION (not QUESTION); omitting it makes a deeper
+    # leading `and`/`or` line look like a new statement in the self-host lexer.
     if kind == TOK_KW_SELF or kind == TOK_BACKTICK_IDENT or kind == TOK_QUESTION:
+        return true
+    if kind == TOK_DOT_QUESTION:
         return true
     false
 
@@ -585,7 +584,7 @@ export TOK_INT_LIT, TOK_FLOAT_LIT, TOK_STRING_LIT, TOK_BOOL_LIT, TOK_NIL_LIT, TO
 export TOK_SUFFIXED_INT, TOK_SUFFIXED_FLOAT
 export TOK_KW_FN, TOK_KW_VAL, TOK_KW_VAR, TOK_KW_STRUCT, TOK_KW_ENUM, TOK_KW_EXTERN
 export TOK_KW_EXPORT, TOK_KW_USE, TOK_KW_IMPORT, TOK_KW_PUB, TOK_KW_STATIC
-export TOK_KW_CLASS, TOK_KW_IMPL, TOK_KW_TRAIT, TOK_KW_IMPLEMENTS, TOK_KW_ME, TOK_KW_TYPE, TOK_KW_ACTOR
+export TOK_KW_CLASS, TOK_KW_IMPL, TOK_KW_TRAIT, TOK_KW_IMPLEMENTS, TOK_KW_ME, TOK_KW_TYPE
 export TOK_KW_ASM, TOK_KW_IF, TOK_KW_ELSE, TOK_KW_ELIF, TOK_KW_MATCH, TOK_KW_CASE
 export TOK_KW_FOR, TOK_KW_WHILE, TOK_KW_BREAK, TOK_KW_CONTINUE, TOK_KW_RETURN, TOK_KW_IN
 export TOK_KW_LOOP, TOK_KW_PASS, TOK_KW_ASYNC, TOK_KW_AWAIT, TOK_KW_YIELD, TOK_KW_SPAWN
@@ -610,4 +609,4 @@ export TOK_KW_NEWUNIT, TOK_BACKSLASH, TOK_AND, TOK_OR, TOK_NOT, TOK_KW_NIL, TOK_
 export TOK_KW_AS
 export TOK_DOUBLE_STAR, TOK_DOUBLE_QUESTION, TOK_DOTDOT, TOK_DOTDOT_EQ, TOK_PLUS_ASSIGN, TOK_MINUS_ASSIGN
 export TOK_STAR_ASSIGN, TOK_SLASH_ASSIGN, TOK_AT, TOK_HASH_LBRACKET, TOK_DOTDOTDOT
-export token_requires_rhs
+export token_requires_rhs, token_can_end_expr

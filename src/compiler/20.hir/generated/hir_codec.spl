@@ -3,7 +3,8 @@
 # HirModule <-> line blob codec. One encoder and one decoder per
 # declaration reachable from HirModule (see codec_gen.spl for the format).
 # Enum arms are exhaustive by construction; the trailing `_` arm only
-# satisfies the seed's match checker and routes to hc_bad_tag, which exits.
+# satisfies the seed's match checker. Encoders reject the cache entry;
+# decoders route an unknown stored tag to hc_bad_tag, which exits.
 
 use compiler.hir.hir_definitions.*
 use compiler.hir.hir_types.*
@@ -15,7 +16,6 @@ use compiler.blocks.value.{BlockValue}
 use compiler.types.type_layout.{LayoutAttr, TypeLayoutKind}
 use compiler.common.attributes.{FunctionAttr, ExportAttr, DriverManifestAttr, DriverManifestAttrKind, VhdlHardwareMetadata, VhdlClockedMetadata, VhdlGenericMetadata, VhdlReturnFieldMetadata, VhdlResetPolarity, VhdlResetSynchrony, OptimizationReq, OptimizationReqLevel, OptimizationBackend}
 use compiler.frontend.parser_types_expr.{AsmTargetSpec, AsmConstraintKind, AsmLocation, Type, TypeKind, Expr}
-use common.facet_abi.*
 use compiler.frontend.core.flat_pool_codec.{FlatPoolReader, flat_pool_parse_i64, flat_pool_unescape}
 use compiler.hir.hir_codec_support.{HirCodecWriter, hc_enc_opaque_expr, hc_dec_opaque_expr, hc_enc_opaque_block_value, hc_dec_opaque_block_value, hc_bad_tag, hc_read_f64}
 
@@ -29,7 +29,7 @@ fn hc_enc_asm_constraint_kind(w: HirCodecWriter, node: AsmConstraintKind):
             w.put_i64(2)
         case LateOut:
             w.put_i64(3)
-        case _: hc_bad_tag("AsmConstraintKind", -1)
+        case _: w.reject("unencodable AsmConstraintKind enum")
 
 fn hc_dec_asm_constraint_kind(r: FlatPoolReader) -> AsmConstraintKind:
     val tag = r.next_i64()
@@ -55,7 +55,7 @@ fn hc_enc_asm_location(w: HirCodecWriter, node: AsmLocation):
             w.put_i64(2)
         case Imm:
             w.put_i64(3)
-        case _: hc_bad_tag("AsmLocation", -1)
+        case _: w.reject("unencodable AsmLocation enum")
 
 fn hc_dec_asm_location(r: FlatPoolReader) -> AsmLocation:
     val tag = r.next_i64()
@@ -137,14 +137,6 @@ fn hc_dec_asm_version_constraint(r: FlatPoolReader) -> AsmVersionConstraint:
     val f_version = if raw1 == "N": nil else: flat_pool_parse_i64(raw1)
     AsmVersionConstraint(op: f_op, version: f_version)
 
-fn hc_enc_aspect_id(w: HirCodecWriter, node: AspectId):
-    w.put_text(node.value)
-
-fn hc_dec_aspect_id(r: FlatPoolReader) -> AspectId:
-    val raw0 = r.next()
-    val f_value = if raw0 == "\\N": nil else: flat_pool_unescape(raw0)
-    AspectId(value: f_value)
-
 fn hc_enc_closure(w: HirCodecWriter, node: Closure):
     match node:
         case Static:
@@ -153,7 +145,7 @@ fn hc_enc_closure(w: HirCodecWriter, node: Closure):
             w.put_i64(1)
         case Dyn:
             w.put_i64(2)
-        case _: hc_bad_tag("Closure", -1)
+        case _: w.reject("unencodable Closure enum")
 
 fn hc_dec_closure(r: FlatPoolReader) -> Closure:
     val tag = r.next_i64()
@@ -166,14 +158,6 @@ fn hc_dec_closure(r: FlatPoolReader) -> Closure:
     hc_bad_tag("Closure", tag)
     hc_dec_closure(r)
 
-fn hc_enc_concrete_type_id(w: HirCodecWriter, node: ConcreteTypeId):
-    w.put_text(node.value)
-
-fn hc_dec_concrete_type_id(r: FlatPoolReader) -> ConcreteTypeId:
-    val raw0 = r.next()
-    val f_value = if raw0 == "\\N": nil else: flat_pool_unescape(raw0)
-    ConcreteTypeId(value: f_value)
-
 fn hc_enc_device_type(w: HirCodecWriter, node: DeviceType):
     match node:
         case CPU:
@@ -184,7 +168,7 @@ fn hc_enc_device_type(w: HirCodecWriter, node: DeviceType):
         case Vulkan(b_id):
             w.put_i64(2)
             w.put_i64(b_id)
-        case _: hc_bad_tag("DeviceType", -1)
+        case _: w.reject("unencodable DeviceType enum")
 
 fn hc_dec_device_type(r: FlatPoolReader) -> DeviceType:
     val tag = r.next_i64()
@@ -282,7 +266,7 @@ fn hc_enc_dim_expr_kind(w: HirCodecWriter, node: DimExprKind):
             else:
                 w.put_i64(1)
                 hc_enc_dim_expr(w, b_right)
-        case _: hc_bad_tag("DimExprKind", -1)
+        case _: w.reject("unencodable DimExprKind enum")
 
 fn hc_dec_dim_expr_kind(r: FlatPoolReader) -> DimExprKind:
     val tag = r.next_i64()
@@ -371,7 +355,7 @@ fn hc_enc_driver_manifest_attr_kind(w: HirCodecWriter, node: DriverManifestAttrK
             w.put_i64(0)
         case NativeLib:
             w.put_i64(1)
-        case _: hc_bad_tag("DriverManifestAttrKind", -1)
+        case _: w.reject("unencodable DriverManifestAttrKind enum")
 
 fn hc_dec_driver_manifest_attr_kind(r: FlatPoolReader) -> DriverManifestAttrKind:
     val tag = r.next_i64()
@@ -421,7 +405,7 @@ fn hc_enc_effect_kind(w: HirCodecWriter, node: EffectKind):
         case Custom(b_name):
             w.put_i64(6)
             w.put_text(b_name)
-        case _: hc_bad_tag("EffectKind", -1)
+        case _: w.reject("unencodable EffectKind enum")
 
 fn hc_dec_effect_kind(r: FlatPoolReader) -> EffectKind:
     val tag = r.next_i64()
@@ -456,30 +440,6 @@ fn hc_dec_export_attr(r: FlatPoolReader) -> ExportAttr:
     val f_export_name = if raw1 == "\\N": nil else: flat_pool_unescape(raw1)
     ExportAttr(is_export_c: f_is_export_c, export_name: f_export_name)
 
-fn hc_enc_facet_binding_id(w: HirCodecWriter, node: FacetBindingId):
-    w.put_text(node.value)
-
-fn hc_dec_facet_binding_id(r: FlatPoolReader) -> FacetBindingId:
-    val raw0 = r.next()
-    val f_value = if raw0 == "\\N": nil else: flat_pool_unescape(raw0)
-    FacetBindingId(value: f_value)
-
-fn hc_enc_facet_interface_id(w: HirCodecWriter, node: FacetInterfaceId):
-    w.put_text(node.value)
-
-fn hc_dec_facet_interface_id(r: FlatPoolReader) -> FacetInterfaceId:
-    val raw0 = r.next()
-    val f_value = if raw0 == "\\N": nil else: flat_pool_unescape(raw0)
-    FacetInterfaceId(value: f_value)
-
-fn hc_enc_facet_method_id(w: HirCodecWriter, node: FacetMethodId):
-    w.put_text(node.value)
-
-fn hc_dec_facet_method_id(r: FlatPoolReader) -> FacetMethodId:
-    val raw0 = r.next()
-    val f_value = if raw0 == "\\N": nil else: flat_pool_unescape(raw0)
-    FacetMethodId(value: f_value)
-
 fn hc_enc_function_attr(w: HirCodecWriter, node: FunctionAttr):
     w.put_bool(node.is_entry)
     w.put_bool(node.is_naked)
@@ -509,6 +469,10 @@ fn hc_enc_function_attr(w: HirCodecWriter, node: FunctionAttr):
     w.put_i64(node.unroll_factor)
     w.put_i64(node.pipeline_ii)
     w.put_i64(node.memory_banks)
+    w.put_bool(node.is_rt_hal)
+    w.put_bool(node.rt_hal_compare_c)
+    w.put_bool(node.rt_hal_compare_rust)
+    w.put_text(node.rt_hal_error)
 
 fn hc_dec_function_attr(r: FlatPoolReader) -> FunctionAttr:
     val raw0 = r.next()
@@ -553,7 +517,15 @@ fn hc_dec_function_attr(r: FlatPoolReader) -> FunctionAttr:
     val f_pipeline_ii = if raw18 == "N": nil else: flat_pool_parse_i64(raw18)
     val raw19 = r.next()
     val f_memory_banks = if raw19 == "N": nil else: flat_pool_parse_i64(raw19)
-    FunctionAttr(is_entry: f_is_entry, is_naked: f_is_naked, is_noreturn: f_is_noreturn, section: f_section, is_interrupt: f_is_interrupt, is_boot: f_is_boot, is_alloc: f_is_alloc, is_no_alloc: f_is_no_alloc, is_gpu_kernel: f_is_gpu_kernel, gpu_target: f_gpu_target, gpu_backends: f_gpu_backends, is_simd: f_is_simd, has_fast_math: f_has_fast_math, simd_enable: f_simd_enable, simd_disable: f_simd_disable, simd_prefer_scalable: f_simd_prefer_scalable, optimization_req: f_optimization_req, unroll_factor: f_unroll_factor, pipeline_ii: f_pipeline_ii, memory_banks: f_memory_banks)
+    val raw20 = r.next()
+    val f_is_rt_hal = if raw20 == "N": nil else: raw20 == "1"
+    val raw21 = r.next()
+    val f_rt_hal_compare_c = if raw21 == "N": nil else: raw21 == "1"
+    val raw22 = r.next()
+    val f_rt_hal_compare_rust = if raw22 == "N": nil else: raw22 == "1"
+    val raw23 = r.next()
+    val f_rt_hal_error = if raw23 == "\\N": nil else: flat_pool_unescape(raw23)
+    FunctionAttr(is_entry: f_is_entry, is_naked: f_is_naked, is_noreturn: f_is_noreturn, section: f_section, is_interrupt: f_is_interrupt, is_boot: f_is_boot, is_alloc: f_is_alloc, is_no_alloc: f_is_no_alloc, is_gpu_kernel: f_is_gpu_kernel, gpu_target: f_gpu_target, gpu_backends: f_gpu_backends, is_simd: f_is_simd, has_fast_math: f_has_fast_math, simd_enable: f_simd_enable, simd_disable: f_simd_disable, simd_prefer_scalable: f_simd_prefer_scalable, optimization_req: f_optimization_req, unroll_factor: f_unroll_factor, pipeline_ii: f_pipeline_ii, memory_banks: f_memory_banks, is_rt_hal: f_is_rt_hal, rt_hal_compare_c: f_rt_hal_compare_c, rt_hal_compare_rust: f_rt_hal_compare_rust, rt_hal_error: f_rt_hal_error)
 
 fn hc_enc_hir_aop_advice(w: HirCodecWriter, node: HirAopAdvice):
     w.put_text(node.predicate_text)
@@ -767,7 +739,7 @@ fn hc_enc_hir_assign_op(w: HirCodecWriter, node: HirAssignOp):
             w.put_i64(8)
         case Shr:
             w.put_i64(9)
-        case _: hc_bad_tag("HirAssignOp", -1)
+        case _: w.reject("unencodable HirAssignOp enum")
 
 fn hc_dec_hir_assign_op(r: FlatPoolReader) -> HirAssignOp:
     val tag = r.next_i64()
@@ -934,7 +906,7 @@ fn hc_enc_hir_bin_op(w: HirCodecWriter, node: HirBinOp):
             w.put_i64(33)
         case Concat:
             w.put_i64(34)
-        case _: hc_bad_tag("HirBinOp", -1)
+        case _: w.reject("unencodable HirBinOp enum")
 
 fn hc_dec_hir_bin_op(r: FlatPoolReader) -> HirBinOp:
     val tag = r.next_i64()
@@ -1354,7 +1326,7 @@ fn hc_enc_hir_comp_clause_kind(w: HirCodecWriter, node: HirCompClauseKind):
             else:
                 w.put_i64(1)
                 hc_enc_hir_expr(w, b_cond)
-        case _: hc_bad_tag("HirCompClauseKind", -1)
+        case _: w.reject("unencodable HirCompClauseKind enum")
 
 fn hc_dec_hir_comp_clause_kind(r: FlatPoolReader) -> HirCompClauseKind:
     val tag = r.next_i64()
@@ -1378,7 +1350,7 @@ fn hc_enc_hir_comprehension_kind(w: HirCodecWriter, node: HirComprehensionKind):
             w.put_i64(2)
         case Generator:
             w.put_i64(3)
-        case _: hc_bad_tag("HirComprehensionKind", -1)
+        case _: w.reject("unencodable HirComprehensionKind enum")
 
 fn hc_dec_hir_comprehension_kind(r: FlatPoolReader) -> HirComprehensionKind:
     val tag = r.next_i64()
@@ -1512,7 +1484,7 @@ fn hc_enc_hir_contract_clause_kind(w: HirCodecWriter, node: HirContractClauseKin
             w.put_i64(3)
         case Decreases:
             w.put_i64(4)
-        case _: hc_bad_tag("HirContractClauseKind", -1)
+        case _: w.reject("unencodable HirContractClauseKind enum")
 
 fn hc_dec_hir_contract_clause_kind(r: FlatPoolReader) -> HirContractClauseKind:
     val tag = r.next_i64()
@@ -1535,7 +1507,7 @@ fn hc_enc_hir_contract_outcome(w: HirCodecWriter, node: HirContractOutcome):
             w.put_i64(0)
         case Result:
             w.put_i64(1)
-        case _: hc_bad_tag("HirContractOutcome", -1)
+        case _: w.reject("unencodable HirContractOutcome enum")
 
 fn hc_dec_hir_contract_outcome(r: FlatPoolReader) -> HirContractOutcome:
     val tag = r.next_i64()
@@ -1717,7 +1689,7 @@ fn hc_enc_hir_enum_payload(w: HirCodecWriter, node: HirEnumPayload):
                 else:
                     w.put_i64(1)
                     hc_enc_hir_expr(w, pb1)
-        case _: hc_bad_tag("HirEnumPayload", -1)
+        case _: w.reject("unencodable HirEnumPayload enum")
 
 fn hc_dec_hir_enum_payload(r: FlatPoolReader) -> HirEnumPayload:
     val tag = r.next_i64()
@@ -1769,99 +1741,6 @@ fn hc_dec_hir_expr(r: FlatPoolReader) -> HirExpr:
     val f_type_ = if r.next_i64() == 1: hc_dec_hir_type(r) else: nil
     val f_span = if r.next_i64() == 1: hc_dec_span(r) else: nil
     HirExpr(kind: f_kind, has_type_: f_has_type_, type_: f_type_, span: f_span)
-
-fn hc_enc_hir_tensor_suffix(w: HirCodecWriter, node: HirTensorSuffix):
-    w.put_bool(node.has_dtype); w.put_i64(node.dtype)
-    w.put_bool(node.has_device); w.put_i64(node.device_kind); w.put_i64(node.device_id)
-    w.put_bool(node.trainable); w.put_bool(node.pinned)
-    w.put_bool(node.has_backend); w.put_i64(node.backend); w.put_text(node.raw)
-
-fn hc_dec_hir_tensor_suffix(r: FlatPoolReader) -> HirTensorSuffix:
-    val has_dtype = r.next_i64() == 1; val dtype = r.next_i64()
-    val has_device = r.next_i64() == 1; val device_kind = r.next_i64(); val device_id = r.next_i64()
-    val trainable = r.next_i64() == 1; val pinned = r.next_i64() == 1
-    val has_backend = r.next_i64() == 1; val backend = r.next_i64(); val raw_value = r.next()
-    HirTensorSuffix(has_dtype: has_dtype, dtype: dtype, has_device: has_device,
-        device_kind: device_kind, device_id: device_id, trainable: trainable,
-        pinned: pinned, has_backend: has_backend, backend: backend,
-        # `put_text` deliberately distinguishes nil (`\\N`) from an empty
-        # line. Preserve that distinction here as every other text decoder
-        # does; normalizing nil to "" changes the canonical suffix payload.
-        raw: if raw_value == "\\N": nil else: flat_pool_unescape(raw_value))
-
-fn hc_enc_hir_gpu_intrinsic_kind(w: HirCodecWriter, node: HirGpuIntrinsicKind):
-    match node:
-        case GlobalId: w.put_i64(0)
-        case LocalId: w.put_i64(1)
-        case BlockId: w.put_i64(2)
-        case BlockDim: w.put_i64(3)
-        case GridDim: w.put_i64(4)
-        case Sync: w.put_i64(5)
-        case Barrier: w.put_i64(6)
-        case MemFence: w.put_i64(7)
-        case AtomicAdd: w.put_i64(8)
-        case AtomicSub: w.put_i64(9)
-        case AtomicMin: w.put_i64(10)
-        case AtomicMax: w.put_i64(11)
-        case AtomicAnd: w.put_i64(12)
-        case AtomicOr: w.put_i64(13)
-        case AtomicXor: w.put_i64(14)
-        case AtomicExchange: w.put_i64(15)
-        case AtomicCas: w.put_i64(16)
-        case LaneId: w.put_i64(17)
-        case WarpId: w.put_i64(18)
-        case WarpSize: w.put_i64(19)
-        case WarpShuffle: w.put_i64(20)
-        case WarpShuffleDown: w.put_i64(21)
-        case WarpShuffleUp: w.put_i64(22)
-        case WarpShuffleXor: w.put_i64(23)
-        case WarpBallot: w.put_i64(24)
-        case WarpReduceAdd: w.put_i64(25)
-        case WarpBroadcast: w.put_i64(26)
-        case WarpScanAdd: w.put_i64(27)
-        case SpecConst: w.put_i64(28)
-        case Vec4LoadF32: w.put_i64(29)
-        case Vec4StoreF32: w.put_i64(30)
-        case Vec2LoadF32: w.put_i64(31)
-        case Vec2StoreF32: w.put_i64(32)
-
-fn hc_dec_hir_gpu_intrinsic_kind(r: FlatPoolReader) -> HirGpuIntrinsicKind:
-    val tag = r.next_i64()
-    if tag == 0: return HirGpuIntrinsicKind.GlobalId
-    if tag == 1: return HirGpuIntrinsicKind.LocalId
-    if tag == 2: return HirGpuIntrinsicKind.BlockId
-    if tag == 3: return HirGpuIntrinsicKind.BlockDim
-    if tag == 4: return HirGpuIntrinsicKind.GridDim
-    if tag == 5: return HirGpuIntrinsicKind.Sync
-    if tag == 6: return HirGpuIntrinsicKind.Barrier
-    if tag == 7: return HirGpuIntrinsicKind.MemFence
-    if tag == 8: return HirGpuIntrinsicKind.AtomicAdd
-    if tag == 9: return HirGpuIntrinsicKind.AtomicSub
-    if tag == 10: return HirGpuIntrinsicKind.AtomicMin
-    if tag == 11: return HirGpuIntrinsicKind.AtomicMax
-    if tag == 12: return HirGpuIntrinsicKind.AtomicAnd
-    if tag == 13: return HirGpuIntrinsicKind.AtomicOr
-    if tag == 14: return HirGpuIntrinsicKind.AtomicXor
-    if tag == 15: return HirGpuIntrinsicKind.AtomicExchange
-    if tag == 16: return HirGpuIntrinsicKind.AtomicCas
-    if tag == 17: return HirGpuIntrinsicKind.LaneId
-    if tag == 18: return HirGpuIntrinsicKind.WarpId
-    if tag == 19: return HirGpuIntrinsicKind.WarpSize
-    if tag == 20: return HirGpuIntrinsicKind.WarpShuffle
-    if tag == 21: return HirGpuIntrinsicKind.WarpShuffleDown
-    if tag == 22: return HirGpuIntrinsicKind.WarpShuffleUp
-    if tag == 23: return HirGpuIntrinsicKind.WarpShuffleXor
-    if tag == 24: return HirGpuIntrinsicKind.WarpBallot
-    if tag == 25: return HirGpuIntrinsicKind.WarpReduceAdd
-    if tag == 26: return HirGpuIntrinsicKind.WarpBroadcast
-    if tag == 27: return HirGpuIntrinsicKind.WarpScanAdd
-    if tag == 28: return HirGpuIntrinsicKind.SpecConst
-    if tag == 29: return HirGpuIntrinsicKind.Vec4LoadF32
-    if tag == 30: return HirGpuIntrinsicKind.Vec4StoreF32
-    if tag == 31: return HirGpuIntrinsicKind.Vec2LoadF32
-    if tag == 32: return HirGpuIntrinsicKind.Vec2StoreF32
-    hc_bad_tag("HirGpuIntrinsicKind", tag)
-    hc_dec_hir_gpu_intrinsic_kind(r)
 
 fn hc_enc_hir_expr_kind(w: HirCodecWriter, node: HirExprKind):
     match node:
@@ -2135,7 +2014,7 @@ fn hc_enc_hir_expr_kind(w: HirCodecWriter, node: HirExprKind):
                 else:
                     w.put_i64(1)
                     hc_enc_hir_type(w, e14)
-        case MethodCall(b_receiver, b_method, b_args, b_resolution, _):
+        case MethodCall(b_receiver, b_method, b_args, b_resolution):
             w.put_i64(24)
             if b_receiver == nil:
                 w.put_i64(0)
@@ -2549,7 +2428,26 @@ fn hc_enc_hir_expr_kind(w: HirCodecWriter, node: HirExprKind):
                 w.put_i64(1)
                 hc_enc_hir_expr(w, b_value)
             w.put_text(b_type_name)
-        case _: hc_bad_tag("HirExprKind", -1)
+        case TryCatch(b_body, b_clauses, b_finally):
+            w.put_i64(57)
+            if b_body == nil:
+                w.put_i64(0)
+            else:
+                w.put_i64(1)
+                hc_enc_hir_block(w, b_body)
+            w.put_i64(if b_clauses == nil: 0 else: b_clauses.len())
+            for clause in (b_clauses ?? []):
+                if clause == nil:
+                    w.put_i64(0)
+                else:
+                    w.put_i64(1)
+                    hc_enc_hir_catch_clause(w, clause)
+            if val finally_body = b_finally:
+                w.put_i64(1)
+                hc_enc_hir_block(w, finally_body)
+            else:
+                w.put_i64(0)
+        case _: w.reject("unencodable HirExprKind enum")
 
 fn hc_dec_hir_expr_kind(r: FlatPoolReader) -> HirExprKind:
     val tag = r.next_i64()
@@ -2962,6 +2860,23 @@ fn hc_dec_hir_expr_kind(r: FlatPoolReader) -> HirExprKind:
         val raw59 = r.next()
         val f_type_name = if raw59 == "\\N": nil else: flat_pool_unescape(raw59)
         return HirExprKind.TypeTest(f_value, f_type_name)
+    if tag == 57:
+        var f_body: HirBlock? = nil
+        if r.next_i64() == 1:
+            f_body = hc_dec_hir_block(r)
+        var f_clauses: [HirCatchClause] = []
+        val clause_count = r.next_len()
+        var clause_i = 0
+        while clause_i < clause_count:
+            var clause: HirCatchClause? = nil
+            if r.next_i64() == 1:
+                clause = hc_dec_hir_catch_clause(r)
+            f_clauses.push(clause)
+            clause_i = clause_i + 1
+        var f_finally: HirBlock? = nil
+        if r.next_i64() == 1:
+            f_finally = hc_dec_hir_block(r)
+        return HirExprKind.TryCatch(f_body, f_clauses, f_finally)
     hc_bad_tag("HirExprKind", tag)
     hc_dec_hir_expr_kind(r)
 
@@ -3029,382 +2944,6 @@ fn hc_dec_hir_extend_enum(r: FlatPoolReader) -> HirExtendEnum:
         i1 = i1 + 1
     val f_span = if r.next_i64() == 1: hc_dec_span(r) else: nil
     HirExtendEnum(target: f_target, closure: f_closure, constructors: f_constructors, span: f_span)
-
-fn hc_enc_hir_facet_access_mode(w: HirCodecWriter, node: HirFacetAccessMode):
-    match node:
-        case PublicReadonly:
-            w.put_i64(0)
-        case InspectReadonly:
-            w.put_i64(1)
-        case _: hc_bad_tag("HirFacetAccessMode", -1)
-
-fn hc_dec_hir_facet_access_mode(r: FlatPoolReader) -> HirFacetAccessMode:
-    val tag = r.next_i64()
-    if tag == 0:
-        return HirFacetAccessMode.PublicReadonly
-    if tag == 1:
-        return HirFacetAccessMode.InspectReadonly
-    hc_bad_tag("HirFacetAccessMode", tag)
-    hc_dec_hir_facet_access_mode(r)
-
-fn hc_enc_hir_facet_acquire_mode(w: HirCodecWriter, node: HirFacetAcquireMode):
-    match node:
-        case TryResident:
-            w.put_i64(0)
-        case LoadOptional:
-            w.put_i64(1)
-        case LoadRequired:
-            w.put_i64(2)
-        case _: hc_bad_tag("HirFacetAcquireMode", -1)
-
-fn hc_dec_hir_facet_acquire_mode(r: FlatPoolReader) -> HirFacetAcquireMode:
-    val tag = r.next_i64()
-    if tag == 0:
-        return HirFacetAcquireMode.TryResident
-    if tag == 1:
-        return HirFacetAcquireMode.LoadOptional
-    if tag == 2:
-        return HirFacetAcquireMode.LoadRequired
-    hc_bad_tag("HirFacetAcquireMode", tag)
-    hc_dec_hir_facet_acquire_mode(r)
-
-fn hc_enc_hir_facet_binding_decl(w: HirCodecWriter, node: HirFacetBindingDecl):
-    if node.aspect_id == nil:
-        w.put_i64(0)
-    else:
-        w.put_i64(1)
-        hc_enc_aspect_id(w, node.aspect_id)
-    w.put_i64(node.aspect_version)
-    if node.interface_type == nil:
-        w.put_i64(0)
-    else:
-        w.put_i64(1)
-        hc_enc_hir_type(w, node.interface_type)
-    if node.target_type_rule == nil:
-        w.put_i64(0)
-    else:
-        w.put_i64(1)
-        hc_enc_hir_type_pointcut(w, node.target_type_rule)
-    if node.implementation_type == nil:
-        w.put_i64(0)
-    else:
-        w.put_i64(1)
-        hc_enc_hir_type(w, node.implementation_type)
-    if node.mode == nil:
-        w.put_i64(0)
-    else:
-        w.put_i64(1)
-        hc_enc_hir_facet_binding_mode(w, node.mode)
-    w.put_i64(node.priority)
-    w.put_text(node.provider_id)
-    if node.binding_id == nil:
-        w.put_i64(0)
-    else:
-        w.put_i64(1)
-        hc_enc_facet_binding_id(w, node.binding_id)
-    if node.span == nil:
-        w.put_i64(0)
-    else:
-        w.put_i64(1)
-        hc_enc_span(w, node.span)
-
-fn hc_dec_hir_facet_binding_decl(r: FlatPoolReader) -> HirFacetBindingDecl:
-    val f_aspect_id = if r.next_i64() == 1: hc_dec_aspect_id(r) else: nil
-    val raw0 = r.next()
-    val f_aspect_version = if raw0 == "N": nil else: flat_pool_parse_i64(raw0)
-    val f_interface_type = if r.next_i64() == 1: hc_dec_hir_type(r) else: nil
-    val f_target_type_rule = if r.next_i64() == 1: hc_dec_hir_type_pointcut(r) else: nil
-    val f_implementation_type = if r.next_i64() == 1: hc_dec_hir_type(r) else: nil
-    val f_mode = if r.next_i64() == 1: hc_dec_hir_facet_binding_mode(r) else: nil
-    val raw1 = r.next()
-    val f_priority = if raw1 == "N": nil else: flat_pool_parse_i64(raw1)
-    val raw2 = r.next()
-    val f_provider_id = if raw2 == "\\N": nil else: flat_pool_unescape(raw2)
-    val f_binding_id = if r.next_i64() == 1: hc_dec_facet_binding_id(r) else: nil
-    val f_span = if r.next_i64() == 1: hc_dec_span(r) else: nil
-    HirFacetBindingDecl(aspect_id: f_aspect_id, aspect_version: f_aspect_version, interface_type: f_interface_type, target_type_rule: f_target_type_rule, implementation_type: f_implementation_type, mode: f_mode, priority: f_priority, provider_id: f_provider_id, binding_id: f_binding_id, span: f_span)
-
-fn hc_enc_hir_facet_binding_mode(w: HirCodecWriter, node: HirFacetBindingMode):
-    match node:
-        case Attached:
-            w.put_i64(0)
-        case NominalStatic:
-            w.put_i64(1)
-        case _: hc_bad_tag("HirFacetBindingMode", -1)
-
-fn hc_dec_hir_facet_binding_mode(r: FlatPoolReader) -> HirFacetBindingMode:
-    val tag = r.next_i64()
-    if tag == 0:
-        return HirFacetBindingMode.Attached
-    if tag == 1:
-        return HirFacetBindingMode.NominalStatic
-    hc_bad_tag("HirFacetBindingMode", tag)
-    hc_dec_hir_facet_binding_mode(r)
-
-fn hc_enc_hir_facet_impl_decl(w: HirCodecWriter, node: HirFacetImplDecl):
-    if node.aspect_id == nil:
-        w.put_i64(0)
-    else:
-        w.put_i64(1)
-        hc_enc_aspect_id(w, node.aspect_id)
-    w.put_i64(node.aspect_version)
-    if node.symbol == nil:
-        w.put_i64(0)
-    else:
-        w.put_i64(1)
-        hc_enc_symbol_id(w, node.symbol)
-    w.put_text(node.name)
-    w.put_i64(if node.type_params == nil: 0 else: node.type_params.len())
-    for e0 in (node.type_params ?? []):
-        if e0 == nil:
-            w.put_i64(0)
-        else:
-            w.put_i64(1)
-            hc_enc_hir_type_param(w, e0)
-    if node.base_type == nil:
-        w.put_i64(0)
-    else:
-        w.put_i64(1)
-        hc_enc_hir_type(w, node.base_type)
-    w.put_i64(if node.interfaces == nil: 0 else: node.interfaces.len())
-    for e1 in (node.interfaces ?? []):
-        if e1 == nil:
-            w.put_i64(0)
-        else:
-            w.put_i64(1)
-            hc_enc_hir_type(w, e1)
-    if node.access_mode == nil:
-        w.put_i64(0)
-    else:
-        w.put_i64(1)
-        hc_enc_hir_facet_access_mode(w, node.access_mode)
-    w.put_i64(if node.methods == nil: 0 else: node.methods.len())
-    for e2 in (node.methods ?? []):
-        if e2 == nil:
-            w.put_i64(0)
-        else:
-            w.put_i64(1)
-            hc_enc_hir_facet_method(w, e2)
-    w.put_text(node.provider_id)
-    w.put_text(node.implementation_hash)
-    w.put_text(node.required_base_abi_hash)
-    w.put_text(node.required_layout_hash)
-    if node.span == nil:
-        w.put_i64(0)
-    else:
-        w.put_i64(1)
-        hc_enc_span(w, node.span)
-
-fn hc_dec_hir_facet_impl_decl(r: FlatPoolReader) -> HirFacetImplDecl:
-    val f_aspect_id = if r.next_i64() == 1: hc_dec_aspect_id(r) else: nil
-    val raw0 = r.next()
-    val f_aspect_version = if raw0 == "N": nil else: flat_pool_parse_i64(raw0)
-    val f_symbol = if r.next_i64() == 1: hc_dec_symbol_id(r) else: nil
-    val raw1 = r.next()
-    val f_name = if raw1 == "\\N": nil else: flat_pool_unescape(raw1)
-    var f_type_params: [HirTypeParam] = []
-    val n2 = r.next_len()
-    var i2 = 0
-    while i2 < n2:
-        val ev2 = if r.next_i64() == 1: hc_dec_hir_type_param(r) else: nil
-        f_type_params.push(ev2)
-        i2 = i2 + 1
-    val f_base_type = if r.next_i64() == 1: hc_dec_hir_type(r) else: nil
-    var f_interfaces: [HirType] = []
-    val n3 = r.next_len()
-    var i3 = 0
-    while i3 < n3:
-        val ev3 = if r.next_i64() == 1: hc_dec_hir_type(r) else: nil
-        f_interfaces.push(ev3)
-        i3 = i3 + 1
-    val f_access_mode = if r.next_i64() == 1: hc_dec_hir_facet_access_mode(r) else: nil
-    var f_methods: [HirFacetMethod] = []
-    val n4 = r.next_len()
-    var i4 = 0
-    while i4 < n4:
-        val ev4 = if r.next_i64() == 1: hc_dec_hir_facet_method(r) else: nil
-        f_methods.push(ev4)
-        i4 = i4 + 1
-    val raw5 = r.next()
-    val f_provider_id = if raw5 == "\\N": nil else: flat_pool_unescape(raw5)
-    val raw6 = r.next()
-    val f_implementation_hash = if raw6 == "\\N": nil else: flat_pool_unescape(raw6)
-    val raw7 = r.next()
-    val f_required_base_abi_hash = if raw7 == "\\N": nil else: flat_pool_unescape(raw7)
-    val raw8 = r.next()
-    val f_required_layout_hash = if raw8 == "\\N": nil else: flat_pool_unescape(raw8)
-    val f_span = if r.next_i64() == 1: hc_dec_span(r) else: nil
-    HirFacetImplDecl(aspect_id: f_aspect_id, aspect_version: f_aspect_version, symbol: f_symbol, name: f_name, type_params: f_type_params, base_type: f_base_type, interfaces: f_interfaces, access_mode: f_access_mode, methods: f_methods, provider_id: f_provider_id, implementation_hash: f_implementation_hash, required_base_abi_hash: f_required_base_abi_hash, required_layout_hash: f_required_layout_hash, span: f_span)
-
-fn hc_enc_hir_facet_interface_decl(w: HirCodecWriter, node: HirFacetInterfaceDecl):
-    if node.aspect_id == nil:
-        w.put_i64(0)
-    else:
-        w.put_i64(1)
-        hc_enc_aspect_id(w, node.aspect_id)
-    w.put_i64(node.aspect_version)
-    if node.symbol == nil:
-        w.put_i64(0)
-    else:
-        w.put_i64(1)
-        hc_enc_symbol_id(w, node.symbol)
-    w.put_text(node.name)
-    w.put_i64(if node.type_params == nil: 0 else: node.type_params.len())
-    for e0 in (node.type_params ?? []):
-        if e0 == nil:
-            w.put_i64(0)
-        else:
-            w.put_i64(1)
-            hc_enc_hir_type_param(w, e0)
-    w.put_i64(if node.composes == nil: 0 else: node.composes.len())
-    for e1 in (node.composes ?? []):
-        if e1 == nil:
-            w.put_i64(0)
-        else:
-            w.put_i64(1)
-            hc_enc_hir_type(w, e1)
-    w.put_i64(if node.methods == nil: 0 else: node.methods.len())
-    for e2 in (node.methods ?? []):
-        if e2 == nil:
-            w.put_i64(0)
-        else:
-            w.put_i64(1)
-            hc_enc_hir_facet_method(w, e2)
-    if node.visibility == nil:
-        w.put_i64(0)
-    else:
-        w.put_i64(1)
-        hc_enc_visibility(w, node.visibility)
-    w.put_bool(node.is_public)
-    w.put_i64(if node.attributes == nil: 0 else: node.attributes.len())
-    for e3 in (node.attributes ?? []):
-        if e3 == nil:
-            w.put_i64(0)
-        else:
-            w.put_i64(1)
-            hc_enc_hir_attribute(w, e3)
-    if node.interface_id == nil:
-        w.put_i64(0)
-    else:
-        w.put_i64(1)
-        hc_enc_facet_interface_id(w, node.interface_id)
-    w.put_text(node.interface_abi_hash)
-    if node.span == nil:
-        w.put_i64(0)
-    else:
-        w.put_i64(1)
-        hc_enc_span(w, node.span)
-
-fn hc_dec_hir_facet_interface_decl(r: FlatPoolReader) -> HirFacetInterfaceDecl:
-    val f_aspect_id = if r.next_i64() == 1: hc_dec_aspect_id(r) else: nil
-    val raw0 = r.next()
-    val f_aspect_version = if raw0 == "N": nil else: flat_pool_parse_i64(raw0)
-    val f_symbol = if r.next_i64() == 1: hc_dec_symbol_id(r) else: nil
-    val raw1 = r.next()
-    val f_name = if raw1 == "\\N": nil else: flat_pool_unescape(raw1)
-    var f_type_params: [HirTypeParam] = []
-    val n2 = r.next_len()
-    var i2 = 0
-    while i2 < n2:
-        val ev2 = if r.next_i64() == 1: hc_dec_hir_type_param(r) else: nil
-        f_type_params.push(ev2)
-        i2 = i2 + 1
-    var f_composes: [HirType] = []
-    val n3 = r.next_len()
-    var i3 = 0
-    while i3 < n3:
-        val ev3 = if r.next_i64() == 1: hc_dec_hir_type(r) else: nil
-        f_composes.push(ev3)
-        i3 = i3 + 1
-    var f_methods: [HirFacetMethod] = []
-    val n4 = r.next_len()
-    var i4 = 0
-    while i4 < n4:
-        val ev4 = if r.next_i64() == 1: hc_dec_hir_facet_method(r) else: nil
-        f_methods.push(ev4)
-        i4 = i4 + 1
-    val f_visibility = if r.next_i64() == 1: hc_dec_visibility(r) else: nil
-    val raw5 = r.next()
-    val f_is_public = if raw5 == "N": nil else: raw5 == "1"
-    var f_attributes: [HirAttribute] = []
-    val n6 = r.next_len()
-    var i6 = 0
-    while i6 < n6:
-        val ev6 = if r.next_i64() == 1: hc_dec_hir_attribute(r) else: nil
-        f_attributes.push(ev6)
-        i6 = i6 + 1
-    val f_interface_id = if r.next_i64() == 1: hc_dec_facet_interface_id(r) else: nil
-    val raw7 = r.next()
-    val f_interface_abi_hash = if raw7 == "\\N": nil else: flat_pool_unescape(raw7)
-    val f_span = if r.next_i64() == 1: hc_dec_span(r) else: nil
-    HirFacetInterfaceDecl(aspect_id: f_aspect_id, aspect_version: f_aspect_version, symbol: f_symbol, name: f_name, type_params: f_type_params, composes: f_composes, methods: f_methods, visibility: f_visibility, is_public: f_is_public, attributes: f_attributes, interface_id: f_interface_id, interface_abi_hash: f_interface_abi_hash, span: f_span)
-
-fn hc_enc_hir_facet_method(w: HirCodecWriter, node: HirFacetMethod):
-    if node.symbol == nil:
-        w.put_i64(0)
-    else:
-        w.put_i64(1)
-        hc_enc_symbol_id(w, node.symbol)
-    w.put_text(node.name)
-    if node.function == nil:
-        w.put_i64(0)
-    else:
-        w.put_i64(1)
-        hc_enc_hir_function(w, node.function)
-    if node.method_id == nil:
-        w.put_i64(0)
-    else:
-        w.put_i64(1)
-        hc_enc_facet_method_id(w, node.method_id)
-    w.put_text(node.signature_hash)
-    if node.span == nil:
-        w.put_i64(0)
-    else:
-        w.put_i64(1)
-        hc_enc_span(w, node.span)
-
-fn hc_dec_hir_facet_method(r: FlatPoolReader) -> HirFacetMethod:
-    val f_symbol = if r.next_i64() == 1: hc_dec_symbol_id(r) else: nil
-    val raw0 = r.next()
-    val f_name = if raw0 == "\\N": nil else: flat_pool_unescape(raw0)
-    val f_function = if r.next_i64() == 1: hc_dec_hir_function(r) else: nil
-    val f_method_id = if r.next_i64() == 1: hc_dec_facet_method_id(r) else: nil
-    val raw1 = r.next()
-    val f_signature_hash = if raw1 == "\\N": nil else: flat_pool_unescape(raw1)
-    val f_span = if r.next_i64() == 1: hc_dec_span(r) else: nil
-    HirFacetMethod(symbol: f_symbol, name: f_name, function: f_function, method_id: f_method_id, signature_hash: f_signature_hash, span: f_span)
-
-fn hc_enc_hir_facet_requirement_decl(w: HirCodecWriter, node: HirFacetRequirementDecl):
-    if node.aspect_id == nil:
-        w.put_i64(0)
-    else:
-        w.put_i64(1)
-        hc_enc_aspect_id(w, node.aspect_id)
-    w.put_i64(node.aspect_version)
-    if node.interface_type == nil:
-        w.put_i64(0)
-    else:
-        w.put_i64(1)
-        hc_enc_hir_type(w, node.interface_type)
-    if node.target_type_rule == nil:
-        w.put_i64(0)
-    else:
-        w.put_i64(1)
-        hc_enc_hir_type_pointcut(w, node.target_type_rule)
-    if node.span == nil:
-        w.put_i64(0)
-    else:
-        w.put_i64(1)
-        hc_enc_span(w, node.span)
-
-fn hc_dec_hir_facet_requirement_decl(r: FlatPoolReader) -> HirFacetRequirementDecl:
-    val f_aspect_id = if r.next_i64() == 1: hc_dec_aspect_id(r) else: nil
-    val raw0 = r.next()
-    val f_aspect_version = if raw0 == "N": nil else: flat_pool_parse_i64(raw0)
-    val f_interface_type = if r.next_i64() == 1: hc_dec_hir_type(r) else: nil
-    val f_target_type_rule = if r.next_i64() == 1: hc_dec_hir_type_pointcut(r) else: nil
-    val f_span = if r.next_i64() == 1: hc_dec_span(r) else: nil
-    HirFacetRequirementDecl(aspect_id: f_aspect_id, aspect_version: f_aspect_version, interface_type: f_interface_type, target_type_rule: f_target_type_rule, span: f_span)
 
 fn hc_enc_hir_field(w: HirCodecWriter, node: HirField):
     if node.symbol == nil:
@@ -4143,34 +3682,6 @@ fn hc_enc_hir_module(w: HirCodecWriter, node: HirModule):
         else:
             w.put_i64(1)
             hc_enc_hir_extend_enum(w, e19)
-    w.put_i64(if node.facet_interfaces == nil: 0 else: node.facet_interfaces.len())
-    for e20 in (node.facet_interfaces ?? []):
-        if e20 == nil:
-            w.put_i64(0)
-        else:
-            w.put_i64(1)
-            hc_enc_hir_facet_interface_decl(w, e20)
-    w.put_i64(if node.facet_impls == nil: 0 else: node.facet_impls.len())
-    for e21 in (node.facet_impls ?? []):
-        if e21 == nil:
-            w.put_i64(0)
-        else:
-            w.put_i64(1)
-            hc_enc_hir_facet_impl_decl(w, e21)
-    w.put_i64(if node.facet_bindings == nil: 0 else: node.facet_bindings.len())
-    for e22 in (node.facet_bindings ?? []):
-        if e22 == nil:
-            w.put_i64(0)
-        else:
-            w.put_i64(1)
-            hc_enc_hir_facet_binding_decl(w, e22)
-    w.put_i64(if node.facet_requirements == nil: 0 else: node.facet_requirements.len())
-    for e23 in (node.facet_requirements ?? []):
-        if e23 == nil:
-            w.put_i64(0)
-        else:
-            w.put_i64(1)
-            hc_enc_hir_facet_requirement_decl(w, e23)
 
 fn hc_dec_hir_module(r: FlatPoolReader) -> HirModule:
     val raw0 = r.next()
@@ -4333,35 +3844,7 @@ fn hc_dec_hir_module(r: FlatPoolReader) -> HirModule:
         val ev27 = if r.next_i64() == 1: hc_dec_hir_extend_enum(r) else: nil
         f_extend_enums.push(ev27)
         i27 = i27 + 1
-    var f_facet_interfaces: [HirFacetInterfaceDecl] = []
-    val n28 = r.next_len()
-    var i28 = 0
-    while i28 < n28:
-        val ev28 = if r.next_i64() == 1: hc_dec_hir_facet_interface_decl(r) else: nil
-        f_facet_interfaces.push(ev28)
-        i28 = i28 + 1
-    var f_facet_impls: [HirFacetImplDecl] = []
-    val n29 = r.next_len()
-    var i29 = 0
-    while i29 < n29:
-        val ev29 = if r.next_i64() == 1: hc_dec_hir_facet_impl_decl(r) else: nil
-        f_facet_impls.push(ev29)
-        i29 = i29 + 1
-    var f_facet_bindings: [HirFacetBindingDecl] = []
-    val n30 = r.next_len()
-    var i30 = 0
-    while i30 < n30:
-        val ev30 = if r.next_i64() == 1: hc_dec_hir_facet_binding_decl(r) else: nil
-        f_facet_bindings.push(ev30)
-        i30 = i30 + 1
-    var f_facet_requirements: [HirFacetRequirementDecl] = []
-    val n31 = r.next_len()
-    var i31 = 0
-    while i31 < n31:
-        val ev31 = if r.next_i64() == 1: hc_dec_hir_facet_requirement_decl(r) else: nil
-        f_facet_requirements.push(ev31)
-        i31 = i31 + 1
-    HirModule(name: f_name, path: f_path, imports: f_imports, exports: f_exports, domain_blocks: f_domain_blocks, symbols: f_symbols, functions: f_functions, gpu_function_targets: f_gpu_function_targets, gpu_function_backend_orders: f_gpu_function_backend_orders, classes: f_classes, structs: f_structs, enums: f_enums, bitfields: f_bitfields, traits: f_traits, impls: f_impls, constants: f_constants, static_asserts: f_static_asserts, aop_advices: f_aop_advices, di_bindings: f_di_bindings, arch_rules: f_arch_rules, mock_decls: f_mock_decls, types: f_types, extend_enums: f_extend_enums, facet_interfaces: f_facet_interfaces, facet_impls: f_facet_impls, facet_bindings: f_facet_bindings, facet_requirements: f_facet_requirements)
+    HirModule(name: f_name, path: f_path, imports: f_imports, exports: f_exports, domain_blocks: f_domain_blocks, symbols: f_symbols, functions: f_functions, gpu_function_targets: f_gpu_function_targets, gpu_function_backend_orders: f_gpu_function_backend_orders, classes: f_classes, structs: f_structs, enums: f_enums, bitfields: f_bitfields, traits: f_traits, impls: f_impls, constants: f_constants, static_asserts: f_static_asserts, aop_advices: f_aop_advices, di_bindings: f_di_bindings, arch_rules: f_arch_rules, mock_decls: f_mock_decls, types: f_types, extend_enums: f_extend_enums)
 
 fn hc_enc_hir_param(w: HirCodecWriter, node: HirParam):
     if node.symbol == nil:
@@ -4539,7 +4022,7 @@ fn hc_enc_hir_pattern_kind(w: HirCodecWriter, node: HirPatternKind):
             w.put_i64(12)
             w.put_text(b_type_name)
             w.put_text(b_binder)
-        case _: hc_bad_tag("HirPatternKind", -1)
+        case _: w.reject("unencodable HirPatternKind enum")
 
 fn hc_dec_hir_pattern_kind(r: FlatPoolReader) -> HirPatternKind:
     val tag = r.next_i64()
@@ -4651,7 +4134,7 @@ fn hc_enc_hir_pattern_payload(w: HirCodecWriter, node: HirPatternPayload):
                 else:
                     w.put_i64(1)
                     hc_enc_hir_pattern(w, pb1)
-        case _: hc_bad_tag("HirPatternPayload", -1)
+        case _: w.reject("unencodable HirPatternPayload enum")
 
 fn hc_dec_hir_pattern_payload(r: FlatPoolReader) -> HirPatternPayload:
     val tag = r.next_i64()
@@ -4718,69 +4201,6 @@ fn hc_dec_hir_stmt(r: FlatPoolReader) -> HirStmt:
     val f_span = if r.next_i64() == 1: hc_dec_span(r) else: nil
     HirStmt(kind: f_kind, span: f_span)
 
-fn hc_enc_hir_gpu_launch_config(w: HirCodecWriter, node: HirGpuLaunchConfig):
-    if node.grid == nil:
-        w.reject("HirGpuLaunchConfig.grid is nil")
-    elif node.grid.len() < 1 or node.grid.len() > 3:
-        w.reject("HirGpuLaunchConfig.grid count is outside 1..3")
-    w.put_i64(if node.grid == nil: 0 else: node.grid.len())
-    for grid_expr in (node.grid ?? []):
-        if grid_expr == nil:
-            w.reject("HirGpuLaunchConfig.grid contains nil")
-            w.put_i64(0)
-        else:
-            w.put_i64(1)
-            hc_enc_hir_expr(w, grid_expr)
-    if node.block == nil:
-        w.reject("HirGpuLaunchConfig.block is nil")
-    elif node.block.len() < 1 or node.block.len() > 3:
-        w.reject("HirGpuLaunchConfig.block count is outside 1..3")
-    w.put_i64(if node.block == nil: 0 else: node.block.len())
-    for block_expr in (node.block ?? []):
-        if block_expr == nil:
-            w.reject("HirGpuLaunchConfig.block contains nil")
-            w.put_i64(0)
-        else:
-            w.put_i64(1)
-            hc_enc_hir_expr(w, block_expr)
-    if node.span == nil:
-        w.reject("HirGpuLaunchConfig.span is nil")
-        w.put_i64(0)
-    else:
-        w.put_i64(1)
-        hc_enc_span(w, node.span)
-
-fn hc_dec_hir_gpu_launch_config(r: FlatPoolReader) -> HirGpuLaunchConfig:
-    var f_grid: [HirExpr] = []
-    val grid_count = r.next_len()
-    if grid_count < 1 or grid_count > 3:
-        hc_bad_tag("HirGpuLaunchConfig.grid count", grid_count)
-    var grid_i = 0
-    while grid_i < grid_count:
-        val grid_present = r.next_i64()
-        if grid_present != 1:
-            hc_bad_tag("HirGpuLaunchConfig.grid element presence", grid_present)
-        val grid_expr = hc_dec_hir_expr(r)
-        f_grid.push(grid_expr)
-        grid_i = grid_i + 1
-    var f_block: [HirExpr] = []
-    val block_count = r.next_len()
-    if block_count < 1 or block_count > 3:
-        hc_bad_tag("HirGpuLaunchConfig.block count", block_count)
-    var block_i = 0
-    while block_i < block_count:
-        val block_present = r.next_i64()
-        if block_present != 1:
-            hc_bad_tag("HirGpuLaunchConfig.block element presence", block_present)
-        val block_expr = hc_dec_hir_expr(r)
-        f_block.push(block_expr)
-        block_i = block_i + 1
-    val span_present = r.next_i64()
-    if span_present != 1:
-        hc_bad_tag("HirGpuLaunchConfig.span presence", span_present)
-    val f_span = hc_dec_span(r)
-    HirGpuLaunchConfig(grid: f_grid, block: f_block, span: f_span)
-
 fn hc_enc_hir_stmt_kind(w: HirCodecWriter, node: HirStmtKind):
     match node:
         case Expr(b_expr):
@@ -4838,7 +4258,7 @@ fn hc_enc_hir_stmt_kind(w: HirCodecWriter, node: HirStmtKind):
             else:
                 w.put_i64(1)
                 hc_enc_asm_target_spec(w, b_spec)
-        case _: hc_bad_tag("HirStmtKind", -1)
+        case _: w.reject("unencodable HirStmtKind enum")
 
 fn hc_dec_hir_stmt_kind(r: FlatPoolReader) -> HirStmtKind:
     val tag = r.next_i64()
@@ -4861,52 +4281,6 @@ fn hc_dec_hir_stmt_kind(r: FlatPoolReader) -> HirStmtKind:
     if tag == 4:
         val f_spec = if r.next_i64() == 1: hc_dec_asm_target_spec(r) else: nil
         return HirStmtKind.AsmAssert(f_spec)
-    if tag == 5:
-        val symbol_present = r.next_i64()
-        if symbol_present != 1:
-            hc_bad_tag("HirStmtKind.SharedVal.symbol presence", symbol_present)
-        val f_symbol = hc_dec_symbol_id(r)
-        val type_present = r.next_i64()
-        if type_present != 1:
-            hc_bad_tag("HirStmtKind.SharedVal.type_ presence", type_present)
-        val f_type_ = hc_dec_hir_type(r)
-        val raw_has_init = r.next()
-        if raw_has_init != "0" and raw_has_init != "1":
-            hc_bad_tag("HirStmtKind.SharedVal.has_init", -1)
-        val f_has_init = raw_has_init == "1"
-        val init_present = r.next_i64()
-        if init_present != 1:
-            hc_bad_tag("HirStmtKind.SharedVal.init presence", init_present)
-        val f_init = hc_dec_hir_expr(r)
-        return HirStmtKind.SharedVal(f_symbol, f_type_, f_has_init, f_init)
-    if tag == 6:
-        val symbol_present = r.next_i64()
-        if symbol_present != 1:
-            hc_bad_tag("HirStmtKind.SharedVar.symbol presence", symbol_present)
-        val f_symbol = hc_dec_symbol_id(r)
-        val type_present = r.next_i64()
-        if type_present != 1:
-            hc_bad_tag("HirStmtKind.SharedVar.type_ presence", type_present)
-        val f_type_ = hc_dec_hir_type(r)
-        val raw_has_init = r.next()
-        if raw_has_init != "0" and raw_has_init != "1":
-            hc_bad_tag("HirStmtKind.SharedVar.has_init", -1)
-        val f_has_init = raw_has_init == "1"
-        val init_present = r.next_i64()
-        if init_present != 1:
-            hc_bad_tag("HirStmtKind.SharedVar.init presence", init_present)
-        val f_init = hc_dec_hir_expr(r)
-        return HirStmtKind.SharedVar(f_symbol, f_type_, f_has_init, f_init)
-    if tag == 7:
-        val config_present = r.next_i64()
-        if config_present != 1:
-            hc_bad_tag("HirStmtKind.GpuLaunch.config presence", config_present)
-        val f_config = hc_dec_hir_gpu_launch_config(r)
-        val body_present = r.next_i64()
-        if body_present != 1:
-            hc_bad_tag("HirStmtKind.GpuLaunch.body presence", body_present)
-        val f_body = hc_dec_hir_block(r)
-        return HirStmtKind.GpuLaunch(f_config, f_body)
     hc_bad_tag("HirStmtKind", tag)
     hc_dec_hir_stmt_kind(r)
 
@@ -5494,7 +4868,7 @@ fn hc_enc_hir_type_kind(w: HirCodecWriter, node: HirTypeKind):
                 else:
                     w.put_i64(1)
                     hc_enc_dim_expr(w, e10)
-        case _: hc_bad_tag("HirTypeKind", -1)
+        case _: w.reject("unencodable HirTypeKind enum")
 
 fn hc_dec_hir_type_kind(r: FlatPoolReader) -> HirTypeKind:
     val tag = r.next_i64()
@@ -5657,9 +5031,6 @@ fn hc_dec_hir_type_kind(r: FlatPoolReader) -> HirTypeKind:
             f_output.push(ev20)
             i20 = i20 + 1
         return HirTypeKind.Layer(f_input, f_output)
-    if tag == 27: return HirTypeKind.Weak(hc_dec_hir_type(r))
-    if tag == 28: return HirTypeKind.Atomic(hc_dec_hir_type(r))
-    if tag == 29: return HirTypeKind.QualifiedDynTrait(r.next_i64(), hc_dec_symbol_id(r))
     hc_bad_tag("HirTypeKind", tag)
     hc_dec_hir_type_kind(r)
 
@@ -5706,96 +5077,6 @@ fn hc_dec_hir_type_param(r: FlatPoolReader) -> HirTypeParam:
     val f_span = if r.next_i64() == 1: hc_dec_span(r) else: nil
     HirTypeParam(symbol: f_symbol, name: f_name, bounds: f_bounds, has_default: f_has_default, default: f_default, span: f_span)
 
-fn hc_enc_hir_type_pointcut(w: HirCodecWriter, node: HirTypePointcut):
-    match node:
-        case TypeName(b_pattern):
-            w.put_i64(0)
-            w.put_text(b_pattern)
-        case Implements(b_interface_type):
-            w.put_i64(1)
-            if b_interface_type == nil:
-                w.put_i64(0)
-            else:
-                w.put_i64(1)
-                hc_enc_hir_type(w, b_interface_type)
-        case Subtype(b_base_type):
-            w.put_i64(2)
-            if b_base_type == nil:
-                w.put_i64(0)
-            else:
-                w.put_i64(1)
-                hc_enc_hir_type(w, b_base_type)
-        case And(b_terms):
-            w.put_i64(3)
-            w.put_i64(if b_terms == nil: 0 else: b_terms.len())
-            for e0 in (b_terms ?? []):
-                if e0 == nil:
-                    w.put_i64(0)
-                else:
-                    w.put_i64(1)
-                    hc_enc_hir_type_pointcut(w, e0)
-        case Or(b_terms):
-            w.put_i64(4)
-            w.put_i64(if b_terms == nil: 0 else: b_terms.len())
-            for e1 in (b_terms ?? []):
-                if e1 == nil:
-                    w.put_i64(0)
-                else:
-                    w.put_i64(1)
-                    hc_enc_hir_type_pointcut(w, e1)
-        case Not(b_terms):
-            w.put_i64(5)
-            w.put_i64(if b_terms == nil: 0 else: b_terms.len())
-            for e2 in (b_terms ?? []):
-                if e2 == nil:
-                    w.put_i64(0)
-                else:
-                    w.put_i64(1)
-                    hc_enc_hir_type_pointcut(w, e2)
-        case _: hc_bad_tag("HirTypePointcut", -1)
-
-fn hc_dec_hir_type_pointcut(r: FlatPoolReader) -> HirTypePointcut:
-    val tag = r.next_i64()
-    if tag == 0:
-        val raw0 = r.next()
-        val f_pattern = if raw0 == "\\N": nil else: flat_pool_unescape(raw0)
-        return HirTypePointcut.TypeName(f_pattern)
-    if tag == 1:
-        val f_interface_type = if r.next_i64() == 1: hc_dec_hir_type(r) else: nil
-        return HirTypePointcut.Implements(f_interface_type)
-    if tag == 2:
-        val f_base_type = if r.next_i64() == 1: hc_dec_hir_type(r) else: nil
-        return HirTypePointcut.Subtype(f_base_type)
-    if tag == 3:
-        var f_terms: [HirTypePointcut] = []
-        val n1 = r.next_len()
-        var i1 = 0
-        while i1 < n1:
-            val ev1 = if r.next_i64() == 1: hc_dec_hir_type_pointcut(r) else: nil
-            f_terms.push(ev1)
-            i1 = i1 + 1
-        return HirTypePointcut.And(f_terms)
-    if tag == 4:
-        var f_terms: [HirTypePointcut] = []
-        val n2 = r.next_len()
-        var i2 = 0
-        while i2 < n2:
-            val ev2 = if r.next_i64() == 1: hc_dec_hir_type_pointcut(r) else: nil
-            f_terms.push(ev2)
-            i2 = i2 + 1
-        return HirTypePointcut.Or(f_terms)
-    if tag == 5:
-        var f_terms: [HirTypePointcut] = []
-        val n3 = r.next_len()
-        var i3 = 0
-        while i3 < n3:
-            val ev3 = if r.next_i64() == 1: hc_dec_hir_type_pointcut(r) else: nil
-            f_terms.push(ev3)
-            i3 = i3 + 1
-        return HirTypePointcut.Not(f_terms)
-    hc_bad_tag("HirTypePointcut", tag)
-    hc_dec_hir_type_pointcut(r)
-
 fn hc_enc_hir_unary_op(w: HirCodecWriter, node: HirUnaryOp):
     match node:
         case Neg:
@@ -5812,7 +5093,7 @@ fn hc_enc_hir_unary_op(w: HirCodecWriter, node: HirUnaryOp):
             w.put_i64(5)
         case Transpose:
             w.put_i64(6)
-        case _: hc_bad_tag("HirUnaryOp", -1)
+        case _: w.reject("unencodable HirUnaryOp enum")
 
 fn hc_dec_hir_unary_op(r: FlatPoolReader) -> HirUnaryOp:
     val tag = r.next_i64()
@@ -5890,7 +5171,7 @@ fn hc_enc_hir_variant_kind(w: HirCodecWriter, node: HirVariantKind):
                 else:
                     w.put_i64(1)
                     hc_enc_hir_field(w, e1)
-        case _: hc_bad_tag("HirVariantKind", -1)
+        case _: w.reject("unencodable HirVariantKind enum")
 
 fn hc_dec_hir_variant_kind(r: FlatPoolReader) -> HirVariantKind:
     val tag = r.next_i64()
@@ -6016,7 +5297,7 @@ fn hc_enc_method_resolution(w: HirCodecWriter, node: MethodResolution):
                 hc_enc_symbol_id(w, b_method_id)
         case Unresolved:
             w.put_i64(4)
-        case _: hc_bad_tag("MethodResolution", -1)
+        case _: w.reject("unencodable MethodResolution enum")
 
 fn hc_dec_method_resolution(r: FlatPoolReader) -> MethodResolution:
     val tag = r.next_i64()
@@ -6037,10 +5318,6 @@ fn hc_dec_method_resolution(r: FlatPoolReader) -> MethodResolution:
         return MethodResolution.StaticMethod(f_type_id, f_method_id)
     if tag == 4:
         return MethodResolution.Unresolved
-    if tag == 5: return MethodResolution.QualifiedInstanceMethod(r.next_i64(), hc_dec_symbol_id(r), hc_dec_symbol_id(r))
-    if tag == 6: return MethodResolution.QualifiedTraitMethod(r.next_i64(), hc_dec_symbol_id(r), hc_dec_symbol_id(r))
-    if tag == 7: return MethodResolution.QualifiedFreeFunction(r.next_i64(), hc_dec_symbol_id(r))
-    if tag == 8: return MethodResolution.QualifiedStaticMethod(r.next_i64(), hc_dec_symbol_id(r), hc_dec_symbol_id(r))
     hc_bad_tag("MethodResolution", tag)
     hc_dec_method_resolution(r)
 
@@ -6068,7 +5345,7 @@ fn hc_enc_optimization_backend(w: HirCodecWriter, node: OptimizationBackend):
             w.put_i64(9)
         case Gpu:
             w.put_i64(10)
-        case _: hc_bad_tag("OptimizationBackend", -1)
+        case _: w.reject("unencodable OptimizationBackend enum")
 
 fn hc_dec_optimization_backend(r: FlatPoolReader) -> OptimizationBackend:
     val tag = r.next_i64()
@@ -6126,7 +5403,7 @@ fn hc_enc_optimization_req_level(w: HirCodecWriter, node: OptimizationReqLevel):
             w.put_i64(3)
         case WarnNot:
             w.put_i64(4)
-        case _: hc_bad_tag("OptimizationReqLevel", -1)
+        case _: w.reject("unencodable OptimizationReqLevel enum")
 
 fn hc_dec_optimization_req_level(r: FlatPoolReader) -> OptimizationReqLevel:
     val tag = r.next_i64()
@@ -6212,7 +5489,7 @@ fn hc_enc_scope_kind(w: HirCodecWriter, node: ScopeKind):
             w.put_i64(5)
         case Impl:
             w.put_i64(6)
-        case _: hc_bad_tag("ScopeKind", -1)
+        case _: w.reject("unencodable ScopeKind enum")
 
 fn hc_dec_scope_kind(r: FlatPoolReader) -> ScopeKind:
     val tag = r.next_i64()
@@ -6296,7 +5573,7 @@ fn hc_enc_symbol_kind(w: HirCodecWriter, node: SymbolKind):
             w.put_i64(13)
         case Import:
             w.put_i64(14)
-        case _: hc_bad_tag("SymbolKind", -1)
+        case _: w.reject("unencodable SymbolKind enum")
 
 fn hc_dec_symbol_kind(r: FlatPoolReader) -> SymbolKind:
     val tag = r.next_i64()
@@ -6394,6 +5671,16 @@ fn hc_enc_symbol_table(w: HirCodecWriter, node: SymbolTable):
     for dk8 in ks8:
         w.put_text(dk8)
         w.put_i64(node.root_scope_symbols[dk8])
+    val ks9 = if node.structural_union_symbols == nil: [] else: node.structural_union_symbols.keys()
+    w.put_i64(ks9.len())
+    for dk9 in ks9:
+        w.put_text(dk9)
+        w.put_i64(node.structural_union_symbols[dk9])
+    val ks10 = if node.structural_union_owners == nil: [] else: node.structural_union_owners.keys()
+    w.put_i64(ks10.len())
+    for dk10 in ks10:
+        w.put_i64(dk10)
+        w.put_text(node.structural_union_owners[dk10])
 
 fn hc_dec_symbol_table(r: FlatPoolReader) -> SymbolTable:
     var f_symbols: Dict<i64, HirSymbol> = {}
@@ -6489,7 +5776,27 @@ fn hc_dec_symbol_table(r: FlatPoolReader) -> SymbolTable:
         val dv24 = if raw26 == "N": nil else: flat_pool_parse_i64(raw26)
         f_root_scope_symbols[dk24] = dv24
         i24 = i24 + 1
-    SymbolTable(symbols: f_symbols, scopes: f_scopes, current_scope: f_current_scope, next_symbol_id: f_next_symbol_id, next_scope_id: f_next_scope_id, gpu_function_targets: f_gpu_function_targets, gpu_function_backend_orders: f_gpu_function_backend_orders, qualified_functions: f_qualified_functions, qualified_types: f_qualified_types, exact_symbols: f_exact_symbols, module_callables: f_module_callables, root_scope_symbols: f_root_scope_symbols)
+    var f_structural_union_symbols: Dict<text, i64> = {}
+    val n27 = r.next_len()
+    var i27 = 0
+    while i27 < n27:
+        val raw28 = r.next()
+        val dk27 = if raw28 == "\\N": nil else: flat_pool_unescape(raw28)
+        val raw29 = r.next()
+        val dv27 = if raw29 == "N": nil else: flat_pool_parse_i64(raw29)
+        f_structural_union_symbols[dk27] = dv27
+        i27 = i27 + 1
+    var f_structural_union_owners: Dict<i64, text> = {}
+    val n30 = r.next_len()
+    var i30 = 0
+    while i30 < n30:
+        val raw31 = r.next()
+        val dk30 = if raw31 == "N": nil else: flat_pool_parse_i64(raw31)
+        val raw32 = r.next()
+        val dv30 = if raw32 == "\\N": nil else: flat_pool_unescape(raw32)
+        f_structural_union_owners[dk30] = dv30
+        i30 = i30 + 1
+    SymbolTable(symbols: f_symbols, scopes: f_scopes, current_scope: f_current_scope, next_symbol_id: f_next_symbol_id, next_scope_id: f_next_scope_id, gpu_function_targets: f_gpu_function_targets, gpu_function_backend_orders: f_gpu_function_backend_orders, qualified_functions: f_qualified_functions, qualified_types: f_qualified_types, exact_symbols: f_exact_symbols, module_callables: f_module_callables, root_scope_symbols: f_root_scope_symbols, structural_union_symbols: f_structural_union_symbols, structural_union_owners: f_structural_union_owners)
 
 fn hc_enc_type(w: HirCodecWriter, node: Type):
     if node.kind == nil:
@@ -6624,7 +5931,7 @@ fn hc_enc_type_kind(w: HirCodecWriter, node: TypeKind):
             else:
                 w.put_i64(1)
                 hc_enc_type(w, b_f0)
-        case _: hc_bad_tag("TypeKind", -1)
+        case _: w.reject("unencodable TypeKind enum")
 
 fn hc_dec_type_kind(r: FlatPoolReader) -> TypeKind:
     val tag = r.next_i64()
@@ -6718,7 +6025,7 @@ fn hc_enc_type_layout_kind(w: HirCodecWriter, node: TypeLayoutKind):
             w.put_i64(2)
         case Transparent:
             w.put_i64(3)
-        case _: hc_bad_tag("TypeLayoutKind", -1)
+        case _: w.reject("unencodable TypeLayoutKind enum")
 
 fn hc_dec_type_layout_kind(r: FlatPoolReader) -> TypeLayoutKind:
     val tag = r.next_i64()
@@ -6844,7 +6151,7 @@ fn hc_enc_vhdl_reset_polarity(w: HirCodecWriter, node: VhdlResetPolarity):
             w.put_i64(0)
         case ActiveHigh:
             w.put_i64(1)
-        case _: hc_bad_tag("VhdlResetPolarity", -1)
+        case _: w.reject("unencodable VhdlResetPolarity enum")
 
 fn hc_dec_vhdl_reset_polarity(r: FlatPoolReader) -> VhdlResetPolarity:
     val tag = r.next_i64()
@@ -6863,7 +6170,7 @@ fn hc_enc_vhdl_reset_synchrony(w: HirCodecWriter, node: VhdlResetSynchrony):
             w.put_i64(1)
         case None_:
             w.put_i64(2)
-        case _: hc_bad_tag("VhdlResetSynchrony", -1)
+        case _: w.reject("unencodable VhdlResetSynchrony enum")
 
 fn hc_dec_vhdl_reset_synchrony(r: FlatPoolReader) -> VhdlResetSynchrony:
     val tag = r.next_i64()
@@ -6901,7 +6208,7 @@ fn hc_enc_visibility(w: HirCodecWriter, node: Visibility):
             w.put_i64(4)
         case Private:
             w.put_i64(5)
-        case _: hc_bad_tag("Visibility", -1)
+        case _: w.reject("unencodable Visibility enum")
 
 fn hc_dec_visibility(r: FlatPoolReader) -> Visibility:
     val tag = r.next_i64()
@@ -6919,5 +6226,7 @@ fn hc_dec_visibility(r: FlatPoolReader) -> Visibility:
         return Visibility.Private
     hc_bad_tag("Visibility", tag)
     hc_dec_visibility(r)
+
+export hc_enc_hir_catch_clause, hc_dec_hir_catch_clause
 
 export hc_enc_asm_constraint_kind, hc_dec_asm_constraint_kind, hc_enc_asm_location, hc_dec_asm_location, hc_enc_asm_target_spec, hc_dec_asm_target_spec, hc_enc_asm_version_constraint, hc_dec_asm_version_constraint, hc_enc_closure, hc_dec_closure, hc_enc_device_type, hc_dec_device_type, hc_enc_dim_expr, hc_dec_dim_expr, hc_enc_dim_expr_kind, hc_dec_dim_expr_kind, hc_enc_driver_manifest_attr, hc_dec_driver_manifest_attr, hc_enc_driver_manifest_attr_kind, hc_dec_driver_manifest_attr_kind, hc_enc_effect, hc_dec_effect, hc_enc_effect_kind, hc_dec_effect_kind, hc_enc_export_attr, hc_dec_export_attr, hc_enc_function_attr, hc_dec_function_attr, hc_enc_hir_aop_advice, hc_dec_hir_aop_advice, hc_enc_hir_arch_rule, hc_dec_hir_arch_rule, hc_enc_hir_asm, hc_dec_hir_asm, hc_enc_hir_asm_constraint, hc_dec_hir_asm_constraint, hc_enc_hir_asm_match_arm, hc_dec_hir_asm_match_arm, hc_enc_hir_assign_op, hc_dec_hir_assign_op, hc_enc_hir_assoc_type_decl, hc_dec_hir_assoc_type_decl, hc_enc_hir_assoc_type_impl, hc_dec_hir_assoc_type_impl, hc_enc_hir_attribute, hc_dec_hir_attribute, hc_enc_hir_bin_op, hc_dec_hir_bin_op, hc_enc_hir_bitfield, hc_dec_hir_bitfield, hc_enc_hir_bitfield_field, hc_dec_hir_bitfield_field, hc_enc_hir_block, hc_dec_hir_block, hc_enc_hir_call_arg, hc_dec_hir_call_arg, hc_enc_hir_class, hc_dec_hir_class, hc_enc_hir_comp_clause, hc_dec_hir_comp_clause, hc_enc_hir_comp_clause_kind, hc_dec_hir_comp_clause_kind, hc_enc_hir_comprehension_kind, hc_dec_hir_comprehension_kind, hc_enc_hir_const, hc_dec_hir_const, hc_enc_hir_contract_block, hc_dec_hir_contract_block, hc_enc_hir_contract_clause, hc_dec_hir_contract_clause, hc_enc_hir_contract_clause_kind, hc_dec_hir_contract_clause_kind, hc_enc_hir_contract_outcome, hc_dec_hir_contract_outcome, hc_enc_hir_di_binding, hc_dec_hir_di_binding, hc_enc_hir_domain_block, hc_dec_hir_domain_block, hc_enc_hir_enum, hc_dec_hir_enum, hc_enc_hir_enum_payload, hc_dec_hir_enum_payload, hc_enc_hir_expr, hc_dec_hir_expr, hc_enc_hir_expr_kind, hc_dec_hir_expr_kind, hc_enc_hir_extend_constructor, hc_dec_hir_extend_constructor, hc_enc_hir_extend_enum, hc_dec_hir_extend_enum, hc_enc_hir_field, hc_dec_hir_field, hc_enc_hir_function, hc_dec_hir_function, hc_enc_hir_if_arm, hc_dec_hir_if_arm, hc_enc_hir_impl, hc_dec_hir_impl, hc_enc_hir_import, hc_dec_hir_import, hc_enc_hir_import_item, hc_dec_hir_import_item, hc_enc_hir_interpolation, hc_dec_hir_interpolation, hc_enc_hir_match_arm, hc_dec_hir_match_arm, hc_enc_hir_mock_decl, hc_dec_hir_mock_decl, hc_enc_hir_module, hc_dec_hir_module, hc_enc_hir_param, hc_dec_hir_param, hc_enc_hir_pattern, hc_dec_hir_pattern, hc_enc_hir_pattern_kind, hc_dec_hir_pattern_kind, hc_enc_hir_pattern_payload, hc_dec_hir_pattern_payload, hc_enc_hir_static_assert, hc_dec_hir_static_assert, hc_enc_hir_stmt, hc_dec_hir_stmt, hc_enc_hir_stmt_kind, hc_dec_hir_stmt_kind, hc_enc_hir_struct, hc_dec_hir_struct, hc_enc_hir_symbol, hc_dec_hir_symbol, hc_enc_hir_trait, hc_dec_hir_trait, hc_enc_hir_trait_bound, hc_dec_hir_trait_bound, hc_enc_hir_type, hc_dec_hir_type, hc_enc_hir_type_kind, hc_dec_hir_type_kind, hc_enc_hir_type_param, hc_dec_hir_type_param, hc_enc_hir_unary_op, hc_dec_hir_unary_op, hc_enc_hir_variant, hc_dec_hir_variant, hc_enc_hir_variant_kind, hc_dec_hir_variant_kind, hc_enc_hir_with_item, hc_dec_hir_with_item, hc_enc_layout_attr, hc_dec_layout_attr, hc_enc_method_resolution, hc_dec_method_resolution, hc_enc_optimization_backend, hc_dec_optimization_backend, hc_enc_optimization_req, hc_dec_optimization_req, hc_enc_optimization_req_level, hc_dec_optimization_req_level, hc_enc_scope, hc_dec_scope, hc_enc_scope_id, hc_dec_scope_id, hc_enc_scope_kind, hc_dec_scope_kind, hc_enc_span, hc_dec_span, hc_enc_symbol_id, hc_dec_symbol_id, hc_enc_symbol_kind, hc_dec_symbol_kind, hc_enc_symbol_table, hc_dec_symbol_table, hc_enc_type, hc_dec_type, hc_enc_type_kind, hc_dec_type_kind, hc_enc_type_layout_kind, hc_dec_type_layout_kind, hc_enc_vhdl_clocked_metadata, hc_dec_vhdl_clocked_metadata, hc_enc_vhdl_generic_metadata, hc_dec_vhdl_generic_metadata, hc_enc_vhdl_hardware_metadata, hc_dec_vhdl_hardware_metadata, hc_enc_vhdl_reset_polarity, hc_dec_vhdl_reset_polarity, hc_enc_vhdl_reset_synchrony, hc_dec_vhdl_reset_synchrony, hc_enc_vhdl_return_field_metadata, hc_dec_vhdl_return_field_metadata, hc_enc_visibility, hc_dec_visibility

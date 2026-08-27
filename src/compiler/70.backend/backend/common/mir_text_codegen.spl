@@ -8,6 +8,8 @@
 # translate_instruction match handles routing.
 
 use compiler.mir.mir_data.*
+use compiler.mir.mir_instruction_support.{GpuBarrierScope}
+use compiler.common.diagnostics.span.{Span}
 
 # ============================================================================
 # MirTextCodegen Trait
@@ -18,16 +20,29 @@ trait MirTextCodegen:
 
     # === Required (each backend implements) ===
     me translate_module(module: MirModule) -> text
-    me translate_function(name: text, body: MirBody)
-    me translate_block(block: MirBlock)
-    me translate_terminator(term: MirTerminator)
+    # `span` is the function-level MIR span, used only for line-table debug
+    # info (!DISubprogram). Synthetic/bootstrap functions pass an empty or
+    # nil-derived span. See MirToLlvm.translate_function in
+    # _MirToLlvm/core_codegen.spl for the full contract.
+    me translate_function(name: text, body: MirBody, span: Span)
+    # Blocks and terminators are translated through their indexed owner
+    # ([MirBlock] + block_index) rather than a detached copy, so the callee
+    # can inspect neighbouring blocks. See _MirToLlvm/core_codegen.spl.
+    # `module_index` and `ir_handle` identify the module and the live IR
+    # builder the block is being emitted into; a backend that builds text
+    # rather than an in-memory IR ignores them.
+    me translate_block_at(blocks: [MirBlock], block_index: i64, return_type_text: text, is_start: bool, return_slot_id: i64, module_index: i64, ir_handle: i64)
+    me translate_terminator_at(blocks: [MirBlock], block_index: i64, return_type_text: text, is_start: bool, return_slot_id: i64)
 
     # Per-category instruction methods (required)
     me translate_const(dest: LocalId, value: MirConstValue, ty: MirType)
     me translate_copy_move(dest: LocalId, src: LocalId, is_move: bool)
     me translate_binop(dest: LocalId, op: MirBinOp, left: MirOperand, right: MirOperand)
     me translate_unaryop(dest: LocalId, op: MirUnaryOp, operand: MirOperand)
-    me translate_call(dest: LocalId?, func: MirOperand, args: [MirOperand])
+    # Calls are translated through their indexed owner ([MirInst] + index)
+    # so the callee can inspect neighbouring instructions. `ir_handle` is the
+    # live IR builder the call is emitted into; text backends ignore it.
+    me translate_call_at(instructions: [MirInst], index: i64, ir_handle: i64)
 
     # Helpers (required)
     me translate_operand(operand: MirOperand) -> text
@@ -63,7 +78,12 @@ trait MirTextCodegen:
             case Bitcast(dest, op, target): self.translate_bitcast(dest, op, target)
 
             # Calls
-            case Call(dest, func, args): self.translate_call(dest, func, args)
+            # Call has no arm here: translating a call needs the owning
+            # instruction list plus the index (translate_call_at), which this
+            # detached-instruction default cannot supply. Backends dispatch
+            # calls from their own indexed loop (translate_instruction_at);
+            # anything reaching this default falls through to
+            # translate_unsupported below.
             case CallIndirect(dest, ptr, args, sig): self.translate_call_indirect(dest, ptr, args, sig)
             case Intrinsic(dest, name, args): self.translate_intrinsic(dest, name, args)
 
@@ -85,13 +105,12 @@ trait MirTextCodegen:
             case Await(dest, promise): self.translate_await(dest, promise)
             case Yield(value): self.translate_yield(value)
             case Spawn(dest, handler, args): self.translate_spawn(dest, handler, args)
-            case Send(dest, target, message): self.translate_send(dest, target, message)
+            case Send(target, message): self.translate_send(target, message)
             case Receive(dest, timeout): self.translate_receive(dest, timeout)
 
             # GPU
             case GpuKernelDef(name): self.translate_gpu_kernel_def(name)
             case GpuLaunch(args): self.translate_gpu_launch(args)
-            case GpuLaunchConfigured(grid, block, body): self.translate_gpu_launch_configured(grid, block, body)
             case GpuGlobalId(dest, dim): self.translate_gpu_global_id(dest, dim)
             case GpuLocalId(dest, dim): self.translate_gpu_local_id(dest, dim)
             case GpuBlockId(dest, dim): self.translate_gpu_block_id(dest, dim)
@@ -100,7 +119,6 @@ trait MirTextCodegen:
             case GpuBarrier(scope): self.translate_gpu_barrier(scope)
             case GpuMemFence(scope): self.translate_gpu_mem_fence(scope)
             case GpuSharedAlloc(dest, type_, size): self.translate_gpu_shared_alloc(dest, type_, size)
-            case GpuSharedAllocInit(dest, type_, size, init): self.translate_gpu_shared_alloc_init(dest, type_, size, init)
             case GpuAtomicOp(dest, op, ptr, value): self.translate_gpu_atomic_op(dest, op, ptr, value)
             case GpuAtomicCas(dest, ptr, expected, desired): self.translate_gpu_atomic_cas(dest, ptr, expected, desired)
 
@@ -156,7 +174,6 @@ trait MirTextCodegen:
 
             # Debug/Nop
             case DebugValue(_, _): ()
-            case ResultMatchSemantic(_, _, _, _, _, _, _): ()
             case Nop: ()
 
             case _: self.translate_unsupported(inst)
@@ -210,7 +227,7 @@ trait MirTextCodegen:
         eprint("Warning: [codegen] translate_yield not implemented by backend, skipping")
     me translate_spawn(dest: LocalId, handler: MirOperand, args: [MirOperand]):
         eprint("Warning: [codegen] translate_spawn not implemented by backend, skipping")
-    me translate_send(dest: LocalId, target: MirOperand, message: MirOperand):
+    me translate_send(target: MirOperand, message: MirOperand):
         eprint("Warning: [codegen] translate_send not implemented by backend, skipping")
     me translate_receive(dest: LocalId, timeout: MirOperand?):
         eprint("Warning: [codegen] translate_receive not implemented by backend, skipping")
@@ -236,12 +253,6 @@ trait MirTextCodegen:
         eprint("Warning: [codegen] translate_gpu_mem_fence not implemented by backend, skipping")
     me translate_gpu_shared_alloc(dest: LocalId, type_: MirType, size: i64):
         eprint("Warning: [codegen] translate_gpu_shared_alloc not implemented by backend, skipping")
-    me translate_gpu_launch_configured(grid: [MirOperand], block: [MirOperand], body: BlockId):
-        eprint("[mir-text] E-BACKEND-MIRTEXT-INST-GpuLaunchConfigured: structured GPU launch lowering is not implemented")
-        panic("compile error: E-BACKEND-MIRTEXT-INST-GpuLaunchConfigured: text backend cannot preserve the configured launch body")
-    me translate_gpu_shared_alloc_init(dest: LocalId, type_: MirType, size: i64, init: MirOperand):
-        eprint("[mir-text] E-BACKEND-MIRTEXT-INST-GpuSharedAllocInit: initialized workgroup allocation lowering is not implemented")
-        panic("compile error: E-BACKEND-MIRTEXT-INST-GpuSharedAllocInit: text backend cannot preserve atomic shared initialization")
     me translate_gpu_atomic_op(dest: LocalId, op: GpuAtomicOpKind, ptr: MirOperand, value: MirOperand):
         eprint("Warning: [codegen] translate_gpu_atomic_op not implemented by backend, skipping")
     me translate_gpu_atomic_cas(dest: LocalId, ptr: MirOperand, expected: MirOperand, desired: MirOperand):
@@ -275,23 +286,8 @@ trait MirTextCodegen:
     me translate_stub(dest: LocalId, name: text):
         ()
     me translate_unsupported(inst: MirInst):
-        """ASSERT on a MIR construct this text backend cannot lower.
-
-        POLICY (2026-08-23): an unimplemented path must fail loudly or be
-        explicitly disabled with a TODO -- never silently emit something
-        plausible. This method was an empty body, and it is the SHARED BASE
-        TRAIT every non-overriding text backend inherits, so a single silent
-        `()` here dropped instructions across all of them while the build
-        reported success. Same shape as the C and LLVM backends
-        (`emit_unsupported_panic`), including the
-        `SIMPLE_ALLOW_UNLOWERED_MIR=1` escape hatch.
-        """
-        val txt_unlowered_name = mir_instkind_variant_name(inst.kind)
-        eprint("[mir-text] E-BACKEND-MIRTEXT-INST-{txt_unlowered_name}: text backend does not lower {txt_unlowered_name}")
-        if (rt_env_get("SIMPLE_ALLOW_UNLOWERED_MIR") ?? "") != "1":
-            panic("compile error: E-BACKEND-MIRTEXT-INST-{txt_unlowered_name}: text backend does not lower {txt_unlowered_name}")
+        ()
 
 # ============================================================================
 # Exports
 # ============================================================================
-

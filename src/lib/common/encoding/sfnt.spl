@@ -83,14 +83,35 @@ class FvarAxis:
     max_value: f64
 
 fn parse_fvar_axes(font: OtFont) -> [FvarAxis]:
-    val maybe_table = find_table(font, 1719034226)
-    val table = match maybe_table:
-        Some(value): value
-        None: return []
-    val base = table.offset as i64
-    val limit = base + table.length as i64
+    # Flat scalar table scan instead of `val table = match find_table(...):
+    # Some(value): value / None: return []`. On the freestanding native lane
+    # (OVMF boot 2026-08-04) that val-assigned Option payload extraction
+    # compiled to discriminant-hash checks with a nil (0x3) fall-through, the
+    # scrutinee matched NEITHER arm at runtime, `table` became nil, and the
+    # first field read `table.offset` died with "field access on nil
+    # receiver" (rip 0x8073034 → this fn). Same Option-marshalling defect
+    # class as the matcher note in sfnt_manifest_names_match below; see
+    # doc/08_tracking/bug/sfnt_fvar_option_match_nil_baremetal_2026-08-04.md.
+    # The statement-form matches in validate_default_glyf_font work; only
+    # this extraction shape faulted, so the lookup is inlined Option-free.
+    var table_found = false
+    var table_offset: i64 = 0
+    var table_length: i64 = 0
+    val tables = font.tables
+    var ti: i64 = 0
+    while ti < tables.len():
+        val entry = tables[ti]
+        val entry_tag: u32 = entry.tag
+        if entry_tag == 1719034226 and not table_found:
+            table_found = true
+            table_offset = entry.offset as i64
+            table_length = entry.length as i64
+        ti = ti + 1
+    if not table_found: return []
+    val base = table_offset
+    val limit = base + table_length
     val blob = font.blob
-    if (table.length < 16 or read_u16_be(blob, base) != 1 or
+    if (table_length < 16 or read_u16_be(blob, base) != 1 or
         read_u16_be(blob, base + 2) != 0 or read_u16_be(blob, base + 6) != 2): return []
     val axes_offset = read_u16_be(blob, base + 4) as i64
     val axis_count = read_u16_be(blob, base + 8) as i64
@@ -113,8 +134,16 @@ fn parse_fvar_axes(font: OtFont) -> [FvarAxis]:
         val default_value = read_fixed_1616(blob, axis_base + 8)
         val max_value = read_fixed_1616(blob, axis_base + 12)
         if tag == 0 or min_value > default_value or default_value > max_value: return []
-        for axis in axes:
-            if axis.tag == tag: return []
+        # Indexed duplicate scan instead of `for axis in axes:` — struct
+        # iteration variables are broken on the freestanding native lane
+        # (value-copy/nil class, see _sfnt_collect_names comment); indexed
+        # element + typed local is the proven-safe form.
+        var ai: i64 = 0
+        while ai < axes.len():
+            val prior = axes[ai]
+            val prior_tag: u32 = prior.tag
+            if prior_tag == tag: return []
+            ai = ai + 1
         axes.push(FvarAxis(tag: tag, min_value: min_value, default_value: default_value, max_value: max_value))
         index = index + 1
     axes
@@ -202,10 +231,17 @@ fn sfnt_manifest_default_axes_match(blob: [u8], manifest: text) -> bool:
     val axes = parse_fvar_axes(font)
     val defaults = manifest.split(",")
     if axes.len() == 0 or defaults.len() != axes.len(): return false
-    for axis in axes:
-        val integer = axis.default_value as i64
-        val value = if integer as f64 == axis.default_value: integer.to_text() else: axis.default_value.to_text()
-        if not _sfnt_names_contain(defaults, _sfnt_tag_text(axis.tag) + "=" + value): return false
+    # Indexed loop + typed locals instead of `for axis in axes:` — struct
+    # iteration variables are broken on the freestanding native lane.
+    var ai: i64 = 0
+    while ai < axes.len():
+        val axis = axes[ai]
+        val axis_tag: u32 = axis.tag
+        val axis_default: f64 = axis.default_value
+        val integer = axis_default as i64
+        val value = if integer as f64 == axis_default: integer.to_text() else: axis_default.to_text()
+        if not _sfnt_names_contain(defaults, _sfnt_tag_text(axis_tag) + "=" + value): return false
+        ai = ai + 1
     true
 
 fn validate_glyf_font_instance(blob: [u8], requested_axes: text) -> SfntValidation:
@@ -228,6 +264,39 @@ class SfntNameValue:
             self.value = candidate
             self.seen = true
 
+# Local re-implementation of std.common.string_core.char_from_code, used only
+# by _sfnt_utf16be_text below. ROOT CAUSE (host-reproduced on the seed
+# `--native` backend, isolated to a 6-line repro): calling the cross-module
+# std.common.encoding.utf16.utf16_decode_one immediately followed by the
+# cross-module std.common.string_core.char_from_code corrupts
+# char_from_code's returned text (len() reports -1, concatenation silently
+# drops it) -- a text-return marshalling defect triggered specifically by
+# THAT call sequence across THOSE two modules; char_from_code alone, or a
+# same-file copy of its logic called right after utf16_decode_one, both
+# return correct text. This is exactly the sequence _sfnt_utf16be_text uses
+# per decoded character, so every decoded name-table string was built from
+# corrupted/empty pieces. Kept file-local (mirrors the existing
+# native-lane-workaround pattern in this file) instead of touching the
+# shared std.common.string_core/utf16 modules, which are out of this lane's
+# scope and other call sites (e.g. _sfnt_tag_text's char_from_code use)
+# already work correctly in production serial evidence.
+fn _sfnt_char_from_code(code: i64) -> text:
+    if code == 9:
+        return "\t"
+    elif code == 10:
+        return "\n"
+    elif code == 11:
+        return "\u000B"
+    elif code == 12:
+        return "\u000C"
+    elif code == 13:
+        return "\r"
+    elif code >= 32 and code <= 126:
+        val chars = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+        val index = code - 32
+        return chars[index]
+    ""
+
 fn _sfnt_utf16be_text(blob: [u8], start: i64, length: i64) -> Option<text>:
     if length % 2 != 0: return None
     var units: [i64] = []
@@ -245,13 +314,17 @@ fn _sfnt_utf16be_text(blob: [u8], start: i64, length: i64) -> Option<text>:
         elif code_unit >= 0xDC00 and code_unit <= 0xDFFF:
             return None
         val decoded = utf16_decode_one(units, index)
-        # `.chr()` has no working native-lane lowering (empty on baremetal);
-        # char_from_code is pure Simple and already proven in-kernel by the
-        # sfnt tag-name path. ASCII coverage suffices for name matching.
+        # `.chr()` has no working native-lane lowering (empty on baremetal).
+        # `_sfnt_char_from_code` (file-local, NOT the cross-module
+        # std.common.string_core.char_from_code) is required here: calling
+        # utf16_decode_one immediately followed by the cross-module
+        # char_from_code corrupts char_from_code's returned text under the
+        # native backend (host-reproduced; see _sfnt_char_from_code doc
+        # comment above). ASCII coverage suffices for name matching.
         val decoded_cp: i64 = decoded[0]
         val decoded_len: i64 = decoded[1]
         if decoded_len <= 0: return None
-        val piece: text = char_from_code(decoded_cp)
+        val piece: text = _sfnt_char_from_code(decoded_cp)
         result = result + piece
         index = index + decoded_len
     Some(result)
@@ -333,15 +406,55 @@ fn sfnt_debug_selected_names(blob: [u8]) -> text:
     val values = match collected:
         Some(v): v
         None: return "<collect-fail>"
+    # Fixed-index while-loop instead of `for pair in [(16,1),(17,2),...]:`
+    # over an inline array-of-tuples literal (H1 hardening): this file's
+    # other native-lane defects (see _sfnt_collect_names, _sfnt_char_from_code
+    # above) are all in the same "array/struct iteration variable on the
+    # native backend" class, and the boot symptom (all five slots return
+    # nameID 5's value -- the LAST pair in the literal) is exactly the
+    # fingerprint of a for-loop that binds its iteration variable to the
+    # final element on every pass. Not host-reproduced on seed --native
+    # (wrong backend: boot is freestanding x86_64-unknown-simpleos), so this
+    # is defensive hardening pending QEMU-boot confirmation, not a proven fix
+    # -- kept behavior-identical on the interpreter (see sfnt_spec.spl).
     var out = ""
-    for pair in [(16, 1), (17, 2), (4, -1), (6, -1), (5, -1)]:
-        val primary: i64 = pair.0
-        val fallback: i64 = pair.1
+    val primaries: [i64] = [16, 17, 4, 6, 5]
+    val fallbacks: [i64] = [1, 2, -1, -1, -1]
+    var pi: i64 = 0
+    while pi < primaries.len():
+        val primary: i64 = primaries[pi]
+        val fallback: i64 = fallbacks[pi]
         val sel = _sfnt_selected_name(values, primary, fallback)
         val piece: text = match sel:
             Some(v): v
             None: "<none>"
         out = out + "|" + piece
+        pi = pi + 1
+    out
+
+fn sfnt_debug_collected_values(blob: [u8]) -> text:
+    """Diagnostic for the H1 (loop-selection) vs H2 (storage-aliasing) split
+    on a real boot: dumps every collected name_id/seen/valid/value, one
+    'id=..,seen=..,valid=..,value=..' group per ';'. If every id's value
+    differs appropriately (family/style/full/postscript/version look
+    distinct) collection is fine and the bug is in selection (H1). If every
+    id's value is the SAME (e.g. all equal the version string), the bug is
+    in storage/aliasing inside _sfnt_collect_names (H2). Not wired into any
+    boot entry point by this change -- callers add the serial_println."""
+    val collected = _sfnt_collect_names(blob)
+    val values = match collected:
+        Some(v): v
+        None: return "<collect-fail>"
+    var out = ""
+    var vi: i64 = 0
+    while vi < values.len():
+        val entry = values[vi]
+        val nid: i64 = entry.name_id
+        val seen: bool = entry.seen
+        val valid: bool = entry.valid
+        val value: text = entry.value
+        out = out + ";id=" + nid.to_text() + ",seen=" + seen.to_text() + ",valid=" + valid.to_text() + ",value=" + value
+        vi = vi + 1
     out
 
 fn sfnt_manifest_names_match(blob: [u8], family: text, style: text, full_name: text,

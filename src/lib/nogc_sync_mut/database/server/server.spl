@@ -59,7 +59,7 @@ use std.database.server.capability.{
 use std.database.server.session.{ SessionRegistry, SessionIdentity }
 use std.database.server.txn.{
     TxnState, TxnWrite,
-    begin_txn, closed_txn, txn_record, txn_lookup,
+    begin_txn, closed_txn, txn_record, txn_lookup, txn_write_count,
     store_read, store_version,
     WRITE_PUT, WRITE_DEL
 }
@@ -125,6 +125,8 @@ class DbServerCapsule:
         var registry = self.registry
         val id = registry.open_session(proof.principal, capability)
         self.registry = registry
+        if id == 0:
+            return err_response(ERR_LIMIT, "session id space exhausted")
         ok_with("session", "{id}")
 
     me sys_close(session_id: i64) -> DbResponse:
@@ -214,6 +216,10 @@ class DbServerCapsule:
             return err_response(ERR_NO_TABLE, "no such table: {table}")
         if not self.registry.has_open_txn(session_id):
             return err_response(ERR_NO_TXN, "{request.op} requires an open transaction")
+        if txn_write_count(self.registry.txn_of(session_id)) >= MAX_TXN_WRITES:
+            # Bounded overlay: an unlimited PUT/DEL stream (including via
+            # BATCH_PUT) must not grow one transaction's overlay without limit.
+            return err_response(ERR_LIMIT, "transaction write bound {MAX_TXN_WRITES} reached")
 
         # Payload = every arg except the routing keys.
         var fields: Dict<text, text> = {}

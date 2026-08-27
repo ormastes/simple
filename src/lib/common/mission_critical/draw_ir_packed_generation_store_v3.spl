@@ -5,8 +5,7 @@ use std.common.crypto.sha256.{sha256_text}
 const DRAW_IR_PACKED_SLOT_FREE: u16 = 0u16
 const DRAW_IR_PACKED_SLOT_ENCODING: u16 = 1u16
 const DRAW_IR_PACKED_SLOT_SEALED: u16 = 2u16
-const DRAW_IR_PACKED_SLOT_QUEUED: u16 = 3u16
-const DRAW_IR_PACKED_SLOT_IN_FLIGHT: u16 = 4u16
+const DRAW_IR_PACKED_SLOT_IN_FLIGHT: u16 = 3u16
 
 const DRAW_IR_PACKED_REASON_OK: u16 = 0u16
 const DRAW_IR_PACKED_REASON_CAPACITY: u16 = 1u16
@@ -40,7 +39,7 @@ enum DrawIrPackedHandoffV3:
     Ready(DrawIrPackedSubmissionV3)
     Refused(u16)
 
-pub fn draw_ir_packed_hash_v3(arena_id: u64, generation: u64, rows: [u64]) -> text:
+fn _draw_ir_packed_hash_v3(arena_id: u64, generation: u64, rows: [u64]) -> text:
     var canonical = "draw-ir-packed-v3|arena={arena_id}|generation={generation}|rows={rows.len()}|"
     var i = 0
     while i < rows.len():
@@ -112,7 +111,7 @@ impl DrawIrPackedGenerationStoreV3:
         )
 
     me admit(row_count: u32) -> DrawIrPackedAdmissionV3:
-        if self.terminal or self.queue_capacity == 0u32 or row_count > self.rows_per_slot:
+        if self.terminal or row_count > self.rows_per_slot:
             return DrawIrPackedAdmissionV3.Refused(DRAW_IR_PACKED_REASON_CAPACITY)
         var slot = 0u32
         while slot < self.slot_count:
@@ -166,7 +165,7 @@ impl DrawIrPackedGenerationStoreV3:
         while i < used:
             rows.push(self.packed_rows[base + i as u64])
             i = i + 1u32
-        val content_hash = draw_ir_packed_hash_v3(self.arena_id, generation_ref.generation, rows)
+        val content_hash = _draw_ir_packed_hash_v3(self.arena_id, generation_ref.generation, rows)
         self.slot_hashes[slot] = content_hash
         self.slot_states[slot] = DRAW_IR_PACKED_SLOT_SEALED
         DrawIrPackedSealV3.Sealed(DrawIrPackedSubmissionV3(
@@ -191,7 +190,7 @@ impl DrawIrPackedGenerationStoreV3:
         self.queue_hashes[tail] = submission.content_hash
         self.queue_tail = (tail + 1u32) % self.queue_capacity
         self.queue_len = self.queue_len + 1u32
-        self.slot_states[slot] = DRAW_IR_PACKED_SLOT_QUEUED
+        self.slot_states[slot] = DRAW_IR_PACKED_SLOT_IN_FLIGHT
         DRAW_IR_PACKED_REASON_OK
 
     me take() -> DrawIrPackedHandoffV3:
@@ -208,7 +207,6 @@ impl DrawIrPackedGenerationStoreV3:
         )
         self.queue_head = (head + 1u32) % self.queue_capacity
         self.queue_len = self.queue_len - 1u32
-        self.slot_states[slot] = DRAW_IR_PACKED_SLOT_IN_FLIGHT
         DrawIrPackedHandoffV3.Ready(submission)
 
     fn matches(submission: DrawIrPackedSubmissionV3, rows: [u64]) -> bool:
@@ -228,7 +226,7 @@ impl DrawIrPackedGenerationStoreV3:
             if self.packed_rows[base + i as u64] != rows[i]:
                 return false
             i = i + 1u32
-        draw_ir_packed_hash_v3(self.arena_id, generation_ref.generation, rows) == submission.content_hash
+        _draw_ir_packed_hash_v3(self.arena_id, generation_ref.generation, rows) == submission.content_hash
 
     me complete(generation_ref: DrawIrPackedGenerationRefV3) -> u16:
         if generation_ref.arena_id != self.arena_id or generation_ref.slot >= self.slot_count:
@@ -366,8 +364,7 @@ fn draw_ir_packed_owner_preflight_v3(store: DrawIrPackedGenerationStoreV3,
         before_state: before, after_state: after)
 
 export DRAW_IR_PACKED_SLOT_FREE, DRAW_IR_PACKED_SLOT_ENCODING,
-    DRAW_IR_PACKED_SLOT_SEALED, DRAW_IR_PACKED_SLOT_QUEUED,
-    DRAW_IR_PACKED_SLOT_IN_FLIGHT,
+    DRAW_IR_PACKED_SLOT_SEALED, DRAW_IR_PACKED_SLOT_IN_FLIGHT,
     DRAW_IR_PACKED_REASON_OK, DRAW_IR_PACKED_REASON_CAPACITY,
     DRAW_IR_PACKED_REASON_NO_SLOT, DRAW_IR_PACKED_REASON_STALE,
     DRAW_IR_PACKED_REASON_STATE, DRAW_IR_PACKED_REASON_WRITE_LIMIT,
@@ -375,6 +372,4 @@ export DRAW_IR_PACKED_SLOT_FREE, DRAW_IR_PACKED_SLOT_ENCODING,
     DRAW_IR_PACKED_REASON_QUEUE_EMPTY,
     DrawIrPackedGenerationRefV3, DrawIrPackedSubmissionV3,
     DrawIrPackedAdmissionV3, DrawIrPackedSealV3, DrawIrPackedHandoffV3,
-    DrawIrPackedGenerationStoreV3, DrawIrPackedCapacityProbeV3,
-    draw_ir_packed_hash_v3, draw_ir_packed_capacity_probe_v3,
-    draw_ir_packed_owner_preflight_v3
+    DrawIrPackedGenerationStoreV3

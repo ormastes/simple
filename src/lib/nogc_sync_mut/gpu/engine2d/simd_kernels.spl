@@ -77,14 +77,15 @@ extern fn rt_simd_has_neon() -> bool
 extern fn rt_simd_has_rvv() -> bool
 
 # ============================================================================
-# Native SIMD pixel-row kernels (NEON on aarch64 / SSE2 on x86_64)
+# Native SIMD pixel-row kernels (NEON on aarch64 / SSE2/AVX2 on x86_64 / RVV on riscv64)
 #
 # These are the genuine vectorized span kernels: the Rust runtime executes
-# `vdupq_n_u32`/`vst1q_u32` (fill) and `vld1q_u32`/`vst1q_u32` (copy) over a
-# packed pixel buffer. Output is bit-identical to the scalar reference. The
-# neon-hit counter only increments when a real SIMD (not scalar-fallback)
-# chunk runs, so the evidence layer can prove NEON actually executed instead
-# of trusting a scalar path that merely reports `has_neon`.
+# `vdupq_n_u32`/`vst1q_u32` on aarch64, SSE2/AVX2 stores/loads on x86_64, and
+# RVV stores/loads on riscv64 over a packed pixel buffer. Output is bit-identical
+# to the scalar reference. The historical neon-hit counter now counts native row
+# chunks on all native row architectures, so the evidence layer can prove real
+# SIMD executed instead of trusting a scalar path that merely reports a feature
+# bit.
 #
 # Implementation: src/compiler_rust/runtime/src/value/engine2d_simd_ops.rs;
 # interpreter dispatch: compiler/src/interpreter_extern/simd.rs.
@@ -94,9 +95,6 @@ extern fn rt_simd_has_rvv() -> bool
 # aarch64 NEON / x86 AVX2 / scalar), with a Rust *seed* shim for interpreter mode
 # (the interpreter is the seed). Return-style so the same call works in both modes
 # (the interpreter passes an Arc clone, so in-place mutation can't propagate).
-extern fn rt_engine2d_simd_fill_row_u32(count: i64, color: u32) -> [u32]
-extern fn rt_engine2d_simd_copy_row_u32(src: [u32]) -> [u32]
-extern fn rt_engine2d_simd_blend_row_u32(dst_row: [u32], src_row: [u32]) -> [u32]
 extern fn rt_simd_engine2d_neon_hits() -> i64
 extern fn rt_simd_engine2d_neon_reset() -> i64
 
@@ -111,15 +109,6 @@ fn engine2d_simd_has_neon() -> bool:
 
 fn engine2d_simd_has_rvv() -> bool:
     rt_simd_has_rvv()
-
-fn engine2d_simd_fill_row_u32(count: i64, color: u32) -> [u32]:
-    rt_engine2d_simd_fill_row_u32(count, color)
-
-fn engine2d_simd_copy_row_u32(src: [u32]) -> [u32]:
-    rt_engine2d_simd_copy_row_u32(src)
-
-fn engine2d_simd_blend_row_u32(dst_row: [u32], src_row: [u32]) -> [u32]:
-    rt_engine2d_simd_blend_row_u32(dst_row, src_row)
 
 fn engine2d_simd_neon_hits() -> i64:
     rt_simd_engine2d_neon_hits()
@@ -163,9 +152,9 @@ fn detect_simd_level() -> SimdLevel:
 
     if engine2d_simd_has_avx2():
         _cached_simd_level = SimdLevel.Avx2
-    elif rt_simd_has_sse():
+    elif engine2d_simd_has_sse():
         _cached_simd_level = SimdLevel.Sse42
-    elif rt_simd_has_neon():
+    elif engine2d_simd_has_neon():
         _cached_simd_level = SimdLevel.Neon
     elif engine2d_simd_has_rvv():
         _cached_simd_level = SimdLevel.Rvv
@@ -174,6 +163,19 @@ fn detect_simd_level() -> SimdLevel:
 
     _simd_detected = true
     _cached_simd_level
+
+pub fn host_simd_level() -> SimdLevel:
+    # The REAL host ISA, ignoring any SIMPLE_2D_SIMD forcing. Used to keep
+    # evidence honest when a foreign ISA name is forced on this host.
+    if engine2d_simd_has_avx2():
+        return SimdLevel.Avx2
+    if engine2d_simd_has_sse():
+        return SimdLevel.Sse42
+    if engine2d_simd_has_neon():
+        return SimdLevel.Neon
+    if engine2d_simd_has_rvv():
+        return SimdLevel.Rvv
+    SimdLevel.None_
 
 fn active_feature_text() -> text:
     detect_simd_level().feature_text()
@@ -205,6 +207,11 @@ class CpuSimdRuntimeEvidence:
     native_simd_bit_exact: bool  # native output == scalar reference, byte-exact
     native_simd_hits: i64
 
+fn _bool_text(value: bool) -> text:
+    if value:
+        return "true"
+    "false"
+
 impl CpuSimdRuntimeEvidence:
     fn executed_all() -> bool:
         self.executed_fill and self.executed_copy and self.executed_alpha and self.executed_scroll
@@ -214,7 +221,17 @@ impl CpuSimdRuntimeEvidence:
 
 fn cpu_simd_required_evidence_valid(evidence: CpuSimdRuntimeEvidence, expected_arch: text, fallback_calls: i64) -> bool:
     """Fail closed for a strict architecture-specific SIMD render lane."""
-    (evidence.arch == expected_arch and evidence.executed_all() and
+    # Fail closed when the reported arch was FORCED via SIMPLE_2D_SIMD on a
+    # foreign host: the per-arch *_available flags reflect the REAL host, so
+    # require the flag matching the expected arch to be true.
+    var host_backed = false
+    if expected_arch == "x86_64":
+        host_backed = evidence.x86_available
+    if expected_arch == "aarch64":
+        host_backed = evidence.arm_available
+    if expected_arch == "riscv64":
+        host_backed = evidence.riscv_available
+    (evidence.arch == expected_arch and host_backed and evidence.executed_all() and
         evidence.native_simd_executed and evidence.native_simd_bit_exact and
         evidence.native_simd_hits > 0 and fallback_calls == 0)
 
@@ -233,32 +250,56 @@ fn native_simd_pixel_evidence() -> NativeSimdPixelEvidence:
     hit counter advanced); a scalar host leaves it false. `bit_exact` compares
     the native output against an independent scalar reference computed here.
     """
+    val level = detect_simd_level()
+    if level != SimdLevel.Neon and level != SimdLevel.Avx2 and level != SimdLevel.Sse42 and level != SimdLevel.Rvv:
+        return NativeSimdPixelEvidence(
+            executed: false,
+            bit_exact: true,
+            hits: 0,
+            fill_checksum: 0
+        )
     engine2d_simd_neon_reset()
-    val count: i64 = 64
     val color: u32 = 0xFF8040C0
-    val native_fill = engine2d_simd_fill_row_u32(count, color)
 
-    var ref_fill: [u32] = [0; 64]
-    var i: i64 = 0
-    while i < count:
-        ref_fill[i.to_i32()] = color
-        i = i + 1
+    # Bit-exactness must be sampled across the vector-width boundary, not at a
+    # single convenient multiple of it. count=64 alone is exactly N whole SIMD
+    # vectors on every level we accept here, so it exercises ONLY the aligned
+    # chunk path and can never observe a tail defect — an unfilled remainder or
+    # a write past the end. These counts cover: below one vector (3), a
+    # non-multiple straddling several vectors (17, 65, 67), and the original
+    # aligned case (64) so previous coverage is retained rather than replaced.
+    val counts: [i64] = [3, 17, 64, 65, 67]
 
-    var fill_exact = native_fill.len() == count
-    i = 0
-    while i < count:
-        if native_fill[i.to_i32()] != ref_fill[i.to_i32()]:
+    var fill_exact = true
+    var copy_exact = true
+    var last_fill: [u32] = [0; 1]
+
+    for count in counts:
+        val native_fill = engine2d_simd_fill_row_u32(count, color)
+
+        if native_fill.len() != count:
             fill_exact = false
-        i = i + 1
+            continue
 
-    val native_copy = engine2d_simd_copy_row_u32(native_fill)
-    var copy_exact = native_copy.len() == native_fill.len()
-    i = 0
-    while i < native_fill.len():
-        if native_copy[i.to_i32()] != native_fill[i.to_i32()]:
+        var i: i64 = 0
+        while i < count:
+            if native_fill[i.to_i32()] != color:
+                fill_exact = false
+            i = i + 1
+
+        val native_copy = engine2d_simd_copy_row_u32(native_fill)
+        if native_copy.len() != native_fill.len():
             copy_exact = false
-        i = i + 1
+        else:
+            i = 0
+            while i < native_fill.len():
+                if native_copy[i.to_i32()] != native_fill[i.to_i32()]:
+                    copy_exact = false
+                i = i + 1
 
+        last_fill = native_fill
+
+    val native_fill = last_fill
     val hits = engine2d_simd_neon_hits()
     NativeSimdPixelEvidence(
         executed: hits > 0,
@@ -285,7 +326,7 @@ fn cpu_simd_runtime_evidence() -> CpuSimdRuntimeEvidence:
     val feature = level.feature_text()
     val before = simd_hit_counts()
 
-    var pixels: [u32] = [0u32; 16]
+    var pixels: [u32] = [0; 16]
     var copy_src: [u32] = [0xFF112233; 16]
     var alpha_src: [u32] = [0x804488CC; 16]
     fill_span(pixels, 0, 16, 0xFF102030)
@@ -303,7 +344,14 @@ fn cpu_simd_runtime_evidence() -> CpuSimdRuntimeEvidence:
     val executed_alpha = alpha_delta > 0
     val executed_scroll = scroll_delta > 0
     val native = native_simd_pixel_evidence()
-    val reason = if feature == "scalar":
+    # Honesty gate: a forced foreign ISA (SIMPLE_2D_SIMD=neon on x86 etc.)
+    # must never masquerade as that ISA actually executing. Compare the
+    # forced/reported level against the REAL host ISA and disclose.
+    val host = host_simd_level()
+    val forced_mismatch = level != host and _forced_simd_level(simd_config_mode()) != SimdLevel.None_
+    val host_arch = host.arch_text()
+    val host_feature = host.feature_text()
+    val base_reason = if feature == "scalar":
         "runtime reported scalar fallback; SIMD feature unavailable"
     else if native.executed and native.bit_exact:
         "native SIMD kernels executed (hits={native.hits}) and matched scalar bit-for-bit"
@@ -311,13 +359,18 @@ fn cpu_simd_runtime_evidence() -> CpuSimdRuntimeEvidence:
         "native SIMD kernels executed but diverged from scalar reference"
     else:
         "SIMD feature reported but native kernels did not take the vectorized path"
+    val reason = if forced_mismatch:
+        "{base_reason}; DISCLOSURE: SIMPLE_2D_SIMD forced '{feature}' but this host executes {host_feature} ({host_arch}) — forced ISA did NOT run"
+    else:
+        base_reason
+    # *_available report the REAL host capability, never the forced label.
     CpuSimdRuntimeEvidence(
         arch: arch,
         feature: feature,
         level: level.to_text(),
-        x86_available: arch == "x86_64" and (feature == "sse42" or feature == "avx2"),
-        arm_available: arch == "aarch64" and feature == "neon",
-        riscv_available: arch == "riscv64" and feature == "rvv",
+        x86_available: host_arch == "x86_64" and (host_feature == "sse42" or host_feature == "avx2"),
+        arm_available: host_arch == "aarch64" and host_feature == "neon",
+        riscv_available: host_arch == "riscv64" and host_feature == "rvv",
         executed_fill: executed_fill,
         executed_copy: executed_copy,
         executed_alpha: executed_alpha,
@@ -333,11 +386,13 @@ fn cpu_simd_runtime_evidence() -> CpuSimdRuntimeEvidence:
 # ============================================================================
 # Native-SIMD routing gate
 #
-# When the host has real SIMD (NEON on aarch64), the hot fill/blend rows route
+# When the host has real SIMD (aarch64 NEON or x86 SSE2/AVX2-capable runtime),
+# the hot fill/blend rows route
 # through the C-backed `rt_engine2d_simd_*_row_u32` kernels (runtime_simd_dispatch.c,
-# NEON/AVX2/scalar) so the live CPU-SIMD render path genuinely executes vector
-# code rather than a scalar loop. Output is bit-identical to the scalar path
-# (the C blend uses the same truncating /255 floor; verified exhaustively).
+# NEON/AVX2/RVV/scalar today) so the live CPU-SIMD render path uses the native row
+# ABI only where the row ABI is proven safe. Output is bit-identical to the
+# scalar path (the C blend uses the same truncating /255 floor; verified
+# exhaustively).
 #
 # Interpreter note: a `[u32]` framebuffer is a boxed array here, so the native
 # row is built/blended with NEON and then copied into the framebuffer element-
@@ -346,8 +401,11 @@ fn cpu_simd_runtime_evidence() -> CpuSimdRuntimeEvidence:
 # packed i64 and the same kernels run over it. (blit/scroll stay pure-Simple
 # scalar: they are in-place sub-range copies that a return-style row kernel
 # can't express without extra marshalling, and they were never Rust-backed.)
-var _neon_rows_cached: bool = false
-var _neon_rows_detected: bool = false
+#
+# Native and scalar rows use the same straight-alpha source-over formula,
+# including transparent and translucent destinations.
+var _native_rows_cached: bool = false
+var _native_rows_detected: bool = false
 
 use std.io_runtime.{env_get}
 
@@ -402,19 +460,23 @@ fn _write_span_bulk(mut dst: any, src: any, dst_off: i64, src_off: i64, count: i
 pub fn simd_fill_row(mut buf: [u32], offset: i64, count: i64, color: u32):
     if count <= 0:
         return
-    if native_pixel_rows_enabled():
-        val row = engine2d_simd_fill_row_u32(count, color)
-        if row.len() == count:
-            # One bulk scatter instead of `count` element stores.
-            _write_span_bulk(buf, row, offset, 0, count)
-            return
+    # No native branch, deliberately (2026-08-20). A fill broadcasts a CONSTANT,
+    # so the native row round trip -- extern call, a fresh `count`-element malloc
+    # in C, `count` boxed stores, then a `count`-element write_span back -- is
+    # ~3x the memory traffic of the scalar store loop it replaces and can never
+    # win. Measured on the same harness (640-px span, 400 iters, 7 fresh procs):
+    # native p50 7 ms vs scalar p50 0 ms. See
+    # doc/08_tracking/bug/engine2d_simd_span_kernels_slower_and_fill_colour_corrupt_2026-08-06.md
+    # section 1. `engine2d_simd_fill_row_u32` stays exported and directly tested;
+    # it is only unfit as the row-fill strategy. copy/blit keep their native
+    # paths -- those are real wins (0 ms vs 13 ms).
     _scalar_fill_row(buf, offset, count, color)
 
-pub fn _scalar_fill_row(mut buf: any, offset: i64, count: i64, color: u32):
+pub fn _scalar_fill_row(mut buf: [u32], offset: i64, count: i64, color: i64):
     var i: i64 = 0
     while i < count:
         val idx = (offset + i).to_i32()
-        buf[idx] = color
+        buf[idx] = color as u32
         i = i + 1
 
 # ============================================================================
@@ -425,21 +487,32 @@ pub fn simd_blend_row(mut dst: any, src: [u32], offset: i64, count: i64):
     if count <= 0:
         return
     if native_pixel_rows_enabled():
-        # Gather aligned dst/src rows, src-over blend via the native row kernel,
-        # scatter back. Bit-identical to _scalar_blend_row (same floor /255).
+        # Gather dst into an aligned row, blend IN PLACE via the span kernel,
+        # scatter back. Bit-identical to _scalar_blend_row (same floor /255):
+        # the span kernel's sa==255 / sa==0 / opaque-dst fast paths reduce to
+        # exactly the branches below, and its general case is the same
+        # engine2d_blend_pixel the row kernel used.
+        #
+        # 2026-08-20: was `engine2d_simd_blend_row_u32(dst_row, src_row)`, which
+        # needed a second `src_row` gather (blend_row takes no offsets) and made
+        # C malloc TWO scratch buffers and unbox/rebox every pixel into them.
+        # `blend_span` takes a src offset, so `src` is read in place -- one less
+        # allocation and one less write_span here, zero mallocs and no scratch
+        # round trip in C.
         val n = count.to_i32()
         var dst_row: [u32] = [0; n]
-        var src_row: [u32] = [0; n]
-        # Bulk gather + bulk scatter (three write_span calls) instead of
-        # 3*count element ops. Output identical to the element loops.
         _write_span_bulk(dst_row, dst, 0, offset, count)
-        _write_span_bulk(src_row, src, 0, offset, count)
-        val blended_i = engine2d_simd_blend_row_u32(dst_row, src_row)
+        val blended_i = rt_engine2d_simd_blend_span_u32(dst_row, 0, src, offset, count)
         _write_span_bulk(dst, blended_i, offset, 0, count)
         return
     _scalar_blend_row(dst, src, offset, count)
 
 pub fn _scalar_blend_row(mut dst: any, src: [u32], offset: i64, count: i64):
+    # Porter-Duff src-over on straight (non-premultiplied) alpha, matching
+    # std.gpu.engine2d.color.blend. Composite in premultiplied space and
+    # unpremultiply by the resulting output alpha so a transparent dst pixel
+    # (da=0) yields outA=sa/outRGB=srcRGB instead of the old hardcoded-opaque,
+    # darkened-toward-gray result. Opaque dst (da=255) is unaffected.
     var i: i64 = 0
     while i < count:
         val idx = (offset + i).to_i32()
@@ -463,10 +536,12 @@ pub fn _scalar_blend_row(mut dst: any, src: [u32], offset: i64, count: i64):
             val sr = (s >> 16) & 0xFF
             val sg = (s >> 8) & 0xFF
             val sb = s & 0xFF
-            val r = (sr * sa + dr * inv_a) / 255
-            val g = (sg * sa + dg * inv_a) / 255
-            val b = (sb * sa + db * inv_a) / 255
-            dst[idx] = (255 << 24) | (r << 16) | (g << 8) | b
+            val dst_weight = (da * inv_a) / 255
+            val out_a = sa + dst_weight
+            val r = (sr * sa + dr * dst_weight) / out_a
+            val g = (sg * sa + dg * dst_weight) / out_a
+            val b = (sb * sa + db * dst_weight) / out_a
+            dst[idx] = (out_a << 24) | (r << 16) | (g << 8) | b
         i = i + 1
 
 # ============================================================================
@@ -496,14 +571,14 @@ pub fn _scalar_blit_row(mut dst: any, dst_offset: i64, src: [u32], src_offset: i
 # fill_span — solid color fill across a span, with hit-count tracking
 # ============================================================================
 
-pub fn fill_span(mut buf: any, offset: i64, count: i64, color: u32):
+pub fn fill_span(mut buf: [u32], offset: i64, count: i64, color: u32):
     """Fill buf[offset..offset+count] with color. Increments fill_hits."""
     if count <= 0:
         return
     record_simd_fill_hit()
     simd_fill_row(buf, offset, count, color)
 
-pub fn _scalar_fill_span(mut buf: any, offset: i64, count: i64, color: u32):
+pub fn _scalar_fill_span(mut buf: [u32], offset: i64, count: i64, color: u32):
     """Scalar reference path for parity testing (identical output to SIMD)."""
     _scalar_fill_row(buf, offset, count, color)
 

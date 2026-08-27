@@ -11,6 +11,8 @@
 #   0x04: Legacy IPI extension (deprecated, single hart_mask_ptr arg)
 #   CLINT MSIP fallback: MMIO write to 0x02000000 + 4*hartid
 
+use std.nogc_async_mut_noalloc.baremetal.mmio.{mmio_write_u32}
+
 # ============================================================================
 # SBI Error Codes
 # ============================================================================
@@ -66,7 +68,7 @@ fn sbi_ecall(ext: u64, fid: u64, arg0: u64, arg1: u64, arg2: u64,
 
 fn sbi_probe_extension(ext_id: u64) -> bool:
     val ret = sbi_ecall(SBI_EXT_BASE, 3, ext_id, 0, 0, 0, 0, 0)
-    ret.value != 0
+    ret.error == SBI_IPI_SUCCESS and ret.value != 0
 
 # ============================================================================
 # IPI path initialisation (call once at boot)
@@ -101,15 +103,11 @@ fn sbi_send_ipi_legacy(hart_mask_ptr: u64) -> SbiResult:
 # CLINT MSIP MMIO fallback
 # ============================================================================
 
-fn clint_send_ipi_to_hart(hartid: u32):
+fn clint_send_ipi_to_hart(hartid: u64):
     """Write MSIP bit for hartid via CLINT MMIO (0x02000000 + 4*hartid)."""
     if hartid > (0xffffffffffffffff - CLINT_MSIP_BASE) / 4u64: return
     val addr = CLINT_MSIP_BASE + 4u64 * hartid
-    rt_mmio_write_u32(addr, 1u32)
-
-fn sbi_ipi_absolute_hart(hart_mask_base: u64, bit: u32) -> (bool, u64):
-    if bit >= 64u32 or hart_mask_base > 0xffffffffffffffff - bit as u64: return (false, 0u64)
-    (true, hart_mask_base + bit as u64)
+    mmio_write_u32(addr, 1u32)
 
 fn sbi_ipi_absolute_hart(hart_mask_base: u64, bit: u32) -> (bool, u64):
     if bit >= 64u32 or hart_mask_base > 0xffffffffffffffff - bit as u64: return (false, 0u64)
@@ -129,7 +127,10 @@ fn sbi_probe_then_send_ipi(hart_mask: u64, hart_mask_base: u64):
         # A one-word legacy mask can address only harts 0..63. Preserve that
         # ABI for base zero; sparse windows fall back to absolute CLINT targets.
         if hart_mask_base == 0u64:
-            sbi_send_ipi_legacy(hart_mask)
+            var legacy_mask = hart_mask
+            val legacy_mask_ptr = unsafe(capabilities: [raw_ptr]):
+                (&legacy_mask) as u64
+            sbi_send_ipi_legacy(legacy_mask_ptr)
         else:
             var legacy_bit: u32 = 0u32
             var legacy_mask = hart_mask
@@ -140,11 +141,12 @@ fn sbi_probe_then_send_ipi(hart_mask: u64, hart_mask_base: u64):
                 legacy_mask = legacy_mask >> 1u64
                 legacy_bit = legacy_bit + 1u32
     else:
-        # ClintMmio: iterate set bits in hart_mask
+        # CLINT uses absolute hart IDs; its MMIO owner rejects address overflow.
         var bit: u32 = 0
         var mask = hart_mask
-        while bit < 64u32:
+        while mask != 0u64:
             if mask & 1u64 != 0u64:
-                clint_send_ipi_to_hart(bit)
+                val target = sbi_ipi_absolute_hart(hart_mask_base, bit)
+                if target.0: clint_send_ipi_to_hart(target.1)
             mask = mask >> 1u64
             bit = bit + 1u32

@@ -2,8 +2,25 @@
 # support owner; this module deliberately has no graph dependency.
 
 use compiler.hir.hir_types.{SymbolId}
-use compiler.mir.mir_types.*
-use compiler.mir.mir_instruction_support.*
+use compiler.mir.mir_types.{
+    LocalId, LocalKind, MirLocal,
+    MirTypeKind, MirType, MirSignature, MirConstValue, MirTypeDef
+}
+use compiler.mir.mir_instruction_support.{
+    BlockId,
+    GpuBarrierScope, GpuMemoryScope, GpuAtomicOpKind,
+    VhdlProcessKind, VhdlClockDomain, VhdlClockEdge,
+    vhdl_clock_domain_name_from_metadata, vhdl_clock_domain_from_metadata,
+    VhdlSignalKind, VhdlPortDirection, VhdlSignalResolution, VhdlNumericKind,
+    MirBorrowKind, MirProjection, MirPlace,
+    MirExecutionDomain, MirTransferMode, MirTransferPayload,
+    mir_transfer_mode_consumes_source,
+    MirBinOp, MirUnaryOp, AggregateKind,
+    MirOperand, MirOperandKind,
+    mir_operand_copy, mir_operand_move, mir_operand_const_int,
+    mir_operand_const_float, mir_operand_const_bool,
+    SwitchCase, MirAsmOperand, MirTerminator
+}
 
 """MIR instruction kind."""
 enum MirInstKind:
@@ -61,11 +78,6 @@ enum MirInstKind:
 
     # Aggregates
     Aggregate(dest: LocalId, kind: AggregateKind, operands: [MirOperand])
-    # Defensive copy of an ordinary by-value struct parameter. Every nested
-    # value-struct rebuild uses this opcode so backends allocate it from the
-    # invocation copy scope. Ordinary copies, including return copy-out,
-    # remain `Aggregate`.
-    AggregateCopyScoped(dest: LocalId, symbol: SymbolId, operands: [MirOperand])
     GetField(dest: LocalId, base: MirOperand, field: i64)
     SetField(base: MirOperand, field: i64, value: MirOperand)
 
@@ -91,45 +103,6 @@ enum MirInstKind:
     Call(dest: LocalId?, func: MirOperand, args: [MirOperand])
     CallIndirect(dest: LocalId?, ptr: MirOperand, args: [MirOperand], sig: MirSignature)
 
-    # Sealed compiler provenance for a resolved direct call to one of the
-    # canonical EnvAccessPlan executors.  This is deliberately *not* a
-    # callable name, path, or runtime capability: `executor_kind` is assigned
-    # only after HIR resolution has proved the exact defining-module/symbol
-    # identity.  It is adjacent to its Call solely for the RT/HAL boundary
-    # transform, and is removed with the other cold RT/HAL metadata before a
-    # generic interpreter/native backend can observe it.
-    #
-    # Invariant: marker -> Call is inseparable; a marker without its immediate
-    # following direct Call is rejected/ignored fail-closed by the boundary
-    # transform.  Same-name user calls and function-value aliases never emit
-    # this node.
-    RtHalEnvExecutorProvenance(provenance_id: i64, executor_kind: i64, executor_symbol: i64,
-        expected_callee: MirOperand, plan: MirOperand)
-
-    # Typed RT/HAL V2 terminal observation. Backends own byte materialisation;
-    # this MIR node retains the source operand and exact type identity.
-    RtHalExitCapture(operation_id: text, compare_c: bool, compare_rust: bool,
-        exit_kind: i64, value: MirOperand?, value_type: MirType,
-        descriptor: text, schema_id: i64, output_type_id: i64,
-        error_type_id: i64, effect_type_id: i64,
-        codec_plan: RtHalExitCodecPlan, codec_ops: [RtHalExitCodecPlan])
-    RtHalExitTypeRegister(descriptor: text, lane0: i64, lane1: i64,
-        lane2: i64, lane3: i64, encoding_code: i64)
-    RtHalExitSchemaRegister(schema_id: i64,
-        output_descriptor: text, output_lane0: i64, output_lane1: i64,
-        output_lane2: i64, output_lane3: i64, output_encoding: i64,
-        error_descriptor: text, error_lane0: i64, error_lane1: i64,
-        error_lane2: i64, error_lane3: i64, error_encoding: i64,
-        effect_descriptor: text, effect_lane0: i64, effect_lane1: i64,
-        effect_lane2: i64, effect_lane3: i64, effect_encoding: i64)
-    RtHalExitSchemaSeal
-    # Executable typed exit-arena writer operations. Each carries a MIR value,
-    # never an aggregate address or target-layout byte view.
-    RtHalExitArenaBegin(dest: LocalId, schema_id: i64, kind_code: i64)
-    RtHalExitArenaWriteScalar(token: LocalId, value: MirOperand, encoding_code: i64, width_bits: i64)
-    RtHalExitArenaWriteUtf8Text(token: LocalId, value: MirOperand, max_bytes: i64)
-    RtHalExitArenaFinish(token: LocalId)
-
     # Intrinsics
     Intrinsic(dest: LocalId?, name: text, args: [MirOperand])
 
@@ -143,40 +116,12 @@ enum MirInstKind:
     DecisionProbe(
         runtime_id: i64,
         semantic_id: text,
-        source_digest: i64,
-        condition_count: i64,
-        evaluated_mask: MirOperand,
-        true_mask: MirOperand,
         result: MirOperand,
         authored_path: text,
         line: i64,
         column: i64
     )
     ConditionProbe(
-        runtime_id: i64,
-        semantic_id: text,
-        parent_runtime_id: i64,
-        parent_semantic_id: text,
-        result: MirOperand,
-        authored_path: text,
-        line: i64,
-        column: i64
-    )
-    # Dynamic-mode equivalents are distinct opcodes so no backend can
-    # accidentally lower an idle patchpoint as an unconditional direct call.
-    DynamicDecisionProbe(
-        runtime_id: i64,
-        semantic_id: text,
-        source_digest: i64,
-        condition_count: i64,
-        evaluated_mask: MirOperand,
-        true_mask: MirOperand,
-        result: MirOperand,
-        authored_path: text,
-        line: i64,
-        column: i64
-    )
-    DynamicConditionProbe(
         runtime_id: i64,
         semantic_id: text,
         parent_runtime_id: i64,
@@ -405,5 +350,10 @@ enum MirInstKind:
 
     # Warp-level barrier / sync with mask
     MirWarpSync(mask: MirOperand)
+
+    # Address of module-owned static storage. Appended to preserve every
+    # pre-existing serialized enum discriminant. Backends must diagnose this
+    # variant until their dedicated lowering lane is admitted.
+    GlobalAddr(dest: LocalId, symbol: SymbolId, mutable: bool)
 
 export MirInstKind

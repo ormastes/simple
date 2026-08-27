@@ -56,6 +56,12 @@ fn rex_wb(rm: i64) -> i64:
         rx = rx + 1  # REX.B
     rx
 
+fn rex_rb32(reg: i64, rm: i64) -> i64:
+    var rx = 0x40
+    if reg >= 8: rx = rx + 4
+    if rm >= 8: rx = rx + 1
+    rx
+
 fn modrm(md: i64, reg: i64, rm: i64) -> i64:
     ((md % 4) * 64) + ((reg_low3(reg)) * 8) + reg_low3(rm)
 
@@ -143,7 +149,7 @@ fn encode_function(func: MachFunction) -> EncodedFunction:
     for block in func.blocks:
         # Record block offset
         var offsets = ectx.block_offsets
-        offsets[block.block_id] = ectx.code_len(code)
+        offsets[block.block_id] = ectx.code.len()
         ectx = EncodeContext(code: ectx.code, relocations: ectx.relocations, block_offsets: offsets, pending_jumps: ectx.pending_jumps)
 
         for inst in block.insts:
@@ -152,7 +158,7 @@ fn encode_function(func: MachFunction) -> EncodedFunction:
     # Second pass: patch jump targets
     for pending in ectx.pending_jumps:
         val target_block = pending.target_block
-        if ectx.block_offsets_contains(block_offsets, target_block):
+        if ectx.block_offsets.contains(target_block):
             val target_offset = ectx.block_offsets[target_block]
             val jump_end = pending.code_offset + 4
             val rel32 = target_offset - jump_end
@@ -254,19 +260,115 @@ fn encode_inst(ectx: EncodeContext, inst: MachInst) -> EncodeContext:
 
     elif inst.opcode == X86_OP_MOV_REG_MEM:
         val dst = get_phys_reg_id(inst.operands[0])
-        val base = get_mem_base_id(inst.operands[1])
-        val offset = get_mem_offset(inst.operands[1])
-        code.push(rex_wrb(dst, base))
-        code.push(0x8b)
-        code = encode_mem_operand(code, dst, base, offset)
+        match inst.operands[1].kind:
+            case Sym(name):
+                code.push(rex_wr(dst))
+                code.push(0x8b)
+                code.push(modrm(0, dst, 5))
+                relocs.push(EncodedReloc(offset: code.len(), symbol_name: name, reloc_type: 2, addend: -4))
+                code = emit_i32(code, 0)
+            case _:
+                val base = get_mem_base_id(inst.operands[1])
+                val offset = get_mem_offset(inst.operands[1])
+                code.push(rex_wrb(dst, base))
+                code.push(0x8b)
+                code = encode_mem_operand(code, dst, base, offset)
 
     elif inst.opcode == X86_OP_MOV_MEM_REG:
-        val base = get_mem_base_id(inst.operands[0])
-        val offset = get_mem_offset(inst.operands[0])
         val src = get_phys_reg_id(inst.operands[1])
-        code.push(rex_wrb(src, base))
-        code.push(0x89)
-        code = encode_mem_operand(code, src, base, offset)
+        match inst.operands[0].kind:
+            case Sym(name):
+                code.push(rex_wr(src))
+                code.push(0x89)
+                code.push(modrm(0, src, 5))
+                relocs.push(EncodedReloc(offset: code.len(), symbol_name: name, reloc_type: 2, addend: -4))
+                code = emit_i32(code, 0)
+            case _:
+                val base = get_mem_base_id(inst.operands[0])
+                val offset = get_mem_offset(inst.operands[0])
+                code.push(rex_wrb(src, base))
+                code.push(0x89)
+                code = encode_mem_operand(code, src, base, offset)
+
+    elif inst.opcode == X86_OP_MOVZX_REG_MEM8 or inst.opcode == X86_OP_MOVZX_REG_MEM16:
+        val dst = get_phys_reg_id(inst.operands[0])
+        match inst.operands[1].kind:
+            case Sym(name):
+                code.push(rex_wr(dst))
+                code.push(0x0f)
+                if inst.opcode == X86_OP_MOVZX_REG_MEM8: code.push(0xb6)
+                else: code.push(0xb7)
+                code.push(modrm(0, dst, 5))
+                relocs.push(EncodedReloc(offset: code.len(), symbol_name: name, reloc_type: 2, addend: -4))
+                code = emit_i32(code, 0)
+            case _:
+                val base = get_mem_base_id(inst.operands[1])
+                val offset = get_mem_offset(inst.operands[1])
+                code.push(rex_wrb(dst, base))
+                code.push(0x0f)
+                if inst.opcode == X86_OP_MOVZX_REG_MEM8: code.push(0xb6)
+                else: code.push(0xb7)
+                code = encode_mem_operand(code, dst, base, offset)
+
+    elif inst.opcode == X86_OP_MOV_REG_MEM32:
+        val dst = get_phys_reg_id(inst.operands[0])
+        match inst.operands[1].kind:
+            case Sym(name):
+                code.push(rex_rb32(dst, 5))
+                code.push(0x8b)
+                code.push(modrm(0, dst, 5))
+                relocs.push(EncodedReloc(offset: code.len(), symbol_name: name, reloc_type: 2, addend: -4))
+                code = emit_i32(code, 0)
+            case _:
+                val base = get_mem_base_id(inst.operands[1])
+                val offset = get_mem_offset(inst.operands[1])
+                code.push(rex_rb32(dst, base))
+                code.push(0x8b)
+                code = encode_mem_operand(code, dst, base, offset)
+
+    elif inst.opcode == X86_OP_MOVSX_REG_MEM8 or inst.opcode == X86_OP_MOVSX_REG_MEM16 or inst.opcode == X86_OP_MOVSX_REG_MEM32:
+        val dst = get_phys_reg_id(inst.operands[0])
+        match inst.operands[1].kind:
+            case Sym(name):
+                code.push(rex_wr(dst))
+                if inst.opcode == X86_OP_MOVSX_REG_MEM32: code.push(0x63)
+                else:
+                    code.push(0x0f)
+                    if inst.opcode == X86_OP_MOVSX_REG_MEM8: code.push(0xbe)
+                    else: code.push(0xbf)
+                code.push(modrm(0, dst, 5))
+                relocs.push(EncodedReloc(offset: code.len(), symbol_name: name, reloc_type: 2, addend: -4))
+                code = emit_i32(code, 0)
+            case _:
+                val base = get_mem_base_id(inst.operands[1])
+                val offset = get_mem_offset(inst.operands[1])
+                code.push(rex_wrb(dst, base))
+                if inst.opcode == X86_OP_MOVSX_REG_MEM32: code.push(0x63)
+                else:
+                    code.push(0x0f)
+                    if inst.opcode == X86_OP_MOVSX_REG_MEM8: code.push(0xbe)
+                    else: code.push(0xbf)
+                code = encode_mem_operand(code, dst, base, offset)
+
+    elif inst.opcode == X86_OP_MOV_MEM8_REG or inst.opcode == X86_OP_MOV_MEM16_REG or inst.opcode == X86_OP_MOV_MEM32_REG:
+        val src = get_phys_reg_id(inst.operands[1])
+        match inst.operands[0].kind:
+            case Sym(name):
+                if inst.opcode == X86_OP_MOV_MEM16_REG: code.push(0x66)
+                code.push(rex_rb32(src, 5))
+                if inst.opcode == X86_OP_MOV_MEM8_REG: code.push(0x88)
+                else: code.push(0x89)
+                code.push(modrm(0, src, 5))
+                relocs.push(EncodedReloc(offset: code.len(), symbol_name: name, reloc_type: 2, addend: -4))
+                code = emit_i32(code, 0)
+            case _:
+                val base = get_mem_base_id(inst.operands[0])
+                val offset = get_mem_offset(inst.operands[0])
+                if inst.opcode == X86_OP_MOV_MEM16_REG: code.push(0x66)
+                code.push(rex_rb32(src, base))
+                if inst.opcode == X86_OP_MOV_MEM8_REG: code.push(0x88)
+                else: code.push(0x89)
+                code = encode_mem_operand(code, src, base, offset)
 
     elif inst.opcode == X86_OP_ADD:
         val dst = get_phys_reg_id(inst.operands[0])
@@ -450,7 +552,7 @@ fn encode_inst(ectx: EncodeContext, inst: MachInst) -> EncodeContext:
                 code.push(modrm(0, dst, 5))  # [rip+disp32]
                 # Record relocation
                 val reloc = EncodedReloc(
-                    offset: code_len(code),
+                    offset: code.len(),
                     symbol_name: name,
                     reloc_type: 2,  # R_X86_64_PC32
                     addend: -4
@@ -481,7 +583,7 @@ fn encode_inst(ectx: EncodeContext, inst: MachInst) -> EncodeContext:
         match inst.operands[0].kind:
             case Label(block_id):
                 code.push(0xe9)  # JMP rel32
-                val jump_offset = code_len(code)
+                val jump_offset = code.len()
                 code = emit_i32(code, 0)  # Placeholder
                 pending.push(PendingJump(code_offset: jump_offset, target_block: block_id, is_conditional: false))
             case _:
@@ -491,7 +593,7 @@ fn encode_inst(ectx: EncodeContext, inst: MachInst) -> EncodeContext:
         val block_id = get_label_id(inst.operands[0])
         code.push(0x0f)
         code.push(0x84)  # JE rel32
-        val jump_offset = code_len(code)
+        val jump_offset = code.len()
         code = emit_i32(code, 0)
         pending.push(PendingJump(code_offset: jump_offset, target_block: block_id, is_conditional: true))
 
@@ -499,7 +601,7 @@ fn encode_inst(ectx: EncodeContext, inst: MachInst) -> EncodeContext:
         val block_id = get_label_id(inst.operands[0])
         code.push(0x0f)
         code.push(0x85)  # JNE rel32
-        val jump_offset = code_len(code)
+        val jump_offset = code.len()
         code = emit_i32(code, 0)
         pending.push(PendingJump(code_offset: jump_offset, target_block: block_id, is_conditional: true))
 
@@ -507,7 +609,7 @@ fn encode_inst(ectx: EncodeContext, inst: MachInst) -> EncodeContext:
         val block_id = get_label_id(inst.operands[0])
         code.push(0x0f)
         code.push(0x85)  # JNZ = JNE rel32
-        val jump_offset = code_len(code)
+        val jump_offset = code.len()
         code = emit_i32(code, 0)
         pending.push(PendingJump(code_offset: jump_offset, target_block: block_id, is_conditional: true))
 
@@ -515,7 +617,7 @@ fn encode_inst(ectx: EncodeContext, inst: MachInst) -> EncodeContext:
         val block_id = get_label_id(inst.operands[0])
         code.push(0x0f)
         code.push(0x84)  # JZ = JE rel32
-        val jump_offset = code_len(code)
+        val jump_offset = code.len()
         code = emit_i32(code, 0)
         pending.push(PendingJump(code_offset: jump_offset, target_block: block_id, is_conditional: true))
 
@@ -524,7 +626,7 @@ fn encode_inst(ectx: EncodeContext, inst: MachInst) -> EncodeContext:
             case Sym(name):
                 code.push(0xe8)  # CALL rel32
                 val reloc = EncodedReloc(
-                    offset: code_len(code),
+                    offset: code.len(),
                     symbol_name: name,
                     reloc_type: 4,  # R_X86_64_PLT32
                     addend: -4
@@ -533,7 +635,7 @@ fn encode_inst(ectx: EncodeContext, inst: MachInst) -> EncodeContext:
                 code = emit_i32(code, 0)  # Placeholder
             case Label(block_id):
                 code.push(0xe8)
-                val jump_offset = code_len(code)
+                val jump_offset = code.len()
                 code = emit_i32(code, 0)
                 pending.push(PendingJump(code_offset: jump_offset, target_block: block_id, is_conditional: false))
             case _:

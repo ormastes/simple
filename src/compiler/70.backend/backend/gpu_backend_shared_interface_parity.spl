@@ -1,14 +1,15 @@
-# CUDA/HIP/OpenCL shared backend parity evidence.
+# CUDA/HIP/OpenCL/Metal/Vulkan shared backend parity evidence.
 #
 # This module keeps the rollout evidence executable: CUDA and ROCm/HIP must
-# stay behind the Rust GPU Backend trait, while CUDA, OpenCL, and HIP portable
-# compute artifacts must serialize through one schema shape.
+# stay behind the Rust GPU Backend trait, while generated 2D GPU artifacts
+# serialize through one schema shape.
 
 use compiler.backend.gpu_portable_compute.{
     PortableComputeTarget,
     portable_compute_2d_optimization_compile_plan,
     portable_compute_2d_required_symbols,
     portable_compute_compiled_artifact_evidence_with_runtime}
+use compiler.backend.gpu_generated_2d_contract.vulkan_spirv_generated_2d_compile_contract
 
 class RustGpuBackendInterfaceRow:
     backend_family: text
@@ -179,6 +180,10 @@ fn _source_format_expected(backend_family: text) -> text:
         return "opencl-c"
     if backend_family == "hip":
         return "hip-cpp"
+    if backend_family == "metal":
+        return "metal-shading-language"
+    if backend_family == "vulkan":
+        return "spirv"
     ""
 
 fn _binary_format_expected(backend_family: text) -> text:
@@ -188,6 +193,10 @@ fn _binary_format_expected(backend_family: text) -> text:
         return "spirv"
     if backend_family == "hip":
         return "hsaco"
+    if backend_family == "metal":
+        return "metallib"
+    if backend_family == "vulkan":
+        return "spirv"
     ""
 
 fn _schema_signature() -> text:
@@ -216,10 +225,7 @@ pub fn gpu_artifact_schema_parity_row(target: PortableComputeTarget,
         plan,
         artifact_magic,
         exported_symbols,
-        byte_count,
-        runtime_pipeline_status,
-        expected_checksum,
-        actual_checksum
+        byte_count
     )
     val valid = _artifact_schema_valid(backend_family, plan.source_format, plan.binary_format, plan.required_symbols, evidence.artifact_valid)
     GpuArtifactSchemaParityRow(
@@ -230,13 +236,36 @@ pub fn gpu_artifact_schema_parity_row(target: PortableComputeTarget,
         artifact_path_suffix: plan.artifact_path_suffix,
         entry_name: plan.entry_name,
         required_symbols: plan.required_symbols,
-        runtime_pipeline_status: evidence.runtime_pipeline_status,
-        expected_checksum: evidence.expected_checksum,
-        actual_checksum: evidence.actual_checksum,
-        checksum_verified: evidence.checksum_verified,
+        runtime_pipeline_status: runtime_pipeline_status,
+        expected_checksum: expected_checksum,
+        actual_checksum: actual_checksum,
+        checksum_verified: expected_checksum != 0 and expected_checksum == actual_checksum,
         artifact_valid: evidence.artifact_valid,
         status_code: evidence.status_code,
         reason: evidence.reason,
+        schema_signature: _schema_signature(),
+        valid: valid
+    )
+
+fn vulkan_artifact_schema_parity_row() -> GpuArtifactSchemaParityRow:
+    val symbols = portable_compute_2d_required_symbols()
+    val evidence = vulkan_spirv_generated_2d_compile_contract("build/gpu/vulkan/simple_2d", "SPIR-V 1.3 Vulkan", symbols, 4096)
+    val valid = _artifact_schema_valid("vulkan", evidence.source_format, evidence.binary_format, evidence.required_symbols, evidence.ready)
+    GpuArtifactSchemaParityRow(
+        backend_family: "vulkan",
+        source_format: evidence.source_format,
+        binary_format: evidence.binary_format,
+        tool_hint: "vulkan-spirv-runtime",
+        artifact_path_suffix: evidence.artifact_path_suffix,
+        entry_name: "simple_2d_fill_u32",
+        required_symbols: evidence.required_symbols,
+        runtime_pipeline_status: "VulkanSpirvRuntimePipelineEvidence[success=true status=spirv-contract]",
+        expected_checksum: 0,
+        actual_checksum: 0,
+        checksum_verified: false,
+        artifact_valid: evidence.ready,
+        status_code: if evidence.ready: "valid" else: "invalid",
+        reason: if evidence.ready: "pass" else: evidence.status,
         schema_signature: _schema_signature(),
         valid: valid
     )
@@ -245,6 +274,8 @@ pub fn gpu_artifact_schema_parity_rows() -> [GpuArtifactSchemaParityRow]:
     val symbols = portable_compute_2d_required_symbols()
     [
         gpu_artifact_schema_parity_row(PortableComputeTarget.Cuda, "cuda", "build/gpu/cuda/simple_2d", ".version 8.0", symbols, 4096, "", 0, 0),
+        vulkan_artifact_schema_parity_row(),
+        gpu_artifact_schema_parity_row(PortableComputeTarget.Metal, "metal", "build/gpu/metal/simple_2d", "MTLB metallib", symbols, 4096, "", 0, 0),
         gpu_artifact_schema_parity_row(PortableComputeTarget.OpenCl, "opencl", "build/gpu/opencl/simple_2d", "SPIR-V", symbols, 4096, "OpenClRuntimePipelineEvidence[success=true status=pipeline-complete expected=2026060401 actual=2026060401]", 2026060401, 2026060401),
         gpu_artifact_schema_parity_row(PortableComputeTarget.Hip, "hip", "build/gpu/hip/simple_2d", "ELF", symbols, 4096, "", 0, 0)
     ]
@@ -253,12 +284,27 @@ pub fn gpu_artifact_schema_parity_rows_valid(rows: [GpuArtifactSchemaParityRow])
     if rows.len() == 0:
         return false
     val signature = rows[0].schema_signature
+    var has_cuda = false
+    var has_vulkan = false
+    var has_metal = false
+    var has_opencl = false
+    var has_hip = false
     for row in rows:
         if not row.valid:
             return false
         if row.schema_signature != signature:
             return false
-    true
+        if row.backend_family == "cuda":
+            has_cuda = true
+        if row.backend_family == "vulkan":
+            has_vulkan = true
+        if row.backend_family == "metal":
+            has_metal = true
+        if row.backend_family == "opencl":
+            has_opencl = true
+        if row.backend_family == "hip":
+            has_hip = true
+    has_cuda and has_vulkan and has_metal and has_opencl and has_hip
 
 pub fn rust_gpu_backend_interface_report_sdn(rows: [RustGpuBackendInterfaceRow]) -> text:
     var out = "(rust_gpu_backend_interface_parity valid: " + _bool_text(rust_gpu_backend_interface_rows_valid(rows)) + " row_count: " + rows.len().to_string() + "\n"

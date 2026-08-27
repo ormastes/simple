@@ -4,7 +4,6 @@ use compiler.tools.duplicate_check.config.{DuplicationConfig, default_config}
 use compiler.tools.duplicate_check.detector.{collect_files}
 use compiler.tools.duplicate_check.math_utils.{find_substr}
 use std.nogc_sync_mut.io.file_ops.{file_read}
-use std.nogc_sync_mut.io.process_ops.{shell_output}
 struct DocEntry:
     file_path: text
     line_number: i64
@@ -27,9 +26,7 @@ fn make_doc_entry(file_path: text, line_number: i64, item_name: text, item_kind:
     )
 
 fn extract_docs_from_file(file_path: text) -> [DocEntry]:
-    var content = file_read(file_path) ?? ""
-    if content.len() == 0:
-        content = shell_output("cat '{file_path}' 2>/dev/null || true", "")
+    val content = file_read(file_path) ?? ""
     if content.len() == 0:
         return []
 
@@ -108,65 +105,7 @@ fn extract_docs_from_file(file_path: text) -> [DocEntry]:
 
     entries
 
-fn build_exclude_args(exclude: [text]) -> text:
-    var args = ""
-    for pattern in exclude:
-        if args.len() > 0:
-            args = args + " "
-        args = args + "-not -path \"*/" + pattern + "*\""
-    args
-
-fn extract_docs_batch(path: text, exclude: [text]) -> [DocEntry]:
-    val exclude_args = build_exclude_args(exclude)
-    val sa = "BEGIN { pending=\"\"; in_doc=0; prev_file=\"\" } "
-    val sb = "FILENAME != prev_file { pending=\"\"; in_doc=0; prev_file=FILENAME } "
-    val sc = "in_doc==1 { line=$0; sub(/^[ \\t]+/, \"\", line); if (line ~ /\"\"\"$/) { sub(/\"\"\"$/, \"\", line); sub(/^[ \\t]+/, \"\", line); sub(/[ \\t]+$/, \"\", line); if (length(line)>0) { if (length(pending)>0) pending=pending \" \" line; else pending=line }; in_doc=0; next } else { if (length(line)>0) { if (length(pending)>0) pending=pending \" \" line; else pending=line }; next } } "
-    val sd = "{ line=$0; sub(/^[ \\t]+/, \"\", line); sub(/[ \\t]+$/, \"\", line) } "
-    val se = "line ~ /^#[^!]/ || line == \"#\" { cmt=line; sub(/^#+[ \\t]*/, \"\", cmt); if (length(pending)>0) pending=pending \" \" cmt; else pending=cmt; next } "
-    val sf = "line ~ /^\"\"\"/ { if (line ~ /^\"\"\".*\"\"\"$/ && length(line)>6) { inner=substr(line,4,length(line)-6); sub(/^[ \\t]+/, \"\", inner); sub(/[ \\t]+$/, \"\", inner); if (length(pending)>0) pending=pending \" \" inner; else pending=inner; next } else { rest=substr(line,4); sub(/^[ \\t]+/, \"\", rest); sub(/[ \\t]+$/, \"\", rest); if (length(rest)>0) { if (length(pending)>0) pending=pending \" \" rest; else pending=rest }; in_doc=1; next } } "
-    val sg = "line ~ /^(static )?fn / { name=line; sub(/^static fn /, \"\", name); sub(/^fn /, \"\", name); sub(/[^a-zA-Z0-9_].*/, \"\", name); sig=line; pd=0; for(k=1;k<=length(line);k++) { c=substr(line,k,1); if(c==\"(\") pd++; if(c==\")\") pd--; if(c==\":\" && pd==0) { sig=substr(line,1,k-1); sub(/^[ \\t]+/, \"\", sig); sub(/[ \\t]+$/, \"\", sig); break } }; gsub(/\\t/, \" \", pending); printf \"%s\\t%d\\t%s\\t%s\\t%s\\t%s\\n\", FILENAME, FNR, name, \"fn\", sig, pending; pending=\"\"; next } "
-    val sh_struct = "line ~ /^struct / { name=substr(line, 8); sub(/[^a-zA-Z0-9_].*/, \"\", name); gsub(/\\t/, \" \", pending); printf \"%s\\t%d\\t%s\\t%s\\t%s\\t%s\\n\", FILENAME, FNR, name, \"struct\", line, pending; pending=\"\"; next } "
-    val si = "line ~ /^class / { name=substr(line, 7); sub(/[^a-zA-Z0-9_].*/, \"\", name); gsub(/\\t/, \" \", pending); printf \"%s\\t%d\\t%s\\t%s\\t%s\\t%s\\n\", FILENAME, FNR, name, \"class\", line, pending; pending=\"\"; next } "
-    val sj = "line ~ /^enum / { name=substr(line, 6); sub(/[^a-zA-Z0-9_].*/, \"\", name); gsub(/\\t/, \" \", pending); printf \"%s\\t%d\\t%s\\t%s\\t%s\\t%s\\n\", FILENAME, FNR, name, \"enum\", line, pending; pending=\"\"; next } "
-    val sk = "length(line) > 0 { pending=\"\" }"
-    val full_script = sa + sb + sc + sd + se + sf + sg + sh_struct + si + sj + sk
-    val cmd = "find {path} -name \"*.spl\" {exclude_args} 2>/dev/null | xargs -r awk \"{full_script}\" 2>/dev/null"
-    val output = shell_output(cmd, "")
-    if output.len() == 0:
-        return []
-    parse_batch_output(output)
-
-fn parse_batch_output(output: text) -> [DocEntry]:
-    val lines = output.split("\n")
-    var entries: [DocEntry] = []
-    for line in lines:
-        if line.len() == 0:
-            continue
-        val parts = line.split("\t")
-        if parts.len() < 6:
-            continue
-        val file_path = parts[0]
-        val line_str = parts[1]
-        var line_num = 0
-        val line_bytes = line_str.bytes()
-        var li = 0
-        while li < line_bytes.len():
-            val digit = line_bytes[li] - 48
-            if digit >= 0 and digit <= 9:
-                line_num = line_num * 10 + digit
-            li = li + 1
-        val item_name = parts[2]
-        val item_kind = parts[3]
-        val signature = parts[4]
-        val doc_comment = parts[5]
-        val entry = make_doc_entry(file_path, line_num, item_name, item_kind, signature, doc_comment)
-        entries.push(entry)
-    entries
-
 fn extract_docs_from_directory(path: text, exclude: [text]) -> [DocEntry]:
-    val batch_result = extract_docs_batch(path, exclude)
-    if batch_result.len() > 0:
-        return batch_result
     var config = default_config()
     config.exclude_patterns = exclude
     config.quiet = true

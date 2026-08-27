@@ -5,8 +5,10 @@
 #   out = tmp broadcast_add C
 
 use compiler.mir.mir_data.{MirFunction}
-use compiler.mir.mir_instructions.{MirInst, MirInstKind, MirOperand, MirOperandKind, MirTerminator}
+use compiler.mir.mir_instructions.{MirBinOp, MirInst, MirInstKind, MirOperand, MirOperandKind, MirTerminator}
 use compiler.mir.mir_types.{LocalId}
+
+extern fn rt_enum_discriminant(value: Any) -> i64
 
 struct GemmAddFusion:
     dest: LocalId
@@ -20,8 +22,12 @@ fn operand_copy_local_id(operand: MirOperand) -> i64?:
         case _: nil
 
 fn operand_uses_local(operand: MirOperand, local_id: i64) -> bool:
-    val found = operand_copy_local_id(operand)
-    found.? and found.unwrap() == local_id
+    # NOTE: explicit match, not `if found.?:` -- the operand's local id can
+    # legitimately be 0; truthiness on the boxed i64? would make this always
+    # report "not used" for local 0, silently missing GEMM-add fusion.
+    match operand_copy_local_id(operand):
+        case Some(found_id): found_id == local_id
+        case nil: false
 
 fn local_is_temp(func: MirFunction, local_id: i64) -> bool:
     for local in func.locals:
@@ -87,7 +93,7 @@ fn terminator_operand_use_count(term: MirTerminator, local_id: i64) -> i64:
             if value.? and operand_uses_local(value.unwrap(), local_id): 1 else: 0
         case If(cond, _, _) | Switch(cond, _, _):
             if operand_uses_local(cond, local_id): 1 else: 0
-        case CallTerminator(_, func_op, args, _, _):
+        case CallTerminator(_, func_op, args, _, _, _, _):
             var count = if operand_uses_local(func_op, local_id): 1 else: 0
             for arg in args:
                 if operand_uses_local(arg, local_id):
@@ -105,10 +111,19 @@ fn local_use_count_in_function(func: MirFunction, local_id: i64) -> i64:
     count
 
 fn detect_gemm_add_pair(func: MirFunction, matmul_inst: MirInst, add_inst: MirInst) -> GemmAddFusion?:
+    val dummy_local = LocalId(id: 0)
+    val dummy_operand = MirOperand(kind: MirOperandKind.Copy(dummy_local))
+    val binop_disc = rt_enum_discriminant(MirInstKind.BinOp(dummy_local, MirBinOp.MatMul, dummy_operand, dummy_operand))
+    if rt_enum_discriminant(matmul_inst.kind) != binop_disc or rt_enum_discriminant(add_inst.kind) != binop_disc:
+        return nil
     match matmul_inst.kind:
-        case BinOp(matmul_dest, MatMul, matmul_left, matmul_right):
+        case BinOp(matmul_dest, matmul_op, matmul_left, matmul_right):
+            if rt_enum_discriminant(matmul_op) != rt_enum_discriminant(MirBinOp.MatMul):
+                return nil
             match add_inst.kind:
-                case BinOp(add_dest, BroadcastAdd, add_left, add_right):
+                case BinOp(add_dest, add_op, add_left, add_right):
+                    if rt_enum_discriminant(add_op) != rt_enum_discriminant(MirBinOp.BroadcastAdd):
+                        return nil
                     if not local_is_temp(func, matmul_dest.id):
                         return nil
                     if local_use_count_in_function(func, matmul_dest.id) != 1:
@@ -122,4 +137,3 @@ fn detect_gemm_add_pair(func: MirFunction, matmul_inst: MirInst, add_inst: MirIn
                     nil
         case _:
             nil
-

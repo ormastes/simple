@@ -6,7 +6,6 @@ use compiler.hir.hir_types.{HirModule, SymbolId, SymbolTable}
 use compiler.hir.hir_definitions.{HirExpr, HirExprKind, HirStmt, HirStmtKind, HirBlock, HirFunction, HirMatchArm, HirCallArg, HirIfArm}
 use visibility_checker.{VisibilityChecker, VisibilityWarning}
 use compiler.common.diagnostics.span.{Span}
-use compiler.common.module_path_naming.{module_logical_name_from_path}
 
 # Check visibility for all cross-module accesses in a HIR module
 fn check_module_visibility(
@@ -20,8 +19,7 @@ fn check_module_visibility(
 
     # Check all functions
     val funcs = hir_module.functions
-    for func_id in funcs.keys():
-        val func: HirFunction = funcs[func_id]
+    for func in funcs.values():
         check_function_visibility(func, symbols, checker)
 
     checker.get_warnings()
@@ -53,8 +51,9 @@ fn check_args_visibility(
 ):
     """Check visibility in call arguments."""
     for arg in args:
-        val arg_val: HirExpr = arg.value
-        check_expr_visibility(arg_val, symbols, checker)
+        # Walk the owned argument payload directly. Materializing another
+        # HirExpr here copies nested call trees on value-semantics runtimes.
+        check_expr_visibility(arg.value, symbols, checker)
 
 fn check_stmt_visibility(
     stmt: HirStmt,
@@ -72,20 +71,8 @@ fn check_stmt_visibility(
             check_expr_visibility(expr, symbols, checker)
         case Block(block):
             check_block_visibility(block, symbols, checker)
-        case SharedVal(_, _, has_init, init):
-            if has_init:
-                check_expr_visibility(init, symbols, checker)
-        case SharedVar(_, _, has_init, init):
-            if has_init:
-                check_expr_visibility(init, symbols, checker)
-        case GpuLaunch(config, body):
-            for dim in config.grid:
-                check_expr_visibility(dim, symbols, checker)
-            for dim in config.block:
-                check_expr_visibility(dim, symbols, checker)
-            check_block_visibility(body, symbols, checker)
-        case AsmAssert(_):
-            pass_do_nothing("compile-time target guard carries no symbol reference")
+        case _:
+            pass
 
 fn check_expr_visibility(
     expr: HirExpr,
@@ -113,7 +100,7 @@ fn check_expr_visibility(
             check_expr_visibility(callee, symbols, checker)
             check_args_visibility(args, symbols, checker)
 
-        case MethodCall(receiver, _, args, _, _):
+        case MethodCall(receiver, _, args, _):
             check_expr_visibility(receiver, symbols, checker)
             check_args_visibility(args, symbols, checker)
 
@@ -185,7 +172,7 @@ fn check_symbol_visibility(
     access_span: Span
 ):
     """Check if accessing this symbol violates visibility rules."""
-    val symbol_opt = symbols.get(symbol_id)
+    val symbol_opt = symbols.get_symbol(symbol_id)
     val symbol = match symbol_opt:
         case Some(value):
             value
@@ -199,17 +186,33 @@ fn check_symbol_visibility(
         case nil:
             return  # Local symbol, no visibility check needed
 
+    # The HIR owner can be recorded as a source path while the driver supplies
+    # a dotted module key. Resolve both to the same logical owner before
+    # asking the checker; otherwise a module can warn on access to its own
+    # private symbol merely because the two spellings differ.
+    val owner_key = visibility_owner_key(defining_module)
+    val requester_key = visibility_owner_key(checker.current_module)
+    if owner_key == requester_key:
+        return
+
     # Check visibility and record warning if needed
-    # Retained HIR symbols can carry a raw source path.  Pass the same
-    # normalized keys used for the same-owner fast path into the capability
-    # gate, while preserving the original module spelling for ordinary
-    # visibility diagnostics.
-    val warning = checker.check_symbol_access_with_canonical_modules(
-        symbol, defining_module, owner_key, requester_key, access_span)
+    val warning = checker.check_symbol_access(symbol, defining_module, access_span)
     match warning:
         case Some(value):
             checker.record_warning(value)
         case nil:
             pass
+
+fn visibility_owner_key(module_name: text) -> text:
+    var owner = module_name
+    while owner.starts_with("../"):
+        owner = owner.substring(3)
+    if owner.starts_with("./"):
+        owner = owner.substring(2)
+    if owner.starts_with("src/"):
+        owner = owner.substring(4)
+    owner.replace(".spl", "").replace(".sdn", "").replace("/", ".")
+
+export check_module_visibility, visibility_owner_key
 
 # Export public API

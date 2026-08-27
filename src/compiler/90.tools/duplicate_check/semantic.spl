@@ -102,8 +102,10 @@ fn run_semantic_analysis(target_path: text, config: DuplicationConfig) -> Semant
         val lookup = lookup_cached(cache, emb_key, hash)
         if lookup.hit:
             cache_hits = cache_hits + 1
-            val vec = csv_to_floats(lookup.embedding_csv)
-            embeddings.push(vec)
+            # NOTE: local name must not be `vec` — HIR lowering resolves `vec`
+            # to the builtin and fails, knocking the module off the JIT path.
+            val cached_vec = csv_to_floats(lookup.embedding_csv)
+            embeddings.push(cached_vec)
         else:
             cache_misses = cache_misses + 1
             # Fetch from Ollama
@@ -286,18 +288,6 @@ fn _tokenize_doc(text_val: text) -> {text: i64}:
         freq[lower] = existing + 1
     freq
 
-fn _extract_dir(file_path: text) -> text:
-    val bytes = file_path.bytes()
-    var last_slash = -1
-    var i = 0
-    while i < bytes.len():
-        if bytes[i] == 47:
-            last_slash = i
-        i = i + 1
-    if last_slash > 0:
-        return file_path[0:last_slash]
-    file_path
-
 fn run_semantic_analysis_local(target_path: text, config: DuplicationConfig) -> SemanticReport:
     val all_entries = extract_docs_from_directory(target_path, config.exclude_patterns)
     if all_entries.len() == 0:
@@ -322,14 +312,23 @@ fn run_semantic_analysis_local(target_path: text, config: DuplicationConfig) -> 
     # Bucket by shared signature token (inverted index), NOT by directory —
     # semantic clones usually live in different directories. Comparing only
     # inside token buckets keeps this near-linear instead of global O(n²).
-    var token_to_indices: {text: text} = {}
+    # Store bucket membership as integers. Encoding a growing bucket as comma-
+    # separated text recopied its entire prefix on every insertion, then split
+    # and parsed it again before comparison (quadratic copying for hot tokens).
+    var token_to_bucket: {text: i64} = {}
+    var buckets: [[i64]] = []
     var gi = 0
     while gi < documented.len():
         if fvecs[gi].magnitude != 0.0:
             for tok in sigs[gi].split(","):
                 if tok.len() > 0:
-                    if token_to_indices.has(tok):
-                        token_to_indices[tok] = token_to_indices[tok] + "," + "{gi}"
+                    if token_to_bucket.has(tok):
+                        val bucket_index = token_to_bucket[tok]
+                        # 401 is an oversized sentinel. Once reached this
+                        # bucket is always skipped, so retaining later members
+                        # cannot affect matching and only wastes memory.
+                        if semantic_bucket_accepts_member(buckets[bucket_index].len()):
+                            buckets[bucket_index].push(gi)
                     else:
                         val bucket_index = buckets.len()
                         token_to_bucket[tok] = bucket_index
@@ -338,6 +337,8 @@ fn run_semantic_analysis_local(target_path: text, config: DuplicationConfig) -> 
 
     var matches: [SemanticMatch] = []
     val threshold = config.semantic_threshold
+    # Dedup: a pair sharing multiple signature tokens lands in multiple buckets.
+    var seen_pairs: {text: bool} = {}
 
     for tok in token_to_bucket.keys():
         val indices = buckets[token_to_bucket[tok]]
@@ -351,21 +352,16 @@ fn run_semantic_analysis_local(target_path: text, config: DuplicationConfig) -> 
         var pi = 0
         while pi < indices.len():
             val i = indices[pi]
-            if fvecs[i].magnitude == 0.0:
-                pi = pi + 1
-                continue
             var pj = pi + 1
             while pj < indices.len():
                 val j = indices[pj]
-                if fvecs[j].magnitude == 0.0:
+                val lo = if i < j: i else: j
+                val hi = if i < j: j else: i
+                val pair_key = "{lo}-{hi}"
+                if seen_pairs.has(pair_key):
                     pj = pj + 1
                     continue
-                if documented[i].file_path == documented[j].file_path:
-                    pj = pj + 1
-                    continue
-                if not signatures_share_token(sigs[i], sigs[j]):
-                    pj = pj + 1
-                    continue
+                seen_pairs[pair_key] = true
                 val sim = cosine_similarity(fvecs[i], fvecs[j])
                 if sim >= threshold:
                     matches.push(make_semantic_match(documented[i], documented[j], sim, ""))
@@ -384,6 +380,14 @@ fn run_semantic_analysis_local(target_path: text, config: DuplicationConfig) -> 
         cache_misses: 0,
         used_fallback: false
     )
+
+fn semantic_bucket_accepts_member(current_len: i64) -> bool:
+    """Return whether a signature bucket still needs one more member.
+
+    Length 401 is the retained oversized sentinel; later members are irrelevant
+    because comparison unconditionally skips this bucket.
+    """
+    current_len <= 400
 
 fn empty_report() -> SemanticReport:
     SemanticReport(

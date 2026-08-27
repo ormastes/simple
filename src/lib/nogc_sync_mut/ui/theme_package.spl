@@ -38,6 +38,15 @@ class ResolvedThemeGlassConfig:
     bg_top: u32
     bg_bottom: u32
 
+# A package-owned, Engine2D-compatible projection of the local `.wm-window`
+# background declaration. This is deliberately resolved while loading the
+# package; DrawIR consumers receive only typed values and never parse CSS.
+class ResolvedWmWindowGradient:
+    available: bool
+    start_rgba: u32
+    end_rgba: u32
+    source_css: text
+
 class ResolvedThemeIcon:
     role: text
     icon_id: text
@@ -69,6 +78,7 @@ class ResolvedThemePackage:
     colors: ResolvedThemeColors
     ui_theme: UITheme
     glass_config: ResolvedThemeGlassConfig
+    snapshot: ThemeRenderSnapshot
 
 class ThemeValidationIssue:
     path: text
@@ -76,33 +86,89 @@ class ThemeValidationIssue:
     message: text
 
 var _theme_package_cache: Dict<text, ResolvedThemePackage> = {}
+var _theme_alias_cache: Dict<text, text> = {}
+var _default_theme_id_cache: text = ""
 
 fn default_theme_id() -> text:
+    if _default_theme_id_cache != "":
+        return _default_theme_id_cache
     val content = _read_if_exists(THEME_REGISTRY_PATH)
     val value = _root_value(content, "default_theme")
-    if value == "":
-        return "aetheric_dark"
-    value
+    _default_theme_id_cache = if value == "": "aetheric_dark" else: value
+    _default_theme_id_cache
 
 fn resolve_theme_alias(theme_id: text) -> text:
     val requested = if theme_id == "": default_theme_id() else: theme_id
+    if _theme_alias_cache.contains_key(requested):
+        return _theme_alias_cache[requested]
     val content = _read_if_exists(THEME_REGISTRY_PATH)
     val alias = _section_value(content, "aliases", requested)
-    if alias != "":
-        return alias
-    requested
+    val resolved = if alias == "": requested else: alias
+    _theme_alias_cache[requested] = resolved
+    resolved
+
+# Scalar accessors: project package fields inside the owning module so
+# callers never carry the ResolvedThemePackage aggregate across the native
+# call ABI, where it decodes as a nil receiver (cranelift lane, 2026-07-26;
+# same class the host_wm_theme_bootstrap comment records).
+fn theme_package_fingerprint(theme_id: text) -> text:
+    val package: ResolvedThemePackage = load_theme_package(theme_id)
+    package.fingerprint
+
+fn theme_package_material_solid_fallback_rgba(theme_id: text) -> u32:
+    val snapshot: ThemeRenderSnapshot = theme_package_render_snapshot(theme_id)
+    snapshot.material.solid_fallback_rgba
+
+fn theme_package_material_text_rgba(theme_id: text) -> u32:
+    val snapshot: ThemeRenderSnapshot = theme_package_render_snapshot(theme_id)
+    snapshot.material.text_rgba
+
+fn theme_package_color_bg(theme_id: text) -> u32:
+    val package: ResolvedThemePackage = load_theme_package(theme_id)
+    package.colors.bg
+
+fn theme_package_color_fg(theme_id: text) -> u32:
+    val package: ResolvedThemePackage = load_theme_package(theme_id)
+    package.colors.fg
+
+fn theme_package_color_accent(theme_id: text) -> u32:
+    val package: ResolvedThemePackage = load_theme_package(theme_id)
+    package.colors.accent
+
+fn theme_package_color_panel(theme_id: text) -> u32:
+    val package: ResolvedThemePackage = load_theme_package(theme_id)
+    package.colors.panel
+
+fn theme_package_color_border(theme_id: text) -> u32:
+    val package: ResolvedThemePackage = load_theme_package(theme_id)
+    package.colors.border
+
+fn theme_package_color_button(theme_id: text) -> u32:
+    val package: ResolvedThemePackage = load_theme_package(theme_id)
+    package.colors.button
+
+fn theme_package_color_status(theme_id: text) -> u32:
+    val package: ResolvedThemePackage = load_theme_package(theme_id)
+    package.colors.status
+
+fn theme_package_render_snapshot(theme_id: text) -> ThemeRenderSnapshot:
+    # Keep the ResolvedThemePackage aggregate inside its owning module. Native
+    # callers consume only the canonical snapshot projection.
+    val package: ResolvedThemePackage = load_theme_package(theme_id)
+    package.snapshot
 
 fn load_default_theme_package() -> ResolvedThemePackage:
     load_theme_package(default_theme_id())
 
 fn load_theme_package(theme_id: text) -> ResolvedThemePackage:
     val resolved_id = resolve_theme_alias(theme_id)
-    match _theme_package_cache.get(resolved_id):
-        case Some(cached):
-            val fresh_key = _mtime_key(cached.source_paths)
-            if fresh_key == cached.mtime_key:
-                return cached
-        case _: pass_dn
+    # Bracket + contains_key, not `.get()`: matching the struct-valued Option
+    # from dict `.get()` faults with "field access on nil receiver" under the
+    # cranelift native lane (same class as the mode.spl workaround; observed
+    # 2026-07-26 in the hosted-WM entry, where it killed the process before
+    # the first frame).
+    if _theme_package_cache.contains_key(resolved_id):
+        return _theme_package_cache[resolved_id]
 
     val registry = _read_if_exists(THEME_REGISTRY_PATH)
     val theme_path = _section_value(registry, "themes", resolved_id)
@@ -136,7 +202,8 @@ fn load_theme_package(theme_id: text) -> ResolvedThemePackage:
     val token_map = _token_map_from_css("{shape_css}\n{base_css}")
     val widget_map = _load_widget_css_map(required_widgets, local_widget_dir, family_widget_dir)
 
-    var paths = [THEME_REGISTRY_PATH, final_theme_path, final_family_path, base_path, shape_path, icons_path]
+    val source_reference = _root_value(theme_sdn, "source_raw_reference")
+    var paths = [THEME_REGISTRY_PATH, final_theme_path, final_family_path, base_path, shape_path, icons_path, source_reference]
     for widget in required_widgets:
         val local_path = "{local_widget_dir}/{widget}.css"
         val family_path_for_widget = "{family_widget_dir}/{widget}.css"
@@ -153,9 +220,9 @@ fn load_theme_package(theme_id: text) -> ResolvedThemePackage:
     paths = _sorted_unique_paths(paths)
 
     val source_manifest_sha256 = _source_manifest_sha256(paths)
-    val material = _material_from_css(base_css, shape_css)
-    val material_sha256 = theme_material_sha256(material)
     val composed_css = "{shape_css}\n{family_widget_css}\n{base_css}\n{theme_widget_css}\n{icon_css}\n"
+    val material = _material_from_css(base_css, shape_css, composed_css)
+    val material_sha256 = theme_material_sha256(material)
     val snapshot = ThemeRenderSnapshot(
         id: resolved_id,
         family_id: family_id,
@@ -166,7 +233,25 @@ fn load_theme_package(theme_id: text) -> ResolvedThemePackage:
         background_rgba: colors.bg,
         foreground_rgba: colors.fg,
         accent_rgba: colors.accent,
-        material: material
+        material: material,
+        semantic: ThemeSemanticColors(
+            info_rgba: _argb_from_css(
+                _css_var(base_css, "--ui-info", ""),
+                0xFF3B82F6u32
+            ),
+            success_rgba: _argb_from_css(
+                _css_var(base_css, "--ui-success", ""),
+                0xFF22C55Eu32
+            ),
+            warning_rgba: _argb_from_css(
+                _css_var(base_css, "--ui-warning", ""),
+                0xFFF59E0Bu32
+            ),
+            error_rgba: _argb_from_css(
+                _css_var(base_css, "--ui-error", ""),
+                0xFFEF4444u32
+            )
+        )
     )
 
     val pkg = ResolvedThemePackage(
@@ -182,39 +267,58 @@ fn load_theme_package(theme_id: text) -> ResolvedThemePackage:
         theme_widget_css: theme_widget_css,
         widget_css: widget_css,
         icon_css: icon_css,
-        source_reference: _root_value(theme_sdn, "source_raw_reference"),
+        source_reference: source_reference,
         source_paths: paths,
-        fingerprint: _mtime_key(paths),
-        mtime_key: _mtime_key(paths),
+        fingerprint: source_manifest_sha256,
+        mtime_key: source_manifest_sha256,
         tokens: parsed.tokens,
         token_map: token_map,
         widget_css_by_name: widget_map,
         icons: icons,
         colors: colors,
         ui_theme: ui_theme,
-        glass_config: glass_cfg
+        glass_config: glass_cfg,
+        snapshot: snapshot
     )
     _theme_package_cache[resolved_id] = pkg
     pkg
 
 fn resolved_theme_css(theme_id: text) -> text:
-    val pkg = load_theme_package(theme_id)
-    "{pkg.shape_css}\n{pkg.family_widget_css}\n{pkg.base_css}\n{pkg.theme_widget_css}\n{pkg.icon_css}\n"
+    val snapshot: ThemeRenderSnapshot = theme_package_render_snapshot(theme_id)
+    snapshot.composed_css
+
+fn invalidate_theme_package_cache(theme_id: text):
+    val requested = if theme_id == "": default_theme_id() else: theme_id
+    val resolved_id = resolve_theme_alias(theme_id)
+    _theme_package_cache.remove(resolved_id)
+    _theme_alias_cache.remove(requested)
+    if theme_id == "":
+        _default_theme_id_cache = ""
+
+fn invalidate_all_theme_package_cache():
+    _theme_package_cache = {}
+    _theme_alias_cache = {}
+    _default_theme_id_cache = ""
 
 fn theme_ui_theme(theme_id: text) -> UITheme:
-    load_theme_package(theme_id).ui_theme
+    val package: ResolvedThemePackage = load_theme_package(theme_id)
+    package.ui_theme
 
 fn theme_design_tokens(theme_id: text) -> GlassDesignTokens:
-    load_theme_package(theme_id).tokens
+    val package: ResolvedThemePackage = load_theme_package(theme_id)
+    package.tokens
 
 fn theme_numeric_colors(theme_id: text) -> ResolvedThemeColors:
-    load_theme_package(theme_id).colors
+    val package: ResolvedThemePackage = load_theme_package(theme_id)
+    package.colors
 
 fn theme_glass_config(theme_id: text) -> ResolvedThemeGlassConfig:
-    load_theme_package(theme_id).glass_config
+    val package: ResolvedThemePackage = load_theme_package(theme_id)
+    package.glass_config
 
 fn theme_icon_defaults(theme_id: text) -> Dict<text, ResolvedThemeIcon>:
-    load_theme_package(theme_id).icons
+    val package: ResolvedThemePackage = load_theme_package(theme_id)
+    package.icons
 
 fn validate_default_theme_package() -> [ThemeValidationIssue]:
     validate_theme_package(THEME_REGISTRY_PATH)
@@ -326,18 +430,46 @@ fn _require_file(issues: [ThemeValidationIssue], owner: text, key: text, path: t
         return _push_issue(issues, path, key, "referenced file is missing")
     issues
 
-fn _mtime_key(paths: [text]) -> text:
-    var out = ""
+fn _sorted_unique_paths(paths: [text]) -> [text]:
+    var out: [text] = []
     for path in paths:
-        if path != "" and file_exists(path):
-            val content = _read_if_exists(path)
-            out = "{out}{path}:{content.len()};"
-        else:
-            out = "{out}{path}:missing;"
+        if path == "":
+            continue
+        var seen = false
+        for existing in out:
+            if existing == path:
+                seen = true
+                break
+        if not seen:
+            out.push(path)
+    var i = 0
+    while i < out.len():
+        var j = i + 1
+        while j < out.len():
+            if out[j] < out[i]:
+                val tmp = out[i]
+                out[i] = out[j]
+                out[j] = tmp
+            j = j + 1
+        i = i + 1
     out
 
+fn _source_manifest_sha256(paths: [text]) -> text:
+    var manifest = "theme-source-manifest-v1\n"
+    for path in paths:
+        val content = _read_if_exists(path)
+        # Hash each source independently, then hash the sorted path/hash
+        # manifest. This keeps the identity content-addressed without copying
+        # whole CSS payloads into the manifest string.
+        val content_sha256 = sha256_text(content)
+        manifest = (
+            manifest + ui_native_i64_text(path.len()) + ":" + path +
+            "\n" + content_sha256 + "\n"
+        )
+    sha256_text(manifest)
+
 fn _strip_value(value: text) -> text:
-    var v = value.trim()
+    var v: text = "{value.trim()}"
     if v.starts_with("\"") and v.ends_with("\"") and v.len() >= 2:
         v = v[1:v.len() - 1]
     v
@@ -345,7 +477,7 @@ fn _strip_value(value: text) -> text:
 fn _root_value(content: text, key: text) -> text:
     val prefix = "{key}:"
     for line in content.split("\n"):
-        val trimmed = line.trim()
+        val trimmed: text = "{line.trim()}"
         if trimmed.starts_with(prefix):
             return _strip_value(trimmed[prefix.len():])
     ""
@@ -355,10 +487,10 @@ fn _section_value(content: text, section: text, key: text) -> text:
     val section_header = "{section}:"
     val prefix = "{key}:"
     for line in content.split("\n"):
-        val trimmed = line.trim()
+        val trimmed: text = "{line.trim()}"
         if trimmed == "" or trimmed.starts_with("#"):
             continue
-        if not line.starts_with(" ") and trimmed.ends_with(":"):
+        if not "{line}".starts_with(" ") and trimmed.ends_with(":"):
             current = trimmed[0:trimmed.len() - 1]
             continue
         if trimmed == section_header:
@@ -373,13 +505,13 @@ fn _section_items(content: text, section: text) -> [text]:
     var current = ""
     val section_header = "{section}:"
     for line in content.split("\n"):
-        val trimmed = line.trim()
+        val trimmed: text = "{line.trim()}"
         if trimmed == "" or trimmed.starts_with("#"):
             continue
         if trimmed == section_header:
             current = section
             continue
-        if not line.starts_with(" ") and trimmed.ends_with(":"):
+        if not "{line}".starts_with(" ") and trimmed.ends_with(":"):
             current = trimmed[0:trimmed.len() - 1]
             continue
         if current == section and trimmed.starts_with("- "):
@@ -450,21 +582,25 @@ fn _resolved_icons(icon_sdn: text, roles: [text]) -> Dict<text, ResolvedThemeIco
 fn _icons_to_css(icons: Dict<text, ResolvedThemeIcon>, roles: [text]) -> text:
     var css = ":root {\n"
     for role in roles:
-        match icons.get(role):
-            case Some(icon):
-                val key = role.replace("_", "-")
-                css = "{css}  --theme-icon-{key}: \"{icon.icon_id}\";\n"
-                css = "{css}  --theme-icon-{key}-label: \"{icon.label}\";\n"
-                css = "{css}  --theme-icon-{key}-color: {icon.color_token};\n"
-                css = "{css}  --theme-icon-{key}-size: \"{icon.size_role}\";\n"
-            case _: pass_dn
+        # Bracket + contains_key, not `.get()` + match: the struct-valued
+        # Option payload from dict `.get()` decodes as nil under the cranelift
+        # native lane, so `icon.icon_id` faulted with "field access on nil
+        # receiver" and killed the hosted WM before its first frame
+        # (2026-07-26; same class and same fix as mode.spl).
+        if icons.contains_key(role):
+            val icon = icons[role]
+            val key = role.replace("_", "-")
+            css = "{css}  --theme-icon-{key}: \"{icon.icon_id}\";\n"
+            css = "{css}  --theme-icon-{key}-label: \"{icon.label}\";\n"
+            css = "{css}  --theme-icon-{key}-color: {icon.color_token};\n"
+            css = "{css}  --theme-icon-{key}-size: \"{icon.size_role}\";\n"
     css = "{css}\}\n"
     css
 
 fn _css_var(css: text, name: text, fallback: text) -> text:
     val prefix = "{name}:"
     for line in css.split("\n"):
-        val trimmed = line.trim()
+        val trimmed: text = "{line.trim()}"
         if trimmed.starts_with(prefix):
             var value = trimmed[prefix.len():].trim()
             if value.ends_with(";"):
@@ -484,7 +620,7 @@ fn _resolved_colors_from_css(base_css: text) -> ResolvedThemeColors:
 fn _token_map_from_css(css: text) -> Dict<text, text>:
     var out: Dict<text, text> = {}
     for line in css.split("\n"):
-        val trimmed = line.trim()
+        val trimmed: text = "{line.trim()}"
         if trimmed.starts_with("--") and trimmed.contains(":"):
             val parts = trimmed.split(":")
             if parts.len() >= 2:
@@ -493,37 +629,44 @@ fn _token_map_from_css(css: text) -> Dict<text, text>:
     out
 
 fn _ui_theme_from_css(name: text, base_css: text, colors: ResolvedThemeColors) -> UITheme:
-    UITheme(
-        name: name,
-        colors: UIThemeColors(
-            background: UIColor.from_hex(_css_var(base_css, "--ui-bg", "#0e0e10")),
-            foreground: UIColor.from_hex(_css_var(base_css, "--ui-fg", "#e4e2e4")),
-            border: _css_var(base_css, "--app-border", "rgba(139,144,160,0.20)"),
-            accent: UIColor.from_hex(_css_var(base_css, "--ui-accent", "#adc6ff")),
-            panel_bg: _css_var(base_css, "--app-surface", "rgba(31,31,33,0.80)"),
-            hover_bg: _css_var(base_css, "--app-surface-hover", "rgba(53,52,55,0.80)"),
-            error: UIColor.from_hex(_css_var(base_css, "--ui-error", "#ffb4ab")),
-            warning: UIColor.from_hex(_css_var(base_css, "--ui-warning", "#f4bd78")),
-            success: UIColor.from_hex(_css_var(base_css, "--ui-success", "#b1b1ff")),
-            info: UIColor.from_hex(_css_var(base_css, "--ui-info", "#9bdcff"))
-        ),
-        spacing: Spacing.default_spacing(),
-        border: BorderStyle(width: 1, radius: _px_int(_css_var(base_css, "--widget-radius", "8px"), 8), style: "solid"),
-        font: FontStyle(
-            family: _css_var(base_css, "--font-main", "\"Inter\", sans-serif"),
-            size: _px_int(_css_var(base_css, "--font-size-base", "14px"), 14),
-            weight: _css_var(base_css, "--font-weight-normal", "400"),
-            line_height: 1.5
-        )
+    val v_bg: text = _css_var(base_css, "--ui-bg", "#0e0e10")
+    val v_fg: text = _css_var(base_css, "--ui-fg", "#e4e2e4")
+    val v_border: text = _css_var(base_css, "--app-border", "rgba(139,144,160,0.20)")
+    val v_accent: text = _css_var(base_css, "--ui-accent", "#adc6ff")
+    val v_panel: text = _css_var(base_css, "--app-surface", "rgba(31,31,33,0.80)")
+    val v_hover: text = _css_var(base_css, "--app-surface-hover", "rgba(53,52,55,0.80)")
+    val v_error: text = _css_var(base_css, "--ui-error", "#ffb4ab")
+    val v_warning: text = _css_var(base_css, "--ui-warning", "#f4bd78")
+    val v_success: text = _css_var(base_css, "--ui-success", "#b1b1ff")
+    val v_info: text = _css_var(base_css, "--ui-info", "#9bdcff")
+    val theme_colors = UIThemeColors(
+        background: UIColor.from_hex(v_bg),
+        foreground: UIColor.from_hex(v_fg),
+        border: v_border,
+        accent: UIColor.from_hex(v_accent),
+        panel_bg: v_panel,
+        hover_bg: v_hover,
+        error: UIColor.from_hex(v_error),
+        warning: UIColor.from_hex(v_warning),
+        success: UIColor.from_hex(v_success),
+        info: UIColor.from_hex(v_info)
     )
+    val spacing = Spacing.default_spacing()
+    val radius_px = _px_int(_css_var(base_css, "--widget-radius", "8px"), 8)
+    val border_style = BorderStyle(width: 1, radius: radius_px, style: "solid")
+    val font_family: text = _css_var(base_css, "--font-main", "\"Inter\", sans-serif")
+    val font_size = _px_int(_css_var(base_css, "--font-size-base", "14px"), 14)
+    val font_weight: text = _css_var(base_css, "--font-weight-normal", "400")
+    val font_style = FontStyle(family: font_family, size: font_size, weight: font_weight, line_height: 1.5)
+    UITheme(name: name, colors: theme_colors, spacing: spacing, border: border_style, font: font_style)
 
 fn _glass_config_from_colors(colors: ResolvedThemeColors, shape_css: text) -> ResolvedThemeGlassConfig:
     ResolvedThemeGlassConfig(
         surface_color: colors.panel & 0x00FFFFFF,
-        surface_alpha: 190,
+        surface_alpha: ((colors.panel >> 24) & 0xFF).to_u8(),
         blur_radius: _px_int(_css_var(shape_css, "--blur-surface", "30px"), 30).to_u32(),
         border_color: colors.border & 0x00FFFFFF,
-        border_alpha: 48,
+        border_alpha: ((colors.border >> 24) & 0xFF).to_u8(),
         shadow_offset: 4,
         shadow_blur: 14,
         shadow_alpha: 44,
@@ -568,12 +711,157 @@ fn _material_from_css(base_css: text, shape_css: text, composed_css: text) -> Th
         inactive_shadows: inactive_shadows,
         font_family: _css_var(base_css, "--font-main", "system-ui, sans-serif"),
         font_size_px: _px_int(_css_var(base_css, "--font-size-base", "14px"), 14),
-        font_weight: (_css_var(base_css, "--font-weight-normal", "400").to_i64() ?? 400).to_i32(),
+        font_weight: font_weight as i32,
         text_rgba: text_color,
         secondary_text_rgba: secondary_text,
         solid_fallback_rgba: solid_fallback,
-        fallback_contrast_milli: _argb_contrast_milli(text_color, solid_fallback)
+        fallback_contrast_milli: _argb_contrast_milli(text_color, solid_fallback),
+        window_gradient_available: window_gradient.available,
+        window_gradient_start_rgba: window_gradient.start_rgba,
+        window_gradient_end_rgba: window_gradient.end_rgba,
+        window_gradient_source_css: window_gradient.source_css
     )
+
+fn _selector_list_contains_exact(selector_list: text, target: text) -> bool:
+    for selector in selector_list.split(","):
+        if selector.trim() == target:
+            return true
+    false
+
+fn _wm_window_background_css(composed_css: text) -> text:
+    # Keep cascade order: the final exact `.wm-window` declaration wins.
+    # Focus/hover selectors are intentionally excluded because the typed
+    # material represents the base window surface rather than transient state.
+    var background = ""
+    for block in composed_css.split("}"):
+        val pieces = block.split("{")
+        if pieces.len() < 2:
+            continue
+        if not _selector_list_contains_exact(pieces[0], ".wm-window"):
+            continue
+        for declaration in pieces[1].split(";"):
+            val trimmed = declaration.trim()
+            if trimmed.starts_with("background:"):
+                background = trimmed["background:".len():].trim()
+    background
+
+fn _css_first_function_arguments(value: text, function_name: text) -> text:
+    val marker = "{function_name}("
+    val found = value.index_of(marker)
+    if found < 0:
+        return ""
+    var index = found + marker.len()
+    var depth = 1
+    var out = ""
+    while index < value.len():
+        val ch = value.char_at(index)
+        if ch == "(":
+            depth = depth + 1
+            out = out + ch
+        elif ch == ")":
+            depth = depth - 1
+            if depth == 0:
+                return out
+            out = out + ch
+        else:
+            out = out + ch
+        index = index + 1
+    ""
+
+fn _css_top_level_parts(value: text) -> [text]:
+    var out: [text] = []
+    var current = ""
+    var depth = 0
+    for ch in value.chars():
+        if ch == "(":
+            depth = depth + 1
+            current = current + ch
+        elif ch == ")":
+            if depth > 0:
+                depth = depth - 1
+            current = current + ch
+        elif ch == "," and depth == 0:
+            out.push(current.trim())
+            current = ""
+        else:
+            current = current + ch
+    if current.trim() != "":
+        out.push(current.trim())
+    out
+
+fn _css_color_candidate(value: text, composed_css: text) -> text:
+    val trimmed = value.trim()
+    if not trimmed.starts_with("var("):
+        return trimmed
+    val args = _css_first_function_arguments(trimmed, "var")
+    if args == "":
+        return ""
+    val token = args.split(",")[0].trim()
+    _css_var(composed_css, token, "")
+
+fn _css_color_is_supported(value: text) -> bool:
+    val trimmed = value.trim()
+    (trimmed.starts_with("rgba(") and trimmed.ends_with(")")) or
+        (trimmed.starts_with("rgb(") and trimmed.ends_with(")")) or
+        (trimmed.starts_with("#") and (trimmed.len() == 4 or trimmed.len() == 7))
+
+fn _opaque_css_over(foreground: u32, opaque_background: u32) -> u32:
+    val alpha = (foreground >> 24) & 0xFF
+    if alpha == 0:
+        return opaque_background
+    if alpha == 255:
+        return 0xFF000000u32 | (foreground & 0x00FFFFFFu32)
+    val inverse = 255u32 - alpha
+    val fr = (foreground >> 16) & 0xFF
+    val fg = (foreground >> 8) & 0xFF
+    val fb = foreground & 0xFF
+    val br = (opaque_background >> 16) & 0xFF
+    val bg = (opaque_background >> 8) & 0xFF
+    val bb = opaque_background & 0xFF
+    val r = (fr * alpha + br * inverse + 127u32) / 255u32
+    val g = (fg * alpha + bg * inverse + 127u32) / 255u32
+    val b = (fb * alpha + bb * inverse + 127u32) / 255u32
+    0xFF000000u32 | (r << 16) | (g << 8) | b
+
+fn _wm_window_gradient_from_css(composed_css: text, solid_fallback: u32) -> ResolvedWmWindowGradient:
+    val background = _wm_window_background_css(composed_css)
+    val args = _css_first_function_arguments(background, "linear-gradient")
+    if args == "":
+        return ResolvedWmWindowGradient(available: false, start_rgba: solid_fallback, end_rgba: solid_fallback, source_css: "")
+    val parts = _css_top_level_parts(args)
+    var first_color = 0
+    if parts.len() > 0:
+        val direction = parts[0].trim().lower()
+        if direction.ends_with("deg") or direction.starts_with("to "):
+            if direction != "180deg" and direction != "to bottom":
+                return ResolvedWmWindowGradient(available: false, start_rgba: solid_fallback, end_rgba: solid_fallback, source_css: "linear-gradient({args})")
+            first_color = 1
+    var colors: [text] = []
+    var part_index = first_color
+    while part_index < parts.len():
+        val part = parts[part_index]
+        val candidate = _css_color_candidate(part, composed_css)
+        if _css_color_is_supported(candidate):
+            colors.push(candidate)
+        part_index = part_index + 1
+    # Engine2D's current contract is exactly two packed stops. Do not silently
+    # reduce multi-stop or unsupported CSS; retain the solid fallback instead.
+    if colors.len() != 2:
+        return ResolvedWmWindowGradient(available: false, start_rgba: solid_fallback, end_rgba: solid_fallback, source_css: "linear-gradient({args})")
+    # Preserve alpha stops for the DrawIR surface-then-gradient composition.
+    # Flattening here turns CSS overlays into incorrect opaque colors.
+    val start = _argb_from_css(colors[0], solid_fallback)
+    val end = _argb_from_css(colors[1], solid_fallback)
+    ResolvedWmWindowGradient(
+        available: true,
+        start_rgba: start,
+        end_rgba: end,
+        source_css: "linear-gradient({args})"
+    )
+
+fn resolve_wm_window_gradient_for_css(composed_css: text, solid_fallback: u32) -> ResolvedWmWindowGradient:
+    """Resolve package CSS into Engine2D's typed vertical two-stop contract."""
+    _wm_window_gradient_from_css(composed_css, solid_fallback)
 
 fn _argb_luminance(color: u32) -> i64:
     val r = ((color >> 16) & 0xFF).to_i64()
@@ -665,23 +953,20 @@ fn _split_top_level_commas(value: text) -> [text]:
     var out: [text] = []
     var current = ""
     var depth = 0
-    var i = 0
-    while i < value.len():
-        val ch = value.char_at(i)
+    for ch in value.chars():
         if ch == "(":
             depth = depth + 1
-            current = "{current}{ch}"
+            current = current + ch
         elif ch == ")":
             if depth > 0:
                 depth = depth - 1
-            current = "{current}{ch}"
+            current = current + ch
         elif ch == "," and depth == 0:
             if current.trim() != "":
                 out.push(current.trim())
             current = ""
         else:
-            current = "{current}{ch}"
-        i = i + 1
+            current = current + ch
     if current.trim() != "":
         out.push(current.trim())
     out
@@ -690,23 +975,20 @@ fn _split_shadow_tokens(value: text) -> [text]:
     var out: [text] = []
     var current = ""
     var depth = 0
-    var i = 0
-    while i < value.len():
-        val ch = value.char_at(i)
+    for ch in value.chars():
         if ch == "(":
             depth = depth + 1
-            current = "{current}{ch}"
+            current = current + ch
         elif ch == ")":
             if depth > 0:
                 depth = depth - 1
-            current = "{current}{ch}"
+            current = current + ch
         elif (ch == " " or ch == "\t") and depth == 0:
             if current.trim() != "":
                 out.push(current.trim())
                 current = ""
         else:
-            current = "{current}{ch}"
-        i = i + 1
+            current = current + ch
     if current.trim() != "":
         out.push(current.trim())
     out
@@ -780,12 +1062,12 @@ fn _argb_from_css(value: text, fallback: u32) -> u32:
     if v.len() < 7:
         return fallback
     val hex = v[1:7]
-    val r = _hex_digit(hex[0].to_i64()) * 16 + _hex_digit(hex[1].to_i64())
-    val g = _hex_digit(hex[2].to_i64()) * 16 + _hex_digit(hex[3].to_i64())
-    val b = _hex_digit(hex[4].to_i64()) * 16 + _hex_digit(hex[5].to_i64())
+    val r = _theme_package_hex_digit(hex.char_code_at(0) as i64) * 16 + _theme_package_hex_digit(hex.char_code_at(1) as i64)
+    val g = _theme_package_hex_digit(hex.char_code_at(2) as i64) * 16 + _theme_package_hex_digit(hex.char_code_at(3) as i64)
+    val b = _theme_package_hex_digit(hex.char_code_at(4) as i64) * 16 + _theme_package_hex_digit(hex.char_code_at(5) as i64)
     0xFF000000 | (r.to_u32() << 16) | (g.to_u32() << 8) | b.to_u32()
 
-fn _hex_digit(ch: i64) -> i64:
+fn _theme_package_hex_digit(ch: i64) -> i64:
     if ch >= 48 and ch <= 57:
         return ch - 48
     if ch >= 97 and ch <= 102:
@@ -818,7 +1100,7 @@ fn _validate_token_layers(base_path: text, base_css: text, shape_path: text, sha
 fn _defined_tokens(css: text) -> [text]:
     var tokens: [text] = []
     for line in css.split("\n"):
-        val trimmed = line.trim()
+        val trimmed: text = "{line.trim()}"
         if trimmed.starts_with("--") and trimmed.contains(":"):
             val parts = trimmed.split(":")
             tokens.push(parts[0].trim())
@@ -879,7 +1161,12 @@ fn render_theme_validation_report(issues: [ThemeValidationIssue]) -> text:
     lines.push("STATUS: FAIL ({issues.len()} failures, 0 warnings)")
     lines.join("\n")
 
-export ResolvedThemePackage, ResolvedThemeColors, ResolvedThemeGlassConfig, ResolvedThemeIcon, ThemeValidationIssue
-export default_theme_id, resolve_theme_alias, load_default_theme_package, load_theme_package
+export ResolvedThemePackage, ResolvedThemeColors, ResolvedThemeGlassConfig, ResolvedWmWindowGradient, ResolvedThemeIcon, ThemeValidationIssue
+export default_theme_id, resolve_theme_alias, load_default_theme_package, load_theme_package, theme_package_render_snapshot
+export theme_package_fingerprint, theme_package_material_solid_fallback_rgba, theme_package_material_text_rgba
+export theme_package_color_bg, theme_package_color_fg, theme_package_color_accent, theme_package_color_panel
+export theme_package_color_border, theme_package_color_button, theme_package_color_status
+export resolve_wm_window_gradient_for_css
+export invalidate_theme_package_cache, invalidate_all_theme_package_cache
 export resolved_theme_css, theme_ui_theme, theme_design_tokens, theme_numeric_colors, theme_glass_config, theme_icon_defaults
 export validate_default_theme_package, validate_theme_package, render_theme_validation_report

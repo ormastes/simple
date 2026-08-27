@@ -3,7 +3,7 @@
 # High-level entry point that auto-selects the best available 3D rendering
 # backend and delegates all operations to it.
 #
-# Backend priority: cpu (only backend for now)
+# Backend priority: CPU scene renderer plus optional Vulkan font adapter.
 #
 # Usage:
 #   use std.gpu.engine3d.engine.{Engine3D}
@@ -19,11 +19,32 @@
 
 use std.gpu.engine3d.backend.{RenderBackend3D}
 use std.gpu.engine3d.backend_cpu.{CpuBackend3D}
-use std.gpu.engine3d.types3d.{Vertex3D, Material3DParams, LightParams3D}
+use std.gpu.engine3d.types3d.{Vertex3D, Material3DParams, LightParams3D, mat4_identity, mat4_mul}
 use std.gpu.engine3d.resource_pool.{ResourcePool3D, TextureHandle3D, BufferHandle3D, ShaderHandle3D, PipelineHandle3D}
 use std.gpu.engine3d.texture3d.{TextureDescriptor3D, SamplerDescriptor3D, TextureView3D}
 use std.gpu.engine3d.texture3d.{TEX_DIM_2D, TEX_DIM_3D, TEX_DIM_CUBE, TEX_FMT_RGBA8_UNORM, TEX_FMT_DEPTH32_FLOAT}
 use std.gpu.engine3d.texture3d.{TEX_USAGE_TEXTURE_BINDING, TEX_USAGE_COPY_DST}
+use std.gc_async_mut.text_layout.font_renderer.{
+    FontCacheStats, FontGlyphRun, FontRenderBatch, FontRenderConfig, FontRenderer,
+    font_execution_plan, font_render_config_selection_supported
+}
+use std.common.gpu.font_atlas_composite.{font_atlas_subrect_pixels, font_destination_origin}
+use std.gpu.engine3d.color3d.{blend3d}
+use std.gpu.engine3d.vulkan_font_adapter.{VulkanFontAdapter3D, VulkanFontAdapter3DEvidence}
+
+fn engine3d_font_frame_target_allows(current: text, requested: text) -> bool:
+    current == "" or current == requested
+
+fn engine3d_font_completion_target(completed: bool, cpu_fallback_count: i64) -> text:
+    if completed: return "vulkan"
+    if cpu_fallback_count > 0: return "cpu"
+    "unavailable"
+
+class _PendingFontCpuFallback:
+    x: i32
+    y: i32
+    batch: FontRenderBatch
+    already_drawn: bool
 
 # ============================================================================
 # Engine3D
@@ -53,6 +74,26 @@ class Engine3D:
     _w: i32
     _h: i32
     _resources: ResourcePool3D
+    _font_renderer: FontRenderer? = nil
+    _vulkan_font: VulkanFontAdapter3D? = nil
+    _vulkan_font_evidence: VulkanFontAdapter3DEvidence? = nil
+    _font_cpu_comparator: bool = false
+    _vulkan_pixels: [u32] = []
+    _font_frame_target: text = ""
+    _font_readback_target: text = ""
+    last_font_execution_attempts: [text] = []
+    last_font_execution_target: text = ""
+    _pending_font_cpu_fallbacks: [_PendingFontCpuFallback] = []
+    _view: [f32]
+    _proj: [f32]
+
+    me fonts() -> FontRenderer:
+        val active = self._font_renderer
+        if active != nil:
+            return active
+        val created = FontRenderer.new()
+        self._font_renderer = created
+        created
 
     # ========================================================================
     # Constructors
@@ -61,8 +102,8 @@ class Engine3D:
     static fn create(width: i32, height: i32) -> Engine3D:
         """Create engine with auto-detected best backend.
 
-        Currently always selects the CPU backend. As hardware backends
-        are added, this will probe in priority order.
+        The CPU scene renderer remains the portable default. Call
+        `create_with_backend(..., "vulkan")` for native font composition.
 
         Args:
             width: Framebuffer width in pixels
@@ -79,23 +120,56 @@ class Engine3D:
         Args:
             width: Framebuffer width in pixels
             height: Framebuffer height in pixels
-            backend_name: Backend name ("cpu" for now)
+            backend_name: `"cpu"`, `"vulkan"`, or `"vulkan-font"`; both
+                Vulkan aliases install the font adapter while retaining the
+                CPU scene renderer
 
         Returns:
             Initialized Engine3D (falls back to cpu for unknown names)
         """
-        # For now, all paths lead to CPU backend
         var cpu = CpuBackend3D.create()
         cpu.init(width, height)
-        Engine3D(_cpu: cpu, _backend_name: "cpu", _w: width, _h: height, _resources: ResourcePool3D.create())
+        var engine = Engine3D(
+            _cpu: cpu,
+            _backend_name: "cpu",
+            _w: width,
+            _h: height,
+            _resources: ResourcePool3D.create(),
+            _view: mat4_identity(),
+            _proj: mat4_identity()
+        )
+        if backend_name == "vulkan" or backend_name == "vulkan-font":
+            engine.install_vulkan_font_backend()
+        engine
 
     # ========================================================================
     # Backend Info
     # ========================================================================
 
     fn backend_name() -> text:
-        """Get the name of the active backend."""
+        """Get the honest scene/font backend identity."""
         self._backend_name
+
+    me install_vulkan_font_backend() -> bool:
+        val installed = self._vulkan_font
+        if installed != nil:
+            return installed.?.ready
+        var adapter = VulkanFontAdapter3D.create(self._w, self._h)
+        if not adapter.ready:
+            adapter.shutdown()
+            return false
+        self._vulkan_font = adapter
+        self._backend_name = "vulkan-font"
+        true
+
+    me enable_font_cpu_comparator(enabled: bool):
+        self._font_cpu_comparator = enabled
+
+    fn vulkan_font_evidence() -> VulkanFontAdapter3DEvidence?:
+        self._vulkan_font_evidence
+
+    fn font_execution_attempts() -> [text]: self.last_font_execution_attempts
+    fn font_execution_target() -> text: self.last_font_execution_target
 
     # ========================================================================
     # Core — Identity & Lifecycle
@@ -105,15 +179,88 @@ class Engine3D:
         self._cpu.name()
 
     me init(width: i32, height: i32) -> bool:
-        self._cpu.init(width, height)
+        val initialized = self._cpu.init(width, height)
+        if initialized:
+            self._w = width
+            self._h = height
+        initialized
 
     me shutdown():
+        self.unload_font()
+        val active = self._vulkan_font
+        if active != nil:
+            var vulkan = active.?
+            vulkan.shutdown()
+        self._vulkan_font = nil
+        self._pending_font_cpu_fallbacks = []
         self._cpu.shutdown()
 
     me begin_frame():
         self._cpu.begin_frame()
+        self._vulkan_pixels = []
+        self._vulkan_font_evidence = nil
+        self._font_frame_target = ""
+        self._font_readback_target = ""
+        self._pending_font_cpu_fallbacks = []
+        self.last_font_execution_attempts = []
+        self.last_font_execution_target = ""
+        val active = self._vulkan_font
+        if active != nil:
+            var vulkan = active.?
+            if not vulkan.begin_frame():
+                vulkan.reason = "vulkan-font-frame-begin-failed"
+            self._vulkan_font = vulkan
 
     me end_frame():
+        val active = self._vulkan_font
+        if active != nil:
+            var vulkan = active.?
+            val evidence = vulkan.end_frame()
+            self._vulkan_font_evidence = evidence
+            self._vulkan_pixels = []
+            val expected_bytes = self._w.to_i64() * self._h.to_i64() * 4
+            val completed = (self._font_frame_target == "vulkan" and evidence.ready and
+                evidence.hud_draws + evidence.world_draws > 0 and
+                evidence.pixels_rgba8.len() == expected_bytes)
+            val completion_target = engine3d_font_completion_target(
+                completed, self._pending_font_cpu_fallbacks.len()
+            )
+            if self._font_frame_target == "vulkan":
+                var completion_attempts = self.last_font_execution_attempts
+                val completion_reason = if evidence.reason == "": "completion-failed" else: evidence.reason
+                completion_attempts.push(if completed: "vulkan:success" else: "vulkan:" + completion_reason)
+                self.last_font_execution_attempts = completion_attempts
+            if completion_target == "vulkan":
+                var i: i64 = 0
+                while i + 3 < evidence.pixels_rgba8.len():
+                    val r = evidence.pixels_rgba8[i].to_u32()
+                    val g = evidence.pixels_rgba8[i + 1].to_u32()
+                    val b = evidence.pixels_rgba8[i + 2].to_u32()
+                    val a = evidence.pixels_rgba8[i + 3].to_u32()
+                    self._vulkan_pixels.push((a << 24u32) | (r << 16u32) | (g << 8u32) | b)
+                    i = i + 4
+                self._font_readback_target = "vulkan"
+                self.last_font_execution_target = "vulkan"
+            elif completion_target == "cpu":
+                var replayed = true
+                for pending in self._pending_font_cpu_fallbacks:
+                    if not pending.already_drawn and not self._draw_font_batch_hud(pending.x, pending.y, pending.batch):
+                        replayed = false
+                if replayed:
+                    self._font_frame_target = "cpu"
+                    self._font_readback_target = "cpu"
+                    self.last_font_execution_target = "cpu"
+                    var fallback_attempts = self.last_font_execution_attempts
+                    fallback_attempts.push("cpu:deferred-success")
+                    self.last_font_execution_attempts = fallback_attempts
+                else:
+                    self._font_readback_target = "unavailable"
+                    self.last_font_execution_target = ""
+            elif self._font_frame_target == "vulkan":
+                self._font_readback_target = "unavailable"
+                self.last_font_execution_target = ""
+            self._pending_font_cpu_fallbacks = []
+            self._vulkan_font = vulkan
         self._cpu.end_frame()
 
     me present():
@@ -124,6 +271,8 @@ class Engine3D:
     # ========================================================================
 
     me set_camera(view: [f32], proj: [f32]):
+        self._view = view
+        self._proj = proj
         self._cpu.set_camera(view, proj)
 
     me set_viewport(x: i32, y: i32, w: i32, h: i32):
@@ -203,9 +352,11 @@ class Engine3D:
         loaded
 
     me unload_font():
-        val active = self._font_renderer
-        if active != nil:
-            val fonts = active
+        # NOTE: destructure — a `me` method called through an OPTION-typed
+        # binding mutates a discarded temporary, so `clear_ttf` never reached
+        # the stored renderer. See
+        # doc/08_tracking/bug/me_method_mutation_through_optional_binding_discarded_2026-08-04.md
+        if val Some(fonts) = self._font_renderer:
             fonts.clear_ttf()
         self._font_renderer = nil
 
@@ -367,6 +518,14 @@ class Engine3D:
         self._draw_font_batch_policy(projected.1, projected.2, projected.3, true, batch, ["vulkan", "cpu"])
 
     fn read_pixels() -> [u32]:
+        if self._font_readback_target == "vulkan-pending" or self._font_readback_target == "unavailable":
+            return []
+        if (self._font_readback_target == "vulkan" and self._vulkan_font != nil and
+            self._vulkan_pixels.len() == self._w.to_i64() * self._h.to_i64()):
+            return self._vulkan_pixels
+        self._cpu.read_pixels()
+
+    fn read_cpu_comparator_pixels() -> [u32]:
         self._cpu.read_pixels()
 
     fn read_depth() -> [f32]:

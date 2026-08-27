@@ -1,22 +1,17 @@
-# Runner Lifecycle Manager - Robust Process and Container Cleanup
+# Runner Lifecycle Manager - Tracked Process and Container Cleanup
 #
-# Provides automatic cleanup of child processes and containers when test
-# runner exits (normal shutdown, signal, or crash).
-#
-# Features:
-# - Automatic PID/container tracking on spawn
-# - Cleanup on normal exit
-# - Cleanup on signal (SIGTERM/SIGINT)
-# - Heartbeat monitoring for orphan detection
-# - Process group management
+# Tracks children spawned through this owner. The parallel runner polls pending
+# POSIX signals and cleans these tracked resources before exiting. Synchronous
+# sequential children, fatal crashes, descendants, and process groups require
+# separate containment and are not claimed here.
 
-use std.test_runner.process_tracker.{tracker_register_pid, tracker_get_pids, tracker_unregister_pid, tracker_register_container, tracker_unregister_container, tracker_kill_all_children, tracker_stop_all_containers, is_docker_available, get_running_containers, tracker_enable_heartbeat, tracker_send_heartbeat, tracker_check_heartbeat_alive}
+use std.test_runner.process_tracker.{tracker_register_pid, tracker_get_pids, tracker_unregister_pid, tracker_register_container, tracker_unregister_container, tracker_kill_all_children, tracker_stop_all_containers, tracker_container_runtime, get_running_containers, tracker_enable_heartbeat, tracker_send_heartbeat, tracker_check_heartbeat_alive}
 use std.test_runner.checkpoint.{checkpoint_save}
 use std.nogc_sync_mut.io.process_ops.{process_spawn_async, process_wait, process_kill, process_is_running, process_run_bounded}
 use std.test_runner.test_runner_types.{TEST_OUTPUT_CAPTURE_BYTES}
 use std.nogc_sync_mut.io.process_governor (proc_slot_acquire, proc_slot_release, proc_slot_reset)
 use std.io_runtime.{exit}
-use std.io.{time_now_unix_micros}
+use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
 
 # ============================================================================
 # Enhanced Process Spawn with Tracking
@@ -60,6 +55,25 @@ fn untrack_process(pid: i64):
     tracker_unregister_pid(pid)
     proc_slot_release()
 
+fn wait_tracked_process(pid: i64, timeout_ms: i64) -> i64:
+    val exit_code = process_wait(pid, timeout_ms)
+    if exit_code == -2:
+        val killed = process_kill(pid)
+        if killed or not process_is_running(pid):
+            untrack_process(pid)
+        return -1
+    if exit_code >= 0 or not process_is_running(pid):
+        untrack_process(pid)
+    exit_code
+
+fn poll_tracked_process(pid: i64) -> i64:
+    if pid <= 0:
+        return -1
+    val exit_code = process_wait(pid, 1)
+    if exit_code >= 0 or (exit_code == -1 and not process_is_running(pid)):
+        untrack_process(pid)
+    exit_code
+
 # ============================================================================
 # Enhanced Container Run with Tracking
 # ============================================================================
@@ -94,20 +108,16 @@ fn run_tracked_container(
         # ... later ...
         stop_tracked_container(container_id)
     """
-    # Build docker/podman run command
-    var cmd_parts: [text] = ["{runtime} run -d"]
-    cmd_parts.push("--memory={memory_mb}m")
-    cmd_parts.push("--cpus={cpu_count}")
-
+    if runtime != "docker" and runtime != "podman":
+        return ""
+    var run_args = [
+        "run", "-d", "--label", "simple-test-runner=1",
+        "--memory={memory_mb}m", "--cpus={cpu_count}", image
+    ]
     for arg in args:
-        cmd_parts.push("\"{arg}\"")
-
-    cmd_parts.push("{image}")
-    val cmd = cmd_parts.join(" ")
-
-    # NOTE: In real implementation, would use shell() and parse container ID
-    # For now, return stub value
-    val container_id = "stub-container-id"
+        run_args.push(arg)
+    val (stdout, _stderr, exit_code) = process_run_bounded(runtime, run_args, 60000, TEST_OUTPUT_CAPTURE_BYTES)
+    val container_id = if exit_code == 0: stdout.trim() else: ""
 
     if container_id != "" and container_id != nil:
         tracker_register_container(container_id)
@@ -120,13 +130,16 @@ fn stop_tracked_container(container_id: text):
 
     Call this after container completes successfully.
     """
-    val runtime = if is_docker_available(): "docker" else: "podman"
+    val runtime = tracker_container_runtime()
+    if runtime == "none":
+        return
 
     # Try graceful stop
-    val stop_cmd = "{runtime} stop -t 10 {container_id}"
-    # NOTE: In real implementation, would use shell()
-
-    tracker_unregister_container(container_id)
+    val (_stdout, _stderr, exit_code) = process_run_bounded(
+        runtime, ["stop", "-t", "10", container_id], 15000, TEST_OUTPUT_CAPTURE_BYTES
+    )
+    if exit_code == 0:
+        tracker_unregister_container(container_id)
 
 # ============================================================================
 # Cleanup on Exit
@@ -136,10 +149,8 @@ fn cleanup_all_children():
     """
     Kill all tracked processes and stop all containers.
 
-    This is called automatically on:
-    - Normal exit (via shutdown_graceful)
-    - Signal handlers (SIGTERM/SIGINT)
-    - Panic/crash handlers (future enhancement)
+    Called by explicit shutdown and cooperative signal handlers. Fatal crashes
+    cannot execute Simple cleanup callbacks.
 
     Returns: Total number of resources cleaned (processes + containers)
     """
@@ -233,89 +244,37 @@ fn lifecycle_check_parent_alive() -> bool:
 
 fn cleanup_orphaned_processes():
     """
-    Cleanup processes that are still running but no longer tracked.
+    Cleanup tracked processes that are still alive.
 
-    This is useful when runner crashes and leaves orphaned children.
-
-    NOTE: Requires process group ID (PGID) tracking for safe implementation.
-    Current stub version only cleans tracked processes.
+    Process-group discovery remains outside this owner's safe PID registry.
     """
-    # Get all tracked PIDs
-    val pids = tracker_get_pids()
-
-    var orphans_killed = 0
-
-    for pid in pids:
-        # Check if process is still running but shouldn't be
-        # (e.g., test timeout exceeded, runner restarted)
-        # NOTE: Real implementation would check process group, parent PID, etc.
-
-        orphans_killed = orphans_killed + 1
-
-    orphans_killed
+    tracker_kill_all_children()
 
 fn cleanup_orphaned_containers():
     """
     Cleanup containers that are still running but no longer tracked.
 
-    Looks for containers with label "simple-test-runner" that have
-    been running for >1 hour.
+    Removes running containers carrying the `simple-test-runner=1` ownership
+    label. Unlabelled user containers are never selected.
     """
-    val runtime = if is_docker_available(): "docker" else: "podman"
-
     # Get all running containers
     val all_containers = get_running_containers()
 
+    val runtime = tracker_container_runtime()
+    if runtime == "none":
+        return 0
     var orphans_stopped = 0
 
     for container_id in all_containers:
-        # NOTE: Real implementation would:
-        # 1. Check container labels for "simple-test-runner"
-        # 2. Check container start time (>1 hour ago)
-        # 3. Stop only if conditions match
-
-        orphans_stopped = orphans_stopped + 1
+        val (_stdout, _stderr, exit_code) = process_run_bounded(
+            runtime, ["rm", "-f", container_id], 15000, TEST_OUTPUT_CAPTURE_BYTES
+        )
+        if exit_code == 0:
+            tracker_unregister_container(container_id)
+            orphans_stopped = orphans_stopped + 1
 
     orphans_stopped
 
 # ============================================================================
-# Signal Handlers (Future Enhancement)
-# ============================================================================
-#
-# To make this production-ready, we need SFFI additions for signal handling:
-#
-# extern fn rt_signal_handler_install(signal: i64, handler_fn: fn())
-# extern fn rt_signal_raise(signal: i64)
-# extern fn rt_atexit_register(handler_fn: fn())
-#
-# fn install_signal_handlers():
-#     """Install cleanup handlers for common signals"""
-#     rt_signal_handler_install(15, on_sigterm)  # SIGTERM
-#     rt_signal_handler_install(2, on_sigint)    # SIGINT (Ctrl+C)
-#     rt_signal_handler_install(1, on_sighup)    # SIGHUP (terminal close)
-#     rt_atexit_register(on_normal_exit)         # Normal exit
-#
-# fn on_sigterm():
-#     cleanup_and_exit(143, "SIGTERM")  # 128 + 15
-#
-# fn on_sigint():
-#     cleanup_and_exit(130, "SIGINT (Ctrl+C)")  # 128 + 2
-#
-# fn on_sighup():
-#     cleanup_and_exit(129, "SIGHUP (terminal closed)")  # 128 + 1
-#
-# fn on_normal_exit():
-#     cleanup_all_children()
-#
-# Usage in main:
-#     install_signal_handlers()
-#     # ... run tests ...
-#     # Cleanup happens automatically on exit
-
-# ============================================================================
 # Exports
 # ============================================================================
-
-
-
-

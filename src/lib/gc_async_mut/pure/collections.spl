@@ -52,45 +52,59 @@ fn flatten<T>(nested: [[T]]) -> [T]:
     result
 
 # Get unique elements
+# Keeps first occurrence of each element, in input order.
+#
+# Dict membership replaces the former inner scan over `result`, which made this
+# O(n^2). Uses only the verified-safe Dict subset: `d[k] = v` (never `.set()`,
+# which silently drops inserts under native codegen) and `contains_key` (never
+# `.get()`). See doc/07_guide/language/dict_native_pitfalls.md.
 fn unique<T>(list: [T]) -> [T]:
+    var seen: Dict<T, bool> = {}
     var result: [T] = []
-    var i = 0
-    while i < list.len():
-        val item = list[i]
-        var found = false
-        var j = 0
-        while j < result.len():
-            if result[j] == item:
-                found = true
-                break
-            j = j + 1
-        if not found:
+    for item in list:
+        if not seen.contains_key(item):
+            seen[item] = true
             result.push(item)
-        i = i + 1
     result
 
 # Group elements by key function
+# Groups appear in first-encounter order of their key; members keep input order.
+#
+# Keys and member buckets live in two parallel arrays because an array-of-arrays
+# is mutable through index (`members[j].push(item)` reaches the stored bucket),
+# unlike a tuple field (`groups[j].1.push(item)` mutates a discarded copy, which
+# dropped every member after the first). The pairs are zipped only at the end.
+# ponytail: slot lookup is a linear scan over `keys`, O(n * distinct_keys);
+# upgrade path is a dict-slot lookup (Dict<K, i64> key -> slot index).
 fn group_by<T, K>(list: [T], key_fn: fn(T) -> K) -> [(K, [T])]:
-    var groups: [(K, [T])] = []
+    var keys: [K] = []
+    var members: [[T]] = []
     var i = 0
     while i < list.len():
         val item = list[i]
         val key = key_fn(item)
 
-        # Find or create group
+        # Find or create slot
         var found = false
         var j = 0
-        while j < groups.len():
-            if groups[j].0 == key:
-                groups[j].1.push(item)
+        while j < keys.len():
+            if keys[j] == key:
+                members[j].push(item)
                 found = true
                 break
             j = j + 1
 
         if not found:
-            groups.push((key, [item]))
+            keys.push(key)
+            members.push([item])
 
         i = i + 1
+
+    var groups: [(K, [T])] = []
+    var g = 0
+    while g < keys.len():
+        groups.push((keys[g], members[g]))
+        g = g + 1
     groups
 
 # Partition list by predicate

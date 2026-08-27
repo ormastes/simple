@@ -2,18 +2,13 @@
 #
 # Common call-graph building logic used by both alloc_inference and call_graph.
 
-use compiler.core.ast.{DECL_FN, EXPR_CALL, EXPR_IDENT, EXPR_IF_CHAIN}
-use compiler.core.ast.{STMT_IF, STMT_IF_CHAIN}
+use compiler.core.ast.{DECL_FN, EXPR_CALL, EXPR_IDENT}
+use compiler.core.ast.{STMT_IF}
 use compiler.core.ast.{decl_count, decl_get_tag, decl_get_name, decl_get_body}
 use compiler.core.ast.{stmt_get_tag, stmt_get_expr, stmt_get_body, stmt_get_type}
 use compiler.core.ast.{expr_get_tag, expr_get_str, expr_get_left, expr_get_right, expr_get_extra}
 use compiler.core.ast.{expr_get_args, expr_get_stmts}
 use compiler.core.ast.{elif_get_cond, elif_get_body, elif_get_else}
-use compiler.frontend.core.if_chain_nodes.{ARM_CONDITION}
-use compiler.frontend.core.if_chain_nodes.{flat_if_chain_first_arm_get, flat_if_chain_arm_count_get}
-use compiler.frontend.core.if_chain_nodes.{flat_if_chain_else_expr_get, flat_if_chain_else_stmt_count_get, flat_if_chain_else_stmt_at}
-use compiler.frontend.core.if_chain_nodes.{flat_if_arm_next_get, flat_if_arm_kind_get, flat_if_arm_head_get, flat_if_arm_init_get}
-use compiler.frontend.core.if_chain_nodes.{flat_if_arm_then_expr_get, flat_if_arm_body_count_get, flat_if_arm_body_at}
 
 # ===== Module State =====
 
@@ -77,9 +72,6 @@ fn ceu_add_callee(fn_idx: i64, callee_name: text):
 
 fn ceu_collect_calls_from_stmt(stmt_idx: i64, fn_idx: i64):
     val tag = stmt_get_tag(stmt_idx)
-    if tag == STMT_IF_CHAIN:
-        ceu_collect_calls_from_if_chain(stmt_get_type(stmt_idx), fn_idx)
-        return
     val expr_idx = stmt_get_expr(stmt_idx)
     val body = stmt_get_body(stmt_idx)
 
@@ -112,11 +104,6 @@ fn ceu_collect_calls_from_expr(expr_idx: i64, fn_idx: i64):
         return
     val tag = expr_get_tag(expr_idx)
 
-    # EXTRA is an if-chain owner id for this tag, not an expression id.
-    if tag == EXPR_IF_CHAIN:
-        ceu_collect_calls_from_if_chain(expr_get_extra(expr_idx), fn_idx)
-        return
-
     if tag == EXPR_CALL:
         val callee = expr_get_left(expr_idx)
         if callee >= 0:
@@ -141,28 +128,3 @@ fn ceu_collect_calls_from_expr(expr_idx: i64, fn_idx: i64):
         ceu_collect_calls_from_expr(arg_idx, fn_idx)
     for stmt_idx in stmts:
         ceu_collect_calls_from_stmt(stmt_idx, fn_idx)
-
-fn ceu_collect_calls_from_if_chain(chain_id: i64, fn_idx: i64):
-    var arm_id = flat_if_chain_first_arm_get(chain_id)
-    var remaining = flat_if_chain_arm_count_get(chain_id)
-    while arm_id >= 0 and remaining > 0:
-        val kind = flat_if_arm_kind_get(arm_id)
-        # Only condition heads execute. Binding heads are identifiers/patterns;
-        # their initializer is the runtime expression and constructor-shaped
-        # patterns must not become call-graph edges.
-        if kind == ARM_CONDITION:
-            ceu_collect_calls_from_expr(flat_if_arm_head_get(arm_id), fn_idx)
-        else:
-            ceu_collect_calls_from_expr(flat_if_arm_init_get(arm_id), fn_idx)
-        ceu_collect_calls_from_expr(flat_if_arm_then_expr_get(arm_id), fn_idx)
-        var body_i = 0
-        while body_i < flat_if_arm_body_count_get(arm_id):
-            ceu_collect_calls_from_stmt(flat_if_arm_body_at(arm_id, body_i), fn_idx)
-            body_i = body_i + 1
-        arm_id = flat_if_arm_next_get(arm_id)
-        remaining = remaining - 1
-    ceu_collect_calls_from_expr(flat_if_chain_else_expr_get(chain_id), fn_idx)
-    var else_i = 0
-    while else_i < flat_if_chain_else_stmt_count_get(chain_id):
-        ceu_collect_calls_from_stmt(flat_if_chain_else_stmt_at(chain_id, else_i), fn_idx)
-        else_i = else_i + 1

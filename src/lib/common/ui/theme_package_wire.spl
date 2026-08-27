@@ -117,16 +117,18 @@ fn _theme_wire_parse_u32(value: text) -> Result<u32, text>:
     if value == "":
         return Err("theme wire: unsigned number is empty")
     var out: u64 = 0u64
-    var i = 0
-    while i < value.len():
-        val code = value.char_at(i) as i64
+    # Iterate CODEPOINTS. `value.len()` is a BYTE count, so the old
+    # `while i < value.len()` bound over-ran `char_at`'s codepoint index space
+    # on any non-ASCII input -- see
+    # doc/08_tracking/bug/text_byte_len_vs_codepoint_index_family_2026-08-06.md
+    for ch in value:
+        val code = ch.char_code_at(0)
         if code < 48 or code > 57:
             return Err("theme wire: unsigned number is malformed")
         val digit = (code - 48).to_u64()
         if out > 429496729u64 or (out == 429496729u64 and digit > 5u64):
             return Err("theme wire: unsigned number overflows u32")
         out = out * 10u64 + digit
-        i = i + 1
     if value.len() > 1 and value.slice(0, 1) == "0":
         return Err("theme wire: unsigned number is noncanonical")
     Ok(out.to_u32())
@@ -144,16 +146,21 @@ fn _theme_wire_parse_i32(value: text) -> Result<i32, text>:
     if value.len() - start > 1 and value.slice(start, start + 1) == "0":
         return Err("theme wire: signed number is noncanonical")
     var out: i64 = 0
-    var i = start
+    var i = 0
     val limit: i64 = if negative: 2147483648 else: 2147483647
-    while i < value.len():
-        val code = value.char_at(i) as i64
-        if code < 48 or code > 57:
-            return Err("theme wire: signed number is malformed")
-        val digit = code - 48
-        if out > (limit - digit) / 10:
-            return Err("theme wire: signed number overflows i32")
-        out = out * 10 + digit
+    # Iterate CODEPOINTS -- `value.len()` is a BYTE count and `char_at` is
+    # codepoint-indexed; see the family bug doc referenced above. `start` is
+    # 0 or 1 and only ever skips an ASCII '-', so it is a valid codepoint
+    # index too.
+    for ch in value:
+        if i >= start:
+            val code = ch.char_code_at(0)
+            if code < 48 or code > 57:
+                return Err("theme wire: signed number is malformed")
+            val digit = code - 48
+            if out > (limit - digit) / 10:
+                return Err("theme wire: signed number overflows i32")
+            out = out * 10 + digit
         i = i + 1
     if negative and out == 0:
         return Err("theme wire: negative zero is noncanonical")

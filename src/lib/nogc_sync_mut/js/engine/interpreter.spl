@@ -14,11 +14,6 @@ use std.js.engine.runtime.{dispatch_native, NATIVE_BLOB_TEXT, NATIVE_FETCH, NATI
 use std.js.engine.parser.{JsParser}
 use std.js.builtins.json.{json_parse}
 use std.js.builtins.array.{array_map, array_filter, array_reduce, array_forEach, array_find, array_findIndex, array_some, array_every, array_sort_with, array_isArray, array_from_values}
-use std.nogc_sync_mut.http.types.{status_text}
-
-extern fn rt_file_read_text(path: text) -> text
-extern fn rt_http_request(method: text, url: text, headers: text, body: text) -> (i64, text, text)
-
 # ── Types, helpers, coercion (extracted to interpreter_types.spl) ────────
 use std.js.engine.interpreter_types.{Environment, EnvironmentStack, CallFrame, JsFunction, NativeIdMapping, to_number, js_to_string, to_boolean, is_truthy, typeof_value, strict_equals, abstract_equals, RETURN_SIGNAL, _is_array_method, _is_string_method, _get_obj_id, _get_fn_id, f64_to_i64, _digit_val}
 
@@ -105,24 +100,6 @@ fn text_equals_exact(left: text, right: text) -> bool:
         i = i + 1
     true
 
-fn _simple_fetch_marker(obj_id: i64, store: ObjectStore) -> bool:
-    match store.get_property(obj_id, "__simple_fetch_host"):
-        JsValue.Boolean(v): v
-        _:
-            false
-
-fn _simple_fetch_base_url(obj_id: i64, store: ObjectStore) -> text:
-    match store.get_property(obj_id, "__simple_base_url"):
-        JsValue.String(v): v
-        _:
-            ""
-
-fn _simple_fetch_cookie_header(obj_id: i64, store: ObjectStore) -> text:
-    match store.get_property(obj_id, "__simple_cookie_header"):
-        JsValue.String(v): v
-        _:
-            ""
-
 fn _simple_fetch_state(obj_id: i64, store: ObjectStore) -> text:
     var i = store.prop_obj_ids.len() - 1
     while i >= 0:
@@ -146,7 +123,6 @@ fn _simple_fetch_value(obj_id: i64, store: ObjectStore) -> JsValue:
                 JsValue.Object(id): return JsValue.Object(id: id)
                 JsValue.Array(id): return JsValue.Array(id: id)
                 JsValue.Function(id): return JsValue.Function(id: id)
-                JsValue.Symbol(id): return JsValue.Symbol(id: id)
         i = i - 1
     JsValue.Undefined
 
@@ -157,123 +133,17 @@ fn _simple_fetch_handlers(obj_id: i64, store: ObjectStore) -> i64:
         _:
             -1
 
-fn _scheme(url: text) -> text:
-    match url.index_of("://"):
-        Some(idx): url.substring(0, idx)
-        nil: "https"
-
-fn _origin(url: text) -> text:
-    val scheme_end_opt = url.index_of("://")
-    match scheme_end_opt:
-        Some(scheme_end):
-            val after_scheme = scheme_end + 3
-            match url.substring(after_scheme).index_of("/"):
-                Some(rel_idx): url.substring(0, after_scheme + rel_idx)
-                nil: url
-        nil:
-            ""
-
-fn _without_fragment(url: text) -> text:
-    match url.index_of("#"):
-        Some(idx): url.substring(0, idx)
-        nil: url
-
-fn _without_query(url: text) -> text:
-    val clean = _without_fragment(url)
-    match clean.index_of("?"):
-        Some(idx): clean.substring(0, idx)
-        nil: clean
-
-fn _base_dir(url: text) -> text:
-    val clean = _without_query(url)
-    val origin = _origin(clean)
-    if origin == "":
-        return ""
-    if clean == origin:
-        return origin + "/"
-    val after_origin = clean.substring(origin.len())
-    match after_origin.last_index_of("/"):
-        Some(rel_idx): origin + after_origin.substring(0, rel_idx + 1)
-        nil: origin + "/"
-
-fn _resolve_fetch_url(base_url: text, href: text) -> text:
-    if href == "":
-        return base_url
-    if href.starts_with("http://") or href.starts_with("https://") or href.starts_with("file://") or href.starts_with("about:"):
-        return href
-    if href.starts_with("//"):
-        return _scheme(base_url) + ":" + href
-    if href.starts_with("#"):
-        return _without_fragment(base_url) + href
-    if href.starts_with("?"):
-        return _without_query(base_url) + href
-    if href.starts_with("/"):
-        val origin = _origin(base_url)
-        if origin != "":
-            return origin + href
-        return href
-    _base_dir(base_url) + href
-
-fn _simple_fetch_sync(store: ObjectStore, obj_id: i64, args: [JsValue]) -> JsValue:
-    var request_url = _simple_fetch_base_url(obj_id, store)
-    if args.len() > 0:
-        request_url = _resolve_fetch_url(request_url, js_to_string(args.get(0)))
-    var method = "GET"
-    if args.len() > 1:
-        val maybe_method = js_to_string(args.get(1)).trim().upper()
-        if maybe_method != "":
-            method = maybe_method
-    var headers_text = ""
-    if args.len() > 2:
-        headers_text = js_to_string(args.get(2))
-    val cookie_header = _simple_fetch_cookie_header(obj_id, store)
-    if cookie_header != "":
-        if headers_text != "":
-            headers_text = headers_text + "\n"
-        headers_text = headers_text + "Cookie: " + cookie_header
-    var body = ""
-    if args.len() > 3:
-        body = js_to_string(args.get(3))
-    var content_type = ""
-    if args.len() > 4:
-        content_type = js_to_string(args.get(4))
-    if content_type != "":
-        if headers_text != "":
-            headers_text = headers_text + "\n"
-        headers_text = headers_text + "Content-Type: " + content_type
-
-    var status: i64 = 0
-    var response_body = ""
-    var error_text = ""
-    if request_url.starts_with("file://"):
-        val path = request_url.slice(7, request_url.len())
-        val content = rt_file_read_text(path) ?? ""
-        if content != "":
-            status = 200
-            response_body = content
-        else:
-            status = 404
-            error_text = "file not found"
-    else:
-        val result = rt_http_request(method, request_url, headers_text, body)
-        status = result.0
-        response_body = result.1
-        error_text = result.2
-
-    val response_id = store.create_object()
-    store.set_property(response_id, "url", JsValue.String(v: request_url))
-    store.set_property(response_id, "status", JsValue.Number(v: status.to_f64()))
-    store.set_property(response_id, "ok", JsValue.Boolean(v: status >= 200 and status < 300 and error_text == ""))
-    store.set_property(response_id, "headersText", JsValue.String(v: ""))
-    store.set_property(response_id, "body", JsValue.String(v: response_body))
-    store.set_property(response_id, "error", JsValue.String(v: error_text))
-    JsValue.Object(id: response_id)
-
 class PendingAsyncRequest:
     request_obj_id: i64
+    script_cookie_writes: [text]
 
-    static fn create(request_obj_id: i64) -> PendingAsyncRequest:
-        PendingAsyncRequest(request_obj_id: request_obj_id)
+    static fn create(
+        request_obj_id: i64, script_cookie_writes: [text] = []
+    ) -> PendingAsyncRequest:
+        PendingAsyncRequest(
+            request_obj_id: request_obj_id,
+            script_cookie_writes: script_cookie_writes
+        )
 
 class PendingPromiseTask:
     promise_id: i64
@@ -318,6 +188,8 @@ class PendingTimerTask:
     scheduled_at_ms: i64
     is_interval: bool
     is_next_tick: bool
+    is_animation_frame: bool
+    is_immediate: bool
 
     static fn create(id: i64, callback_id: i64, delay_ms: i64, scheduled_at_ms: i64, is_interval: bool) -> PendingTimerTask:
         PendingTimerTask(
@@ -328,6 +200,8 @@ class PendingTimerTask:
             scheduled_at_ms: scheduled_at_ms,
             is_interval: is_interval,
             is_next_tick: false,
+            is_animation_frame: false,
+            is_immediate: false,
         )
 
     static fn create_with_args(id: i64, callback_id: i64, callback_args: [JsValue], delay_ms: i64, scheduled_at_ms: i64, is_interval: bool) -> PendingTimerTask:
@@ -339,6 +213,37 @@ class PendingTimerTask:
             scheduled_at_ms: scheduled_at_ms,
             is_interval: is_interval,
             is_next_tick: false,
+            is_animation_frame: false,
+            is_immediate: false,
+        )
+
+    static fn create_immediate_with_args(
+        id: i64, callback_id: i64, callback_args: [JsValue],
+        scheduled_at_ms: i64
+    ) -> PendingTimerTask:
+        PendingTimerTask(
+            id: id,
+            callback_id: callback_id,
+            callback_args: callback_args,
+            delay_ms: 0,
+            scheduled_at_ms: scheduled_at_ms,
+            is_interval: false,
+            is_next_tick: false,
+            is_animation_frame: false,
+            is_immediate: true,
+        )
+
+    static fn create_animation_frame(id: i64, callback_id: i64, delay_ms: i64, scheduled_at_ms: i64) -> PendingTimerTask:
+        PendingTimerTask(
+            id: id,
+            callback_id: callback_id,
+            callback_args: [],
+            delay_ms: delay_ms,
+            scheduled_at_ms: scheduled_at_ms,
+            is_interval: false,
+            is_next_tick: false,
+            is_animation_frame: true,
+            is_immediate: false,
         )
 
     static fn create_next_tick(id: i64, callback_id: i64) -> PendingTimerTask:
@@ -350,9 +255,81 @@ class PendingTimerTask:
             scheduled_at_ms: 0,
             is_interval: false,
             is_next_tick: true,
+            is_animation_frame: false,
+            is_immediate: false,
         )
 
+    fn due_at_ms() -> i64:
+        """Return the representable deadline, or -1 when addition would wrap."""
+        js_timer_deadline_ms(self.scheduled_at_ms, self.delay_ms)
+
+    fn is_due_at(current_time_ms: i64) -> bool:
+        """Return true only for a representable deadline reached by the clock."""
+        val due_at = self.due_at_ms()
+        due_at >= 0 and due_at <= current_time_ms
+
+pub fn js_timer_deadline_ms(scheduled_at_ms: i64, delay_ms: i64) -> i64:
+    """Add a non-negative timer delay without making overflow immediately due."""
+    if delay_ms < 0:
+        return -1
+    if (
+        delay_ms > 0 and
+        scheduled_at_ms > 9223372036854775807 - delay_ms
+    ):
+        return -1
+    scheduled_at_ms + delay_ms
+
+fn js_timer_task_precedes(
+    left: PendingTimerTask, right: PendingTimerTask
+) -> bool:
+    """Order ready-queue tasks by nextTick, deadline, then creation id."""
+    if left.is_next_tick != right.is_next_tick:
+        return left.is_next_tick
+    val left_due = left.due_at_ms()
+    val right_due = right.due_at_ms()
+    if left_due < 0:
+        return right_due < 0 and left.id < right.id
+    if right_due < 0:
+        return true
+    left_due < right_due or (
+        left_due == right_due and left.id < right.id
+    )
+
 # ── Interpreter ──────────────────────────────────────────────────────────
+
+val MAX_SCRIPT_EXECUTION_STEPS: i64 = 100000
+pub val JS_HOST_DOM_MUTATION_MAX_RETAINED_OBJECTS: i64 = 32768
+pub val JS_HOST_DOM_MUTATION_MAX_RETAINED_BYTES: i64 = 64 * 1024 * 1024
+
+pub struct JsHostDomElementPlan:
+    is_body: bool
+    tag_name: text
+    author_id: text
+    class_name: text
+    value: text
+    text_content: text
+    inner_html: text
+    style_names: [text]
+    style_values: [text]
+    style_snapshot: text
+
+pub struct JsHostBodyMutationPlan:
+    handled: bool
+    ok: bool
+    canonical_body_html: text
+    canonical_body_text: text
+    elements: [JsHostDomElementPlan]
+
+pub fn js_host_body_mutation_disabled(
+    property: text, value: text
+) -> JsHostBodyMutationPlan:
+    JsHostBodyMutationPlan(
+        handled: false,
+        ok: false,
+        canonical_body_html: "",
+        canonical_body_text: "",
+        elements: []
+    )
 
 class JsInterpreter:
     env_stack: EnvironmentStack
@@ -396,15 +373,18 @@ class JsInterpreter:
     next_async_request_seq: i64
     pending_async_requests: [PendingAsyncRequest]
     pending_async_request_registry: [PendingAsyncRequest]
+    last_taken_async_cookie_writes: [text]
     pending_promise_tasks: [PendingPromiseTask]
+    pending_promise_task_head: i64
     promise_handlers: [PromiseHandlerRecord]
     promise_handler_registrations: [PromiseHandlerRegistration]
     next_promise_handler_id: i64
     next_timer_id: i64
     pending_timer_tasks: [PendingTimerTask]
-    canceled_timer_ids: [i64]
     timer_handle_ids: [i64]
     timer_handle_object_ids: [i64]
+    timer_current_time_ms: i64
+    timer_time_origin_ms: i64
     global_var_names: [text]
     global_var_values: [JsValue]
     host_window_id: i64
@@ -415,13 +395,65 @@ class JsInterpreter:
     host_chrome_id: i64
     host_session_storage_id: i64
     host_local_storage_id: i64
+    host_promise_id: i64
     host_document_title_value: JsValue
     host_document_cookie_value: JsValue
+    pending_host_document_cookie_writes: [text]
+    host_document_cookie_write_overflow: bool
     host_body_inner_html_value: JsValue
     host_body_text_content_value: JsValue
+    host_body_inner_html_dirty: bool
+    host_body_text_content_dirty: bool
+    host_body_mutation_hook: fn(text, text) -> JsHostBodyMutationPlan
+    host_dom_bridge_generation: i64
+    host_dom_mutation_generation: i64
+    host_dom_element_list_id: i64
+    host_dom_element_ids: [i64]
+    host_dom_style_ids: [i64]
+    host_dom_id_snapshots: [text]
+    host_dom_class_snapshots: [text]
+    host_dom_value_snapshots: [text]
+    host_dom_style_snapshots: [text]
+    host_dom_mutation_retained_objects: i64
+    host_dom_mutation_retained_bytes: i64
+    pending_host_event_ops: [text]
+    pending_host_event_target_ids: [i64]
+    pending_host_event_types: [text]
+    pending_host_event_callbacks: [JsValue]
+    pending_host_event_captures: [bool]
+    pending_host_event_once_flags: [bool]
+    host_event_sync_dispatch_blocked: bool
+    node_compat_enabled: bool
+    execution_steps_remaining: i64
+    execution_limit_hit: bool
 
     static fn new(logger: Logger) -> JsInterpreter:
         JsInterpreter.create(logger)
+
+    me cancel_pending_async_fetches(error: text) -> i64:
+        val requests = self.pending_async_request_registry
+        self.pending_async_request_registry = []
+        self.pending_async_requests = []
+        var canceled = 0
+        var idx = 0
+        while idx < requests.len():
+            val req = requests[idx]
+            val promise_id_val = self.get_object_property(
+                req.request_obj_id, "promise_id"
+            )
+            var promise_id: i64 = -1
+            match promise_id_val:
+                JsValue.String(promise_id_text):
+                    promise_id = parse_non_negative_i64_text(promise_id_text)
+                JsValue.Number(promise_id_num):
+                    promise_id = f64_to_i64(promise_id_num)
+                _:
+                    pass_dn
+            if promise_id >= 0:
+                self._settle_promise(promise_id, JsValue.String(v: error), true)
+                canceled = canceled + 1
+            idx = idx + 1
+        canceled
 
     me ident_name(expr: JsExpression) -> text:
         match expr:
@@ -473,15 +505,18 @@ class JsInterpreter:
             next_async_request_seq: 1,
             pending_async_requests: [],
             pending_async_request_registry: [],
+            last_taken_async_cookie_writes: [],
             pending_promise_tasks: [],
+            pending_promise_task_head: 0,
             promise_handlers: [],
             promise_handler_registrations: [],
             next_promise_handler_id: 1,
             next_timer_id: 1,
             pending_timer_tasks: [],
-            canceled_timer_ids: [],
             timer_handle_ids: [],
             timer_handle_object_ids: [],
+            timer_current_time_ms: 0,
+            timer_time_origin_ms: 0,
             global_var_names: [],
             global_var_values: [],
             host_window_id: -1,
@@ -492,11 +527,106 @@ class JsInterpreter:
             host_chrome_id: -1,
             host_session_storage_id: -1,
             host_local_storage_id: -1,
+            host_promise_id: -1,
             host_document_title_value: JsValue.Undefined,
             host_document_cookie_value: JsValue.Undefined,
+            pending_host_document_cookie_writes: [],
+            host_document_cookie_write_overflow: false,
             host_body_inner_html_value: JsValue.Undefined,
             host_body_text_content_value: JsValue.Undefined,
+            host_body_inner_html_dirty: false,
+            host_body_text_content_dirty: false,
+            host_body_mutation_hook: js_host_body_mutation_disabled,
+            host_dom_bridge_generation: 0,
+            host_dom_mutation_generation: 0,
+            host_dom_element_list_id: -1,
+            host_dom_element_ids: [],
+            host_dom_style_ids: [],
+            host_dom_id_snapshots: [],
+            host_dom_class_snapshots: [],
+            host_dom_value_snapshots: [],
+            host_dom_style_snapshots: [],
+            host_dom_mutation_retained_objects: 0,
+            host_dom_mutation_retained_bytes: 0,
+            pending_host_event_ops: [],
+            pending_host_event_target_ids: [],
+            pending_host_event_types: [],
+            pending_host_event_callbacks: [],
+            pending_host_event_captures: [],
+            pending_host_event_once_flags: [],
+            host_event_sync_dispatch_blocked: false,
+            node_compat_enabled: true,
+            execution_steps_remaining: MAX_SCRIPT_EXECUTION_STEPS,
+            execution_limit_hit: false,
         )
+
+    me _timer_heap_swap(left: i64, right: i64):
+        val task = self.pending_timer_tasks[left]
+        self.pending_timer_tasks[left] = self.pending_timer_tasks[right]
+        self.pending_timer_tasks[right] = task
+
+    me _timer_heap_sift_up(start: i64):
+        var index = start
+        while index > 0:
+            val parent = (index - 1) / 2
+            if not js_timer_task_precedes(
+                self.pending_timer_tasks[index],
+                self.pending_timer_tasks[parent]
+            ):
+                return
+            self._timer_heap_swap(index, parent)
+            index = parent
+
+    me _timer_heap_sift_down(start: i64):
+        var index = start
+        while true:
+            val left = index * 2 + 1
+            if left >= self.pending_timer_tasks.len():
+                return
+            val right = left + 1
+            var first = left
+            if (
+                right < self.pending_timer_tasks.len() and
+                js_timer_task_precedes(
+                    self.pending_timer_tasks[right],
+                    self.pending_timer_tasks[left]
+                )
+            ):
+                first = right
+            if not js_timer_task_precedes(
+                self.pending_timer_tasks[first],
+                self.pending_timer_tasks[index]
+            ):
+                return
+            self._timer_heap_swap(index, first)
+            index = first
+
+    me _timer_heap_repair(index: i64):
+        if index < 0 or index >= self.pending_timer_tasks.len():
+            return
+        if (
+            index > 0 and
+            js_timer_task_precedes(
+                self.pending_timer_tasks[index],
+                self.pending_timer_tasks[(index - 1) / 2]
+            )
+        ):
+            self._timer_heap_sift_up(index)
+        else:
+            self._timer_heap_sift_down(index)
+
+    me _timer_heap_push(task: PendingTimerTask):
+        self.pending_timer_tasks.push(task)
+        self._timer_heap_sift_up(self.pending_timer_tasks.len() - 1)
+
+    me _timer_heap_remove_at(index: i64):
+        if index < 0 or index >= self.pending_timer_tasks.len():
+            return
+        val last = self.pending_timer_tasks.len() - 1
+        if index != last:
+            self.pending_timer_tasks[index] = self.pending_timer_tasks[last]
+        val _ = self.pending_timer_tasks.pop()
+        self._timer_heap_repair(index)
 
 # ── impl extensions (split files) ────────────────────────────────────────
 use std.nogc_sync_mut.js.engine.interpreter_object.{JsInterpreter}

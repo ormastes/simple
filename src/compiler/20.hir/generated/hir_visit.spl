@@ -54,7 +54,7 @@ fn hir_expr_kind_name(node: HirExpr) -> text:
         case Binary(_, _, _): name = "Binary"
         case Unary(_, _): name = "Unary"
         case Call(_, _, _): name = "Call"
-        case MethodCall(_, _, _, _, _): name = "MethodCall"
+        case MethodCall(_, _, _, _): name = "MethodCall"
         case StaticCall(_, _, _, _): name = "StaticCall"
         case If(_, _, _): name = "If"
         case IfChain(_, _): name = "IfChain"
@@ -88,11 +88,6 @@ fn hir_expr_kind_name(node: HirExpr) -> text:
         case Error: name = "Error"
         case TypeTest(_, _): name = "TypeTest"
         case TryCatch(_, _, _): name = "TryCatch"
-        case Spawn(_): name = "Spawn"
-        case DictComprehension(_, _, _): name = "DictComprehension"
-        case ArrayLitSuffix(_, _): name = "ArrayLitSuffix"
-        case KernelLaunch(_, _, _, _): name = "KernelLaunch"
-        case GpuIntrinsic(_, _, _): name = "GpuIntrinsic"
         case _: name = unreachable_hir_variant("HirExprKind", "hir_expr_kind_name")
     name
 
@@ -107,9 +102,6 @@ fn hir_stmt_kind_name(node: HirStmt) -> text:
         case Assign(_, _, _): name = "Assign"
         case Block(_): name = "Block"
         case AsmAssert(_): name = "AsmAssert"
-        case SharedVal(_, _, _, _): name = "SharedVal"
-        case SharedVar(_, _, _, _): name = "SharedVar"
-        case GpuLaunch(_, _): name = "GpuLaunch"
         case _: name = unreachable_hir_variant("HirStmtKind", "hir_stmt_kind_name")
     name
 
@@ -140,9 +132,6 @@ fn hir_gen_type_kind_name(node: HirType) -> text:
         case Function(_, _, _): name = "Function"
         case Projection(_, _): name = "Projection"
         case Isolated(_): name = "Isolated"
-        case Weak(_): name = "Weak"
-        case Atomic(_): name = "Atomic"
-        case QualifiedDynTrait(_, _): name = "QualifiedDynTrait"
         case Infer(_, _): name = "Infer"
         case Error: name = "Error"
         case Never: name = "Never"
@@ -275,12 +264,10 @@ fn hir_visit_expr(node: HirExpr, visitor: HirVisitor):
                 hir_visit_call_arg(it1, visitor)
             for it2 in b_type_args:
                 hir_visit_type(it2, visitor)
-        case MethodCall(b_receiver, _, b_args, _, b_type_args):
+        case MethodCall(b_receiver, _, b_args, _):
             hir_visit_expr(b_receiver, visitor)
             for it2 in b_args:
                 hir_visit_call_arg(it2, visitor)
-            for it4 in b_type_args:
-                hir_visit_type(it4, visitor)
         case StaticCall(b_type_, _, b_args, _):
             hir_visit_type(b_type_, visitor)
             for it2 in b_args:
@@ -376,17 +363,6 @@ fn hir_visit_expr(node: HirExpr, visitor: HirVisitor):
             for clause in b_clauses:
                 hir_visit_catch_clause(clause, visitor)
             hir_visit_block(b_finally, visitor)
-        case Spawn(b_value): hir_visit_expr(b_value, visitor)
-        case DictComprehension(b_key, b_value, b_clauses):
-            hir_visit_expr(b_key, visitor); hir_visit_expr(b_value, visitor)
-            for clause in b_clauses: hir_visit_comp_clause(clause, visitor)
-        case ArrayLitSuffix(b_elements, _):
-            for element in b_elements: hir_visit_expr(element, visitor)
-        case KernelLaunch(b_kernel, b_grid, b_block, b_args):
-            hir_visit_expr(b_kernel, visitor); hir_visit_expr(b_grid, visitor); hir_visit_expr(b_block, visitor)
-            for arg in b_args: hir_visit_call_arg(arg, visitor)
-        case GpuIntrinsic(_, _, b_args):
-            for arg in b_args: hir_visit_expr(arg, visitor)
         case _: unreachable_hir_variant("HirExprKind", "hir_visit_expr")
 
 fn hir_visit_stmt(node: HirStmt, visitor: HirVisitor):
@@ -406,20 +382,6 @@ fn hir_visit_stmt(node: HirStmt, visitor: HirVisitor):
             hir_visit_block(b_block, visitor)
         case AsmAssert(_):
             hir_visit_nothing()
-        case SharedVal(_, b_type_, b_has_init, b_init):
-            hir_visit_type(b_type_, visitor)
-            if b_has_init:
-                hir_visit_expr(b_init, visitor)
-        case SharedVar(_, b_type_, b_has_init, b_init):
-            hir_visit_type(b_type_, visitor)
-            if b_has_init:
-                hir_visit_expr(b_init, visitor)
-        case GpuLaunch(b_config, b_body):
-            for grid_expr in b_config.grid:
-                hir_visit_expr(grid_expr, visitor)
-            for block_expr in b_config.block:
-                hir_visit_expr(block_expr, visitor)
-            hir_visit_block(b_body, visitor)
         case _: unreachable_hir_variant("HirStmtKind", "hir_visit_stmt")
 
 fn hir_visit_type(node: HirType, visitor: HirVisitor):
@@ -479,12 +441,6 @@ fn hir_visit_type(node: HirType, visitor: HirVisitor):
             hir_visit_type(b_base, visitor)
         case Isolated(b_inner):
             hir_visit_type(b_inner, visitor)
-        case Weak(b_inner):
-            hir_visit_type(b_inner, visitor)
-        case Atomic(b_inner):
-            hir_visit_type(b_inner, visitor)
-        case QualifiedDynTrait(_, _):
-            hir_visit_nothing()
         case Infer(_, _):
             hir_visit_nothing()
         case Error:
@@ -675,102 +631,6 @@ fn hir_visit_enum_payload(node: HirEnumPayload, visitor: HirVisitor):
                 hir_visit_expr(kb0, visitor)
         case _: unreachable_hir_variant("HirEnumPayload", "hir_visit_enum_payload")
 
-fn hir_visit_extend_constructor(node: HirExtendConstructor, visitor: HirVisitor):
-    if node == nil:
-        return
-    hir_visit_nothing()
-
-fn hir_visit_extend_enum(node: HirExtendEnum, visitor: HirVisitor):
-    if node == nil:
-        return
-    for it0 in node.constructors:
-        hir_visit_extend_constructor(it0, visitor)
-
-fn hir_visit_facet_access_mode(node: HirFacetAccessMode, visitor: HirVisitor):
-    if node == nil:
-        return
-    match node:
-        case PublicReadonly:
-            hir_visit_nothing()
-        case InspectReadonly:
-            hir_visit_nothing()
-        case _: unreachable_hir_variant("HirFacetAccessMode", "hir_visit_facet_access_mode")
-
-fn hir_visit_facet_acquire_mode(node: HirFacetAcquireMode, visitor: HirVisitor):
-    if node == nil:
-        return
-    match node:
-        case TryResident:
-            hir_visit_nothing()
-        case LoadOptional:
-            hir_visit_nothing()
-        case LoadRequired:
-            hir_visit_nothing()
-        case _: unreachable_hir_variant("HirFacetAcquireMode", "hir_visit_facet_acquire_mode")
-
-fn hir_visit_facet_binding_decl(node: HirFacetBindingDecl, visitor: HirVisitor):
-    if node == nil:
-        return
-    hir_visit_type(node.interface_type, visitor)
-    hir_visit_type_pointcut(node.target_type_rule, visitor)
-    hir_visit_type(node.implementation_type, visitor)
-    hir_visit_facet_binding_mode(node.mode, visitor)
-
-fn hir_visit_facet_binding_mode(node: HirFacetBindingMode, visitor: HirVisitor):
-    if node == nil:
-        return
-    match node:
-        case Attached:
-            hir_visit_nothing()
-        case NominalStatic:
-            hir_visit_nothing()
-        case _: unreachable_hir_variant("HirFacetBindingMode", "hir_visit_facet_binding_mode")
-
-fn hir_visit_facet_impl_decl(node: HirFacetImplDecl, visitor: HirVisitor):
-    if node == nil:
-        return
-    for it0 in node.type_params:
-        hir_visit_type_param(it0, visitor)
-    hir_visit_type(node.base_type, visitor)
-    for it2 in node.interfaces:
-        hir_visit_type(it2, visitor)
-    hir_visit_facet_access_mode(node.access_mode, visitor)
-    for it4 in node.methods:
-        hir_visit_facet_method(it4, visitor)
-
-fn hir_visit_facet_interface_decl(node: HirFacetInterfaceDecl, visitor: HirVisitor):
-    if node == nil:
-        return
-    for it0 in node.type_params:
-        hir_visit_type_param(it0, visitor)
-    for it1 in node.composes:
-        hir_visit_type(it1, visitor)
-    for it2 in node.methods:
-        hir_visit_facet_method(it2, visitor)
-
-fn hir_visit_facet_method(node: HirFacetMethod, visitor: HirVisitor):
-    if node == nil:
-        return
-    hir_visit_function(node.function, visitor)
-
-fn hir_visit_facet_requirement_decl(node: HirFacetRequirementDecl, visitor: HirVisitor):
-    if node == nil:
-        return
-    hir_visit_type(node.interface_type, visitor)
-    hir_visit_type_pointcut(node.target_type_rule, visitor)
-
-fn hir_visit_function(node: HirFunction, visitor: HirVisitor):
-    if node == nil:
-        return
-    for it0 in node.type_params:
-        hir_visit_type_param(it0, visitor)
-    for it1 in node.params:
-        hir_visit_param(it1, visitor)
-    hir_visit_type(node.return_type, visitor)
-    hir_visit_block(node.body, visitor)
-    for it4 in node.effects:
-        hir_visit_effect(it4, visitor)
-
 fn hir_visit_if_arm(node: HirIfArm, visitor: HirVisitor):
     if node == nil:
         return
@@ -818,35 +678,6 @@ fn hir_visit_pattern_payload(node: HirPatternPayload, visitor: HirVisitor):
                 hir_visit_pattern(kb0, visitor)
         case _: unreachable_hir_variant("HirPatternPayload", "hir_visit_pattern_payload")
 
-fn hir_visit_type_param(node: HirTypeParam, visitor: HirVisitor):
-    if node == nil:
-        return
-    for it0 in node.bounds:
-        hir_visit_type(it0, visitor)
-    if node.has_default:
-        hir_visit_type(node.default, visitor)
-
-fn hir_visit_type_pointcut(node: HirTypePointcut, visitor: HirVisitor):
-    if node == nil:
-        return
-    match node:
-        case TypeName(_):
-            hir_visit_nothing()
-        case Implements(b_interface_type):
-            hir_visit_type(b_interface_type, visitor)
-        case Subtype(b_base_type):
-            hir_visit_type(b_base_type, visitor)
-        case And(b_terms):
-            for it0 in b_terms:
-                hir_visit_type_pointcut(it0, visitor)
-        case Or(b_terms):
-            for it0 in b_terms:
-                hir_visit_type_pointcut(it0, visitor)
-        case Not(b_terms):
-            for it0 in b_terms:
-                hir_visit_type_pointcut(it0, visitor)
-        case _: unreachable_hir_variant("HirTypePointcut", "hir_visit_type_pointcut")
-
 fn hir_visit_with_item(node: HirWithItem, visitor: HirVisitor):
     if node == nil:
         return
@@ -854,4 +685,4 @@ fn hir_visit_with_item(node: HirWithItem, visitor: HirVisitor):
 
 export HirVisitor, HirVisitCounter, unreachable_hir_variant, hir_visit_nothing
 export hir_expr_kind_name, hir_stmt_kind_name, hir_gen_type_kind_name, hir_pattern_kind_name
-export hir_visit_expr, hir_visit_stmt, hir_visit_type, hir_visit_pattern, hir_visit_dim_expr, hir_visit_dim_expr_kind, hir_visit_effect, hir_visit_effect_kind, hir_visit_asm, hir_visit_asm_constraint, hir_visit_asm_match_arm, hir_visit_block, hir_visit_call_arg, hir_visit_comp_clause, hir_visit_comp_clause_kind, hir_visit_comprehension_kind, hir_visit_enum_payload, hir_visit_extend_constructor, hir_visit_extend_enum, hir_visit_facet_access_mode, hir_visit_facet_acquire_mode, hir_visit_facet_binding_decl, hir_visit_facet_binding_mode, hir_visit_facet_impl_decl, hir_visit_facet_interface_decl, hir_visit_facet_method, hir_visit_facet_requirement_decl, hir_visit_function, hir_visit_if_arm, hir_visit_interpolation, hir_visit_match_arm, hir_visit_module, hir_visit_param, hir_visit_pattern_payload, hir_visit_type_param, hir_visit_type_pointcut, hir_visit_with_item
+export hir_visit_expr, hir_visit_stmt, hir_visit_type, hir_visit_pattern, hir_visit_dim_expr, hir_visit_dim_expr_kind, hir_visit_effect, hir_visit_effect_kind, hir_visit_asm, hir_visit_asm_constraint, hir_visit_asm_match_arm, hir_visit_block, hir_visit_call_arg, hir_visit_comp_clause, hir_visit_comp_clause_kind, hir_visit_comprehension_kind, hir_visit_enum_payload, hir_visit_if_arm, hir_visit_interpolation, hir_visit_match_arm, hir_visit_param, hir_visit_pattern_payload, hir_visit_with_item

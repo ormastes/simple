@@ -18,6 +18,17 @@ struct PlatformLinkDefaults:
     crt_search_dirs: [text]
     dynamic_linker_candidates: [text]
     extra_link_flags: [text]
+    ssp: bool
+
+# ============================================================================
+# Hardening Policy
+# ============================================================================
+
+struct HardeningPolicy:
+    pie: bool
+    ssp: bool
+    relro: bool
+    bind_now: bool
 
 # ============================================================================
 # Main API
@@ -29,8 +40,25 @@ fn platform_defaults(os: text, arch: text) -> PlatformLinkDefaults:
         library_dirs: default_library_dirs(os),
         crt_search_dirs: default_crt_search_dirs(os, arch),
         dynamic_linker_candidates: default_dynamic_linker_candidates(os, arch),
-        extra_link_flags: []
+        extra_link_flags: [],
+        ssp: true
     )
+
+# resolve_hardening returns the per-preset hardening policy.
+# preset: "hosted" | "baremetal" | "embedded_with_heap"
+# Hosted/desktop stays unconditionally fully hardened (regression guard).
+# Baremetal opts out of all security features (no MMU, no PIE, no SSP).
+# EmbeddedWithHeap keeps RELRO/bind-now but disables PIE and SSP.
+# SSP here is config-only — codegen wiring is deferred (separate bug).
+fn resolve_hardening(preset: text) -> HardeningPolicy:
+    if preset == "hosted":
+        return HardeningPolicy(pie: true, ssp: true, relro: true, bind_now: true)
+    elif preset == "baremetal":
+        return HardeningPolicy(pie: false, ssp: false, relro: false, bind_now: false)
+    elif preset == "embedded_with_heap":
+        return HardeningPolicy(pie: false, ssp: false, relro: true, bind_now: true)
+    # Unknown preset → fail-safe: fully hardened (same as hosted)
+    HardeningPolicy(pie: true, ssp: true, relro: true, bind_now: true)
 
 # ============================================================================
 # System Libraries
@@ -43,8 +71,13 @@ fn default_libraries(os: text) -> [text]:
         return ["c", "pthread", "m", "System"]
     elif os == "freebsd" or os == "FreeBSD":
         return ["c", "pthread", "m"]
+    elif os == "simpleos":
+        # SimpleOS is a first-class unix-like host. Its pure-Simple, musl-shaped
+        # libc folds dl/pthread into libc (musl optimization) but presents the
+        # same surface — so userland links exactly like other hosts.
+        return ["c", "pthread", "m"]
     elif os == "windows":
-        return ["kernel32", "user32"]
+        return ["kernel32", "user32", "d3d11", "dxgi"]
     []
 
 # ============================================================================
@@ -57,7 +90,7 @@ fn default_library_dirs(os: text) -> [text]:
     ["/usr/lib/simple", "/usr/local/lib/simple"]
 
 # ============================================================================
-# CRT Search Directories (Linux only)
+# CRT Search Directories
 # ============================================================================
 
 fn default_crt_search_dirs(os: text, arch: text) -> [text]:
@@ -73,8 +106,12 @@ fn default_crt_search_dirs(os: text, arch: text) -> [text]:
         return ["/usr/lib/x86_64-linux-gnu", "/usr/lib64", "/lib/x86_64-linux-gnu", "/lib64"]
     elif arch == "aarch64":
         return ["/usr/lib/aarch64-linux-gnu", "/usr/aarch64-linux-gnu/lib", "/lib/aarch64-linux-gnu"]
+    elif arch == "armv7l" or arch == "armv7" or arch == "arm":
+        return ["/usr/lib/arm-linux-gnueabihf", "/usr/arm-linux-gnueabihf/lib", "/lib/arm-linux-gnueabihf"]
     elif arch == "riscv64":
         return ["/usr/lib/riscv64-linux-gnu", "/usr/riscv64-linux-gnu/lib", "/lib/riscv64-linux-gnu"]
+    elif arch == "riscv32":
+        return []
     ["/usr/lib"]
 
 # ============================================================================
@@ -104,19 +141,20 @@ fn default_dynamic_linker_candidates(os: text, arch: text) -> [text]:
                 "/lib/ld-linux.so.2",
                 "/lib/i386-linux-gnu/ld-linux.so.2"
             ]
-        elif arch == "armv7" or arch == "arm":
+        elif arch == "armv7l" or arch == "armv7" or arch == "arm":
             return [
                 "/lib/ld-linux-armhf.so.3",
                 "/lib/arm-linux-gnueabihf/ld-linux-armhf.so.3"
             ]
         elif arch == "riscv32":
-            return [
-                "/lib/ld-linux-riscv32-ilp32d.so.1",
-                "/lib/riscv32-linux-gnu/ld-linux-riscv32-ilp32d.so.1"
-            ]
+            return []
         return []
     elif os == "freebsd" or os == "FreeBSD":
         return ["/libexec/ld-elf.so.1"]
+    elif os == "simpleos":
+        # SimpleOS uses one ELF dynamic loader across arches (shares features
+        # with linux; few-optimization: single loader path, no triplet split).
+        return ["/lib/ld-simpleos.so.1", "/usr/lib/simple/ld-simpleos.so.1"]
     []
 
 # ============================================================================
@@ -130,7 +168,7 @@ fn elf_emulation(arch: text) -> text:
         return "aarch64linux"
     elif arch == "i686" or arch == "i386":
         return "elf_i386"
-    elif arch == "armv7" or arch == "arm":
+    elif arch == "armv7l" or arch == "armv7" or arch == "arm":
         return "armelf_linux_eabi"
     elif arch == "riscv64":
         return "elf64lriscv"
@@ -147,8 +185,12 @@ fn gcc_triplet(arch: text) -> text:
         return "x86_64-linux-gnu"
     elif arch == "aarch64":
         return "aarch64-linux-gnu"
+    elif arch == "armv7l" or arch == "armv7" or arch == "arm":
+        return "arm-linux-gnueabihf"
     elif arch == "riscv64":
         return "riscv64-linux-gnu"
+    elif arch == "riscv32":
+        return ""
     "x86_64-linux-gnu"
 
 # ============================================================================

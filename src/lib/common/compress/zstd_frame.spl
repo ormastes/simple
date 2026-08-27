@@ -4,7 +4,10 @@ use std.common.compress.types.{CompressionSimdTier}
 use std.common.compress.zstd_types.{ZstdFrameHeader, ZSTD_MAGIC, ZSTD_XXH64_PRIME1, ZSTD_XXH64_PRIME2, ZSTD_XXH64_PRIME3, ZSTD_XXH64_PRIME4, ZSTD_XXH64_PRIME5}
 
 fn _zstd_xxh64_rotl(value: u64, amount: u64) -> u64:
-    (value << amount) | (value >> (64u64 - amount))
+    val shift = amount % 64u64
+    if shift == 0u64:
+        return value
+    (value << shift) | (value >> (64u64 - shift))
 
 fn _zstd_xxh64_round(acc: u64, input: u64) -> u64:
     val mixed = (acc + input * ZSTD_XXH64_PRIME2)
@@ -31,6 +34,14 @@ fn _zstd_read_u64_local(data: [u8], pos: i64) -> Result<u64, CompressionError>:
         idx = idx + 1
     Ok(value)
 
+fn _zstd_read_u64_guarded(data: [u8], pos: i64) -> u64:
+    var value: u64 = 0u64
+    var idx = 0
+    while idx < 8:
+        value = value | (data[pos + idx].to_u64() << (idx * 8).to_u64())
+        idx = idx + 1
+    value
+
 fn _zstd_xxh64_bytes(data: [u8], seed: u64) -> u64:
     _zstd_xxh64_bytes_for_tier(data, seed, CompressionSimdTier.scalar)
 
@@ -44,10 +55,10 @@ fn _zstd_xxh64_bytes_for_tier(data: [u8], seed: u64, tier: CompressionSimdTier) 
         var v3 = seed
         var v4 = seed - ZSTD_XXH64_PRIME1
         while idx + chunk_width <= data.len():
-            val w1 = _zstd_read_u64_local(data, idx).unwrap()
-            val w2 = _zstd_read_u64_local(data, idx + 8).unwrap()
-            val w3 = _zstd_read_u64_local(data, idx + 16).unwrap()
-            val w4 = _zstd_read_u64_local(data, idx + 24).unwrap()
+            val w1 = _zstd_read_u64_guarded(data, idx)
+            val w2 = _zstd_read_u64_guarded(data, idx + 8)
+            val w3 = _zstd_read_u64_guarded(data, idx + 16)
+            val w4 = _zstd_read_u64_guarded(data, idx + 24)
             v1 = _zstd_xxh64_round(v1, w1)
             v2 = _zstd_xxh64_round(v2, w2)
             v3 = _zstd_xxh64_round(v3, w3)
@@ -65,7 +76,7 @@ fn _zstd_xxh64_bytes_for_tier(data: [u8], seed: u64, tier: CompressionSimdTier) 
         hash = seed + ZSTD_XXH64_PRIME5
     hash = hash + data.len().to_u64()
     while idx + 8 <= data.len():
-        val lane = _zstd_read_u64_local(data, idx).unwrap()
+        val lane = _zstd_read_u64_guarded(data, idx)
         hash = hash ^ _zstd_xxh64_round(0u64, lane)
         hash = _zstd_xxh64_rotl(hash, 27u64) * ZSTD_XXH64_PRIME1 + ZSTD_XXH64_PRIME4
         idx = idx + 8
@@ -118,12 +129,12 @@ fn _zstd_parse_window_size(window_descriptor: i64) -> Result<i64, CompressionErr
 
 fn _zstd_parse_content_size(input: [u8], pos: i64, size_code: i64, single_segment: bool) -> Result<(i64?, i64), CompressionError>:
     val field_size_res = _zstd_frame_content_size_field_size(size_code, single_segment)
-    if field_size_res.is_err():
-        return Err(field_size_res.unwrap_err())
-    val field_size = field_size_res.unwrap()
+    val field_size = match field_size_res:
+        case Ok(decoded): decoded
+        case Err(reason): return Err(reason)
     if field_size == 0:
         return Ok((nil, 0))
-    if pos + field_size > input.len():
+    if pos < 0 or pos + field_size > input.len():
         return Err(CompressionError.TruncatedInput("zstd frame content size"))
     if field_size == 1:
         return Ok((Some(input[pos].to_i64()), 1))
@@ -131,25 +142,26 @@ fn _zstd_parse_content_size(input: [u8], pos: i64, size_code: i64, single_segmen
         return Ok((Some((input[pos].to_i64() | (input[pos + 1].to_i64() << 8)) + 256), 2))
     if field_size == 4:
         val size_res = read_u32_le(input, pos)
-        if size_res.is_err():
-            return Err(size_res.unwrap_err())
-        return Ok((Some(size_res.unwrap().to_i64()), 4))
+        val size32 = match size_res:
+            case Ok(decoded): decoded
+            case Err(reason): return Err(reason)
+        return Ok((Some(size32.to_i64()), 4))
     val size_res = _zstd_read_u64_local(input, pos)
-    if size_res.is_err():
-        return Err(size_res.unwrap_err())
-    val size = size_res.unwrap()
+    val size = match size_res:
+        case Ok(decoded): decoded
+        case Err(reason): return Err(reason)
     if size > 0x7FFFFFFFFFFFFFFFu64:
         return Err(CompressionError.UnsupportedFeature("zstd frame content size exceeds i64"))
     Ok((Some(size.to_i64()), 8))
 
 fn _zstd_parse_dictionary_id(input: [u8], pos: i64, size_code: i64) -> Result<(i64?, i64), CompressionError>:
     val field_size_res = _zstd_dictionary_id_field_size(size_code)
-    if field_size_res.is_err():
-        return Err(field_size_res.unwrap_err())
-    val field_size = field_size_res.unwrap()
+    val field_size = match field_size_res:
+        case Ok(decoded): decoded
+        case Err(reason): return Err(reason)
     if field_size == 0:
         return Ok((nil, 0))
-    if pos + field_size > input.len():
+    if pos < 0 or pos + field_size > input.len():
         return Err(CompressionError.TruncatedInput("zstd dictionary id"))
     var value = 0
     if field_size == 1:
@@ -164,14 +176,17 @@ fn _zstd_parse_dictionary_id(input: [u8], pos: i64, size_code: i64) -> Result<(i
     Ok((if value == 0: nil else: Some(value), field_size))
 
 fn _zstd_parse_frame_header(input: [u8], frame_start: i64) -> Result<ZstdFrameHeader, CompressionError>:
-    if frame_start + 5 > input.len():
+    if frame_start < 0 or frame_start + 5 > input.len():
         return Err(CompressionError.TruncatedInput("zstd frame header"))
     val magic_res = read_u32_le(input, frame_start)
-    if magic_res.is_err():
-        return Err(magic_res.unwrap_err())
-    if magic_res.unwrap() != ZSTD_MAGIC:
+    val magic = match magic_res:
+        case Ok(decoded): decoded
+        case Err(reason): return Err(reason)
+    if magic != ZSTD_MAGIC:
         return Err(CompressionError.InvalidHeader("zstd frame magic"))
     val descriptor = input[frame_start + 4].to_i64()
+    if ((descriptor >> 4) & 1) == 1:
+        return Err(CompressionError.CorruptStream("zstd unused frame header bit"))
     if ((descriptor >> 3) & 1) == 1:
         return Err(CompressionError.CorruptStream("zstd reserved frame header bit"))
     val single_segment = ((descriptor >> 5) & 1) == 1
@@ -184,19 +199,19 @@ fn _zstd_parse_frame_header(input: [u8], frame_start: i64) -> Result<ZstdFrameHe
         if pos >= input.len():
             return Err(CompressionError.TruncatedInput("zstd window descriptor"))
         val window_res = _zstd_parse_window_size(input[pos].to_i64())
-        if window_res.is_err():
-            return Err(window_res.unwrap_err())
-        window_size = window_res.unwrap()
+        window_size = match window_res:
+            case Ok(decoded): decoded
+            case Err(reason): return Err(reason)
         pos = pos + 1
     val dictionary_res = _zstd_parse_dictionary_id(input, pos, dictionary_id_flag)
-    if dictionary_res.is_err():
-        return Err(dictionary_res.unwrap_err())
-    val (dictionary_id, dictionary_used) = dictionary_res.unwrap()
+    val (dictionary_id, dictionary_used) = match dictionary_res:
+        case Ok(decoded): decoded
+        case Err(reason): return Err(reason)
     pos = pos + dictionary_used
     val content_size_res = _zstd_parse_content_size(input, pos, content_size_flag, single_segment)
-    if content_size_res.is_err():
-        return Err(content_size_res.unwrap_err())
-    val (content_size, content_used) = content_size_res.unwrap()
+    val (content_size, content_used) = match content_size_res:
+        case Ok(decoded): decoded
+        case Err(reason): return Err(reason)
     pos = pos + content_used
     if single_segment:
         window_size = content_size ?? 0

@@ -8,6 +8,10 @@
 # Composition-only; no inheritance. Reuses `UnitExpression` + `unit_expression_mul/div`
 # + `exact_ratio_mul/div` arithmetic from `src/lib/common/units/model/world_units.spl`.
 
+use compiler.core.types.{
+    newunit_count, newunit_name_at, newunit_suffix_at, newunit_underlying_tag_at,
+    type_tag_name
+}
 use std.common.units.model.world_units.{
     ExactRatio, UnitFactor, UnitExpression, UnitClass,
     exact_ratio, exact_ratio_mul, exact_ratio_div, exact_ratio_equal,
@@ -127,8 +131,12 @@ class UnitRegistry:
         None
 
     pub me has(name: text) -> bool:
-        val opt = self.lookup(name)
-        opt.?
+        # NOTE: `opt.?` evaluates to the Option's PAYLOAD (object), not bool, on
+        # both engines (verified 2026-07-28) — returning it from a `-> bool` fn
+        # silently yields the object and `== true` comparisons fail. Use match.
+        match self.lookup(name):
+            case Some(_): true
+            case None: false
 
     pub me dimensions_match(a: UnitExpression, b: UnitExpression) -> bool:
         """Two unit expressions have matching dimensions iff their factor sets are equivalent
@@ -245,42 +253,46 @@ fn suggest_unit(reg: UnitRegistry, name: text) -> Option<text>:
 # Registry builder — walks modules with path starting `unit.`
 # ---------------------------------------------------------------------------
 
-fn module_path_is_unit(module_path: text) -> bool:
-    """Any module whose dotted path starts with 'unit.' contributes to the registry."""
-    module_path.starts_with("unit.")
+fn unit_registry_build() -> UnitRegistry:
+    """Build the registry consumed at compile start (after parsing, before
+    typecheck).
 
-fn unit_registry_build(modules: [any]) -> UnitRegistry:
-    """Walk modules; collect `unit`/`newunit`/`composite` declarations.
-
-    `modules` is a list of Module values. This is the entry point used at
-    compile start (after module resolution, before typecheck). Track C
-    populates the unit tree — this function is the consumer side."""
+    Source of truth: the parser-side newunit records in compiler.core.types
+    (`newunit Name: T as suffix` calls newunit_register at parse time; the
+    parser stores declarations as flat ids, so there is no Module AST value
+    to walk). Remaining gap: `unit.*` catalog modules with `unit`/`composite`
+    declarations — those decl forms are not parsed yet; extend this builder
+    once Track C pins their shapes."""
     val reg = UnitRegistry.new()
-    for m in modules:
-        val mp = module_path_of(m)
-        if not module_path_is_unit(mp):
-            continue
-        collect_from_module(reg, m, mp)
+    unit_registry_collect_newunits(reg)
     reg
 
-fn module_path_of(m: any) -> text:
-    """Module-path accessor. Placeholder — the real walker (see
-    `collect_from_module`) is wired once Track C pins the `Module`/`UnitDecl`
-    AST shapes. Returns "" today so the builder is a no-op skeleton."""
-    ""
+fn unit_registry_collect_newunits(reg: UnitRegistry) -> i64:
+    """Register every parser-recorded `newunit Name: T as suffix` into `reg`.
 
-fn collect_from_module(reg: UnitRegistry, m: any, module_path: text) -> unit:
-    """Extract `unit`/`newunit`/`composite` decls from a Module AST and register them.
-
-    This is a thin adapter: the actual AST shape is pinned by Track C's
-    catalog authoring. For now we expose the registry API; the walker will be
-    completed when composite parsing lands."""
-    # Intentional scaffold: populated once CompositeUnitDecl / UnitDecl nodes
-    # are parsed. Registry remains usable via direct `register_*` calls.
-    unit_value()
-
-fn unit_value() -> unit:
-    ()
+    short_symbol = the literal suffix (what `10_uid` looks up),
+    full_symbol  = the declared type name,
+    kind         = the underlying primitive's name (e.g. 'i64').
+    Newunits are nominal 1:1 wrappers — Count class, unit base factor.
+    Returns the number of entries registered."""
+    var n = 0
+    var i = 0
+    while i < newunit_count():
+        val name = newunit_name_at(i)
+        val suffix = newunit_suffix_at(i)
+        val entry = unit_entry(
+            short_symbol: suffix,
+            full_symbol: name,
+            module_path: "newunit." + name,
+            kind: type_tag_name(newunit_underlying_tag_at(i)),
+            klass: UnitClass.Count,
+            base_factor: exact_ratio(1, 1),
+            expression: unit_expression_from_base(suffix)
+        )
+        reg.register_entry(entry)
+        n = n + 1
+        i = i + 1
+    n
 
 # ---------------------------------------------------------------------------
 # Registry lookup for suffix lowering — entry point called from HIR

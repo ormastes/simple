@@ -2,16 +2,19 @@
 # SoC RTL PLIC — Platform-Level Interrupt Controller
 # ============================================================================
 #
-# Implements a minimal RISC-V PLIC for 32 interrupt sources and 1 context
-# (context 0 = M-mode).  All operations are pure functions returning new
-# state — suitable for synthesizable RTL.
+# Implements a minimal RISC-V PLIC for 32 interrupt sources and 2 contexts
+# (context 0 = M-mode -> MEIP, context 1 = S-mode -> SEIP).  All operations
+# are pure functions returning new state — suitable for synthesizable RTL.
 #
-# MMIO layout (base 0x0C000000, standard RISC-V PLIC):
+# MMIO layout (base 0x0C000000, standard RISC-V PLIC / QEMU virt):
 #   0x000000-0x00007F  Priority registers (source 1-31, 4 bytes each)
-#   0x001000           Pending bits (32-bit bitmap)
-#   0x002000           Enable bits for context 0
+#   0x001000           Pending bits (32-bit bitmap, shared by all contexts)
+#   0x002000           Enable bits for context 0 (M-mode)
+#   0x002080           Enable bits for context 1 (S-mode)
 #   0x200000           Priority threshold for context 0
 #   0x200004           Claim/complete for context 0
+#   0x201000           Priority threshold for context 1
+#   0x201004           Claim/complete for context 1
 #
 # Source 0 is hardwired to "no interrupt" per the RISC-V spec.
 #
@@ -28,6 +31,10 @@ val PLIC_PENDING_OFF: u32    = 0x00001000
 val PLIC_ENABLE_OFF: u32     = 0x00002000
 val PLIC_THRESHOLD_OFF: u32  = 0x00200000
 val PLIC_CLAIM_OFF: u32      = 0x00200004
+# Context 1 (S-mode) register offsets
+val PLIC_ENABLE_S_OFF: u32    = 0x00002080
+val PLIC_THRESHOLD_S_OFF: u32 = 0x00201000
+val PLIC_CLAIM_S_OFF: u32     = 0x00201004
 
 # ============================================================================
 # PLIC State
@@ -36,10 +43,13 @@ val PLIC_CLAIM_OFF: u32      = 0x00200004
 struct PlicState:
     """PLIC register file.  32 interrupt sources (source 0 unused)."""
     priority: [u32]       # Source priorities (index 0-31, source 0 unused)
-    pending: u32          # 32-bit pending bitmap
+    pending: u32          # 32-bit pending bitmap (shared by both contexts)
     enable: u32           # 32-bit enable bitmap for context 0 (M-mode)
     threshold: u32        # Priority threshold for context 0
-    claim_complete: u32   # Last claimed interrupt id
+    claim_complete: u32   # Last claimed interrupt id (context 0)
+    enable_s: u32         # 32-bit enable bitmap for context 1 (S-mode)
+    threshold_s: u32      # Priority threshold for context 1
+    claim_complete_s: u32 # Last claimed interrupt id (context 1)
 
 # ============================================================================
 # PLIC Check Result
@@ -75,7 +85,10 @@ fn plic_create() -> PlicState:
         pending: 0,
         enable: 0,
         threshold: 0,
-        claim_complete: 0
+        claim_complete: 0,
+        enable_s: 0,
+        threshold_s: 0,
+        claim_complete_s: 0
     )
 
 # ============================================================================
@@ -101,9 +114,17 @@ fn plic_mmio_read(state: PlicState, offset: u32) -> u32:
     if offset == PLIC_ENABLE_OFF:
         return state.enable
 
+    # Enable bits for context 1 (S-mode)
+    if offset == PLIC_ENABLE_S_OFF:
+        return state.enable_s
+
     # Priority threshold for context 0
     if offset == PLIC_THRESHOLD_OFF:
         return state.threshold
+
+    # Priority threshold for context 1 (S-mode)
+    if offset == PLIC_THRESHOLD_S_OFF:
+        return state.threshold_s
 
     # Claim/complete for context 0 — reading returns the winning source id.
     # NOTE: the actual state mutation (clearing pending bit) is applied by
@@ -111,6 +132,11 @@ fn plic_mmio_read(state: PlicState, offset: u32) -> u32:
     # (same pattern as uart_mmio_read_update for UART RX FIFO pop).
     if offset == PLIC_CLAIM_OFF:
         val cr = plic_check_interrupt(state)
+        return cr.source_id
+
+    # Claim/complete for context 1 — same protocol against the S enables
+    if offset == PLIC_CLAIM_S_OFF:
+        val cr = plic_check_interrupt_s(state)
         return cr.source_id
 
     0
@@ -125,6 +151,9 @@ fn plic_mmio_read_update(state: PlicState, offset: u32) -> PlicState:
     and clears its pending bit.  All other offsets are no-ops."""
     if offset == PLIC_CLAIM_OFF:
         val cr = plic_claim(state)
+        return cr.state
+    if offset == PLIC_CLAIM_S_OFF:
+        val cr = plic_claim_s(state)
         return cr.state
     state
 
@@ -154,14 +183,29 @@ fn plic_mmio_write(state: PlicState, offset: u32, value: u32) -> PlicState:
         out.enable = value
         return out
 
+    # Enable bits for context 1 (S-mode)
+    if offset == PLIC_ENABLE_S_OFF:
+        out.enable_s = value
+        return out
+
     # Priority threshold for context 0
     if offset == PLIC_THRESHOLD_OFF:
         out.threshold = value & 0x7
         return out
 
+    # Priority threshold for context 1 (S-mode)
+    if offset == PLIC_THRESHOLD_S_OFF:
+        out.threshold_s = value & 0x7
+        return out
+
     # Claim/complete for context 0 — writing performs a complete
     if offset == PLIC_CLAIM_OFF:
         out = plic_complete(out, value)
+        return out
+
+    # Claim/complete for context 1 — writing performs a complete
+    if offset == PLIC_CLAIM_S_OFF:
+        out = plic_complete_s(out, value)
         return out
 
     out
@@ -245,4 +289,54 @@ fn plic_complete(state: PlicState, source: u32) -> PlicState:
         return state
     var out = state
     out.claim_complete = 0
+    out
+
+# ============================================================================
+# Context 1 (S-mode) — check / claim / complete against enable_s/threshold_s
+# ============================================================================
+
+fn plic_check_interrupt_s(state: PlicState) -> PlicCheckResult:
+    """Context-1 (S-mode) evaluation of the shared pending bitmap against
+    enable_s/threshold_s.  The result's meip field carries the SEIP level
+    (irq line for this context)."""
+    var best_src: u32 = 0
+    var best_pri: u32 = 0
+
+    var src: u32 = 1
+    while src < 32:
+        val mask: u32 = 1 << src
+        val is_pending = (state.pending & mask) != 0
+        val is_enabled = (state.enable_s & mask) != 0
+        if is_pending and is_enabled:
+            val pri = state.priority[src]
+            if pri > state.threshold_s and pri > best_pri:
+                best_pri = pri
+                best_src = src
+        src = src + 1
+
+    PlicCheckResult(
+        source_id: best_src,
+        meip: best_src != 0
+    )
+
+fn plic_claim_s(state: PlicState) -> PlicClaimResult:
+    """Context-1 claim: atomically returns the winning source for the
+    S-mode context and clears its pending bit (shared gateway — a level
+    source re-pends until deasserted)."""
+    val check = plic_check_interrupt_s(state)
+    var out = state
+    if check.source_id != 0:
+        val mask: u32 = 1 << check.source_id
+        out.pending = state.pending & (mask ^ 0xFFFFFFFF)
+        out.claim_complete_s = check.source_id
+    else:
+        out.claim_complete_s = 0
+    PlicClaimResult(state: out, source_id: check.source_id)
+
+fn plic_complete_s(state: PlicState, source: u32) -> PlicState:
+    """Context-1 complete: clears the claim_complete_s register."""
+    if source == 0 or source >= 32:
+        return state
+    var out = state
+    out.claim_complete_s = 0
     out

@@ -6,7 +6,7 @@
 
 use compiler.mir.mir_data.{MirInst, MirInstKind, MirTerminator, MirOperand, MirBinOp, LocalId}
 use compiler.mir.mir_instructions.{MirBlock}
-use compiler.mir_opt.mir_opt.auto_vectorize_types.{LoopInfo, ArrayAccess}
+use compiler.mir_opt.mir_opt.auto_vectorize_types.{VectorLoopInfo, ArrayAccess}
 use compiler.mir_opt.mir_opt.auto_vectorize_analysis.{DependencyAnalysisResult}
 
 # ============================================================================
@@ -24,7 +24,7 @@ struct VectorizabilityResult:
 # Main Validation
 # ============================================================================
 
-fn check_vectorizability(loop_info: LoopInfo, body_blocks: [MirBlock], dep_result: DependencyAnalysisResult) -> VectorizabilityResult:
+fn check_vectorizability(loop_info: VectorLoopInfo, body_blocks: [MirBlock], dep_result: DependencyAnalysisResult) -> VectorizabilityResult:
     """
     Comprehensive vectorizability validation.
     Checks all conditions required for safe vectorization.
@@ -59,7 +59,7 @@ fn check_vectorizability(loop_info: LoopInfo, body_blocks: [MirBlock], dep_resul
         )
 
     # Check 4: Array accesses must be linear
-    val non_linear = check_array_access_patterns(dep_result.array_accesses, loop.induction_var)
+    val non_linear = check_array_access_patterns(dep_result.array_accesses, loop_info.induction_var)
     if non_linear:
         return VectorizabilityResult(
             can_vectorize: false,
@@ -69,7 +69,7 @@ fn check_vectorizability(loop_info: LoopInfo, body_blocks: [MirBlock], dep_resul
         )
 
     # Check 5: Trip count must be sufficient
-    val trip_count = estimate_trip_count(loop)
+    val trip_count = estimate_trip_count(loop_info)
     if trip_count < 8:  # Need at least 2 vector iterations
         return VectorizabilityResult(
             can_vectorize: false,
@@ -150,15 +150,15 @@ fn check_array_access_patterns(accesses: [ArrayAccess], induction: LocalId) -> b
             return true
     false
 
-fn estimate_trip_count(loop_info: LoopInfo) -> i64:
+fn estimate_trip_count(loop_info: VectorLoopInfo) -> i64:
     """
     Estimate the number of loop iterations.
     For simple loops: (end - start) / step
     """
-    if loop.step == 0:
+    if loop_info.step == 0:
         return 0
 
-    val count = (loop.end_value - loop.start_value) / loop.step
+    val count = (loop_info.end_value - loop_info.start_value) / loop_info.step
     if count < 0:
         return 0
 
@@ -216,20 +216,23 @@ fn get_vectorizable_type(body_blocks: [MirBlock]) -> text?:
     Determine the element type for vectorization (f32, f64, i32).
     Returns nil if mixed types or unsupported types found.
     """
-    var found_type: text? = nil
+    var found_type = ""
 
     for block in body_blocks:
         for inst in block.instructions:
             val inst_type = get_instruction_type(inst)
             if inst_type.?:
                 val t = inst_type.unwrap()
-                if not found_type.?:
-                    found_type = Some(t)
-                elif found_type.unwrap() != t:
+                if found_type == "":
+                    found_type = t
+                elif found_type != t:
                     # Mixed types - can't vectorize
                     return nil
 
-    found_type
+    if found_type == "":
+        nil
+    else:
+        Some(found_type)
 
 fn get_instruction_type(inst: MirInst) -> text?:
     """

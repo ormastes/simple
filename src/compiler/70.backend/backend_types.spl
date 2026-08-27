@@ -3,7 +3,7 @@
 # This module contains backend type definitions:
 # - BackendKind, BackendResult, BackendError: Backend interface types
 # - CompiledUnit, CompiledSymbol: Compilation output types
-# - SdnValue: SDN (data-only) value representation
+# - BackendSdnValue: SDN (data-only) value representation
 # - Value: Runtime value representation
 # - Environment: Execution environment for values
 #
@@ -47,7 +47,7 @@ use compiler.backend.backend.backend_types.{BackendKind, CompiledSymbol, Compile
 enum BackendResult:
     Value(value: Value)
     CompiledUnit(unit: CompiledUnit)
-    SdnData(data: SdnValue)
+    SdnData(data: BackendSdnValue)
     Unit
 
 struct BackendError:
@@ -96,17 +96,11 @@ struct CompiledUnit:
     entry_point: text?
     relocations: [Relocation]
 
-struct CompiledSymbol:
-    """Symbol in compiled unit."""
-    name: text
-    address: i64
-    size: i64
-    kind: CompiledSymbolKind
-
-enum CompiledSymbolKind:
-    Function
-    Data
-    External
+# `CompiledSymbol` / `CompiledSymbolKind` are imported at the top of this file
+# from compiler.backend.backend.backend_types -- see the note there. The third
+# copy in compiler/10.frontend/core/backend_types.spl is a separate module that
+# no importer here shares a scope with; it is tracked in
+# doc/08_tracking/bug/duplicate_backend_types_terminal_declarations.md.
 
 struct Relocation:
     """Relocation entry."""
@@ -123,7 +117,7 @@ enum RelocKind:
 # SDN Value (for SDN Backend)
 # ============================================================================
 
-struct SdnValue:
+struct BackendSdnValue:
     """Data-only value from SDN parsing."""
     kind: SdnValueKind
 
@@ -134,34 +128,34 @@ enum SdnValueKind:
     Int(value: i64)
     Float(value: f64)
     String(value: text)
-    Array(elements: [SdnValue])
-    Dict(entries: Dict<text, SdnValue>)
-    Table(headers: [text], rows: [[SdnValue]])
+    Array(elements: [BackendSdnValue])
+    Dict(entries: Dict<text, BackendSdnValue>)
+    Table(headers: [text], rows: [[BackendSdnValue]])
 
-impl SdnValue:
-    static fn make_nil() -> SdnValue:
-        SdnValue(kind: SdnValueKind.Nil)
+impl BackendSdnValue:
+    static fn make_nil() -> BackendSdnValue:
+        BackendSdnValue(kind: SdnValueKind.Nil)
 
-    static fn bool(value: bool) -> SdnValue:
-        SdnValue(kind: SdnValueKind.Bool(value))
+    static fn bool(value: bool) -> BackendSdnValue:
+        BackendSdnValue(kind: SdnValueKind.Bool(value))
 
-    static fn int(value: i64) -> SdnValue:
-        SdnValue(kind: SdnValueKind.Int(value))
+    static fn int(value: i64) -> BackendSdnValue:
+        BackendSdnValue(kind: SdnValueKind.Int(value))
 
-    static fn float(value: f64) -> SdnValue:
-        SdnValue(kind: SdnValueKind.Float(value))
+    static fn float(value: f64) -> BackendSdnValue:
+        BackendSdnValue(kind: SdnValueKind.Float(value))
 
-    static fn string(value: text) -> SdnValue:
-        SdnValue(kind: SdnValueKind.String(value))
+    static fn string(value: text) -> BackendSdnValue:
+        BackendSdnValue(kind: SdnValueKind.String(value))
 
-    static fn array(elements: [SdnValue]) -> SdnValue:
-        SdnValue(kind: SdnValueKind.Array(elements))
+    static fn array(elements: [BackendSdnValue]) -> BackendSdnValue:
+        BackendSdnValue(kind: SdnValueKind.Array(elements))
 
-    static fn dict(entries: Dict<text, SdnValue>) -> SdnValue:
-        SdnValue(kind: SdnValueKind.Dict(entries))
+    static fn dict(entries: Dict<text, BackendSdnValue>) -> BackendSdnValue:
+        BackendSdnValue(kind: SdnValueKind.Dict(entries))
 
-    static fn table(headers: [text], rows: [[SdnValue]]) -> SdnValue:
-        SdnValue(kind: SdnValueKind.Table(headers, rows))
+    static fn table(headers: [text], rows: [[BackendSdnValue]]) -> BackendSdnValue:
+        BackendSdnValue(kind: SdnValueKind.Table(headers, rows))
 
 # ============================================================================
 # Runtime Value (for Interpreter Backend)
@@ -200,16 +194,23 @@ struct FunctionValue:
     symbol: SymbolId
     name: text
 
+type ValueCaptureMap = {text: Value}
+
 struct ClosureValue:
     """Closure value with captured environment."""
     params: [HirParam]
     body: HirExpr
-    captures: Dict<SymbolId, Value>
+    captures: ValueCaptureMap
 
 struct ObjectValue:
-    """Object instance."""
-    class_: SymbolId
-    fields: Dict<text, Value>
+    """Class instance handle (Task #112 class reference model).
+
+    Carries only the class name plus an integer HANDLE into the interpreter's
+    shared ObjectStore (see objects.spl / env.spl). The instance's fields live
+    in the store, NOT inline here, so copying a `Value.Object(ObjectValue)`
+    copies the handle and all copies share one record -> reference semantics."""
+    class_name: text
+    handle: i64
 
 impl Value:
     static fn make_nil() -> Value:
@@ -379,13 +380,11 @@ impl Value:
 # Evaluation Context
 # ============================================================================
 
-
 # ============================================================================
 # Exports
 # ============================================================================
 
 export use compiler.backend.backend.backend_types.*
-use compiler.mir.mir_types.{MirType}
 
 # BackendKind / CompiledSymbol / CompiledSymbolKind are NOT listed here: they
 # are no longer declared by this module and already reach every importer through

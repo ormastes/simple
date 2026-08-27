@@ -100,6 +100,7 @@ class SettlementLinker:
     by matching import names to export entries.
     """
     exports: Dict<text, SymbolEntry>     # name -> export entry
+    fallback_exports: Dict<text, SymbolEntry>  # retained JIT/fallback owners
     imports: Dict<text, [ImportRef]>     # name -> list of import refs
     modules: [text]                      # module IDs in load order
     resolved_count: i64
@@ -109,6 +110,7 @@ impl SettlementLinker:
     static fn create() -> SettlementLinker:
         SettlementLinker(
             exports: {},
+            fallback_exports: {},
             imports: {},
             modules: [],
             resolved_count: 0,
@@ -137,7 +139,10 @@ impl SettlementLinker:
         """Register an import reference to be resolved."""
         if not self.imports.contains(ref.symbol_name):
             self.imports[ref.symbol_name] = []
-        self.imports[ref.symbol_name].push(ref)
+        # ADR-004: dict-index mutation needs write-back.
+        var bucket = self.imports[ref.symbol_name]
+        bucket.push(ref)
+        self.imports[ref.symbol_name] = bucket
 
     me add_module(module_id: text):
         """Register a module in the link set."""
@@ -184,18 +189,19 @@ impl SettlementLinker:
             else:
                 # Try fallback
                 val fb_result = fallback_fn(name)
-                if fb_result.?:
-                    val entry = fb_result.unwrap()
-                    self.exports[name] = entry
-                    self.resolved_count = self.resolved_count + 1
-                else:
-                    val refs = self.imports[name]
-                    for ref in refs:
-                        errors.push(LinkError.UnresolvedSymbol(
-                            name: name,
-                            referenced_by: ref.from_module
-                        ))
-                    self.unresolved_count = self.unresolved_count + 1
+                match fb_result:
+                    case Some(entry):
+                        self.fallback_exports[name] = entry
+                        self.exports[name] = entry
+                        self.resolved_count = self.resolved_count + 1
+                    case nil:
+                        val refs = self.imports[name]
+                        for ref in refs:
+                            errors.push(LinkError.UnresolvedSymbol(
+                                name: name,
+                                referenced_by: ref.from_module
+                            ))
+                        self.unresolved_count = self.unresolved_count + 1
 
         if errors.len() > 0:
             Err(errors)
@@ -220,8 +226,8 @@ impl SettlementLinker:
     fn stats() -> LinkerStats:
         """Get linker statistics."""
         LinkerStats(
-            total_exports: self.exports.len(),
-            total_imports: self.imports.len(),
+            total_exports: self.exports.keys().len(),
+            total_imports: self.imports.keys().len(),
             resolved: self.resolved_count,
             unresolved: self.unresolved_count,
             module_count: self.modules.len()

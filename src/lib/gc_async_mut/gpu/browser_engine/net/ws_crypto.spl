@@ -5,22 +5,25 @@
 
 use std.gc_async_mut.gpu.browser_engine.net.h1_client.{net_ascii_lower_char}
 use std.gc_async_mut.gpu.browser_engine.net.ws_utils.{decode_byte_val, ws_substring}
-
-extern fn rt_random_hex(len: i64) -> text
+use std.nogc_sync_mut.io.crypto_sffi.{random_hex as checked_random_hex}
+use std.gc_async_mut.gpu.browser_engine.shared.error.{network_error}
 
 # WebSocket magic GUID used in Sec-WebSocket-Accept validation (RFC 6455 Section 4.2.2)
 val WS_MAGIC_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 var _ws_random_counter = 0
 
-fn generate_ws_key() -> text:
+fn generate_ws_key() -> Result<text>:
     # Generate a random 16-byte value encoded as base64 for Sec-WebSocket-Key.
     # The key must be a nonce consisting of a randomly selected 16-byte value
     # that has been base64-encoded (RFC 6455 Section 4.1).
-    var bytes = ws_hex_to_bytes(rt_random_hex(16))
+    val raw = checked_random_hex(16)
+    if raw == nil:
+        return Err(network_error("ws: CSPRNG failed while generating handshake key"))
+    var bytes = ws_hex_to_bytes(raw ?? "")
     _ws_random_counter = _ws_random_counter + 1
     bytes = ws_mix_counter(bytes, _ws_random_counter)
-    ws_base64_encode(bytes)
+    Ok(ws_base64_encode(bytes))
 
 fn compute_accept_key(key: text) -> text:
     # Compute the expected Sec-WebSocket-Accept value.
@@ -29,10 +32,13 @@ fn compute_accept_key(key: text) -> text:
     val concatenated = key + WS_MAGIC_GUID
     ws_base64_encode(ws_sha1(concatenated))
 
-fn generate_mask_key() -> [i64]:
+fn generate_mask_key() -> Result<[i64]>:
     # Generate a random 4-byte masking key for client-to-server frames.
     # RFC 6455 Section 5.3: client MUST mask all frames.
-    var bytes = ws_hex_to_bytes(rt_random_hex(4))
+    val raw = checked_random_hex(4)
+    if raw == nil:
+        return Err(network_error("ws: CSPRNG failed while generating frame mask"))
+    var bytes = ws_hex_to_bytes(raw ?? "")
     _ws_random_counter = _ws_random_counter + 1
     bytes = ws_mix_counter(bytes, _ws_random_counter)
     var mask = []
@@ -43,7 +49,7 @@ fn generate_mask_key() -> [i64]:
         else:
             mask.push(0)
         i = i + 1
-    mask
+    Ok(mask)
 
 fn ws_base64_encode(bytes: [i64]) -> text:
     val alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
@@ -245,6 +251,10 @@ fn ws_mix_counter(bytes: [i64], counter: i64) -> [i64]:
         i = i + 1
     result
 
+# NOTE: uses `return -1`, not a bare trailing `-1` — the interpreter
+# silently drops a bare negative-integer literal immediately following a
+# run of single-line `if cond: return X` statements (confirmed repro; see
+# doc/08_tracking/bug/browser_net_real_site_gaps_2026-07-11.md).
 fn ws_hex_digit(ch: text) -> i64:
     val lower = net_ascii_lower_char(ch)
     if lower == "0": return 0
@@ -263,4 +273,4 @@ fn ws_hex_digit(ch: text) -> i64:
     if lower == "d": return 13
     if lower == "e": return 14
     if lower == "f": return 15
-    -1
+    return -1

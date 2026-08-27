@@ -7,21 +7,6 @@
 # - Statement types
 
 use compiler.hir.hir_types.*
-# Explicit named imports of the hir_types names this module uses in DECLARATION
-# position (enum payloads and struct field types). They are already reachable
-# through the glob above for ordinary lowering, but the cross-module dependency
-# materialization walk in
-# `20.hir/hir_lowering/_Items/module_reexport_materialization.spl` deliberately
-# EXCLUDES glob routes when resolving a payload/callable dependency to its
-# physical origin ("Glob imports stay excluded here: resolving them while
-# recursively materializing enum payloads corrupts staged native HIR state").
-# Without a declaration, an `export use` hop, or an explicit named import in the
-# OWNER, the walk emits `[hir-payload-origin-unresolved] owner=compiler.hir.
-# hir_definitions payload=MethodResolution` and the failure resurfaces as a hard
-# `unresolved type: MethodResolution` against every module that imports
-# HirExprKind -- 493 occurrences in the Stage 3 log of 2026-08-24. Same fix and
-# same reasoning as the AsmConstraintKind/AsmLocation import documented below.
-use compiler.hir.hir_types.{MethodResolution, HirType, SymbolId, Effect}
 use compiler.common.diagnostics.span.{Span}
 use compiler.blocks.value.{BlockValue}
 use compiler.types.type_layout.LayoutAttr
@@ -36,6 +21,7 @@ use compiler.common.attributes.{FunctionAttr, ExportAttr, DriverManifestAttr, Vh
 # precedence over overlapping glob routes during dependency materialization.
 use compiler.frontend.parser_types_expr.{AsmTargetSpec, AsmConstraintKind, AsmLocation}
 use compiler.common.dependency.visibility.{Visibility}
+export use compiler.hir.hir_operators.{HirBinOp, HirUnaryOp, HirAssignOp}
 
 # Bootstrap parser boundary: a raw Dict<K,V> field immediately before the
 # next top-level declaration can leave the declaration in the previous class.
@@ -63,7 +49,7 @@ struct HirFunction:
     is_mutable: bool        # 'me' method
     is_const: bool          # 'const fn' - can be evaluated at compile time
     is_extern: bool         # 'extern fn' - external function (no body)
-    func_attr: FunctionAttr?  # @entry/@naked/@noreturn/@section/@interrupt
+    func_attr: FunctionAttr  # @entry/@naked/@noreturn/@section/@interrupt
     # # DESUGARED: export_attr: ExportAttr
     has_export_attr: bool
     export_attr: ExportAttr
@@ -130,6 +116,12 @@ struct HirParam:
     has_default: bool
     default: HirExpr
     span: Span
+    # `mut name: T` marker, threaded from the parser's Param.is_mutable
+    # (native_freefn_mut_param_no_mutate fix) so MIR lowering
+    # (function_lowering.spl) can bind a mut struct param by-reference
+    # instead of taking the Bug #167 defensive struct-value-copy. Appended
+    # at the end of the struct to avoid disturbing existing field order.
+    is_mutable: bool
 
 struct HirClass:
     """Class definition in HIR."""
@@ -161,7 +153,7 @@ struct HirClass:
     # # DESUGARED: specialization_of: text
     has_specialization_of: bool
     specialization_of: text
-    type_bindings: Dict<text, HirType>
+    type_bindings: HirTypeBindings
 
 struct HirStruct:
     """Struct definition in HIR."""
@@ -189,7 +181,7 @@ struct HirStruct:
     # # DESUGARED: specialization_of: text
     has_specialization_of: bool
     specialization_of: text
-    type_bindings: Dict<text, HirType>
+    type_bindings: HirTypeBindings
 
 struct HirField:
     """Struct/class field."""
@@ -210,10 +202,23 @@ struct HirField:
     fixed_address: i64
     span: Span
 
+struct HirAttribute:
+    """A decorator carried from source into HIR.
+
+    `name` is the spelling without the leading `@` ("closed", "evolving");
+    `args` is the raw argument text with whitespace removed
+    ("repr:u16,unknown:Unknown"), or "" when the decorator took no arguments.
+    Unknown decorator names are PRESERVED, never rejected -- other lanes own
+    their own vocabularies. See
+    doc/08_tracking/bug/enum_decorators_dropped_before_hir_2026-08-21.md."""
+    name: text
+    args: text
+
 struct HirEnum:
     """Enum definition in HIR."""
     symbol: SymbolId
     name: text
+    runtime_name: text
     type_params: [HirTypeParam]
     variants: [HirVariant]
     visibility: Visibility
@@ -229,12 +234,53 @@ struct HirEnum:
     has_specialization_of: bool
     specialization_of: text
     type_bindings: HirTypeBindings
+    # Source decorators, in source order. MUST stay the LAST field: the Rust
+    # seed fills partial named constructions POSITIONALLY, so a field inserted
+    # anywhere else silently shifts every existing construction site.
+    attributes: [HirAttribute]
+    # §2 of doc/05_design/compiler/hardening/critical_completeness_design_2026-08-21.md:
+    # a trailing `complete:` / `dyn:` section in the enum body declares the
+    # constructor universe OPEN in that region (neither section = closed).
+    # Same LAST-field rule as `attributes` above; defaults keep the existing
+    # `HirEnum(...)` construction sites compiling unchanged.
+    complete_open: bool = false
+    dyn_open: bool = false
+
+fn hir_enum_has_attribute(e: HirEnum, name: text) -> bool:
+    """True when `e` carries the decorator `@name` (arguments ignored)."""
+    for a in e.attributes:
+        if a.name == name:
+            return true
+    false
+
+fn hir_enum_attribute_args(e: HirEnum, name: text) -> text:
+    """Raw argument text of `@name` on `e`, "" when absent or argument-less."""
+    for a in e.attributes:
+        if a.name == name:
+            return a.args
+    ""
+
+fn hir_attribute_from_raw(raw: text) -> HirAttribute:
+    """Split a parser attribute spelling ("evolving(repr:u16)") into name+args."""
+    if raw.ends_with(")") and raw.contains("("):
+        var head = ""
+        var idx = 0
+        for ch in raw:
+            if ch == "(":
+                break
+            head = head + ch
+            idx = idx + 1
+        return HirAttribute(name: head, args: raw.substring(idx + 1, raw.len() - 1))
+    HirAttribute(name: raw, args: "")
 
 struct HirVariant:
     """Enum variant."""
     symbol: SymbolId
     name: text
     kind: HirVariantKind
+    # # DESUGARED: discriminant: HirExpr
+    has_discriminant: bool
+    discriminant: HirExpr
     span: Span
 
 """Enum variant kind."""
@@ -354,7 +400,7 @@ struct HirTrait:
     # # DESUGARED: specialization_of: text
     has_specialization_of: bool
     specialization_of: text
-    type_bindings: Dict<text, HirType>
+    type_bindings: HirTypeBindings
 
 struct HirImpl:
     """Impl block in HIR.
@@ -385,10 +431,6 @@ struct HirImpl:
     type_params: [HirTypeParam]     # Generic parameters (impl<T>)
     where_clause: [HirTraitBound]   # Where T: Trait constraints
     methods: Dict<text, SymbolId>   # Method name → symbol
-    # Fully-qualified identity of the selected adapter declaration. Empty for
-    # ordinary impl blocks. The methods dictionary retains source method names
-    # while each value is the adapter-specific exact SymbolId.
-    facet_impl_key: text
     # Method name -> declared return type's struct NAME (methchain lane, "" when
     # the return type is not a known Named struct). Native-build's --entry path
     # runs no HIR type inference on expressions (see MirLowering.struct_value_syms
@@ -406,6 +448,8 @@ struct HirImpl:
     # `[idx]` on the result goes through the runtime array index path instead
     # of silently misreading the raw boxed handle as an offset.
     method_return_is_array: Dict<text, bool>
+    # Method name -> true when the declared return type is Optional(T)
+    method_return_is_optional: Dict<text, bool>
     assoc_type_impls: [HirAssocTypeImpl]  # Associated type implementations
     span: Span
 
@@ -472,7 +516,13 @@ struct HirMockDecl:
 # ============================================================================
 
 struct HirExpr:
-    """Expression in HIR."""
+    """Expression in HIR.
+
+    `has_type_` is the authoritative presence bit.  A lowering path that
+    supplies a real `type_` must set it explicitly; the placeholder stored
+    while `has_type_` is false must never be interpreted as inferred type
+    metadata after this value crosses a phase boundary.
+    """
     kind: HirExprKind
     # # DESUGARED: type_: HirType
     has_type_: bool
@@ -492,12 +542,14 @@ enum HirExprKind:
 
     # Collections
     ArrayLit(elements: [HirExpr], type_: HirType?)
+    ArrayRepeat(value: HirExpr, count: HirExpr, elem_type: HirType?)  # [value; count]
     TupleLit(elements: [HirExpr])
     DictLit(entries: [(HirExpr, HirExpr)], key_type: HirType, value_type: HirType?)
     SetLit(elements: [HirExpr], elem_type: HirType?)
 
     # Variables and access
     Var(symbol: SymbolId)
+    NamedVar(symbol: SymbolId, name: text)
     Field(base: HirExpr, field: text, resolved: SymbolId?)
     Index(base: HirExpr, index: HirExpr)
     TupleIndex(base: HirExpr, index: i64)
@@ -514,6 +566,9 @@ enum HirExprKind:
 
     # Calls
     Call(callee: HirExpr, args: [HirCallArg], type_args: [HirType])
+    # Keep receiver first: lowering consumes/reconstructs this nested value
+    # before recursively lowering args, whose enum payloads may reuse staged
+    # interpreter storage.  The payload ABI/order is shared with MIR.
     MethodCall(receiver: HirExpr, method: text, args: [HirCallArg], resolution: MethodResolution)
     StaticCall(type_: HirType, method: text, args: [HirCallArg], resolution: MethodResolution)
 
@@ -565,13 +620,25 @@ enum HirExprKind:
     UnsafeBlock(body: HirBlock)         # unsafe: ... - unsafe operations
 
     # Inline assembly - must be within unsafe block
-    InlineAsm(asm: HirAsm),             # asm { ... } or legacy asm volatile(...)
+    InlineAsm(asm_node: HirAsm),        # asm { ... } or legacy asm volatile(...)
 
     # Target-qualified inline assembly - multi-target dispatch
     InlineAsmMatch(arms: [HirAsmMatchArm]),  # asm match: case [spec]: ...
 
     # Error recovery
     Error
+
+    # `x is i64` where the right-hand side NAMES A TYPE -- a boolean type
+    # test, not a value comparison (bug doc
+    # union_narrowing_has_no_grammar_or_runtime_2026-08-21.md: `is` used to
+    # lower `i64` as a VALUE and fail with "unresolved identifier 'i64'").
+    # On a union scrutinee this is the same discriminant test the equivalent
+    # `case i64 v:` arm performs. Appended LAST: ordinals are positional.
+    TypeTest(value: HirExpr, type_name: text)
+
+    # Recoverable block exception handling. Appended to preserve all existing
+    # positional enum ordinals used by the bootstrap codec.
+    TryCatch(body: HirBlock, clauses: [HirCatchClause], finally_: HirBlock?)
 
 struct HirInterpolation:
     """String interpolation."""
@@ -595,6 +662,15 @@ struct HirMatchArm:
     # # DESUGARED: guard: HirExpr
     has_guard: bool
     guard: HirExpr
+    body: HirBlock
+    span: Span
+
+struct HirCatchClause:
+    """Catch arm with an optional binding pattern and optional type filter."""
+    has_pattern: bool
+    pattern: HirPattern
+    has_type_: bool
+    type_: HirType
     body: HirBlock
     span: Span
 
@@ -629,73 +705,6 @@ enum HirCompClauseKind:
     If(cond: HirExpr)
 
 # ============================================================================
-# HIR Operators
-# ============================================================================
-
-"""Binary operator."""
-enum HirBinOp:
-    # Arithmetic
-    Add
-    Sub
-    Mul
-    Div
-    Mod
-    Pow
-
-    # Matrix operations
-    MatMul              # @
-
-    # Comparison
-    Eq
-    NotEq
-    Lt
-    LtEq
-    Gt
-    GtEq
-
-    # Logical
-    And
-    Or
-
-    # Bitwise
-    BitAnd
-    BitOr
-    BitXor
-    Shl
-    Shr
-
-    # Broadcast operations (dotted operators)
-    BroadcastAdd        # .+
-    BroadcastSub        # .-
-    BroadcastMul        # .*
-    BroadcastDiv        # ./
-    BroadcastPow        # .^
-
-    # Pipeline/Composition operators
-    PipeForward         # |>
-    Compose             # >>
-    ComposeBack         # <<
-    Parallel            # //
-    LayerConnect        # ~>
-
-    # Other
-    In
-    NotIn
-    Is
-    IsNot
-    Concat         # ++
-
-"""Unary operator."""
-enum HirUnaryOp:
-    Neg            # -
-    Not            # not, !
-    BitNot         # ~
-    Ref            # &
-    RefMut         # &mut
-    Deref          # *
-    Transpose      # ' (postfix, m{} only)
-
-# ============================================================================
 # HIR Patterns
 # ============================================================================
 
@@ -726,6 +735,13 @@ enum HirPatternKind:
     # than silently dropping the arm (§11.6).
     CompleteRegion(binder: text)
     DynRegion(binder: text)
+    # `case i64 v:` narrowing arm (bug doc
+    # union_narrowing_has_no_grammar_or_runtime_2026-08-21.md, plan §10.3).
+    # On a UNION-typed scrutinee this is rewritten into the equivalent
+    # `Enum(__Union_..., <Variant>, Tuple([Binding]))` pattern by
+    # compiler.semantics.union_normalize.narrow, so exhaustiveness and
+    # E-CLOSED-001 need no new machinery. Appended LAST: ordinals positional.
+    TypeTest(type_name: text, binder: text)
 
 """Enum pattern payload."""
 enum HirPatternPayload:
@@ -748,77 +764,6 @@ enum HirStmtKind:
     Assign(target: HirExpr, op: HirAssignOp, value: HirExpr)
     Block(block: HirBlock)
     AsmAssert(spec: AsmTargetSpec)          # asm assert [spec] - compile-time target guard
-    # GPU statement forms are appended to retain every prior positional enum
-    # ordinal. Distinct shared shapes are the canonical storage-class and
-    # mutability authority; init remains optional rather than becoming NilLit.
-    SharedVal(symbol: SymbolId, type_: HirType, has_init: bool, init: HirExpr)
-    SharedVar(symbol: SymbolId, type_: HirType, has_init: bool, init: HirExpr)
-    GpuLaunch(config: HirGpuLaunchConfig, body: HirBlock)
-
-"""Compound assignment operator."""
-enum HirAssignOp:
-    Add
-    Sub
-    Mul
-    Div
-    Mod
-    BitAnd
-    BitOr
-    BitXor
-    Shl
-    Shr
-
-"""Compound assignment operator."""
-enum HirAssignOp:
-    Add
-    Sub
-    Mul
-    Div
-    Mod
-    BitAnd
-    BitOr
-    BitXor
-    Shl
-    Shr
-
-"""Compound assignment operator."""
-enum HirAssignOp:
-    Add
-    Sub
-    Mul
-    Div
-    Mod
-    BitAnd
-    BitOr
-    BitXor
-    Shl
-    Shr
-
-"""Compound assignment operator."""
-enum HirAssignOp:
-    Add
-    Sub
-    Mul
-    Div
-    Mod
-    BitAnd
-    BitOr
-    BitXor
-    Shl
-    Shr
-
-"""Compound assignment operator."""
-enum HirAssignOp:
-    Add
-    Sub
-    Mul
-    Div
-    Mod
-    BitAnd
-    BitOr
-    BitXor
-    Shl
-    Shr
 
 struct HirBlock:
     """Block of statements."""
@@ -827,6 +772,11 @@ struct HirBlock:
     has: bool
     value: HirExpr
     span: Span
+    # Capability names from an `unsafe(capabilities: [...]):` header when this
+    # block is the body of `HirExprKind.UnsafeBlock`; empty otherwise. Trailing
+    # defaulted field (same LAST-field rule as HirEnum.complete_open) so the
+    # existing `HirBlock(...)` construction sites stay unchanged.
+    unsafe_caps: [text] = []
 
 struct HirIfArm:
     """One ordered arm in a flattened HIR if/elif expression."""

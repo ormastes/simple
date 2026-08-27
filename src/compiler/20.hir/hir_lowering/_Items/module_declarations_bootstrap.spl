@@ -7,12 +7,11 @@ use compiler.hir.hir_lowering._Items.module_lowering.*
 use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
 use compiler.frontend.parser_types.*
-use compiler.frontend.parser_types.{ParserModuleOwner, ParserFunction, ImportItem, Param}
+use compiler.frontend.parser_types.{ParserFunction, ImportItem, Param}
 use compiler.frontend.parser_types_expr.*
 use compiler.frontend.flat_ast_bridge.{flat_bootstrap_function_count, flat_bootstrap_function_at, flat_bootstrap_function_decl_at}
 use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_lowering.types.HirLowering
-use compiler.hir.hir_stmt_tags.{HIR_STMT_EXPR_TAG, HIR_EXPR_RETURN_TAG}
 use compiler.hir.hir_lowering.context_helpers.*
 use compiler.hir.hir_lowering.module_surface.*
 use compiler.hir.hir_lowering.expressions.*
@@ -20,68 +19,27 @@ use compiler.common.attributes.{parse_layout_attrs, parse_function_attrs, parse_
 use compiler.types.type_layout.{LayoutAttr, TypeLayoutKind, PlatformParseResult, PlatformDiagnosticLevel, PlatformLayoutDiagnostic}
 use compiler.common.dependency.visibility.{Visibility}
 use compiler.common.module_path_naming.{module_logical_name_from_path}
-use compiler.core.{decl_get_body, decl_get_name, decl_get_param_names, decl_get_param_types, decl_get_ret_type, elif_count, elif_get_else}
-use compiler.core.ast_stmt.{STMT_EXPR, STMT_VAL_DECL, STMT_VAR_DECL, STMT_RETURN, STMT_IF, stmt_count, stmt_get_tag, stmt_get_expr, stmt_get_name, stmt_get_type, stmt_get_body, stmt_get_if_single_else}
+use compiler.core.{decl_get_body, decl_get_name, decl_get_param_names, decl_get_param_types, decl_get_ret_type}
+use compiler.core.{STMT_EXPR, STMT_VAL_DECL, STMT_VAR_DECL, STMT_RETURN, stmt_get_tag, stmt_get_expr, stmt_get_name, stmt_get_type}
 
 extern fn rt_enum_discriminant(value: Any) -> i64
-extern fn rt_enum_payload(value: HirStmtKind) -> HirExpr
-use compiler.core.{EXPR_INT_LIT, EXPR_STRING_LIT, EXPR_INTERPOLATED_STRING, EXPR_BOOL_LIT, EXPR_NIL_LIT, EXPR_UNIT, EXPR_IDENT, EXPR_BINARY, EXPR_CALL, EXPR_INDEX, EXPR_FIELD_ACCESS, EXPR_METHOD_CALL, EXPR_IF, EXPR_BLOCK, EXPR_RETURN, expr_count, expr_get_tag, expr_get_int, expr_get_str, expr_get_left, expr_get_right, expr_get_extra, expr_get_args, expr_get_arg_names, expr_get_stmts}
+extern fn rt_enum_payload(value: StmtKind) -> Expr
+use compiler.core.{EXPR_INT_LIT, EXPR_STRING_LIT, EXPR_INTERPOLATED_STRING, EXPR_BOOL_LIT, EXPR_NIL_LIT, EXPR_IDENT, EXPR_BINARY, EXPR_CALL, EXPR_FIELD_ACCESS, EXPR_METHOD_CALL, EXPR_BLOCK, EXPR_RETURN, expr_get_tag, expr_get_int, expr_get_str, expr_get_left, expr_get_right, expr_get_args, expr_get_arg_names, expr_get_stmts}
 use compiler.frontend.core._AstExpr.accessors.{expr_get_arg_names}
-use compiler.core.{TOK_MINUS, TOK_STAR, TOK_SLASH, TOK_PERCENT, TOK_EQ, TOK_NOT_EQ, TOK_LT, TOK_LT_EQ, TOK_GT, TOK_GT_EQ, TOK_KW_AND, TOK_KW_OR}
+use compiler.core.{TOK_MINUS, TOK_STAR, TOK_SLASH, TOK_PERCENT, TOK_EQ, TOK_NOT_EQ, TOK_LT, TOK_LT_EQ, TOK_GT, TOK_GT_EQ}
 use compiler.frontend.core.types.{TYPE_VOID, TYPE_BOOL, TYPE_I64, TYPE_TEXT, TYPE_DICT, TYPE_ARRAY_I64, TYPE_ARRAY_TEXT, TYPE_ARRAY_BOOL, TYPE_ARRAY_ANY, custom_primitive_bind_symbol, custom_primitive_is_name}
 use compiler.frontend.core.types.{is_dict_tag, dict_tag_to_id, dict_type_get_key, dict_type_get_value}
 use compiler.frontend.core.types.{primitive_integer_bit_width_from_name, custom_primitive_integer_bit_width_by_name}
-use compiler.core.types.{int_to_str}
+use compiler.core.{int_to_str}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 
 impl HirLowering:
-    me bootstrap_flat_error_expr(kind_label: text, index: i64, span: Span) -> HirExpr:
-        # Mirror flat_bridge_report_unhandled_node's fail-closed policy: record
-        # a real lowering diagnostic and return an explicit unsupported marker,
-        # never a Unit NilLit that can masquerade as valid fallthrough.
-        self.error("flat AST bridge: malformed " + kind_label + " index " + index.to_text(), span)
-        HirExpr(kind: HirExprKind.Error, has_type_: false, type_: HirType(kind: HirTypeKind.Infer(0, 0), span: span), span: span)
-
-    me bootstrap_flat_error_stmt(kind_label: text, index: i64, span: Span) -> HirStmt:
-        HirStmt(kind: HirStmtKind.Expr(self.bootstrap_flat_error_expr(kind_label, index, span)), span: span)
-
-    me bootstrap_flat_body_contains_active(stmt_ids: [i64], active_idx: i64) -> bool:
-        var i = 0
-        while i < stmt_ids.len():
-            if stmt_ids[i] == active_idx:
-                return true
-            i = i + 1
-        false
-
-    me lower_bootstrap_flat_if_branch(expr_idx: i64, span: Span) -> HirBlock:
-        self.lower_bootstrap_flat_if_branch_bounded(expr_idx, span, 0)
-
-    me lower_bootstrap_flat_if_branch_bounded(expr_idx: i64, span: Span, depth: i64) -> HirBlock:
-        """Lower one flat if arm without routing through the rich AST bridge."""
-        val empty_value = HirExpr(kind: HirExprKind.NilLit, has_type_: true, type_: HirType(kind: HirTypeKind.Unit, span: span), span: span)
-        if expr_idx < 0:
-            return HirBlock(stmts: [], has: false, value: empty_value, span: span)
-        if expr_get_tag(expr_idx) == EXPR_BLOCK:
-            self.symbols.push_scope(ScopeKind.Block)
-            val body = self.lower_bootstrap_flat_block_bounded(
-                expr_get_stmts(expr_idx), depth + 1)
-            val tail_idx = expr_get_left(expr_idx)
-            var result = body
-            if tail_idx >= 0:
-                result = HirBlock(stmts: body.stmts, has: true, value: self.lower_bootstrap_flat_expr_bounded(tail_idx, depth + 1), span: span)
-            self.symbols.pop_scope()
-            return result
-        HirBlock(stmts: [], has: true, value: self.lower_bootstrap_flat_expr_bounded(expr_idx, depth + 1), span: span)
-
     me declare_module_symbols(module: ParserModule):
-        self.declare_module_symbols_owner(ParserModuleOwner(value: module))
-
-    me declare_module_symbols_owner(owner: ParserModuleOwner):
         # Closure builds need this pass even under SIMPLE_BOOTSTRAP=1 (see the
         # call site in lower_module) so a module's own struct/enum/class/
         # trait names resolve inside its own function bodies.
-        val declare_bootstrap_closure = (hir_module_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and (hir_module_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
-        if (hir_module_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and not declare_bootstrap_closure:
+        val declare_bootstrap_closure = self.ambient_bootstrap_enabled() and (hir_module_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
+        if self.ambient_bootstrap_enabled() and not declare_bootstrap_closure:
             return
         # Pass module filename for visibility tracking
         val mod_name = if self.module_filename != "": Some(self.module_filename) else: nil
@@ -89,7 +47,7 @@ impl HirLowering:
         val decl_visibility = Visibility.Public
 
         # Use while loops instead of for-in (for-in doesn't work in compiled native code)
-        val module_classes = owner.value.classes
+        val module_classes = module.classes
         val cls_keys = module_classes.keys()
         var idx = 0
         while idx < cls_keys.len():
@@ -97,7 +55,7 @@ impl HirLowering:
             self.symbols.define(name, SymbolKind.Class, nil, decl_span, decl_visibility, false, mod_name)
             idx = idx + 1
 
-        val module_structs = owner.value.structs
+        val module_structs = module.structs
         val str_keys = module_structs.keys()
         idx = 0
         while idx < str_keys.len():
@@ -105,7 +63,7 @@ impl HirLowering:
             self.symbols.define(name, SymbolKind.Struct, nil, decl_span, decl_visibility, false, mod_name)
             idx = idx + 1
 
-        val module_enums = owner.value.enums
+        val module_enums = module.enums
         val enum_keys = module_enums.keys()
         idx = 0
         while idx < enum_keys.len():
@@ -113,7 +71,7 @@ impl HirLowering:
             self.symbols.define(name, SymbolKind.Enum, nil, decl_span, decl_visibility, false, mod_name)
             idx = idx + 1
 
-        val module_bitfields = owner.value.bitfields
+        val module_bitfields = module.bitfields
         val bf_keys = module_bitfields.keys()
         idx = 0
         while idx < bf_keys.len():
@@ -121,7 +79,7 @@ impl HirLowering:
             self.symbols.define(name, SymbolKind.Struct, nil, decl_span, decl_visibility, false, mod_name)
             idx = idx + 1
 
-        val module_traits = owner.value.traits
+        val module_traits = module.traits
         val trait_keys = module_traits.keys()
         idx = 0
         while idx < trait_keys.len():
@@ -143,7 +101,7 @@ impl HirLowering:
         # using it in its own `fn alias_user(v: MyAliasA)` signature.
         # Must run BEFORE the function-signature loop below, which lowers param and
         # return annotations and would otherwise still miss the alias.
-        val module_type_aliases = owner.value.type_aliases
+        val module_type_aliases = module.type_aliases
         val alias_keys = module_type_aliases.keys()
         idx = 0
         while idx < alias_keys.len():
@@ -153,7 +111,7 @@ impl HirLowering:
 
         # ParserFunction signatures are lowered after type symbols so named returns
         # and recursive calls are typed before any function body is lowered.
-        val module_functions = owner.value.functions
+        val module_functions = module.functions
         val fn_keys = module_functions.keys()
         idx = 0
         while idx < fn_keys.len():
@@ -179,7 +137,7 @@ impl HirLowering:
             self.symbols.define(name, SymbolKind.Function, fn_type, decl_span, decl_visibility, false, mod_name)
             idx = idx + 1
 
-        val module_constants = owner.value.constants
+        val module_constants = module.constants
         val const_keys = module_constants.keys()
         idx = 0
         while idx < const_keys.len():
@@ -189,8 +147,8 @@ impl HirLowering:
 
         # Declare impl methods
         var impl_idx = 0
-        while impl_idx < owner.value.impls.len():
-            val impl_ = owner.value.impls[impl_idx]
+        while impl_idx < module.impls.len():
+            val impl_ = module.impls[impl_idx]
             val owner_name = parser_type_kind_named_name(impl_.type_.kind)
             val meth_keys = impl_.methods.keys()
             # SEED-PARITY (2026-08-01): make `Self` resolvable in an impl
@@ -293,6 +251,14 @@ impl HirLowering:
             ), span: span)
         if tag == TYPE_TEXT:
             return HirType(kind: HirTypeKind.Str, span: span)
+        if tag == TYPE_ARRAY_I64:
+            return HirType(kind: HirTypeKind.Array(HirType(kind: HirTypeKind.Int(64, true), span: span), nil), span: span)
+        if tag == TYPE_ARRAY_TEXT:
+            return HirType(kind: HirTypeKind.Array(HirType(kind: HirTypeKind.Str, span: span), nil), span: span)
+        if tag == TYPE_ARRAY_BOOL:
+            return HirType(kind: HirTypeKind.Array(HirType(kind: HirTypeKind.Bool, span: span), nil), span: span)
+        if tag == TYPE_ARRAY_ANY:
+            return HirType(kind: HirTypeKind.Array(HirType(kind: HirTypeKind.Any, span: span), nil), span: span)
         if tag == TYPE_I64:
             return HirType(kind: HirTypeKind.Int(64, true), span: span)
         if tag == TYPE_BOOL:
@@ -322,22 +288,12 @@ impl HirLowering:
             return HirBinOp.Gt
         if op == TOK_GT_EQ:
             return HirBinOp.GtEq
-        if op == TOK_KW_AND:
-            return HirBinOp.And
-        if op == TOK_KW_OR:
-            return HirBinOp.Or
         HirBinOp.Add
 
     me lower_bootstrap_flat_expr(expr_idx: i64) -> HirExpr:
-        self.lower_bootstrap_flat_expr_bounded(expr_idx, 0)
-
-    me lower_bootstrap_flat_expr_bounded(expr_idx: i64, depth: i64) -> HirExpr:
         val span = Span.empty()
         if expr_idx < 0:
             return HirExpr(kind: HirExprKind.NilLit, has_type_: true, type_: HirType(kind: HirTypeKind.Unit, span: span), span: span)
-        val live_expr_count = expr_count()
-        if expr_idx >= live_expr_count:
-            return self.bootstrap_flat_error_expr("expression", expr_idx, span)
         val tag = expr_get_tag(expr_idx)
         if tag == EXPR_STRING_LIT:
             val raw_str_value = expr_get_str(expr_idx)
@@ -359,7 +315,7 @@ impl HirLowering:
             var interp_parts: [HirInterpolation] = []
             for part_idx in expr_get_args(expr_idx):
                 interp_parts.push(HirInterpolation(
-                    expr: self.lower_bootstrap_flat_expr_bounded(part_idx, depth + 1),
+                    expr: self.lower_bootstrap_flat_expr(part_idx),
                     has_format: false,
                     format: "",
                     span: span
@@ -378,8 +334,6 @@ impl HirLowering:
             return HirExpr(kind: HirExprKind.BoolLit(expr_get_int(expr_idx) != 0), has_type_: true, type_: HirType(kind: HirTypeKind.Bool, span: span), span: span)
         if tag == EXPR_NIL_LIT:
             return HirExpr(kind: HirExprKind.NilLit, has_type_: true, type_: HirType(kind: HirTypeKind.Unit, span: span), span: span)
-        if tag == EXPR_UNIT:
-            return HirExpr(kind: HirExprKind.UnitLit, has_type_: true, type_: HirType(kind: HirTypeKind.Unit, span: span), span: span)
         if tag == EXPR_IDENT:
             val name = expr_get_str(expr_idx)
             var sym = bootstrap_hir_symbol_for_name(name)
@@ -388,84 +342,30 @@ impl HirLowering:
                 sym = found_symbol
             return HirExpr(kind: HirExprKind.Var(sym), has_type_: false, type_: HirType(kind: HirTypeKind.Infer(0, 0), span: span), span: span)
         if tag == EXPR_BINARY:
-            return HirExpr(kind: HirExprKind.Binary(self.bootstrap_hir_bin_op(expr_get_int(expr_idx)), self.lower_bootstrap_flat_expr_bounded(expr_get_left(expr_idx), depth + 1), self.lower_bootstrap_flat_expr_bounded(expr_get_right(expr_idx), depth + 1)), has_type_: false, type_: HirType(kind: HirTypeKind.Infer(0, 0), span: span), span: span)
+            return HirExpr(kind: HirExprKind.Binary(self.bootstrap_hir_bin_op(expr_get_int(expr_idx)), self.lower_bootstrap_flat_expr(expr_get_left(expr_idx)), self.lower_bootstrap_flat_expr(expr_get_right(expr_idx))), has_type_: false, type_: HirType(kind: HirTypeKind.Infer(0, 0), span: span), span: span)
         if tag == EXPR_CALL:
-            val callee = self.lower_bootstrap_flat_expr_bounded(expr_get_left(expr_idx), depth + 1)
+            val callee = self.lower_bootstrap_flat_expr(expr_get_left(expr_idx))
             val arg_ids = expr_get_args(expr_idx)
             val arg_names = expr_get_arg_names(expr_idx)
             var args: [HirCallArg] = []
             var ai = 0
             while ai < arg_ids.len():
                 val arg_name = if ai < arg_names.len(): arg_names[ai] else: ""
-                args.push(HirCallArg(has_name: arg_name != "", name: arg_name, value: self.lower_bootstrap_flat_expr_bounded(arg_ids[ai], depth + 1), span: span))
+                args.push(HirCallArg(has_name: arg_name != "", name: arg_name, value: self.lower_bootstrap_flat_expr(arg_ids[ai]), span: span))
                 ai = ai + 1
             return HirExpr(kind: HirExprKind.Call(callee, args, []), has_type_: false, type_: HirType(kind: HirTypeKind.Infer(0, 0), span: span), span: span)
         if tag == EXPR_FIELD_ACCESS:
             return HirExpr(kind: HirExprKind.Field(self.lower_bootstrap_flat_expr(expr_get_left(expr_idx)), expr_get_str(expr_idx), nil), has_type_: false, type_: HirType(kind: HirTypeKind.Infer(0, 0), span: span), span: span)
-        if tag == EXPR_INDEX:
-            return HirExpr(kind: HirExprKind.Index(self.lower_bootstrap_flat_expr_bounded(expr_get_left(expr_idx), depth + 1), self.lower_bootstrap_flat_expr_bounded(expr_get_right(expr_idx), depth + 1)), has_type_: false, type_: HirType(kind: HirTypeKind.Infer(0, 0), span: span), span: span)
         if tag == EXPR_METHOD_CALL:
-            val method_arg_ids = expr_get_args(expr_idx)
-            val method_arg_names = expr_get_arg_names(expr_idx)
-            var method_args: [HirCallArg] = []
-            var mai = 0
-            while mai < method_arg_ids.len():
-                val method_arg_name = if mai < method_arg_names.len(): method_arg_names[mai] else: ""
-                method_args.push(HirCallArg(has_name: method_arg_name != "", name: method_arg_name, value: self.lower_bootstrap_flat_expr(method_arg_ids[mai]), span: span))
-                mai = mai + 1
-            return HirExpr(kind: HirExprKind.MethodCall(self.lower_bootstrap_flat_expr(expr_get_left(expr_idx)), expr_get_str(expr_idx), method_args, MethodResolution.Unresolved), has_type_: false, type_: HirType(kind: HirTypeKind.Infer(0, 0), span: span), span: span)
-        if tag == EXPR_IF:
-            # The bootstrap-flat path bypasses convert_flat_expr, so it must
-            # preserve expression-if arms itself.  Previously EXPR_IF fell
-            # through to NilLit; a non-unit function whose tail was an if/elif
-            # consequently appeared to have no return and tripped E-SFFI-016.
-            var arms: [HirIfArm] = []
-            var current = expr_idx
-            var terminal_else = -1
-            var walking = true
-            var walked = 0
-            while walking:
-                if current < 0 or current >= live_expr_count or walked >= live_expr_count:
-                    return self.bootstrap_flat_error_expr("if-expression chain", current, span)
-                walked = walked + 1
-                arms.push(HirIfArm(
-                    cond: self.lower_bootstrap_flat_expr(expr_get_left(current)),
-                    then_: self.lower_bootstrap_flat_if_branch(expr_get_right(current), span),
-                    span: span
-                ))
-                val next_idx = expr_get_extra(current)
-                if next_idx >= live_expr_count:
-                    return self.bootstrap_flat_error_expr("if-expression next", next_idx, span)
-                if next_idx >= 0 and next_idx < live_expr_count and expr_get_tag(next_idx) == EXPR_IF:
-                    if next_idx >= current:
-                        return self.bootstrap_flat_error_expr("if-expression order", next_idx, span)
-                    current = next_idx
-                else:
-                    terminal_else = next_idx
-                    walking = false
-            if terminal_else >= 0 and terminal_else < live_expr_count and expr_get_tag(terminal_else) != EXPR_UNIT:
-                return HirExpr(kind: HirExprKind.IfChain(arms, self.lower_bootstrap_flat_if_branch(terminal_else, span)), has_type_: false, type_: HirType(kind: HirTypeKind.Infer(0, 0), span: span), span: span)
-            return HirExpr(kind: HirExprKind.IfChain(arms, nil), has_type_: false, type_: HirType(kind: HirTypeKind.Infer(0, 0), span: span), span: span)
+            return HirExpr(kind: HirExprKind.MethodCall(self.lower_bootstrap_flat_expr(expr_get_left(expr_idx)), expr_get_str(expr_idx), [], MethodResolution.Unresolved), has_type_: false, type_: HirType(kind: HirTypeKind.Infer(0, 0), span: span), span: span)
         if tag == EXPR_RETURN:
             # Bare-lift — see bug doc 2026-07-23 (Some-box vs flat optional).
             var flat_ret_val: HirExpr? = nil
-            val return_idx = expr_get_left(expr_idx)
-            if return_idx >= 0:
-                flat_ret_val = self.lower_bootstrap_flat_expr_bounded(
-                    return_idx, depth + 1)
+            flat_ret_val = self.lower_bootstrap_flat_expr(expr_get_left(expr_idx))
             return HirExpr(kind: HirExprKind.Return(flat_ret_val), has_type_: true, type_: HirType(kind: HirTypeKind.Unit, span: span), span: span)
         if tag == EXPR_BLOCK:
-            self.symbols.push_scope(ScopeKind.Block)
-            var block = self.lower_bootstrap_flat_block_bounded(
-                expr_get_stmts(expr_idx), depth + 1)
-            val tail_idx = expr_get_left(expr_idx)
-            if tail_idx >= 0:
-                block = HirBlock(stmts: block.stmts, has: true,
-                    value: self.lower_bootstrap_flat_expr_bounded(
-                        tail_idx, depth + 1), span: span)
-            self.symbols.pop_scope()
-            return HirExpr(kind: HirExprKind.Block(block), has_type_: false, type_: HirType(kind: HirTypeKind.Infer(0, 0), span: span), span: span)
-        self.bootstrap_flat_error_expr("unsupported expression tag", expr_idx, span)
+            return HirExpr(kind: HirExprKind.Block(self.lower_bootstrap_flat_block(expr_get_stmts(expr_idx))), has_type_: false, type_: HirType(kind: HirTypeKind.Infer(0, 0), span: span), span: span)
+        HirExpr(kind: HirExprKind.NilLit, has_type_: true, type_: HirType(kind: HirTypeKind.Unit, span: span), span: span)
 
     me bootstrap_flat_var_expr(name: text, span: Span) -> HirExpr:
         """Build a bootstrap-flat HIR Var expr for `name`, mirroring the
@@ -521,69 +421,13 @@ impl HirLowering:
             i = i + 1
         parts
 
-    me lower_bootstrap_flat_if_stmt(root_idx: i64, span: Span) -> HirStmt:
-        self.lower_bootstrap_flat_if_stmt_bounded(root_idx, span, 0)
-
-    me lower_bootstrap_flat_if_stmt_bounded(root_idx: i64, span: Span, depth: i64) -> HirStmt:
-        """Preserve a statement-form if/elif chain as one value-producing HIR expression."""
-        var arms: [HirIfArm] = []
-        var current = root_idx
-        var terminal_else: [i64] = []
-        var walking = true
-        val live_stmt_count = stmt_count()
-        var walked = 0
-        while walking:
-            if (current < 0 or current >= live_stmt_count or
-                walked >= live_stmt_count or
-                depth + walked > self.bootstrap_flat_traversal_ceiling()):
-                return self.bootstrap_flat_error_stmt("if-statement chain", current, span)
-            if self.bootstrap_flat_body_contains_active(stmt_get_body(current), current):
-                return self.bootstrap_flat_error_stmt("if body cycle", current, span)
-            walked = walked + 1
-            arms.push(HirIfArm(
-                cond: self.lower_bootstrap_flat_expr_bounded(stmt_get_expr(current), depth + 1),
-                then_: self.lower_bootstrap_flat_child_block(
-                    stmt_get_body(current), ScopeKind.Block, depth + 1),
-                span: span
-            ))
-            var next_if = -1
-            val candidate = stmt_get_if_single_else(current)
-            if candidate >= live_stmt_count:
-                return self.bootstrap_flat_error_stmt("if-statement next", candidate, span)
-            if candidate >= 0 and candidate < live_stmt_count and stmt_get_tag(candidate) == STMT_IF:
-                next_if = candidate
-            if next_if >= 0:
-                if next_if >= current:
-                    return self.bootstrap_flat_error_stmt("if-statement order", next_if, span)
-                current = next_if
-            else:
-                val elif_idx = stmt_get_type(current)
-                if elif_idx >= 0:
-                    if elif_idx >= elif_count():
-                        return self.bootstrap_flat_error_stmt("elif", elif_idx, span)
-                    terminal_else = elif_get_else(elif_idx)
-                walking = false
-        val chain = if terminal_else.len() > 0:
-            HirExpr(kind: HirExprKind.IfChain(arms, self.lower_bootstrap_flat_child_block(terminal_else, ScopeKind.Block, depth + 1)), has_type_: false, type_: HirType(kind: HirTypeKind.Infer(0, 0), span: span), span: span)
-        else:
-            HirExpr(kind: HirExprKind.IfChain(arms, nil), has_type_: false, type_: HirType(kind: HirTypeKind.Infer(0, 0), span: span), span: span)
-        HirStmt(kind: HirStmtKind.Expr(chain), span: span)
-
     me lower_bootstrap_flat_stmt(stmt_idx: i64) -> HirStmt:
-        self.lower_bootstrap_flat_stmt_bounded(stmt_idx, 0)
-
-    me lower_bootstrap_flat_stmt_bounded(stmt_idx: i64, depth: i64) -> HirStmt:
         val span = Span.empty()
-        if stmt_idx < 0 or stmt_idx >= stmt_count():
-            return self.bootstrap_flat_error_stmt("statement", stmt_idx, span)
         eprint("[hir-lower] flat_stmt:start {stmt_idx}")
         val tag = stmt_get_tag(stmt_idx)
         eprint("[hir-lower] flat_stmt:tag {stmt_idx} {tag}")
         if tag == STMT_EXPR:
-            val expression_idx = stmt_get_expr(stmt_idx)
-            if expression_idx < 0:
-                return self.bootstrap_flat_error_stmt("expression statement sentinel", stmt_idx, span)
-            return HirStmt(kind: HirStmtKind.Expr(self.lower_bootstrap_flat_expr_bounded(expression_idx, depth + 1)), span: span)
+            return HirStmt(kind: HirStmtKind.Expr(self.lower_bootstrap_flat_expr(stmt_get_expr(stmt_idx))), span: span)
         if tag == STMT_RETURN:
             val expr_idx = stmt_get_expr(stmt_idx)
             # Bare-lift: explicit Some(...) builds a heap Option box on the
@@ -591,123 +435,35 @@ impl HirLowering:
             # (<value:0x100000004>) — bug doc 2026-07-23.
             var value: HirExpr? = nil
             if expr_idx >= 0:
-                value = self.lower_bootstrap_flat_expr_bounded(expr_idx, depth + 1)
+                value = self.lower_bootstrap_flat_expr(expr_idx)
             return HirStmt(kind: HirStmtKind.Expr(HirExpr(kind: HirExprKind.Return(value), has_type_: true, type_: HirType(kind: HirTypeKind.Unit, span: span), span: span)), span: span)
-        if tag == STMT_IF:
-            return self.lower_bootstrap_flat_if_stmt(stmt_idx, span)
         if tag == STMT_VAL_DECL or tag == STMT_VAR_DECL:
-            val init_idx = stmt_get_expr(stmt_idx)
-            val init = if init_idx >= 0:
-                self.lower_bootstrap_flat_expr_bounded(init_idx, depth + 1)
-            else:
-                HirExpr(kind: HirExprKind.NilLit, has_type_: true, type_: HirType(kind: HirTypeKind.Unit, span: span), span: span)
-            val mutable = tag == STMT_VAR_DECL
-            val type_tag = stmt_get_type(stmt_idx)
-            var declared_type: HirType = nil
-            var declared_type_opt: HirType? = nil
-            if type_tag != 0:
-                declared_type = self.bootstrap_hir_type_from_tag(type_tag)
-                declared_type_opt = declared_type
-            val symbol = self.symbols.define(
-                stmt_get_name(stmt_idx), SymbolKind.Variable, declared_type_opt, span,
-                Visibility.Private, mutable, nil)
-            return HirStmt(kind: HirStmtKind.Let(symbol, declared_type, init), span: span)
-        if tag == STMT_ASSIGN:
-            val values = stmt_get_body(stmt_idx)
-            if values.len() != 1:
-                return self.bootstrap_flat_error_stmt("assignment value", stmt_idx, span)
-            return HirStmt(kind: HirStmtKind.Assign(
-                self.lower_bootstrap_flat_expr_bounded(stmt_get_expr(stmt_idx), depth + 1), nil,
-                self.lower_bootstrap_flat_expr_bounded(values[0], depth + 1)), span: span)
-        if tag == STMT_FOR:
-            val iter_name = stmt_get_name(stmt_idx)
-            if iter_name.starts_with("("):
-                return self.bootstrap_flat_error_stmt("tuple for iterator", stmt_idx, span)
-            if self.bootstrap_flat_body_contains_active(stmt_get_body(stmt_idx), stmt_idx):
-                return self.bootstrap_flat_error_stmt("for body cycle", stmt_idx, span)
-            val iter = self.lower_bootstrap_flat_expr_bounded(
-                stmt_get_expr(stmt_idx), depth + 1)
-            self.symbols.push_scope(ScopeKind.Loop)
-            self.loop_depth = self.loop_depth + 1
-            val symbol = self.symbols.define(
-                iter_name, SymbolKind.Variable, nil, span,
-                Visibility.Private, false, nil)
-            val body = self.lower_bootstrap_flat_block_bounded(
-                stmt_get_body(stmt_idx), depth + 1)
-            self.loop_depth = self.loop_depth - 1
-            self.symbols.pop_scope()
-            return HirStmt(kind: HirStmtKind.Expr(HirExpr(
-                kind: HirExprKind.For(symbol, iter, body, nil), has_type_: false,
-                type_: HirType(kind: HirTypeKind.Unit, span: span), span: span)), span: span)
-        if tag == STMT_WHILE:
-            if self.bootstrap_flat_body_contains_active(stmt_get_body(stmt_idx), stmt_idx):
-                return self.bootstrap_flat_error_stmt("while body cycle", stmt_idx, span)
-            val cond = self.lower_bootstrap_flat_expr_bounded(
-                stmt_get_expr(stmt_idx), depth + 1)
-            self.symbols.push_scope(ScopeKind.Loop)
-            self.loop_depth = self.loop_depth + 1
-            val body = self.lower_bootstrap_flat_block_bounded(
-                stmt_get_body(stmt_idx), depth + 1)
-            self.loop_depth = self.loop_depth - 1
-            self.symbols.pop_scope()
-            return HirStmt(kind: HirStmtKind.Expr(HirExpr(
-                kind: HirExprKind.While(cond, body, nil), has_type_: false,
-                type_: HirType(kind: HirTypeKind.Unit, span: span), span: span)), span: span)
-        if tag == STMT_BLOCK:
-            if self.bootstrap_flat_body_contains_active(stmt_get_body(stmt_idx), stmt_idx):
-                return self.bootstrap_flat_error_stmt("block body cycle", stmt_idx, span)
-            return HirStmt(kind: HirStmtKind.Block(
-                self.lower_bootstrap_flat_child_block(
-                    stmt_get_body(stmt_idx), ScopeKind.Block, depth + 1)), span: span)
-        if tag == STMT_BREAK:
-            if self.loop_depth <= 0:
-                return self.bootstrap_flat_error_stmt("break outside loop", stmt_idx, span)
-            val label = stmt_get_name(stmt_idx)
-            return HirStmt(kind: HirStmtKind.Expr(HirExpr(
-                kind: HirExprKind.Break(label, nil), has_type_: false,
-                type_: HirType(kind: HirTypeKind.Unit, span: span), span: span)), span: span)
-        if tag == STMT_CONTINUE:
-            if self.loop_depth <= 0:
-                return self.bootstrap_flat_error_stmt("continue outside loop", stmt_idx, span)
-            val label = stmt_get_name(stmt_idx)
-            var label_opt: text? = nil
-            if label != "":
-                label_opt = label
-            return HirStmt(kind: HirStmtKind.Expr(HirExpr(
-                kind: HirExprKind.Continue(label_opt), has_type_: false,
-                type_: HirType(kind: HirTypeKind.Unit, span: span), span: span)), span: span)
-        self.bootstrap_flat_error_stmt("unsupported statement tag", stmt_idx, span)
-
-    me lower_bootstrap_flat_child_block(stmt_ids: [i64], scope_kind: ScopeKind, depth: i64) -> HirBlock:
-        self.symbols.push_scope(scope_kind)
-        val block = self.lower_bootstrap_flat_block_bounded(stmt_ids, depth)
-        self.symbols.pop_scope()
-        block
+            return HirStmt(kind: HirStmtKind.Expr(HirExpr(kind: HirExprKind.NilLit, has_type_: true, type_: HirType(kind: HirTypeKind.Unit, span: span), span: span)), span: span)
+        HirStmt(kind: HirStmtKind.Expr(HirExpr(kind: HirExprKind.NilLit, has_type_: true, type_: HirType(kind: HirTypeKind.Unit, span: span), span: span)), span: span)
 
     me lower_bootstrap_flat_block(stmt_ids: [i64]) -> HirBlock:
-        self.lower_bootstrap_flat_block_bounded(stmt_ids, 0)
-
-    me lower_bootstrap_flat_block_bounded(stmt_ids: [i64], depth: i64) -> HirBlock:
         val span = Span.empty()
         var stmts: [HirStmt] = []
         var has_value = false
         var value_expr = HirExpr(kind: HirExprKind.NilLit, has_type_: true, type_: HirType(kind: HirTypeKind.Unit, span: span), span: span)
+        val expr_stmt_disc = rt_enum_discriminant(HirStmtKind.Expr(value_expr))
+        val return_expr_disc = rt_enum_discriminant(HirExprKind.Return(nil))
         var i = 0
-        if (depth > self.bootstrap_flat_traversal_ceiling() or
-            stmt_ids.len() > self.bootstrap_flat_traversal_ceiling()):
-            return HirBlock(stmts: [self.bootstrap_flat_error_stmt("block budget", depth, span)], has: false, value: value_expr, span: span)
         while i < stmt_ids.len():
             eprint("[hir-lower] flat_block:stmt {i}")
-            val stmt = self.lower_bootstrap_flat_stmt_bounded(stmt_ids[i], depth)
+            val stmt = self.lower_bootstrap_flat_stmt(stmt_ids[i])
             eprint("[hir-lower] flat_block:stmt:done {i}")
             if i == stmt_ids.len() - 1:
-                if rt_enum_discriminant(stmt.kind) == HIR_STMT_EXPR_TAG:
-                    val expr: HirExpr = rt_enum_payload(stmt.kind)
-                    if rt_enum_discriminant(expr.kind) == HIR_EXPR_RETURN_TAG:
-                        stmts.push(stmt)
-                    else:
-                        has_value = true
-                        value_expr = expr
+                if rt_enum_discriminant(stmt.kind) == expr_stmt_disc:
+                    match stmt.kind:
+                        case HirStmtKind.Expr(expr):
+                            if rt_enum_discriminant(expr.kind) == return_expr_disc:
+                                stmts.push(stmt)
+                            else:
+                                has_value = true
+                                value_expr = expr
+                        case _:
+                            stmts.push(stmt)
                 else:
                     stmts.push(stmt)
             else:

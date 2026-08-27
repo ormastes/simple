@@ -5,8 +5,7 @@
 # Invalidation walks reverse edges so a changed semantic identity invalidates
 # every transitive dependent without rebuilding unrelated symbols.
 
-use std.common.crypto.sha256.{sha256_text}
-use std.common.encoding.sha256_contract.{sha256_lower_hex_valid}
+use compiler.common.assurance.flight_rules.{assurance_text_hash}
 
 struct ProofDagNodeV1:
     symbol_id: text
@@ -25,38 +24,6 @@ struct ProofDagScheduleV1:
     ordered_components: [ProofDagComponentV1]
     diagnostic: text
     critical_path_ms: i64
-
-# The proof DAG remains parent-owned.  A worker receives only this frozen,
-# pointer-free item and creates a fresh result envelope; it never mutates the
-# schedule or another worker's state.
-struct ProofDagExecutorConfigV1:
-    max_workers: i64
-    max_inflight: i64
-
-struct ProofDagWorkItemV1:
-    component_id: text
-    dispatch_index: i64
-    batch_index: i64
-    worker_slot: i64
-    input_hash: text
-
-struct ProofDagWorkerResultV1:
-    component_id: text
-    dispatch_index: i64
-    worker_slot: i64
-    input_hash: text
-    result_hash: text
-    elapsed_ms: i64
-    peak_rss_kib: i64
-    succeeded: bool
-
-struct ProofDagExecutionReceiptV1:
-    committed_component_ids: [text]
-    committed_result_hashes: [text]
-    max_active_workers: i64
-    total_elapsed_ms: i64
-    peak_rss_kib: i64
-    diagnostic: text
 
 fn _proof_text_contains(values: [text], candidate: text) -> bool:
     for value in values:
@@ -83,30 +50,18 @@ fn _proof_sorted_text(values: [text]) -> [text]:
         i = i + 1
     result
 
-fn _proof_frame_text(value: text) -> text:
-    value.len().to_string() + ":" + value
-
-fn _proof_frame_texts(values: [text]) -> text:
-    var framed: [text] = []
-    for value in values:
-        framed = framed.push(_proof_frame_text(value))
-    values.len().to_string() + ":[" + framed.join("") + "]"
-
 fn _proof_node_index(nodes: [ProofDagNodeV1], symbol_id: text) -> i64:
     for index in 0..nodes.len():
         if nodes[index].symbol_id == symbol_id: return index
     -1
 
 fn proof_dag_diagnostic(nodes: [ProofDagNodeV1]) -> text:
-    if nodes.is_empty():
-        return "FV2-E-PROOF-DAG-EMPTY: at least one proof node is required"
     for index in 0..nodes.len():
         val node = nodes[index]
         if node.symbol_id == "": return "FV2-E-PROOF-DAG-SYMBOL: SymbolId is required"
         if _proof_node_index(nodes, node.symbol_id) != index:
             return "FV2-E-PROOF-DAG-DUPLICATE: duplicate SymbolId " + node.symbol_id
-        if not sha256_lower_hex_valid(node.semantic_hash):
-            return "FV2-E-PROOF-DAG-HASH: lowercase SHA-256 semantic hash is required for " + node.symbol_id
+        if node.semantic_hash == "": return "FV2-E-PROOF-DAG-HASH: semantic hash is required for " + node.symbol_id
         if node.estimated_cost_ms < 0: return "FV2-E-PROOF-DAG-COST: estimated cost cannot be negative"
         for dependency in node.dependency_ids:
             if _proof_node_index(nodes, dependency) < 0:
@@ -156,37 +111,6 @@ fn _proof_component_index(components: [ProofDagComponentV1], component_id: text)
         if components[index].component_id == component_id: return index
     -1
 
-fn _proof_schedule_diagnostic(schedule: ProofDagScheduleV1) -> text:
-    if schedule.ordered_components.is_empty():
-        return "FV2-E-PROOF-SCHEDULE-EMPTY: at least one scheduled component is required"
-    if schedule.critical_path_ms < 0:
-        return "FV2-E-PROOF-SCHEDULE-PATH: critical path cannot be negative"
-
-    var prior_component_ids: [text] = []
-    var scheduled_symbol_ids: [text] = []
-    for component in schedule.ordered_components:
-        if not sha256_lower_hex_valid(component.component_id):
-            return "FV2-E-PROOF-SCHEDULE-COMPONENT: lowercase SHA-256 component identity is required"
-        if _proof_text_contains(prior_component_ids, component.component_id):
-            return "FV2-E-PROOF-SCHEDULE-DUPLICATE: duplicate component identity"
-        if component.symbol_ids.is_empty():
-            return "FV2-E-PROOF-SCHEDULE-SYMBOL: each component requires a symbol"
-        if component.estimated_cost_ms < 0 or component.critical_path_ms < 0:
-            return "FV2-E-PROOF-SCHEDULE-COST: component cost and path cannot be negative"
-        for symbol_id in component.symbol_ids:
-            if symbol_id == "" or _proof_text_contains(scheduled_symbol_ids, symbol_id):
-                return "FV2-E-PROOF-SCHEDULE-SYMBOL: symbols must be non-empty and unique"
-            scheduled_symbol_ids = scheduled_symbol_ids.push(symbol_id)
-        var dependency_ids: [text] = []
-        for dependency_id in component.dependency_component_ids:
-            if dependency_id == "" or _proof_text_contains(dependency_ids, dependency_id):
-                return "FV2-E-PROOF-SCHEDULE-DEPENDENCY: dependencies must be non-empty and unique"
-            if not _proof_text_contains(prior_component_ids, dependency_id):
-                return "FV2-E-PROOF-SCHEDULE-ORDER: every dependency must precede its consumer"
-            dependency_ids = dependency_ids.push(dependency_id)
-        prior_component_ids = prior_component_ids.push(component.component_id)
-    ""
-
 fn build_proof_dag_schedule_v1(nodes: [ProofDagNodeV1]) -> ProofDagScheduleV1:
     val diagnostic = proof_dag_diagnostic(nodes)
     if diagnostic != "": return ProofDagScheduleV1([], diagnostic, 0)
@@ -206,13 +130,7 @@ fn build_proof_dag_schedule_v1(nodes: [ProofDagNodeV1]) -> ProofDagScheduleV1:
                 assigned = _proof_text_push_unique(assigned, candidate)
                 cost = cost + nodes[_proof_node_index(nodes, candidate)].estimated_cost_ms
         members = _proof_sorted_text(members)
-        var member_identities: [text] = []
-        for member in members:
-            val node = nodes[_proof_node_index(nodes, member)]
-            member_identities = member_identities.push(
-                _proof_frame_text(member) + _proof_frame_text(node.semantic_hash))
-        val component_id = sha256_text(
-            _proof_frame_text("ProofDagSccV1") + _proof_frame_texts(member_identities))
+        val component_id = assurance_text_hash("ProofDagSccV1|" + members.join(","))
         components = components.push(ProofDagComponentV1(component_id, members, [], cost, 0))
 
     # Collapse symbol dependencies onto SCC dependencies.
@@ -260,106 +178,3 @@ fn build_proof_dag_schedule_v1(nodes: [ProofDagNodeV1]) -> ProofDagScheduleV1:
     for component in ordered:
         if component.critical_path_ms > critical_path: critical_path = component.critical_path_ms
     ProofDagScheduleV1(ordered, "", critical_path)
-
-fn proof_dag_bounded_work_v1(
-    schedule: ProofDagScheduleV1,
-    config: ProofDagExecutorConfigV1
-) -> [ProofDagWorkItemV1]:
-    if schedule.diagnostic != "" or _proof_schedule_diagnostic(schedule) != "" or config.max_workers <= 0 or config.max_inflight <= 0: return []
-    val bound = if config.max_workers < config.max_inflight: config.max_workers else: config.max_inflight
-    var items: [ProofDagWorkItemV1] = []
-    for index in 0..schedule.ordered_components.len():
-        val component = schedule.ordered_components[index]
-        var batch_index = 0
-        for dependency in component.dependency_component_ids:
-            for prior in items:
-                if prior.component_id == dependency and prior.batch_index + 1 > batch_index:
-                    batch_index = prior.batch_index + 1
-        var slot = 0
-        for prior in items:
-            if prior.batch_index == batch_index: slot = slot + 1
-        while slot >= bound:
-            batch_index = batch_index + 1
-            slot = 0
-            for prior in items:
-                if prior.batch_index == batch_index: slot = slot + 1
-        var dependency_work_identities: [text] = []
-        for dependency_id in component.dependency_component_ids:
-            for prior in items:
-                if prior.component_id == dependency_id:
-                    dependency_work_identities = dependency_work_identities.push(
-                        _proof_frame_text(dependency_id) + _proof_frame_text(prior.input_hash))
-        dependency_work_identities = _proof_sorted_text(dependency_work_identities)
-        val dependency_work_material = _proof_frame_texts(dependency_work_identities)
-        val symbol_material = _proof_frame_texts(_proof_sorted_text(component.symbol_ids))
-        val input_hash = sha256_text(
-            _proof_frame_text("ProofDagWorkV1") +
-            _proof_frame_text(component.component_id) +
-            symbol_material + dependency_work_material)
-        items = items.push(ProofDagWorkItemV1(component.component_id, index, batch_index, slot, input_hash))
-    items
-
-fn _proof_result_index(results: [ProofDagWorkerResultV1], dispatch_index: i64) -> i64:
-    for index in 0..results.len():
-        if results[index].dispatch_index == dispatch_index: return index
-    -1
-
-# Parent-authoritative commit.  Completion order is deliberately ignored:
-# envelopes are validated against the frozen work list and committed in DAG
-# order, making the receipt deterministic across worker interleavings.
-fn proof_dag_commit_worker_results_v1(
-    schedule: ProofDagScheduleV1,
-    config: ProofDagExecutorConfigV1,
-    results: [ProofDagWorkerResultV1]
-) -> ProofDagExecutionReceiptV1:
-    if schedule.diagnostic != "":
-        return ProofDagExecutionReceiptV1([], [], 0, 0, 0, schedule.diagnostic)
-    val schedule_diagnostic = _proof_schedule_diagnostic(schedule)
-    if schedule_diagnostic != "":
-        return ProofDagExecutionReceiptV1([], [], 0, 0, 0, schedule_diagnostic)
-    if config.max_workers <= 0 or config.max_inflight <= 0:
-        return ProofDagExecutionReceiptV1([], [], 0, 0, 0, "FV2-E-PROOF-WORKER-BOUND: positive worker and inflight bounds are required")
-    val work = proof_dag_bounded_work_v1(schedule, config)
-    if results.len() != work.len():
-        return ProofDagExecutionReceiptV1([], [], 0, 0, 0, "FV2-E-PROOF-WORKER-COUNT: exactly one result per work item is required")
-
-    var committed_ids: [text] = []
-    var committed_hashes: [text] = []
-    var total_elapsed = 0
-    var peak_rss = 0
-    var max_active_workers = 0
-    for item in work:
-        val result_index = _proof_result_index(results, item.dispatch_index)
-        if result_index < 0:
-            return ProofDagExecutionReceiptV1([], [], 0, 0, 0, "FV2-E-PROOF-WORKER-MISSING: missing dispatch result")
-        val result = results[result_index]
-        if result.component_id != item.component_id or result.worker_slot != item.worker_slot or result.input_hash != item.input_hash:
-            return ProofDagExecutionReceiptV1([], [], 0, 0, 0, "FV2-E-PROOF-WORKER-IDENTITY: result does not match frozen work identity")
-        if not sha256_lower_hex_valid(result.result_hash) or result.elapsed_ms < 0 or result.peak_rss_kib < 0:
-            return ProofDagExecutionReceiptV1([], [], 0, 0, 0, "FV2-E-PROOF-WORKER-EVIDENCE: result measurements and lowercase SHA-256 hash are required")
-        if not result.succeeded:
-            return ProofDagExecutionReceiptV1([], [], 0, 0, 0, "FV2-E-PROOF-WORKER-FAILED: child proof failed")
-        committed_ids = committed_ids.push(result.component_id)
-        committed_hashes = committed_hashes.push(result.result_hash)
-        total_elapsed = total_elapsed + result.elapsed_ms
-        if result.peak_rss_kib > peak_rss: peak_rss = result.peak_rss_kib
-        var batch_workers = 0
-        for candidate in work:
-            if candidate.batch_index == item.batch_index: batch_workers = batch_workers + 1
-        if batch_workers > max_active_workers: max_active_workers = batch_workers
-    ProofDagExecutionReceiptV1(
-        committed_ids, committed_hashes, max_active_workers, total_elapsed, peak_rss, ""
-    )
-
-# A scalar task result cannot truthfully supply the measured duration, peak RSS,
-# or independently retained result identity required by ProofDagWorkerResultV1.
-# Keep this compatibility entrypoint fail-closed until the task facade returns
-# a typed, measured worker envelope.  Callers with real measurements must use
-# proof_dag_commit_worker_results_v1 directly.
-fn execute_proof_dag_bounded_v1(
-    schedule: ProofDagScheduleV1,
-    config: ProofDagExecutorConfigV1,
-    worker_fn: fn(ProofDagWorkItemV1) -> i64
-) -> ProofDagExecutionReceiptV1:
-    ProofDagExecutionReceiptV1([], [], 0, 0, 0,
-        "FV2-E-PROOF-WORKER-MEASUREMENT: scalar workers cannot create measured proof evidence")

@@ -16,22 +16,7 @@
 # send() wait for its specific response id.
 
 use std.net.tcp.{TcpStream}
-use std.json.builder.{escape_json}
-
-# Plain-text JSON helpers. JsonBuilder's static-constructor + method chain is
-# resolved by NAME across co-compiled modules under the test harness, where
-# `object()` collides with unrelated statics (CodegenOutput.object,
-# TemplateValue.object) and chained calls lose the receiver type
-# ("method 'field_bool'/'build' not found on value of type object"). Flat
-# functions with cdp_-prefixed names have no such collision surface.
-fn cdp_json_str_field(key: text, value: text) -> text:
-    "\"" + key + "\":\"" + escape_json(value) + "\""
-
-fn cdp_json_raw_field(key: text, raw: text) -> text:
-    "\"" + key + "\":" + raw
-
-fn cdp_json_object(fields: [text]) -> text:
-    "{" + fields.join(",") + "}"
+use std.json.builder.{JsonBuilder, escape_json}
 use std.json.parser.{json_parse}
 use std.common.string_core.{char_from_code}
 use std.play.types.{
@@ -39,10 +24,8 @@ use std.play.types.{
     ERR_CDP_PROTOCOL, ERR_CDP_TRANSPORT, ERR_TIMEOUT, ERR_INVALID_ARGUMENT
 }
 
-extern fn rt_time_now_unix_micros() -> i64
+use std.io_runtime.{time_now_unix_micros}
 extern fn bytes_to_string(bytes: [u8]) -> text
-extern fn rt_string_data(s: text) -> [u8]
-extern fn rt_string_len(s: text) -> i64
 
 # ============================================================================
 # WebSocket frame constants (RFC 6455)
@@ -98,10 +81,9 @@ fn cdp_parse_ws_url(url: text) -> (text, i64, text, bool):
 # Text ↔ byte helpers
 # ============================================================================
 
-extern fn rt_text_to_bytes(s: text) -> [i64]
 
 fn cdp_text_to_bytes(s: text) -> [i64]:
-    rt_text_to_bytes(s)
+    s.bytes()
 
 fn cdp_bytes_to_text(bytes: [i64]) -> text:
     var parts: [text] = []
@@ -146,7 +128,7 @@ use std.websocket.handshake.{generate_websocket_key}
 # ============================================================================
 
 fn cdp_make_mask_key() -> [i64]:
-    val t = rt_time_now_unix_micros()
+    val t = time_now_unix_micros()
     var mk: [i64] = []
     mk.push(((t >> 0) & 0xFF) ^ 0x5A)
     mk.push(((t >> 8) & 0xFF) ^ 0xA5)
@@ -481,11 +463,11 @@ class CdpClient:
         self.next_id = self.next_id + 1
 
         val params = if params_json == "": "{}" else: params_json
-        val cmd = cdp_json_object([
-            cdp_json_raw_field("id", id.to_text()),
-            cdp_json_str_field("method", method),
-            cdp_json_raw_field("params", params)
-        ])
+        val cmd = JsonBuilder.object()
+            .field_int("id", id)
+            .field("method", method)
+            .field_raw("params", params)
+            .build()
 
         val frame = cdp_build_text_frame(cmd)
         match self.stream.write_all(cdp_i64_array_to_u8(frame)):
@@ -497,8 +479,8 @@ class CdpClient:
             id: id, body: "", resolved: false, is_error: false, error_message: ""
         ))
 
-        val deadline = rt_time_now_unix_micros() + (timeout_ms * 1000)
-        while rt_time_now_unix_micros() < deadline:
+        val deadline = time_now_unix_micros() + (timeout_ms * 1000)
+        while time_now_unix_micros() < deadline:
             self._pump_once()
             for p in self.pending:
                 if p.id == id and p.resolved:
@@ -517,12 +499,12 @@ class CdpClient:
         self.next_id = self.next_id + 1
 
         val params = if params_json == "": "{}" else: params_json
-        val cmd = cdp_json_object([
-            cdp_json_raw_field("id", id.to_text()),
-            cdp_json_str_field("method", method),
-            cdp_json_raw_field("params", params),
-            cdp_json_str_field("sessionId", session_id)
-        ])
+        val cmd = JsonBuilder.object()
+            .field_int("id", id)
+            .field("method", method)
+            .field_raw("params", params)
+            .field("sessionId", session_id)
+            .build()
 
         val frame = cdp_build_text_frame(cmd)
         match self.stream.write_all(cdp_i64_array_to_u8(frame)):
@@ -534,8 +516,8 @@ class CdpClient:
             id: id, body: "", resolved: false, is_error: false, error_message: ""
         ))
 
-        val deadline = rt_time_now_unix_micros() + (timeout_ms * 1000)
-        while rt_time_now_unix_micros() < deadline:
+        val deadline = time_now_unix_micros() + (timeout_ms * 1000)
+        while time_now_unix_micros() < deadline:
             self._pump_once()
             for p in self.pending:
                 if p.id == id and p.resolved:
@@ -553,8 +535,8 @@ class CdpClient:
         out
 
     me wait_for_event(method: text, timeout_ms: i64) -> Result<CdpEvent, PlayError>:
-        val deadline = rt_time_now_unix_micros() + (timeout_ms * 1000)
-        while rt_time_now_unix_micros() < deadline:
+        val deadline = time_now_unix_micros() + (timeout_ms * 1000)
+        while time_now_unix_micros() < deadline:
             self._pump_once()
             var hit: CdpEvent = CdpEvent(method: "", params_json: "", session_id: "")
             var found = false

@@ -235,6 +235,40 @@ fn _allpass(samples: [f64], delay_frames: i64, gain: f64) -> [f64]:
         i = i + 1
     out
 
+# ============================================================================
+# Pitch shift — resample (tape-speed style: pitch and duration move together)
+# ============================================================================
+
+pub fn apply_pitch_shift(samples: [f64], pitch_factor: f64, sample_rate: i64) -> [f64]:
+    """Pitch shift via linear-interpolation resample: output[i] reads the
+    input at position i*pitch_factor (fractional index, linearly
+    interpolated between the two nearest input samples). pitch_factor > 1.0
+    raises pitch and shortens the buffer (tape sped up); pitch_factor < 1.0
+    lowers pitch and lengthens it (tape slowed down) — the same trade-off a
+    real-time node-graph resampler makes, just applied offline to a full
+    buffer instead of a live stream. `sample_rate` is accepted for call-site
+    symmetry with the other effects (apply_lowpass/apply_highpass/apply_delay/
+    reverb all take it) even though this function only needs the ratio, not
+    the absolute rate. pitch_factor <= 0.0 or an empty buffer returns
+    `samples` unchanged (defined, not an error — callers pass validated SDN
+    values; this is a pure function like the other effects)."""
+    val n = samples.len()
+    if (n == 0 or pitch_factor <= 0.0):
+        return samples
+    val out_len = ((n as f64) / pitch_factor) as i64
+    var out: [f64] = []
+    var i: i64 = 0
+    while i < out_len:
+        val src_pos = (i as f64) * pitch_factor
+        val idx0 = src_pos as i64
+        var idx1 = idx0 + 1
+        if idx1 >= n:
+            idx1 = n - 1
+        val frac = src_pos - (idx0 as f64)
+        out.push(samples[idx0] * (1.0 - frac) + samples[idx1] * frac)
+        i = i + 1
+    out
+
 pub fn reverb(samples: [f64], sample_rate: i64, room_size: f64, wet: f64) -> [f64]:
     """Schroeder reverb: 4 parallel combs (feedback = room_size, classic
     29.7/37.1/41.1/43.7 ms delays) summed, then 2 series allpass filters

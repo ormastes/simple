@@ -19,7 +19,7 @@ fn _aes_u8_at(buf: [u8], idx: u64) -> u8:
 # AES S-Box (FIPS 197, Section 5.1.1) — inline table, no SFFI
 # ============================================================================
 
-fn _aes_sbox_table() -> [u8]:
+fn _aes128_gcm_aes_sbox_table() -> [u8]:
     """Pre-computed AES S-box (256 entries)."""
     var t: [u8] = []
     # Row 0
@@ -106,11 +106,11 @@ fn _aes_sbox_table() -> [u8]:
 
 fn _aes_sbox(index: i64) -> u8:
     """Look up a byte in the AES S-box table."""
-    val tbl = _aes_sbox_table()
+    val tbl = _aes128_gcm_aes_sbox_table()
     _aes_u8_at(tbl, (index & 0xFF).to_u64())
 
 # AES Round Constants (RCON) — packed as u32 with RCON byte in high position
-fn _aes_rcon_table() -> [u8]:
+fn _aes128_gcm_aes_rcon_table() -> [u8]:
     """AES RCON byte values for rounds 1..10."""
     var t: [u8] = []
     t.push(0x01) t.push(0x02) t.push(0x04) t.push(0x08)
@@ -120,7 +120,7 @@ fn _aes_rcon_table() -> [u8]:
 
 fn _aes_rcon(index: i64) -> u32:
     """Return RCON for round (index+1), packed as u32 big-endian (byte << 24)."""
-    val tbl = _aes_rcon_table()
+    val tbl = _aes128_gcm_aes_rcon_table()
     _aes_u8_at(tbl, index.to_u64()).to_u32() << 24
 
 # ============================================================================
@@ -306,7 +306,7 @@ fn aes128_encrypt_block(plaintext: [u8], round_keys: [u8]) -> [u8]:
 # GF(2^128) Multiplication for GHASH
 # ============================================================================
 
-fn gf128_mul(x: [u8], y: [u8]) -> [u8]:
+fn _aes128_gcm_gf128_mul(x: [u8], y: [u8]) -> [u8]:
     """Multiply two 128-bit elements in GF(2^128).
 
     Uses the polynomial x^128 + x^7 + x^2 + x + 1 (R = 0xE1000000...).
@@ -364,7 +364,7 @@ fn _aes_ghash_block(h: [u8], y: [u8], x_block: [u8]) -> [u8]:
     while i < 16:
         xored.push(_aes_u8_at(y, i) ^ _aes_u8_at(x_block, i))
         i = i + 1
-    gf128_mul(xored, h)
+    _aes128_gcm_gf128_mul(xored, h)
 
 fn _aes_pad_to_16(data: [u8]) -> [u8]:
     """Pad data to a multiple of 16 bytes with zeros."""
@@ -390,7 +390,7 @@ fn _aes_append(a: [u8], b: [u8]) -> [u8]:
         i = i + 1
     out
 
-fn ghash(h: [u8], aad: [u8], ciphertext: [u8]) -> [u8]:
+fn _aes128_gcm_ghash(h: [u8], aad: [u8], ciphertext: [u8]) -> [u8]:
     """Compute GHASH for GCM.
 
     Processes: pad(AAD) || pad(ciphertext) || len(AAD) || len(ciphertext)
@@ -537,7 +537,7 @@ fn aes128_gcm_encrypt(key: [u8], nonce: [u8], plaintext: [u8], aad: [u8]) -> [u8
     val j0 = _aes_make_j0(nonce)
     val icb = _aes_inc32(j0)
     val ciphertext = gctr(round_keys, icb, plaintext)
-    val s = ghash(h, aad, ciphertext)
+    val s = _aes128_gcm_ghash(h, aad, ciphertext)
     val tag = gctr(round_keys, j0, s)
 
     _aes_append(ciphertext, tag)
@@ -562,7 +562,7 @@ fn aes128_gcm_decrypt(key: [u8], nonce: [u8], ciphertext: [u8], aad: [u8], tag: 
     val h = aes128_encrypt_block(zero_block, round_keys)
 
     val j0 = _aes_make_j0(nonce)
-    val s = ghash(h, aad, ciphertext)
+    val s = _aes128_gcm_ghash(h, aad, ciphertext)
     val expected_tag = gctr(round_keys, j0, s)
 
     # Constant-time tag comparison

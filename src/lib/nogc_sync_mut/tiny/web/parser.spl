@@ -3,190 +3,88 @@
 use std.tiny.common.status.{TinyStatus, TINY_ERR_CAPACITY, TINY_ERR_MALFORMED, TINY_ERR_UNSUPPORTED}
 use std.tiny.common.types.{TinyRect}
 use std.tiny.web.model.{TinyWebNode, TinyWebReceipt, TINY_WEB_A, TINY_WEB_BUTTON, TINY_WEB_DOCUMENT, TINY_WEB_HEADING, TINY_WEB_LABEL, TINY_WEB_STYLE, TINY_WEB_TEXT, TINY_WEB_TITLE, tiny_web_kind}
-use std.tiny.web.token.{TinyHtmlTokenArena, TinyHtmlTokenResult, TINY_HTML_END, TINY_HTML_START, TINY_HTML_TEXT, tiny_html_attribute, tiny_html_has_attribute}
-
-class TinyWebParseArena:
-    nodes: [TinyWebNode]
-    node_count: i32
-    stack: [i32]
-    stack_count: i32
-    suppressed_tags: [text]
-    suppressed_count: i32
-    max_nodes: i32
-    max_depth: i32
-    active_max_nodes: i32
-    active_max_depth: i32
-    allocation_count: i32
-    reuse_count: i32
-
-    static fn bounded(max_nodes: i32, max_depth: i32) -> TinyWebParseArena:
-        var nodes: [TinyWebNode] = []
-        var node_index = 0
-        while node_index < max_nodes:
-            nodes.push(TinyWebNode.empty())
-            node_index = node_index + 1
-        var stack: [i32] = []
-        var tags: [text] = []
-        var depth_index = 0
-        while depth_index <= max_depth:
-            stack.push(-1)
-            tags.push("")
-            depth_index = depth_index + 1
-        TinyWebParseArena(
-            nodes: nodes, node_count: 0, stack: stack, stack_count: 0,
-            suppressed_tags: tags, suppressed_count: 0,
-            max_nodes: max_nodes, max_depth: max_depth,
-            active_max_nodes: max_nodes, active_max_depth: max_depth,
-            allocation_count: 3, reuse_count: 0,
-        )
-
-    me reset() -> TinyStatus:
-        self.node_count = 0
-        self.stack_count = 0
-        self.suppressed_count = 0
-        self.reuse_count = self.reuse_count + 1
-        val root = self.append_node(TinyWebNode(
-            kind: TINY_WEB_DOCUMENT, parent_index: -1, depth: 0,
-            text_value: "", tag_name: "#document", id_value: "", class_value: "",
-            type_value: "", href_value: "", value_attribute: "", name_value: "",
-            placeholder_value: "", max_length_value: "", checked: false,
-            disabled: false, bounds: TinyRect.empty(),
-        ))
-        if not root.is_ok(): return root
-        self.stack[0] = 0
-        self.stack_count = 1
-        TinyStatus.ok()
-
-    me append_node(node: TinyWebNode) -> TinyStatus:
-        if self.node_count >= self.active_max_nodes:
-            return TinyStatus.error(TINY_ERR_CAPACITY, self.node_count)
-        self.nodes[self.node_count] = node
-        self.node_count = self.node_count + 1
-        TinyStatus.ok()
-
-    me push_stack(index: i32) -> TinyStatus:
-        if self.stack_count > self.active_max_depth:
-            return TinyStatus.error(TINY_ERR_CAPACITY, self.stack_count)
-        self.stack[self.stack_count] = index
-        self.stack_count = self.stack_count + 1
-        TinyStatus.ok()
-
-    me push_suppressed(tag: text) -> TinyStatus:
-        if self.suppressed_count >= self.suppressed_tags.len():
-            return TinyStatus.error(TINY_ERR_CAPACITY, self.suppressed_count)
-        self.suppressed_tags[self.suppressed_count] = tag
-        self.suppressed_count = self.suppressed_count + 1
-        TinyStatus.ok()
-
-    fn receipt(status: TinyStatus, unsupported: i32, malformed_offset: i32, title_text: text, style_source: text) -> TinyWebReceipt:
-        TinyWebReceipt(
-            status: status, nodes: self.nodes, node_count: self.node_count,
-            unsupported_count: unsupported, malformed_offset: malformed_offset,
-            title_text: title_text, style_source: style_source,
-        )
-
-    me parse_tokens(token_result: TinyHtmlTokenResult, max_text_bytes: i32, max_nodes: i32, max_depth: i32) -> TinyWebReceipt:
-        self.active_max_nodes = if max_nodes < self.max_nodes: max_nodes else: self.max_nodes
-        self.active_max_depth = if max_depth < self.max_depth: max_depth else: self.max_depth
-        val reset_status = self.reset()
-        if not reset_status.is_ok(): return self.receipt(reset_status, 0, 0, "", "")
-        if not token_result.status.is_ok():
-            return self.receipt(token_result.status, 0, token_result.status.detail_id, "", "")
-        var unsupported = 0
-        var first_unsupported = 0
-        var title_text = ""
-        var style_source = ""
-        var attribute_bytes = 0
-        var token_index = 0
-        while token_index < token_result.token_count:
-            val token = token_result.tokens[token_index]
-            token_index = token_index + 1
-            if self.suppressed_count > 0:
-                if token.kind == TINY_HTML_START:
-                    unsupported = unsupported + 1
-                    if not token.self_closing:
-                        val pushed = self.push_suppressed(token.name)
-                        if not pushed.is_ok(): return self.receipt(pushed, unsupported, token.offset, title_text, style_source)
-                elif token.kind == TINY_HTML_END:
-                    unsupported = unsupported + 1
-                    if token.name == self.suppressed_tags[self.suppressed_count - 1]: self.suppressed_count = self.suppressed_count - 1
-                continue
-            if token.kind == TINY_HTML_TEXT:
-                val value = token.value.trim()
-                if value.len() > 0:
-                    val parent_index = self.stack[self.stack_count - 1]
-                    val parent_kind = self.nodes[parent_index].kind
-                    if parent_kind == TINY_WEB_TITLE:
-                        title_text = title_text + value
-                        continue
-                    if parent_kind == TINY_WEB_STYLE:
-                        style_source = style_source + value
-                        continue
-                    if parent_kind == TINY_WEB_BUTTON or parent_kind == TINY_WEB_LABEL or parent_kind == TINY_WEB_A or parent_kind == TINY_WEB_HEADING:
-                        var parent_node = self.nodes[parent_index]
-                        parent_node.text_value = parent_node.text_value + value
-                        self.nodes[parent_index] = parent_node
-                    val appended = self.append_node(TinyWebNode(
-                        kind: TINY_WEB_TEXT, parent_index: parent_index,
-                        depth: self.stack_count, text_value: value, tag_name: "#text",
-                        id_value: "", class_value: "", type_value: "", href_value: "",
-                        value_attribute: "", name_value: "", placeholder_value: "",
-                        max_length_value: "", checked: false, disabled: false,
-                        bounds: TinyRect.empty(),
-                    ))
-                    if not appended.is_ok(): return self.receipt(appended, unsupported, 0, title_text, style_source)
-            else:
-                val kind = tiny_web_kind(token.name)
-                if kind < 0:
-                    unsupported = unsupported + 1
-                    if first_unsupported == 0: first_unsupported = token.offset + 1
-                    if token.kind == TINY_HTML_START and not token.self_closing:
-                        val pushed = self.push_suppressed(token.name)
-                        if not pushed.is_ok(): return self.receipt(pushed, unsupported, token.offset, title_text, style_source)
-                else:
-                    if token.kind == TINY_HTML_START:
-                        if self.stack_count > self.active_max_depth:
-                            return self.receipt(TinyStatus.error(TINY_ERR_CAPACITY, self.stack_count), unsupported, token.offset, title_text, style_source)
-                        val id_value = tiny_html_attribute(token.value, "id")
-                        val class_value = tiny_html_attribute(token.value, "class")
-                        val type_value = tiny_html_attribute(token.value, "type")
-                        val href_value = tiny_html_attribute(token.value, "href")
-                        val value_attribute = tiny_html_attribute(token.value, "value")
-                        val name_value = tiny_html_attribute(token.value, "name")
-                        val placeholder_value = tiny_html_attribute(token.value, "placeholder")
-                        val max_length_value = tiny_html_attribute(token.value, "maxlength")
-                        val admitted_bytes = id_value.len() + class_value.len() + type_value.len() + href_value.len() + value_attribute.len() + name_value.len() + placeholder_value.len() + max_length_value.len()
-                        if admitted_bytes > max_text_bytes or attribute_bytes > max_text_bytes - admitted_bytes:
-                            return self.receipt(TinyStatus.error(TINY_ERR_CAPACITY, attribute_bytes), unsupported, token.offset, title_text, style_source)
-                        attribute_bytes = attribute_bytes + admitted_bytes
-                        val index = self.node_count
-                        val appended = self.append_node(TinyWebNode(
-                            kind: kind, parent_index: self.stack[self.stack_count - 1],
-                            depth: self.stack_count,
-                            text_value: if token.name == "input": value_attribute else: "",
-                            tag_name: token.name, id_value: id_value, class_value: class_value,
-                            type_value: type_value, href_value: href_value,
-                            value_attribute: value_attribute, name_value: name_value,
-                            placeholder_value: placeholder_value, max_length_value: max_length_value,
-                            checked: tiny_html_has_attribute(token.value, "checked"),
-                            disabled: tiny_html_has_attribute(token.value, "disabled"),
-                            bounds: TinyRect.empty(),
-                        ))
-                        if not appended.is_ok(): return self.receipt(appended, unsupported, token.offset, title_text, style_source)
-                        if not token.self_closing:
-                            val pushed = self.push_stack(index)
-                            if not pushed.is_ok(): return self.receipt(pushed, unsupported, token.offset, title_text, style_source)
-                    else:
-                        if self.stack_count <= 1 or self.nodes[self.stack[self.stack_count - 1]].kind != kind:
-                            return self.receipt(TinyStatus.error(TINY_ERR_MALFORMED, token.offset), unsupported, token.offset, title_text, style_source)
-                        self.stack_count = self.stack_count - 1
-        if self.stack_count != 1:
-            return self.receipt(TinyStatus.error(TINY_ERR_MALFORMED, self.stack_count), unsupported, self.stack_count, title_text, style_source)
-        val status = if unsupported > 0: TinyStatus.error(TINY_ERR_UNSUPPORTED, first_unsupported) else: TinyStatus.ok()
-        self.receipt(status, unsupported, 0, title_text, style_source)
+use std.tiny.web.token.{TINY_HTML_END, TINY_HTML_START, TINY_HTML_TEXT, tiny_html_attribute, tiny_html_has_attribute, tiny_html_tokenize}
 
 fn tiny_web_parse(source: text, max_nodes: i32, max_depth: i32, max_text_bytes: i32) -> TinyWebReceipt:
-    var token_arena = TinyHtmlTokenArena.bounded(max_nodes * 2 + 4)
-    val token_result = token_arena.tokenize(source, max_text_bytes)
-    var parse_arena = TinyWebParseArena.bounded(max_nodes, max_depth)
-    parse_arena.parse_tokens(token_result, max_text_bytes, max_nodes, max_depth)
+    val token_result = tiny_html_tokenize(source, max_nodes * 2 + 4, max_text_bytes)
+    if not token_result.status.is_ok():
+        return TinyWebReceipt(status: token_result.status, nodes: [], unsupported_count: 0, malformed_offset: token_result.status.detail_id, title_text: "", style_source: "")
+    var nodes: [TinyWebNode] = [TinyWebNode(kind: TINY_WEB_DOCUMENT, parent_index: -1, depth: 0, text_value: "", tag_name: "#document", id_value: "", class_value: "", type_value: "", href_value: "", value_attribute: "", name_value: "", placeholder_value: "", max_length_value: "", checked: false, disabled: false, bounds: TinyRect.empty())]
+    var stack: [i32] = [0]
+    var unsupported = 0
+    var first_unsupported = 0
+    var suppressed_tags: [text] = []
+    var title_text = ""
+    var style_source = ""
+    var attribute_bytes = 0
+    for token in token_result.tokens:
+        if suppressed_tags.len() > 0:
+            if token.kind == TINY_HTML_START:
+                unsupported = unsupported + 1
+                if not token.self_closing: suppressed_tags.push(token.name)
+            elif token.kind == TINY_HTML_END:
+                unsupported = unsupported + 1
+                if token.name == suppressed_tags[suppressed_tags.len() - 1]: suppressed_tags.pop()
+            continue
+        if token.kind == TINY_HTML_TEXT:
+            val value = token.value.trim()
+            if value.len() > 0:
+                val parent_kind = nodes[stack[stack.len() - 1]].kind
+                if parent_kind == TINY_WEB_TITLE:
+                    title_text = title_text + value
+                    continue
+                if parent_kind == TINY_WEB_STYLE:
+                    style_source = style_source + value
+                    continue
+                if parent_kind == TINY_WEB_BUTTON or parent_kind == TINY_WEB_LABEL or parent_kind == TINY_WEB_A or parent_kind == TINY_WEB_HEADING:
+                    val parent_index = stack[stack.len() - 1]
+                    var parent_node = nodes[parent_index]
+                    parent_node.text_value = parent_node.text_value + value
+                    nodes[parent_index] = parent_node
+                if nodes.len() >= max_nodes:
+                    return TinyWebReceipt(status: TinyStatus.error(TINY_ERR_CAPACITY, nodes.len()), nodes: nodes, unsupported_count: unsupported, malformed_offset: 0, title_text: title_text, style_source: style_source)
+                nodes.push(TinyWebNode(kind: TINY_WEB_TEXT, parent_index: stack[stack.len() - 1], depth: stack.len(), text_value: value, tag_name: "#text", id_value: "", class_value: "", type_value: "", href_value: "", value_attribute: "", name_value: "", placeholder_value: "", max_length_value: "", checked: false, disabled: false, bounds: TinyRect.empty()))
+        else:
+            val kind = tiny_web_kind(token.name)
+            if kind < 0:
+                unsupported = unsupported + 1
+                if first_unsupported == 0: first_unsupported = token.offset + 1
+                if token.kind == TINY_HTML_START and not token.self_closing: suppressed_tags.push(token.name)
+            else:
+                if token.kind == TINY_HTML_START:
+                    if stack.len() > max_depth:
+                        return TinyWebReceipt(status: TinyStatus.error(TINY_ERR_CAPACITY, stack.len()), nodes: nodes, unsupported_count: unsupported, malformed_offset: token.offset, title_text: title_text, style_source: style_source)
+                    if nodes.len() >= max_nodes:
+                        return TinyWebReceipt(status: TinyStatus.error(TINY_ERR_CAPACITY, nodes.len()), nodes: nodes, unsupported_count: unsupported, malformed_offset: token.offset, title_text: title_text, style_source: style_source)
+                    val index = nodes.len()
+                    val id_value = tiny_html_attribute(token.value, "id")
+                    val class_value = tiny_html_attribute(token.value, "class")
+                    val type_value = tiny_html_attribute(token.value, "type")
+                    val href_value = tiny_html_attribute(token.value, "href")
+                    val value_attribute = tiny_html_attribute(token.value, "value")
+                    val name_value = tiny_html_attribute(token.value, "name")
+                    val placeholder_value = tiny_html_attribute(token.value, "placeholder")
+                    val max_length_value = tiny_html_attribute(token.value, "maxlength")
+                    val admitted_bytes = id_value.len() + class_value.len() + type_value.len() + href_value.len() + value_attribute.len() + name_value.len() + placeholder_value.len() + max_length_value.len()
+                    if admitted_bytes > max_text_bytes or attribute_bytes > max_text_bytes - admitted_bytes:
+                        return TinyWebReceipt(status: TinyStatus.error(TINY_ERR_CAPACITY, attribute_bytes), nodes: nodes, unsupported_count: unsupported, malformed_offset: token.offset, title_text: title_text, style_source: style_source)
+                    attribute_bytes = attribute_bytes + admitted_bytes
+                    val initial_value = if token.name == "input": value_attribute else: ""
+                    nodes.push(TinyWebNode(
+                        kind: kind, parent_index: stack[stack.len() - 1], depth: stack.len(), text_value: initial_value,
+                        tag_name: token.name, id_value: id_value, class_value: class_value,
+                        type_value: type_value, href_value: href_value,
+                        value_attribute: value_attribute, name_value: name_value,
+                        placeholder_value: placeholder_value, max_length_value: max_length_value,
+                        checked: tiny_html_has_attribute(token.value, "checked"),
+                        disabled: tiny_html_has_attribute(token.value, "disabled"), bounds: TinyRect.empty(),
+                    ))
+                    if not token.self_closing: stack.push(index)
+                else:
+                    if stack.len() <= 1 or nodes[stack[stack.len() - 1]].kind != kind:
+                        return TinyWebReceipt(status: TinyStatus.error(TINY_ERR_MALFORMED, token.offset), nodes: nodes, unsupported_count: unsupported, malformed_offset: token.offset, title_text: title_text, style_source: style_source)
+                    stack.pop()
+    if stack.len() != 1:
+        return TinyWebReceipt(status: TinyStatus.error(TINY_ERR_MALFORMED, source.len()), nodes: nodes, unsupported_count: unsupported, malformed_offset: source.len(), title_text: title_text, style_source: style_source)
+    val status = if unsupported > 0: TinyStatus.error(TINY_ERR_UNSUPPORTED, first_unsupported) else: TinyStatus.ok()
+    TinyWebReceipt(status: status, nodes: nodes, unsupported_count: unsupported, malformed_offset: 0, title_text: title_text, style_source: style_source)

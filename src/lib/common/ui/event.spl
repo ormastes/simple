@@ -5,6 +5,38 @@
 
 use common.ui.widget.{UIMode, UIEvent, UIState, UITree, WidgetNode}
 use common.ui.mode.{switch_mode, resolve_keybinding}
+use common.ui.layout.{compute_layout}
+use common.ui.native_scalar_text.{ui_native_i64_text}
+use common.ui.widget_hit.{
+    widget_set_pressed,
+    widget_clear_pressed,
+    widget_dispatch_hover,
+    widget_dispatch_click,
+    widget_dispatch_scroll,
+    widget_dispatch_key,
+    widget_scrollbar_pointer_down,
+    widget_scrollbar_pointer_move,
+    widget_scrollbar_pointer_up,
+    widget_hit_test,
+    widget_dispatch_composition_update,
+    widget_dispatch_composition_commit
+}
+
+# Viewport used to lay out the tree for hit-testing. Stored in the tree's
+# token bag (set by UIEvent.Resize); defaults to 640x480 when unset.
+fn _viewport_dim(state: UIState, key: text, fallback: i32) -> i32:
+    val raw = state.tree.resolve_token(key)
+    if raw == "":
+        return fallback
+    raw.to_int() ?? fallback
+
+fn _with_focus(state: UIState, focused_id: text) -> UIState:
+    UIState(
+        tree: state.tree,
+        mode: state.mode,
+        focused_id: focused_id,
+        command_buffer: state.command_buffer
+    )
 
 # =========================================================================
 # Event Processing
@@ -32,26 +64,64 @@ fn process_event(state: UIState, event: UIEvent) -> UIState:
         UIEvent.FileChanged:
             return state
         UIEvent.Resize(width, height):
-            return state
+            var tree = state.tree.with_token(
+                "viewport_w", ui_native_i64_text(width as i64)
+            )
+            tree = tree.with_token(
+                "viewport_h", ui_native_i64_text(height as i64)
+            )
+            return UIState(tree: tree, mode: state.mode, focused_id: state.focused_id, command_buffer: state.command_buffer)
         UIEvent.TouchPress(x, y):
-            return state
+            return handle_pointer(state, x, y, "down")
         UIEvent.TouchMove(x, y):
-            return state
+            return handle_pointer(state, x, y, "move")
         UIEvent.TouchRelease(x, y):
-            return state
+            return handle_pointer(state, x, y, "up")
         UIEvent.MouseEvent(x, y, button, kind):
-            return state
+            return handle_pointer(state, x as i32, y as i32, kind)
         UIEvent.ScrollEvent(x, y, dx, dy):
-            return state
+            return handle_scroll(state, x as i32, y as i32, dy as i32)
         UIEvent.FocusEvent(target_id, kind):
             return handle_focus_event(state, target_id, kind)
         UIEvent.InputChange(target_id, value):
             return handle_input_change(state, target_id, value)
         UIEvent.FetchResult(request_id, url, status, headers, body, error):
             return state
+        UIEvent.DragStart(source_id, mime, data):
+            return handle_drag_start(state, source_id, mime, data)
+        UIEvent.DragMove(x, y):
+            return handle_drag_move(state, x, y)
+        UIEvent.DragDrop(mime, data, x, y, source_id):
+            return handle_drag_drop(state, mime, data, x, y, source_id)
+        # Copy/Cut/Paste/PasteFromHistory are stateless from process_event's
+        # point of view: process_event is a pure (state, event) -> state
+        # reducer with no side channel for a ClipboardService instance. The
+        # actual clipboard mechanics are dispatched by the caller that owns
+        # the service (see nogc_sync_mut.ui.session.UISession.dispatch,
+        # which owns one ClipboardService per session and handles these
+        # variants directly before/alongside calling process_event).
+        UIEvent.Copy:
+            return state
+        UIEvent.Cut:
+            return state
+        UIEvent.Paste:
+            return state
+        UIEvent.PasteFromHistory(index):
+            return state
+        UIEvent.CompositionUpdate(text):
+            return handle_composition_update(state, text)
+        UIEvent.CompositionCommit(text):
+            return handle_composition_commit(state, text)
 
 fn handle_keypress(state: UIState, key: text) -> UIState:
     """Handle a key press by checking keybindings first."""
+    val focused = state.tree.find_widget(state.focused_id)
+    if focused != nil and focused.kind_name() == "button" and (
+        key == "enter" or key == " " or key == "space"
+    ):
+        widget_dispatch_key(state.focused_id, key)
+        return state
+
     # Check keybindings
     val bound_event = resolve_keybinding(state, key)
     if bound_event != nil:
@@ -99,9 +169,10 @@ fn handle_command_key(state: UIState, key: text) -> UIState:
         )
 
 fn handle_insert_key(state: UIState, key: text) -> UIState:
-    """Handle keys in insert mode."""
+    """Handle keys in insert mode: route printable keys to the focused input."""
     if key == "escape":
         return switch_mode(state, UIMode.Normal)
+    widget_dispatch_key(state.focused_id, key)
     return state
 
 fn handle_menu_key(state: UIState, key: text) -> UIState:
@@ -196,6 +267,134 @@ fn handle_action(state: UIState, name: text) -> UIState:
 
     return state
 
+# =========================================================================
+# Pointer / scroll routing (hit-test over the laid-out widget tree)
+# =========================================================================
+
+fn handle_pointer(state: UIState, x: i32, y: i32, kind: text) -> UIState:
+    """Route a pointer event to the widget under (x, y).
+
+    `move` updates hover; `down` presses buttons, toggles checkboxes, focuses
+    inputs, and moves focus to the hit widget; `up` clears pressed state.
+    """
+    val root = state.tree.root_node()
+    val w = _viewport_dim(state, "viewport_w", 640)
+    val h = _viewport_dim(state, "viewport_h", 480)
+    if kind == "move":
+        widget_scrollbar_pointer_move(root, w, h, y)
+        widget_dispatch_hover(root, w, h, x, y)
+        return state
+    if kind == "up":
+        widget_scrollbar_pointer_up(root)
+        widget_clear_pressed(root)
+        return state
+    # down — compute layout once and share it across both dispatch calls
+    # instead of each recomputing it from scratch (they used to run
+    # compute_layout() independently, doubling layout cost per down event).
+    val layout = compute_layout(root, 0, 0, w, h)
+    widget_scrollbar_pointer_down(root, w, h, x, y)
+    widget_set_pressed(root, w, h, x, y, layout)
+    val hit = widget_dispatch_click(root, w, h, x, y, layout)
+    if hit != "":
+        return _with_focus(state, hit)
+    return state
+
+fn handle_scroll(state: UIState, x: i32, y: i32, dy: i32) -> UIState:
+    """Route a wheel event to the scroll container under (x, y)."""
+    val root = state.tree.root_node()
+    val w = _viewport_dim(state, "viewport_w", 640)
+    val h = _viewport_dim(state, "viewport_h", 480)
+    widget_dispatch_scroll(root, w, h, x, y, dy)
+    return state
+
+# =========================================================================
+# Content drag-and-drop (distinct from window titlebar move, which the
+# compositor handles on its own — this is CONTENT dragged between widgets).
+# =========================================================================
+
+# Drag bookkeeping is stored as props on the ROOT widget node (the same
+# process-local widget prop store that `ui_hover` / `ui_pressed` / `ui_focus`
+# already use), NOT as UITree tokens. Tokens live in the tree's `Dict` field
+# and are copied by value on every `with_token`, so they do not round-trip
+# through the pure `(state,event)->state` reducer under all backends; the
+# prop store is the single shared surface every other pointer reducer here
+# writes to, and it is what renderers read back. Keeping drag state on the
+# root node keeps these handlers pure (they return `state` unchanged; all
+# effects are in the shared store) and consistent with hover/press.
+val _DRAG_ACTIVE_PROP: text = "ui_drag_active"
+val _DRAG_SOURCE_PROP: text = "ui_drag_source"
+val _DRAG_MIME_PROP: text = "ui_drag_mime"
+val _DRAG_DATA_PROP: text = "ui_drag_data"
+
+fn handle_drag_start(state: UIState, source_id: text, mime: text, data: text) -> UIState:
+    """Begin a content drag: record the payload on the root node and mark the
+    source widget so a renderer can show drag feedback."""
+    val root = state.tree.root_node()
+    root.set_prop(_DRAG_ACTIVE_PROP, "true")
+    root.set_prop(_DRAG_SOURCE_PROP, source_id)
+    root.set_prop(_DRAG_MIME_PROP, mime)
+    root.set_prop(_DRAG_DATA_PROP, data)
+    val node = state.tree.find_widget(source_id)
+    if node != nil:
+        node.set_prop("ui_dragging", "true")
+    return state
+
+fn handle_drag_move(state: UIState, x: i32, y: i32) -> UIState:
+    """Highlight the widget under the pointer as the current drop target."""
+    val root = state.tree.root_node()
+    if root.get_prop(_DRAG_ACTIVE_PROP) != "true":
+        return state
+    val w = _viewport_dim(state, "viewport_w", 640)
+    val h = _viewport_dim(state, "viewport_h", 480)
+    val hit = widget_hit_test(root, w, h, x, y)
+    for id in root.collect_ids():
+        if id != "":
+            var flag = "false"
+            if hit.found and id == hit.id:
+                flag = "true"
+            WidgetNode(id: id).set_prop("ui_drop_target", flag)
+    return state
+
+fn handle_drag_drop(state: UIState, mime: text, data: text, x: i32, y: i32, source_id: text) -> UIState:
+    """Deliver the dragged payload to the widget under (x, y) and clear drag
+    state. Delivery target: an input/textfield's `value` prop (the same
+    generic surface Copy/Cut/Paste write to) — the inter-widget minimum."""
+    val root = state.tree.root_node()
+    val w = _viewport_dim(state, "viewport_w", 640)
+    val h = _viewport_dim(state, "viewport_h", 480)
+    val hit = widget_hit_test(root, w, h, x, y)
+    for id in root.collect_ids():
+        if id != "":
+            WidgetNode(id: id).set_prop("ui_drop_target", "false")
+    if source_id != "":
+        val src = state.tree.find_widget(source_id)
+        if src != nil:
+            src.set_prop("ui_dragging", "false")
+    root.set_prop(_DRAG_ACTIVE_PROP, "false")
+    if not hit.found:
+        return state
+    val target_kind = WidgetNode(id: hit.id).kind_name()
+    if target_kind == "input" or target_kind == "textfield":
+        WidgetNode(id: hit.id).set_prop("value", data)
+    return state
+
+# =========================================================================
+# IME composition (CJK/accented input via a host input-method editor).
+# =========================================================================
+
+fn handle_composition_update(state: UIState, text: text) -> UIState:
+    """IME preedit update: shows the in-progress composition on the focused
+    input WITHOUT committing it (value/caret are untouched)."""
+    widget_dispatch_composition_update(state.focused_id, text)
+    return state
+
+fn handle_composition_commit(state: UIState, text: text) -> UIState:
+    """IME commit: inserts the composed STRING at the caret (char-indexed,
+    not byte-indexed — see widget_hit's _char_slice/_nchars), replacing
+    whatever preedit was showing."""
+    widget_dispatch_composition_commit(state.focused_id, text)
+    return state
+
 fn handle_focus_event(state: UIState, target_id: text, kind: text) -> UIState:
     if kind == "blur":
         return state
@@ -235,9 +434,8 @@ fn execute_command(state: UIState) -> UIState:
 # =========================================================================
 
 fn focus_next(state: UIState) -> UIState:
-    """Move focus to the next widget."""
-    val ids = state.tree.all_widget_ids()
-    val focusable = get_focusable_ids(ids)
+    """Move focus to the next widget (tab_index order)."""
+    val focusable = get_focusable_ordered(state.tree)
     if focusable.len() == 0:
         return state
 
@@ -250,9 +448,8 @@ fn focus_next(state: UIState) -> UIState:
     )
 
 fn focus_prev(state: UIState) -> UIState:
-    """Move focus to the previous widget."""
-    val ids = state.tree.all_widget_ids()
-    val focusable = get_focusable_ids(ids)
+    """Move focus to the previous widget (tab_index order)."""
+    val focusable = get_focusable_ordered(state.tree)
     if focusable.len() == 0:
         return state
 
@@ -270,6 +467,49 @@ fn get_focusable_ids(ids: [text]) -> [text]:
     for id in ids:
         if id != "":
             result = result.push(id)
+    return result
+
+fn get_focusable_ordered(tree: UITree) -> [text]:
+    """Focusable widget IDs in tab order.
+
+    Each widget's sort key is its optional `tab_index` prop when present,
+    otherwise its 0-based declaration position. IDs are ordered by ascending
+    key, with declaration order as a stable tiebreak (so equal keys — and the
+    no-tab_index widgets keyed by position — keep declaration order).
+    """
+    val ids = tree.all_widget_ids()
+    var f_ids: [text] = []
+    var f_keys: [i32] = []
+    var pos = 0
+    for id in ids:
+        if id != "":
+            val raw = WidgetNode(id: id).get_prop("tab_index")
+            var key = pos
+            if raw != "":
+                key = (raw.to_int() ?? pos.to_i64()).to_i32()
+            f_ids = f_ids.push(id)
+            f_keys = f_keys.push(key)
+            pos = pos + 1
+    val n = f_ids.len()
+    # Stable selection sort: scanning candidates in ascending original index
+    # with a strict `<` comparison makes the lowest-index widget win ties.
+    var used: [bool] = []
+    var u = 0
+    while u < n:
+        used = used.push(false)
+        u = u + 1
+    var result: [text] = []
+    var count = 0
+    while count < n:
+        var best = -1
+        var bi = 0
+        while bi < n:
+            if not used[bi] and (best == -1 or f_keys[bi] < f_keys[best]):
+                best = bi
+            bi = bi + 1
+        used[best] = true
+        result = result.push(f_ids[best])
+        count = count + 1
     return result
 
 fn get_next_id(ids: [text], current: text) -> text:

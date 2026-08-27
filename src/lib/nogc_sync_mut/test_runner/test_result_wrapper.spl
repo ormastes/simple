@@ -6,7 +6,7 @@ use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
 extern fn rt_file_create_excl(path: text, content: text) -> bool
 
 fn result_wrapper_path(file_path: text) -> text:
-    val slash = file_path.last_index_of("/") ?? -1
+    val slash = file_path.last_index_of("/")
     val dir = if slash >= 0: file_path.substring(0, slash + 1) else: ""
     val base = if slash >= 0: file_path.substring(slash + 1) else: file_path
     dir + ".simple_result_{time_now_unix_micros()}_" + base
@@ -31,8 +31,6 @@ fn read_file_content(file_path: text) -> text:
 
 fn spipe_inline_helpers() -> text:
     "# === spipe inline helpers (compile-mode only) ===\n" +
-    "use std.io_runtime.{env_get}\n" +
-    "use std.spec.skip_governance.{validate_bare_pending, validate_free_text_skip}\n\n" +
     "extern fn rt_bdd_expect_truthy(value)\n\n" +
     "extern fn rt_exit(code: i64)\n\n" +
     "fn expect(value):\n" +
@@ -40,21 +38,17 @@ fn spipe_inline_helpers() -> text:
     "fn step(description: text):\n" +
     "    if description == \"\":\n" +
     "        return\n\n" +
-    "fn compiled_omission_profile() -> text:\n" +
-    "    val profile = env_get(\"SIMPLE_SAFETY_PROFILE\") ?? \"\"\n" +
-    "    if profile == \"dev\" or profile == \"advisory\": return profile\n" +
-    "    \"critical\"\n\n" +
     "fn pending(name: text):\n" +
-    "    print \"    {name} ... pending\"\n\n" +
+    "    print \"    \{name\} ... pending\"\n\n" +
     "fn skip(name: text, reason: text):\n" +
-    "    print \"    {name} ... skipped ({reason})\"\n\n" +
+    "    print \"    \{name\} ... skipped (\{reason\})\"\n\n" +
     "fn skip_it(name: text, block: fn()):\n" +
-    "    print \"    {name} ... skipped (compiled-only)\"\n\n" +
+    "    print \"    \{name\} ... skipped (compiled-only)\"\n\n" +
     "fn check(condition: bool):\n" +
     "    expect condition\n\n" +
     "fn check_msg(condition: bool, message: text):\n" +
     "    if not condition:\n" +
-    "        print \"    check failed: {message}\"\n" +
+    "        print \"    check failed: \{message\}\"\n" +
     "    expect condition\n\n" +
     "fn fail_assertion(message: text):\n" +
     "    print \"    assertion failed: \" + message\n" +
@@ -80,6 +74,38 @@ fn spipe_inline_helpers() -> text:
     "    expect value != nil\n\n" +
     "# === end spipe inline helpers ===\n"
 
+fn spipe_scenario_inline_helpers() -> text:
+    "# === typed scenario omission helpers ===\n" +
+    "fn scenario_wire_field(value: text) -> text:\n" +
+    "    value.replace(\"|\", \"/\").replace(\"\\n\", \" \").replace(\"\\r\", \" \").trim()\n\n" +
+    "fn scenario_artifacts_wire(paths: [text]) -> text:\n" +
+    "    var safe: [text] = []\n" +
+    "    for path in paths:\n" +
+    "        safe.push(scenario_wire_field(path).replace(\";\", \",\"))\n" +
+    "    safe.join(\";\")\n\n" +
+    "fn emit_scenario_omission(status: ScenarioOmissionStatus, selection: EnvScenarioSelection):\n" +
+    "    val label = scenario_omission_status_name(status)\n" +
+    "    print \"__SIMPLE_SCENARIO_OMISSION_V1__|\{label\}|\{scenario_wire_field(selection.scenario_id)\}|\{scenario_wire_field(selection.reason)\}|\{scenario_wire_field(selection.prerequisite)\}|\{scenario_wire_field(selection.owner)\}|\{scenario_wire_field(selection.tracking_id)\}|\{scenario_artifacts_wire(selection.artifact_paths)\}|\{scenario_wire_field(selection.resume_command)\}\"\n\n" +
+    "fn unavailable_scenario(name: text, status: ScenarioOmissionStatus, selection: EnvScenarioSelection):\n" +
+    "    val validation = validate_scenario_omission(selection, status)\n" +
+    "    if not validation.ok:\n" +
+    "        print \"    \{name\} ... FAILED (omission rejected: \{validation.message\})\"\n" +
+    "        panic(\"test-runner: typed scenario omission rejected\")\n" +
+    "    val label = scenario_omission_status_name(status)\n" +
+    "    print \"    \{name\} ... \{label\} (\{selection.reason\}; owner=\{selection.owner\}; tracking=\{selection.tracking_id\})\"\n\n" +
+    "    emit_scenario_omission(status, selection)\n\n" +
+    "fn blocked_scenario(name: text, selection: EnvScenarioSelection):\n" +
+    "    unavailable_scenario(name, ScenarioOmissionStatus.Blocked, selection)\n\n" +
+    "fn unsupported_scenario(name: text, selection: EnvScenarioSelection):\n" +
+    "    unavailable_scenario(name, ScenarioOmissionStatus.Unsupported, selection)\n\n" +
+    "fn excluded_mcdc_scenario(name: text, semantic_decision_id: text, condition_ordinal: i64, identity_version: text, selection: EnvScenarioSelection):\n" +
+    "    val problem = scenario_governance_collect_mcdc_exclusion(selection, semantic_decision_id, condition_ordinal, identity_version)\n" +
+    "    if problem != \"\":\n" +
+    "        print \"    \{name\} ... FAILED (exclusion rejected: \{problem\})\"\n" +
+    "        panic(\"test-runner: MC/DC exclusion rejected\")\n" +
+    "    print \"    \{name\} ... EXCLUDED (\{semantic_decision_id\} condition=\{condition_ordinal\}; \{selection.reason\}; owner=\{selection.owner\}; tracking=\{selection.tracking_id\}; identity-version=\{identity_version\})\"\n" +
+    "# === end typed scenario omission helpers ===\n"
+
 fn spipe_last_index_of(haystack: text, needle: text) -> i64:
     if needle.len() == 0 or haystack.len() < needle.len():
         return -1
@@ -99,13 +125,13 @@ fn spipe_rewrite_infix_expect_line(line: text) -> text:
     while i < matchers.len():
         val matcher = matchers[i]
         val needle = " " + matcher + " "
-        val split_at = trimmed.index_of(needle) ?? -1
+        val split_at = trimmed.index_of(needle)
         if split_at >= 0:
             val actual = trimmed.substring(7, split_at).trim()
             val expected = trimmed.substring(split_at + needle.len()).trim()
             if actual.len() == 0 or expected.len() == 0:
                 return line
-            val indent_len = line.index_of(line.trim()) ?? 0
+            val indent_len = line.index_of(line.trim())
             val indent = line.substring(0, indent_len)
             return indent + "expect(" + actual + ")." + matcher + "(" + expected + ")"
         i = i + 1
@@ -176,7 +202,7 @@ fn spipe_rewrite_method_expect_line(line: text) -> text:
     val trimmed_start = line.trim()
     if not trimmed_start.starts_with("expect(") and not trimmed_start.starts_with("expect ("):
         return line
-    val indent_len = line.index_of(trimmed_start) ?? 0
+    val indent_len = line.index_of(trimmed_start)
     val indent = line.substring(0, indent_len)
     val rest_after_expect = trimmed_start.substring(6)
     val after_open_paren = rest_after_expect.trim()
@@ -198,7 +224,7 @@ fn spipe_rewrite_method_expect_line(line: text) -> text:
             return line
         negated = true
         after_neg = next.substring(1)
-    val matcher_end = after_neg.index_of("(") ?? -1
+    val matcher_end = after_neg.index_of("(")
     if matcher_end < 0:
         return line
     val matcher = after_neg.substring(0, matcher_end)
@@ -301,8 +327,7 @@ fn spipe_helpers_used(body: text, top_level: text, native_result: bool) -> bool:
     val helper_names: [text] = [
         "step", "pending", "skip", "skip_it", "check", "check_msg",
         "fail_assertion", "fail_test", "fail", "assert_eq", "assert_ne", "assert_not_equal",
-        "assert_true", "assert_false", "assert_nil", "assert_not_nil",
-        "__simple_governed_pending_on", "__simple_governed_pending_skip", "expect"
+        "assert_true", "assert_false", "assert_nil", "assert_not_nil", "expect"
     ]
     var i = 0
     while i < helper_names.len():
@@ -313,6 +338,15 @@ fn spipe_helpers_used(body: text, top_level: text, native_result: bool) -> bool:
         if body.contains(needle) or top_level.contains(needle):
             return true
         i = i + 1
+    false
+
+fn spipe_scenario_helpers_used(body: text, top_level: text) -> bool:
+    val names: [text] = [
+        "blocked_scenario(", "unsupported_scenario(", "excluded_mcdc_scenario("
+    ]
+    for name in names:
+        if body.contains(name) or top_level.contains(name):
+            return true
     false
 
 fn spipe_write_native_wrapper(wrapped: text) -> text:
@@ -352,9 +386,9 @@ fn _preprocess_spipe_file(file_path: text, native_result: bool) -> text:
     for raw_line in lines:
         val infix_line = spipe_rewrite_infix_expect_line(raw_line)
         var line = spipe_rewrite_method_expect_line(infix_line)
-        if not in_docstring:
-            line = spipe_rewrite_governed_pending_calls(line)
         var trimmed = line.trim()
+        if native_result and (trimmed.starts_with("pending_on(") or trimmed.starts_with("pending_skip(")):
+            return ""
         if native_result and (trimmed.starts_with("fn expect(") or trimmed.starts_with("fn step(") or
             trimmed.starts_with("fn check(") or trimmed.starts_with("fn fail(") or
             trimmed.starts_with("fn assert_")):
@@ -363,7 +397,7 @@ fn _preprocess_spipe_file(file_path: text, native_result: bool) -> text:
         if native_result and ((is_expect_line and trimmed.contains(" to_")) or spipe_expect_has_method_suffix(trimmed) or trimmed.starts_with(".to_") or trimmed.starts_with(".not_()")):
             return ""
         if native_result and trimmed.starts_with("expect "):
-            val indent_len = line.index_of(trimmed) ?? 0
+            val indent_len = line.index_of(trimmed)
             line = line.substring(0, indent_len) + "expect(" + trimmed.substring(7) + ")"
             trimmed = line.trim()
 
@@ -395,8 +429,7 @@ fn _preprocess_spipe_file(file_path: text, native_result: bool) -> text:
                     body_parts.push("    " + line)
                 continue
             else:
-                # A one-line triple string opens and closes on this line.
-                in_docstring = not trimmed.substring(3).contains("\"\"\"")
+                in_docstring = true
                 if in_top_fn:
                     top_level_parts.push(line)
                 else:
@@ -428,7 +461,7 @@ fn _preprocess_spipe_file(file_path: text, native_result: bool) -> text:
 
         # Top-level declarations (at column 0 only) stay outside main.
         if not in_top_fn:
-            val line_indent = line.index_of(trimmed) ?? 0
+            val line_indent = line.index_of(trimmed)
             if line_indent == 0:
                 if spipe_is_top_level_start(trimmed):
                     in_top_fn = true
@@ -442,7 +475,7 @@ fn _preprocess_spipe_file(file_path: text, native_result: bool) -> text:
             if trimmed.len() == 0:
                 top_level_parts.push("")
                 continue
-            val current_indent = line.index_of(trimmed) ?? 0
+            val current_indent = line.index_of(trimmed)
             if current_indent > top_fn_indent:
                 top_level_parts.push(line)
                 continue
@@ -463,7 +496,15 @@ fn _preprocess_spipe_file(file_path: text, native_result: bool) -> text:
     val imports = import_parts.join("\n")
     val top_level = top_level_parts.join("\n")
     val body = body_parts.join("\n")
-    val helpers = if spipe_helpers_used(body, top_level, native_result): spipe_inline_helpers() else: ""
+    val scenario_helpers = spipe_scenario_helpers_used(body, top_level)
+    val scenario_imports = if scenario_helpers:
+        "use lib.common.env_access.model.EnvScenarioSelection\n" +
+        "use std.spec.scenario_governance.{ScenarioOmissionStatus, scenario_omission_status_name, validate_scenario_omission, scenario_governance_collect_mcdc_exclusion}\n"
+    else:
+        ""
+    var helpers = if spipe_helpers_used(body, top_level, native_result): spipe_inline_helpers() else: ""
+    if scenario_helpers:
+        helpers = helpers + "\n" + spipe_scenario_inline_helpers()
     val native_decls = if native_result:
         "extern fn rt_bdd_clear_state()\n" +
         "extern fn rt_bdd_format_results() -> i64\n" +
@@ -485,7 +526,7 @@ fn _preprocess_spipe_file(file_path: text, native_result: bool) -> text:
     else:
         ""
     val main_decl = if native_result: "fn main() -> i64:\n" else: "fn main():\n"
-    val wrapped = imports + "\n" + native_decls + helpers + "\n" + top_level + "\n" + main_decl + native_start + body + native_end
+    val wrapped = imports + "\n" + scenario_imports + native_decls + helpers + "\n" + top_level + "\n" + main_decl + native_start + body + native_end
     if native_result:
         return spipe_write_native_wrapper(wrapped)
     val tmp_path = "/tmp/spipe_wrapped_" + file_path.replace("/", "_")

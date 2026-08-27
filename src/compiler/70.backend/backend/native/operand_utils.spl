@@ -5,6 +5,29 @@
 # Used by all encoder backends (x86_64, aarch64, riscv64, riscv32).
 
 use compiler.backend.native.mach_inst.{MachReg, MachRegKind, Operand, OperandKind}
+extern fn rt_enum_discriminant(value: Any) -> i64
+
+# Lane C7 (backend coverage, hardening plan 2026-08-21 sections 11.3-11.6).
+# Every accessor below used to answer `0` for an operand of the wrong kind.
+# `0` is not a sentinel here: it is register RAX, offset 0, immediate 0 and
+# block label 0 -- all perfectly valid values -- so a mis-kinded operand
+# produced silently wrong machine code instead of an error. The named refusals
+# below make the same situation loud and greppable.
+# Universe: `enum OperandKind`, src/compiler/70.backend/backend/native/mach_inst.spl
+# Table:    spec/compiler_schema/transitions/mach_operand_to_native_encode.sdn
+fn native_operand_kind_name(op: Operand) -> text:
+    match op.kind:
+        case Reg(_): "Reg"
+        case Imm(_): "Imm"
+        case Mem(_, _): "Mem"
+        case Label(_): "Label"
+        case Sym(_): "Sym"
+        case _: "Unknown(discriminant {rt_enum_discriminant(op.kind)})"
+
+fn native_operand_mismatch(accessor: text, expected: text, op: Operand) -> i64:
+    """NAMED refusal for an operand accessor applied to the wrong OperandKind
+    (lane C7). `E-BACKEND-OPERAND-<Accessor>` is stable and greppable."""
+    panic("E-BACKEND-OPERAND-{accessor}: expected OperandKind.{expected}, got OperandKind.{native_operand_kind_name(op)}")
 
 fn get_phys_reg_id(op: Operand) -> i64:
     match op.kind:
@@ -12,7 +35,7 @@ fn get_phys_reg_id(op: Operand) -> i64:
             match reg.kind:
                 case Physical(id): id
                 case Virtual(id): id
-        case _: 0
+        case _: native_operand_mismatch("get_phys_reg_id", "Reg", op)
 
 fn get_mem_base_id(op: Operand) -> i64:
     match op.kind:
@@ -20,22 +43,22 @@ fn get_mem_base_id(op: Operand) -> i64:
             match base.kind:
                 case Physical(id): id
                 case Virtual(id): id
-        case _: 0
+        case _: native_operand_mismatch("get_mem_base_id", "Mem", op)
 
 fn get_mem_offset(op: Operand) -> i64:
     match op.kind:
         case Mem(_, offset): offset
-        case _: 0
+        case _: native_operand_mismatch("get_mem_offset", "Mem", op)
 
 fn get_imm_value(op: Operand) -> i64:
     match op.kind:
         case Imm(v): v
-        case _: 0
+        case _: native_operand_mismatch("get_imm_value", "Imm", op)
 
 fn get_label_id(op: Operand) -> i64:
     match op.kind:
         case Label(id): id
-        case _: 0
+        case _: native_operand_mismatch("get_label_id", "Label", op)
 
 fn get_sym_name(op: Operand) -> text:
     match op.kind:

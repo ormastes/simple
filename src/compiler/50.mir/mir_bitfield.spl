@@ -1,17 +1,16 @@
-# Bitfield MIR Lowering
+# ResolvedBitfield MIR Lowering
 #
 # Lowers bitfield field access to efficient bit manipulation operations.
 #
-# Bitfield field read:  (value >> offset) & mask
-# Bitfield field write: (value & ~shifted_mask) | ((new_val & mask) << offset)
+# ResolvedBitfield field read:  (value >> offset) & mask
+# ResolvedBitfield field write: (value & ~shifted_mask) | ((new_val & mask) << offset)
 
 use compiler.mir.mir_data.*
-use compiler.backend.bitfield.{Bitfield, BitfieldField}
+use compiler.backend.bitfield.{ResolvedBitfield, ResolvedBitfieldField}
 use compiler.hir.hir_types.{HirType}
-use compiler.mir.mir_types.{LocalId}  # explicit: a glob is not an import-origin for surface projection
 
 # Global bitfield registry - populated during semantic analysis
-var BITFIELD_REGISTRY: Dict<text, Bitfield> = {}
+var BITFIELD_REGISTRY: Dict<text, ResolvedBitfield> = {}
 
 # Check if a type is a bitfield type
 fn is_bitfield_type(type_: HirType) -> bool:
@@ -19,27 +18,24 @@ fn is_bitfield_type(type_: HirType) -> bool:
     match type_.kind:
         case Named(symbol, _):
             val type_name = symbol.name
-            # Match types annotated with @bitfield or having Bitfield/Flags naming
-            type_name.contains("Bitfield") or type_name.contains("Flags") or type_name.contains("Register") or type_name.contains("Control")
+            # Match types annotated with @bitfield or having ResolvedBitfield/Flags naming
+            type_name.contains("ResolvedBitfield") or type_name.contains("Flags") or type_name.contains("Register") or type_name.contains("Control")
         case _:
             false
 
 # Get bitfield metadata for a type
-fn get_bitfield_info(type_: HirType) -> Bitfield?:
+fn get_bitfield_info(type_: HirType) -> ResolvedBitfield?:
     # Look up bitfield definition from type's symbol table entry
     match type_.kind:
         case Named(symbol, _):
             val type_name = symbol.name
             # Check global bitfield registry (populated during HIR lowering)
-            if BITFIELD_REGISTRY.has(type_name):
+            if BITFIELD_REGISTRY[type_name].?:
                 Some(BITFIELD_REGISTRY[type_name])
             else:
                 nil
         case _:
             nil
-
-# Global bitfield registry - populated during semantic analysis
-var BITFIELD_REGISTRY: Dict<text, Bitfield> = {}
 
 struct BitfieldMirLower:
     """Helper for lowering bitfield operations to MIR."""
@@ -49,7 +45,7 @@ impl BitfieldMirLower:
     static fn new(builder: MirBuilder) -> BitfieldMirLower:
         BitfieldMirLower(builder: builder)
 
-    fn lower_get(base: LocalId, field: BitfieldField) -> LocalId:
+    fn lower_get(base: LocalId, field: ResolvedBitfieldField) -> LocalId:
         """Lower bitfield field read to MIR bit operations.
 
         Generates: (value >> offset) & mask
@@ -80,7 +76,7 @@ impl BitfieldMirLower:
             MirType.i64()
         )
 
-    fn lower_set(base: LocalId, field: BitfieldField, new_value: LocalId) -> LocalId:
+    fn lower_set(base: LocalId, field: ResolvedBitfieldField, new_value: LocalId) -> LocalId:
         """Lower bitfield field write to MIR bit operations.
 
         Generates: (value & ~shifted_mask) | ((new_val & mask) << offset)
@@ -136,15 +132,14 @@ fn lower_bitfield_get(
     builder: MirBuilder,
     base: LocalId,
     field_name: text,
-    bitfield: Bitfield
+    bitfield: ResolvedBitfield
 ) -> LocalId:
     """Lower bitfield field read operation."""
     val field = bitfield.get_field(field_name)
-    val f = if val found_field = field:
-        found_field
-    else:
+    if not field.?:
         # Field not found, return base (error will be caught elsewhere)
         return base
+    val f = field.unwrap()
     val lowerer = BitfieldMirLower(builder: builder)
     lowerer.lower_get(base, f)
 
@@ -153,16 +148,15 @@ fn lower_bitfield_set(
     builder: MirBuilder,
     base: LocalId,
     field_name: text,
-    bitfield: Bitfield,
+    bitfield: ResolvedBitfield,
     new_value: LocalId
 ) -> LocalId:
     """Lower bitfield field write operation."""
     val field = bitfield.get_field(field_name)
-    val f = if val found_field = field:
-        found_field
-    else:
+    if not field.?:
         # Field not found, return base (error will be caught elsewhere)
         return base
+    val f = field.unwrap()
     val lowerer = BitfieldMirLower(builder: builder)
     lowerer.lower_set(base, f, new_value)
 

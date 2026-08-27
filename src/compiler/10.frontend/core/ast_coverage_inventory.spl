@@ -4,7 +4,9 @@ use compiler.core.ast.*
 use compiler.core.ast_expr.*
 use compiler.core.ast_stmt.*
 use compiler.core.ast_traversal.*
-use compiler.frontend.core.if_chain_nodes.*
+use compiler.core.mcdc_masking_context.{
+    compiler_mcdc_context_manifest_row, compiler_mcdc_formal_contexts
+}
 use compiler.core.types.{span_is_valid, span_line, span_col, span_start}
 use std.common.mcdc.model.{
     mcdc_authored_path_v1, mcdc_runtime_decision_id_v1,
@@ -158,22 +160,9 @@ fn inventory_walk_expr(path: text, id: i64):
     inventory_seen_expr[id] = true
     val tag = expr_get_tag(id)
     if tag == EXPR_IF or tag == EXPR_WHILE:
-        val span = expr_get_span(id); inventory_add_decision(path, span)
-        inventory_condition_tree(path, span, expr_get_left(id))
-    elif tag == EXPR_IF_CHAIN:
-        val chain_id = expr_get_extra(id)
-        var arm_id = flat_if_chain_first_arm_get(chain_id)
-        var remaining = flat_if_chain_arm_count_get(chain_id)
-        while arm_id >= 0 and remaining > 0:
-            val span = flat_if_arm_span_get(arm_id)
-            inventory_add_decision(path, span)
-            val condition_expr = if flat_if_arm_kind_get(arm_id) == ARM_CONDITION:
-                flat_if_arm_head_get(arm_id)
-            else:
-                flat_if_arm_init_get(arm_id)
-            inventory_condition_tree(path, span, condition_expr)
-            arm_id = flat_if_arm_next_get(arm_id)
-            remaining = remaining - 1
+        val condition = expr_get_left(id)
+        val span = expr_get_span(condition); inventory_add_decision(path, span)
+        inventory_condition_tree(path, span, condition)
     for x in flat_expr_child_exprs(id): inventory_walk_expr(path, x)
     for x in flat_expr_child_stmts(id): inventory_walk_stmt(path, x)
     for x in flat_expr_child_arms(id): inventory_walk_arm(path, x)
@@ -194,21 +183,9 @@ fn inventory_walk_stmt(path: text, id: i64):
     val tag = stmt_get_tag(id)
     if tag == STMT_IF or tag == STMT_WHILE:
         val exprs = flat_stmt_child_exprs(id)
-        if exprs.len() > 0: inventory_condition_tree(path, span, exprs[0])
-    elif tag == STMT_IF_CHAIN:
-        val chain_id = stmt_get_type(id)
-        var arm_id = flat_if_chain_first_arm_get(chain_id)
-        var remaining = flat_if_chain_arm_count_get(chain_id)
-        while arm_id >= 0 and remaining > 0:
-            val span = flat_if_arm_span_get(arm_id)
-            inventory_add_decision(path, span)
-            val condition_expr = if flat_if_arm_kind_get(arm_id) == ARM_CONDITION:
-                flat_if_arm_head_get(arm_id)
-            else:
-                flat_if_arm_init_get(arm_id)
-            inventory_condition_tree(path, span, condition_expr)
-            arm_id = flat_if_arm_next_get(arm_id)
-            remaining = remaining - 1
+        if exprs.len() > 0:
+            val span = expr_get_span(exprs[0]); inventory_add_decision(path, span)
+            inventory_condition_tree(path, span, exprs[0])
     for x in flat_stmt_child_exprs(id): inventory_walk_expr(path, x)
     for x in flat_stmt_child_stmts(id): inventory_walk_stmt(path, x)
     for x in flat_stmt_child_arms(id): inventory_walk_arm(path, x)

@@ -8,13 +8,14 @@
 
 use std.daemon_sdk.types.{DaemonRequest, DaemonResponse, daemon_request_new, daemon_response_new}
 
-use std.io_runtime.{file_read_raw, file_write_raw}
+use std.io_runtime.{read_file_text}
 use std.io_runtime.{file_exists}
 use std.io_runtime.{file_delete}
-extern fn rt_mkdir_p(path: text) -> bool
-use std.io_runtime.{dir_list}
+use std.io_runtime.{file_write}
+use std.io_runtime.{mkdir_p}
+use std.nogc_sync_mut.io_runtime.{dir_list}
 use std.io_runtime.{hash_text}
-use std.io_runtime.{time_now_unix_micros}
+use std.nogc_sync_mut.io_runtime.{time_now_unix_micros}
 use std.io_runtime.{file_rename}
 
 # ============================================================================
@@ -22,7 +23,7 @@ use std.io_runtime.{file_rename}
 # ============================================================================
 
 fn write_daemon_request(req: DaemonRequest, request_dir: text) -> text:
-    rt_mkdir_p(request_dir)
+    mkdir_p(request_dir)
 
     val req_path = daemon_request_path_for(req.id, request_dir)
 
@@ -44,13 +45,13 @@ fn write_daemon_request(req: DaemonRequest, request_dir: text) -> text:
 
     # Atomic write: tmp + rename
     val tmp_path = "{req_path}.tmp"
-    if file_write_raw(tmp_path, content):
-        if rt_file_rename(tmp_path, req_path):
+    if file_write(tmp_path, content):
+        if file_rename(tmp_path, req_path):
             return req_path
-        rt_file_delete(tmp_path)
+        file_delete(tmp_path)
 
     # Fallback: direct write
-    if file_write_raw(req_path, content):
+    if file_write(req_path, content):
         return req_path
     ""
 
@@ -61,10 +62,10 @@ fn write_daemon_request(req: DaemonRequest, request_dir: text) -> text:
 fn read_daemon_requests(request_dir: text) -> [DaemonRequest]:
     var requests: [DaemonRequest] = []
 
-    if not rt_file_exists(request_dir):
+    if not file_exists(request_dir):
         return requests
 
-    val files = rt_dir_list(request_dir)
+    val files = dir_list(request_dir)
     var i = 0
     while i < files.len():
         val file_path = files[i]
@@ -77,7 +78,7 @@ fn read_daemon_requests(request_dir: text) -> [DaemonRequest]:
     requests
 
 fn parse_request_file(path: text) -> DaemonRequest:
-    val content = file_read_raw(path) ?? ""
+    val content = read_file_text(path)
     if content == "":
         return DaemonRequest(id: "", kind: 0, timestamp: 0, fields: {})
 
@@ -112,7 +113,7 @@ fn parse_request_file(path: text) -> DaemonRequest:
 # ============================================================================
 
 fn write_daemon_response(resp: DaemonResponse, response_dir: text) -> bool:
-    rt_mkdir_p(response_dir)
+    mkdir_p(response_dir)
 
     val resp_path = "{response_dir}/{resp.request_id}.resp"
 
@@ -133,12 +134,12 @@ fn write_daemon_response(resp: DaemonResponse, response_dir: text) -> bool:
 
     # Atomic write
     val tmp_path = "{resp_path}.tmp"
-    if file_write_raw(tmp_path, content):
-        if rt_file_rename(tmp_path, resp_path):
+    if file_write(tmp_path, content):
+        if file_rename(tmp_path, resp_path):
             return true
-        rt_file_delete(tmp_path)
+        file_delete(tmp_path)
 
-    file_write_raw(resp_path, content)
+    file_write(resp_path, content)
 
 # ============================================================================
 # Read Response
@@ -146,10 +147,10 @@ fn write_daemon_response(resp: DaemonResponse, response_dir: text) -> bool:
 
 fn read_daemon_response(request_id: text, response_dir: text) -> DaemonResponse:
     val resp_path = "{response_dir}/{request_id}.resp"
-    if not rt_file_exists(resp_path):
+    if not file_exists(resp_path):
         return DaemonResponse(request_id: "", status: -1, timestamp: 0, fields: {})
 
-    val content = file_read_raw(resp_path) ?? ""
+    val content = read_file_text(resp_path)
     if content == "":
         return DaemonResponse(request_id: "", status: -1, timestamp: 0, fields: {})
 
@@ -187,27 +188,27 @@ fn clear_processed_requests(request_dir: text, processed_ids: [text]):
     var i = 0
     while i < processed_ids.len():
         val req_path = daemon_request_path_for(processed_ids[i], request_dir)
-        rt_file_delete(req_path)
+        file_delete(req_path)
         i = i + 1
 
 fn clear_old_responses(response_dir: text, max_age_ms: i64):
-    if not rt_file_exists(response_dir):
+    if not file_exists(response_dir):
         return
 
-    val now = rt_time_now_unix_micros()
+    val now = time_now_unix_micros()
     val max_age_us = max_age_ms * 1000
-    val files = rt_dir_list(response_dir)
+    val files = dir_list(response_dir)
     var i = 0
     while i < files.len():
         val file_path = files[i]
         if file_path.ends_with(".resp"):
             val resp = read_daemon_response_timestamp(file_path)
             if resp > 0 and (now - resp) > max_age_us:
-                rt_file_delete(file_path)
+                file_delete(file_path)
         i = i + 1
 
 fn read_daemon_response_timestamp(path: text) -> i64:
-    val content = file_read_raw(path) ?? ""
+    val content = read_file_text(path)
     if content == "":
         return 0
     val lines = content.split("\n")
@@ -224,5 +225,5 @@ fn read_daemon_response_timestamp(path: text) -> i64:
 # ============================================================================
 
 fn daemon_request_path_for(request_id: text, request_dir: text) -> text:
-    val hash = rt_hash_text(request_id)
+    val hash = hash_text(request_id)
     "{request_dir}/{hash}_{request_id}.req"

@@ -1,5 +1,4 @@
 use std.nogc_sync_mut.sffi.io.{dir_create_all, file_exists}
-use std.nogc_sync_mut.sffi.system.{process_run_timeout}
 use std.common.encoding.font_registry.{selected_font_asset_candidates, selected_font_asset_physical_path}
 
 # `rt_process_run_timeout` is declared here rather than imported through
@@ -7,12 +6,12 @@ use std.common.encoding.font_registry.{selected_font_asset_candidates, selected_
 #
 # This module is in the web renderer's import graph (font_provider ->
 # font_renderer -> ..._foundation -> the whole browser engine). Pulling in
-# `sffi.system` drags its module-level `extern fn rt_sleep_ms` along, and
-# `rt_sleep_ms` has no address in the Cranelift JIT's runtime symbol table.
-# The JIT's pre-finalize NULL-jump guard then rejects the WHOLE module and the
-# driver silently falls back to the interpreter — measured at ~285x slower for
-# the CSS cascade, which is what made the `web x headless` showcase cell miss
-# its paint budget with a uniform frame.
+# Importing the broad `sffi.system` facade historically dragged a sleep extern
+# with no Cranelift address into this graph. The canonical sleep surface is now
+# a Simple wrapper over `std.io_runtime.thread_sleep`, but this module still
+# keeps its one process extern local so unrelated system providers cannot grow
+# the renderer closure. The old broad import caused a measured ~285x
+# interpreter fallback for the CSS cascade.
 #
 # Declaring the one extern we actually use keeps that edge out of the graph.
 # See doc/08_tracking/bug/web_render_budget_interpreter_gap_2026-07-25.md.
@@ -36,6 +35,15 @@ enum FontBackend:
     Vector
     Bitmap
 
+fn _browser_resolve_bundled_candidates(paths: [text]) -> [text]:
+    var resolved: [text] = []
+    for path in paths:
+        if path.starts_with("assets/fonts/"):
+            resolved.push(selected_font_asset_physical_path(path))
+        else:
+            resolved.push(path)
+    resolved
+
 extern fn rt_http_download(url: text, output_path: text) -> (i64, i64, text)
 
 fn browser_font_dylib_candidates() -> [text]:
@@ -47,29 +55,34 @@ fn browser_font_dylib_candidates() -> [text]:
     ]
 
 fn browser_serif_font_candidates() -> [text]:
-    [
+    _browser_resolve_bundled_candidates([
         "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf",
-        "examples/09_embedded/simple_os/fonts/serif/NotoSerif-Regular.ttf",
-        "examples/09_embedded/simple_os/fonts/serif/NotoSerifSC-Regular.otf",
+        "assets/fonts/google-fonts/ofl/notoserifsc/NotoSerifSC[wght].ttf",
+        "assets/fonts/google-fonts/ofl/notoserifdevanagari/NotoSerifDevanagari[wdth,wght].ttf",
+        "assets/fonts/google-fonts/ofl/notonaskharabic/NotoNaskhArabic[wght].ttf",
+        "assets/fonts/google-fonts/ofl/notoserifbengali/NotoSerifBengali[wdth,wght].ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf",
         "/usr/share/fonts/opentype/urw-base35/NimbusRoman-Regular.otf"
-    ]
+    ])
 
 fn browser_sans_font_candidates() -> [text]:
-    [
-        "examples/09_embedded/simple_os/fonts/sans/NotoSans-Regular.ttf",
+    _browser_resolve_bundled_candidates([
+        "assets/fonts/google-fonts/ofl/notosanssc/NotoSansSC[wght].ttf",
+        "assets/fonts/google-fonts/ofl/notosansdevanagari/NotoSansDevanagari[wdth,wght].ttf",
+        "assets/fonts/google-fonts/ofl/notosansarabic/NotoSansArabic[wdth,wght].ttf",
+        "assets/fonts/google-fonts/ofl/notosansbengali/NotoSansBengali[wdth,wght].ttf",
         "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/usr/share/fonts/opentype/urw-base35/NimbusSans-Regular.otf"
-    ]
+    ])
 
 fn browser_mono_font_candidates() -> [text]:
-    [
-        "examples/09_embedded/simple_os/fonts/mono/FiraCodeNerdFontMono-Regular.ttf",
+    _browser_resolve_bundled_candidates([
+        "assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf",
         "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
         "/usr/share/fonts/opentype/urw-base35/NimbusMonoPS-Regular.otf"
-    ]
+    ])
 
 fn browser_font_candidates_for_family(family: text) -> [text]:
     val face_source = browser_font_face_source_from_family_value(family)
@@ -80,14 +93,30 @@ fn browser_font_candidates_for_family(family: text) -> [text]:
         if lower.contains("sans") or lower.contains("arial") or lower.contains("helvetica"):
             return [face_source] + browser_sans_font_candidates()
         return [face_source] + browser_serif_font_candidates()
+    val bundled = browser_bundled_font_path_for_family(family)
+    if bundled != "":
+        return [bundled]
     if lower.contains("mono") or lower.contains("courier") or lower.contains("code") or lower.contains("console"):
         return browser_mono_font_candidates()
     if lower.contains("sans") or lower.contains("arial") or lower.contains("helvetica"):
         return browser_sans_font_candidates()
     if lower.contains("serif") or lower.contains("times") or lower.contains("georgia") or lower.contains("system"):
         return browser_serif_font_candidates()
-    # Unspecified / unmatched family default: Fira Code Nerd mono.
+    # Unspecified / unmatched family default: bundled Noto Sans Mono.
     browser_mono_font_candidates()
+
+fn browser_bundled_font_path_for_family(family: text) -> text:
+    # Break the split/index/trim chain into typed intermediates: the seed
+    # compiler cannot resolve `.split(...)` when the whole chain sits in a
+    # nested call-argument position (erased-receiver method-resolution gap,
+    # see bug web_font_provider_split_nested_call_resolution_2026-07-14).
+    val families = family.split(",")
+    val first = if families.len() > 0: families[0].trim() else: family.trim()
+    val wanted = _strip_font_url_quotes(first).to_lower()
+    for asset in selected_font_asset_candidates():
+        if asset.family.to_lower() == wanted:
+            return selected_font_asset_physical_path(asset.local_path)
+    ""
 
 fn browser_font_face_family_value(family: text, source_url: text) -> text:
     val source = browser_font_face_local_source_path(source_url)
@@ -130,14 +159,13 @@ fn browser_chrome_compatible_vector_font_name() -> text:
     "Simple Vector Outline"
 
 fn browser_provided_font_paths() -> [text]:
-    [
-        "examples/09_embedded/simple_os/fonts/sans/NotoSans-Regular.ttf",
-        "examples/09_embedded/simple_os/fonts/serif/NotoSerif-Regular.ttf",
-        "examples/09_embedded/simple_os/fonts/mono/FiraCodeNerdFontMono-Regular.ttf"
-    ]
+    var paths: [text] = []
+    for asset in selected_font_asset_candidates():
+        paths.push(selected_font_asset_physical_path(asset.local_path))
+    paths
 
 fn browser_font_download_script_path() -> text:
-    "examples/09_embedded/simple_os/fonts/download_fonts.shs"
+    ""
 
 fn browser_font_cache_dir() -> text:
     "build/browser-font-cache"

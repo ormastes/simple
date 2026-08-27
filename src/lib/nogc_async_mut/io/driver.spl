@@ -46,22 +46,32 @@ val _OP_UDP_SEND: i64 = 13
 val _OP_UDP_BIND: i64 = 14
 val _OP_SEND_BYTES: i64 = 15
 
+@unsafe(reason: "raw accepted descriptor; negative sentinel conflates timeout and failure", capabilities: [ffi])
 extern fn rt_io_tcp_accept_timeout(fd: i64, ms: i64) -> i64
+@unsafe(reason: "raw connected descriptor; negative sentinel conflates timeout and failure", capabilities: [ffi])
 extern fn rt_io_tcp_connect_timeout(addr: text, ms: i64) -> i64
-extern fn rt_io_tcp_read(fd: i64, size: i64) -> [u8]
+@unsafe(reason: "raw nullable TCP bytes; nil is read failure and empty is EOF", capabilities: [ffi])
+extern fn rt_io_tcp_read(fd: i64, size: i64) -> [u8]?
+@unsafe(reason: "raw TCP text-write count; negative sentinel or short count means failure", capabilities: [ffi])
 extern fn rt_io_tcp_write_text(fd: i64, data: text) -> i64
+@unsafe(reason: "raw TCP byte-write count; negative or short result means incomplete send", capabilities: [ffi])
 extern fn rt_io_tcp_write_bytes(fd: i64, data: [u8]) -> i64
+@unsafe(reason: "raw descriptor close consumes one live descriptor; false means close failed", capabilities: [ffi])
 extern fn rt_io_tcp_close(fd: i64) -> bool
-extern fn rt_io_tcp_set_read_timeout(fd: i64, ms: i64?) -> bool
+@unsafe(reason: "raw scalar timeout status; non-positive milliseconds clear the timeout", capabilities: [ffi])
+extern fn rt_io_tcp_set_read_timeout(fd: i64, ms: i64) -> bool
+@unsafe(reason: "raw descriptor option status; false means mutation failed", capabilities: [ffi])
 extern fn rt_io_tcp_set_nodelay(fd: i64, enabled: bool) -> bool
+@unsafe(reason: "raw descriptor flush status; false means flush failed", capabilities: [ffi])
 extern fn rt_io_tcp_flush(fd: i64) -> bool
 extern fn rt_file_read_text(path: text) -> text
-extern fn rt_file_size(path: text) -> i64
 use std.io_runtime.{file_exists}
 use std.io_runtime.{time_now_unix_micros}
 use std.common.string_core.{bytes_to_text}
 use std.common.string_core.{text_to_bytes}
+@unsafe(reason: "raw UDP receive writes one bounded runtime buffer; nil means provider failure or no datagram", capabilities: [ffi])
 extern fn rt_io_udp_recv_from(fd: i64, size: i64) -> ([u8], text)?
+@unsafe(reason: "raw UDP send borrows packed bytes for the call; negative result means provider failure", capabilities: [ffi])
 extern fn rt_io_udp_send_to(fd: i64, data: [u8], addr: text) -> i64
 
 extern fn rt_event_loop_create() -> i64
@@ -164,7 +174,7 @@ class IoDriver:
         self._c_recv_byte_data.push(bytes)
 
     fn _now_ms(self) -> i64:
-        rt_time_now_unix_micros() / 1000
+        time_now_unix_micros() / 1000
 
     fn _find_file(self, handle: i64) -> text:
         var i = 0
@@ -348,30 +358,6 @@ class IoDriver:
             i = i + 1
         []
 
-    me _remove_send_bytes(op_id: i64):
-        """Release the byte owner for a completed or rejected send operation.
-
-        _bytes_pending_* is an operation-indexed table rather than a completion
-        queue.  Retaining an empty row after completion leaks table cardinality
-        and turns the linear lookup in _load_send_bytes into a request-lifetime
-        cost for every later write.
-        """
-        var i = 0
-        while i < self._bytes_pending_ids.len() and i < self._bytes_pending_data.len():
-            if self._bytes_pending_ids[i] == op_id:
-                # Pending byte rows are unordered.  Swap-delete keeps removal
-                # O(1) and allocation-free after the O(number of in-flight
-                # sends) lookup, which is important on the write completion
-                # path.
-                val last = self._bytes_pending_ids.len() - 1
-                if i != last:
-                    self._bytes_pending_ids[i] = self._bytes_pending_ids[last]
-                    self._bytes_pending_data[i] = self._bytes_pending_data[last]
-                self._bytes_pending_ids.pop()
-                self._bytes_pending_data.pop()
-                return
-            i = i + 1
-
     # ---- Network Operations ----
 
     me submit_accept(listen_fd: i64) -> i64:
@@ -402,11 +388,6 @@ class IoDriver:
         return id
 
     me submit_sendfile(sock_fd: i64, file_fd: i64, offset: i64, len: i64) -> i64:
-        # Sendfile is a socket write operation even though its payload is
-        # owned by a file handle.  Register the socket for writable
-        # readiness exactly as submit_send_bytes does; otherwise a blocked
-        # sendfile can bypass the per-fd completion discipline.
-        self._ev_register_write(sock_fd)
         return self._push_op(_OP_SENDFILE, sock_fd, file_fd, "", 0, offset, len, "", 0)
 
     # ---- UDP Operations ----
@@ -455,7 +436,6 @@ class IoDriver:
         var new_length: [i64] = []
         var new_path: [text] = []
         var new_time: [i64] = []
-        var canceled_ids: [i64] = []
         var i = 0
         while i < self._p_id.len():
             if self._p_fd[i] != fd:
@@ -469,8 +449,6 @@ class IoDriver:
                 new_length.push(self._p_length[i])
                 new_path.push(self._p_path[i])
                 new_time.push(self._p_time[i])
-            else:
-                canceled_ids.push(self._p_id[i])
             i = i + 1
         self._p_id = new_id
         self._p_type = new_type
@@ -482,27 +460,6 @@ class IoDriver:
         self._p_length = new_length
         self._p_path = new_path
         self._p_time = new_time
-
-        # Byte sends retain their data outside the pending-op arrays.  Remove
-        # rows for canceled operations too, otherwise a closed descriptor can
-        # leave a retained payload behind until a later driver teardown.
-        var kept_byte_ids: [i64] = []
-        var kept_byte_data: [[u8]] = []
-        i = 0
-        while i < self._bytes_pending_ids.len() and i < self._bytes_pending_data.len():
-            var canceled = false
-            var j = 0
-            while j < canceled_ids.len():
-                if self._bytes_pending_ids[i] == canceled_ids[j]:
-                    canceled = true
-                    break
-                j = j + 1
-            if not canceled:
-                kept_byte_ids.push(self._bytes_pending_ids[i])
-                kept_byte_data.push(self._bytes_pending_data[i])
-            i = i + 1
-        self._bytes_pending_ids = kept_byte_ids
-        self._bytes_pending_data = kept_byte_data
 
     # ---- Batch Control ----
 
@@ -543,7 +500,8 @@ class IoDriver:
                 accept_scan = accept_scan + 1
         if accept_fast_index >= 0 and max > 0:
             val accept_ms = if self._p_id.len() > 1: 1 elif timeout_ms > 0: timeout_ms else: 1
-            val accept_res = rt_io_tcp_accept_timeout(self._p_fd[accept_fast_index], accept_ms)
+            val accept_res = unsafe(capabilities: [ffi]):
+                rt_io_tcp_accept_timeout(self._p_fd[accept_fast_index], accept_ms)
             if accept_res >= 0:
                 self._complete_fd(self._p_id[accept_fast_index], accept_res, 0, "", self._p_fd[accept_fast_index])
                 var keep_id: [i64] = []
@@ -586,7 +544,7 @@ class IoDriver:
         var has_ev = self._ev_fd >= 0
         var ev_has_results = false
         if has_ev:
-            val raw_ev = rt_event_loop_poll(self._ev_fd, 64, 0)
+            val raw_count = rt_event_loop_poll(self._ev_fd, 64, timeout_ms)
             var ri = 0
             while ri < raw_count:
                 val ready_fd = rt_event_loop_poll_get_fd(ri)
@@ -628,15 +586,14 @@ class IoDriver:
             val oid = self._p_id[i]
 
             if fd < 0 and (ot == _OP_ACCEPT or ot == _OP_RECV or ot == _OP_SEND or ot == _OP_SEND_BYTES or ot == _OP_SENDFILE or ot == _OP_CLOSE or ot == _OP_UDP_RECV or ot == _OP_UDP_SEND):
-                if ot == _OP_SEND_BYTES:
-                    self._remove_send_bytes(oid)
                 self._complete_fd(oid, -1, 0, "", fd)
                 i = i + 1
                 continue
 
             if ot == _OP_ACCEPT:
                 val a_ms = if self._c_id.len() > 0: 1 elif timeout_ms > 0: timeout_ms else: 1
-                val res = rt_io_tcp_accept_timeout(fd, a_ms)
+                val res = unsafe(capabilities: [ffi]):
+                    rt_io_tcp_accept_timeout(fd, a_ms)
                 if res >= 0:
                     self._complete_fd(oid, res, 0, "", fd)
                     i = i + 1
@@ -656,7 +613,8 @@ class IoDriver:
 
             elif ot == _OP_SEND:
                 val send_ready = self._ready_contains(ready_fds, fd)
-                val res = rt_io_tcp_write_text(fd, self._p_data[i])
+                val res = unsafe(capabilities: [ffi]):
+                    rt_io_tcp_write_text(fd, self._p_data[i])
                 if res > 0 or (ev_has_results and send_ready):
                     self._ev_complete_fd_interest(fd, oid)
                     self._complete_fd(oid, res, 0, "", fd)
@@ -664,13 +622,14 @@ class IoDriver:
                     continue
 
             elif ot == _OP_SEND_BYTES:
-                val bdata = self._bytes_pending.get(oid)
+                val send_ready = self._ready_contains(ready_fds, fd)
+                val bdata = self._load_send_bytes(oid)
                 var bres: i64 = 0
                 if bdata.len() > 0:
                     unsafe(capabilities: [ffi]):
                         bres = rt_io_tcp_write_bytes(fd, bdata)
                 if bres > 0 or (ev_has_results and send_ready):
-                    self._remove_send_bytes(oid)
+                    self._store_send_bytes(oid, [])
                     self._ev_complete_fd_interest(fd, oid)
                     self._complete_fd(oid, bres, 0, "", fd)
                     i = i + 1
@@ -679,19 +638,26 @@ class IoDriver:
             elif ot == _OP_CONNECT:
                 val timeout = if self._p_fd2[i] > 0: self._p_fd2[i] else: 1
                 val addr = self._p_data[i]
-                val connect_fd = rt_io_tcp_connect_timeout(addr, timeout)
+                val connect_fd = unsafe(capabilities: [ffi]):
+                    rt_io_tcp_connect_timeout(addr, timeout)
                 self._complete_fd(oid, connect_fd, 0, "", connect_fd)
                 i = i + 1
                 continue
 
             elif ot == _OP_RECV:
                 val recv_ready = self._ready_contains(ready_fds, fd)
-                val bytes = rt_io_tcp_read(fd, self._p_size[i])
-                if bytes.len() > 0:
-                    val txt = bytes_to_text(bytes)
-                    self._store_recv_bytes(oid, bytes)
+                val bytes = unsafe(capabilities: [ffi]):
+                    rt_io_tcp_read(fd, self._p_size[i])
+                if bytes == nil:
                     self._ev_complete_fd_interest(fd, oid)
-                    self._complete_fd_bytes(oid, bytes.len(), 0, txt, fd, bytes)
+                    self._complete_fd(oid, -1, 0, "", fd)
+                    i = i + 1
+                    continue
+                if bytes!.len() > 0:
+                    val txt = bytes_to_text(bytes!)
+                    self._store_recv_bytes(oid, bytes!)
+                    self._ev_complete_fd_interest(fd, oid)
+                    self._complete_fd_bytes(oid, bytes!.len(), 0, txt, fd, bytes!)
                     i = i + 1
                     continue
                 if ev_has_results and recv_ready:
@@ -702,7 +668,7 @@ class IoDriver:
 
             elif ot == _OP_OPEN:
                 val path = self._p_path[i]
-                if rt_file_exists(path):
+                if file_exists(path):
                     val fh = self._next_fh
                     self._next_fh = fh + 1
                     val content = rt_file_read_text(path)
@@ -715,26 +681,17 @@ class IoDriver:
                 continue
 
             elif ot == _OP_SENDFILE:
-                val send_ready = self._ready_contains(ready_fds, fd)
-                if (not ev_has_results) or send_ready:
-                    val content = self._find_file(self._p_fd2[i])
-                    val off = self._p_offset[i]
-                    var end_pos = off + self._p_length[i]
-                    if end_pos > content.len():
-                        end_pos = content.len()
-                    val chunk = content.slice(off, end_pos)
-                    val res = unsafe(capabilities: [ffi]):
-                        rt_io_tcp_write_text(fd, chunk)
-                    # The Worker owns offset/remaining progress and will
-                    # submit exactly one successor after a short completion.
-                    # Complete zero only after writable readiness so a
-                    # transient would-block result remains pending instead of
-                    # being mistaken for a terminal short write.
-                    if res > 0 or (ev_has_results and send_ready):
-                        self._ev_complete_fd_interest(fd, oid)
-                        self._complete_fd(oid, res, 0, "", fd)
-                        i = i + 1
-                        continue
+                val content = self._find_file(self._p_fd2[i])
+                val off = self._p_offset[i]
+                var end_pos = off + self._p_length[i]
+                if end_pos > content.len():
+                    end_pos = content.len()
+                val chunk = content.slice(off, end_pos)
+                val res = unsafe(capabilities: [ffi]):
+                    rt_io_tcp_write_text(fd, chunk)
+                self._complete_fd(oid, res, 0, "", fd)
+                i = i + 1
+                continue
 
             elif ot == _OP_CLOSE:
                 val is_file = self._find_file(fd).len() > 0
@@ -742,7 +699,8 @@ class IoDriver:
                     self._remove_file(fd)
                 else:
                     self._ev_deregister(fd)
-                    rt_io_tcp_close(fd)
+                    unsafe(capabilities: [ffi]):
+                        rt_io_tcp_close(fd)
                 self._complete(oid, 0, 0, "")
                 i = i + 1
                 continue
@@ -761,14 +719,16 @@ class IoDriver:
 
             elif ot == _OP_UDP_SEND:
                 val udp_bytes = text_to_bytes(self._p_data[i])
-                val udp_sent = rt_io_udp_send_to(fd, udp_bytes, self._p_path[i])
+                val udp_sent = unsafe(capabilities: [ffi]):
+                    rt_io_udp_send_to(fd, udp_bytes, self._p_path[i])
                 self._complete_fd(oid, udp_sent, 0, "", fd)
                 i = i + 1
                 continue
 
             elif ot == _OP_UDP_RECV:
                 if (not ev_has_results) or self._ready_contains(ready_fds, fd):
-                    val udp_result = rt_io_udp_recv_from(fd, self._p_size[i])
+                    val udp_result = unsafe(capabilities: [ffi]):
+                        rt_io_udp_recv_from(fd, self._p_size[i])
                     if udp_result != nil:
                         val udp_data = udp_result.0
                         val udp_addr = udp_result.1

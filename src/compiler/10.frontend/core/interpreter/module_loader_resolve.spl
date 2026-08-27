@@ -14,16 +14,24 @@
 # 2. SIMPLE_LIB environment variable path
 # 3. Fallback to src/lib/ (standard library)
 
-extern fn rt_env_get(key: text) -> text
+@unsafe(reason: "raw platform path-join ABI", capabilities: [ffi])
 extern fn rt_path_join(base: text, rel: text) -> text
+@unsafe(reason: "raw platform dirname ABI", capabilities: [ffi])
 extern fn rt_path_dirname(path: text) -> text
 
-use std.io_runtime.{dir_list, file_exists, dir_exists}
+@always_inline
+fn _sffi_path_join(base: text, rel: text) -> text:
+    unsafe(capabilities: [ffi]):
+        rt_path_join(base, rel)
 
-# Failed-existence-probe evidence is owned only by the rt_file_exists facade.
-# The resolver neither increments a local counter nor calls a syscall worker.
-# Native C/Rust providers drain atomic in-flight calls; pure-Simple interpreter
-# parity is explicitly single-thread and fail-closed (negative token errors).
+@always_inline
+fn _sffi_path_dirname(path: text) -> text:
+    unsafe(capabilities: [ffi]):
+        rt_path_dirname(path)
+
+use std.io_runtime.{dir_list, file_exists, dir_exists}
+use std.io_runtime.{env_get_opt}
+use std.nogc_sync_mut.io.process_ops.{eprint}
 
 # Failed-existence-probe evidence is owned only by the rt_file_exists facade.
 # The resolver neither increments a local counter nor calls a syscall worker.
@@ -37,263 +45,15 @@ use std.io_runtime.{dir_list, file_exists, dir_exists}
 # Full cache: "module_name|current_file" → resolved path (for relative imports)
 var _interp_module_fast_cache: {text: text} = {}
 var _interp_module_cache: {text: text} = {}
-var _interp_module_fast_cache_probes: {text: [text]} = {}
-var _interp_module_cache_probes: {text: [text]} = {}
-var _interp_module_cache_order: [text] = []
-var _interp_module_active_probes: [text] = []
-var _interp_module_probe_recording: bool = false
 var _interp_module_uncached_count: i64 = 0
-var _interp_module_cache_eviction_count: i64 = 0
-var _interp_module_cache_invalidation_count: i64 = 0
-var _interp_module_cache_fast_invalidation_count: i64 = 0
-var _interp_module_cache_precise_invalidation_count: i64 = 0
-var _interp_module_cache_fail_closed_invalidation_count: i64 = 0
-var _interp_module_cache_normalization_ambiguity_count: i64 = 0
-var _interp_module_cache_mutation_event_count: i64 = 0
-var _interp_module_cache_mutation_path_count: i64 = 0
-var _interp_module_cache_create_event_count: i64 = 0
-var _interp_module_cache_edit_event_count: i64 = 0
-var _interp_module_cache_delete_event_count: i64 = 0
-var _interp_module_cache_move_event_count: i64 = 0
-
-struct ModuleResolveCacheTelemetry:
-    entries: i64
-    uncached_resolutions: i64
-    evictions: i64
-    total_invalidations: i64
-    fast_invalidations: i64
-    precise_full_invalidations: i64
-    fail_closed_full_invalidations: i64
-    normalization_ambiguities: i64
-    mutation_events: i64
-    mutation_paths: i64
-    create_events: i64
-    edit_events: i64
-    delete_events: i64
-    move_events: i64
-
-# Long-lived test daemons and REPL/compiler sessions can see arbitrarily many
-# caller-sensitive misses.  Keep both the fast and full dictionaries under one
-# hard cap so a miss storm cannot become retained-RSS growth.
-val INTERP_MODULE_RESOLVE_CACHE_MAX_ENTRIES: i64 = 256
-
-fn _module_resolve_record_probe(path: text):
-    if not _interp_module_probe_recording or path == "":
-        return
-    for existing in _interp_module_active_probes:
-        if existing == path:
-            return
-    _interp_module_active_probes.push(path)
-
-fn _module_resolve_file_exists(path: text) -> bool:
-    _module_resolve_record_probe(path)
-    rt_file_exists(path)
-
-fn _module_resolve_dir_exists(path: text) -> bool:
-    _module_resolve_record_probe(path)
-    rt_dir_exists(path)
-
-fn _module_resolve_dir_list(path: text) -> [text]:
-    _module_resolve_record_probe(path)
-    dir_list(path)
-
-fn _module_resolve_rt_dir_list(path: text) -> [text]:
-    _module_resolve_record_probe(path)
-    rt_dir_list(path)
-
-fn _module_resolve_cache_evict_one():
-    if _interp_module_cache_order.len() == 0:
-        return
-    val token = _interp_module_cache_order[0]
-    _interp_module_cache_order = _interp_module_cache_order[1..]
-    if token.starts_with("F|"):
-        val key = token.substring(2, token.len())
-        _interp_module_fast_cache = _interp_module_fast_cache.remove(key)
-        _interp_module_fast_cache_probes = _interp_module_fast_cache_probes.remove(key)
-    else:
-        val key = token.substring(2, token.len())
-        _interp_module_cache = _interp_module_cache.remove(key)
-        _interp_module_cache_probes = _interp_module_cache_probes.remove(key)
-    _interp_module_cache_eviction_count = _interp_module_cache_eviction_count + 1
-
-fn _module_resolve_cache_make_room():
-    while _interp_module_fast_cache.len() + _interp_module_cache.len() >= INTERP_MODULE_RESOLVE_CACHE_MAX_ENTRIES:
-        _module_resolve_cache_evict_one()
-
-fn _module_resolve_cache_store_full(key: text, result: text, probes: [text]):
-    if not _interp_module_cache.has(key):
-        _module_resolve_cache_make_room()
-        _interp_module_cache_order.push("C|" + key)
-    _interp_module_cache[key] = result
-    _interp_module_cache_probes[key] = probes
-
-fn _module_resolve_cache_store_fast(key: text, result: text, probes: [text]):
-    if not _interp_module_fast_cache.has(key):
-        _module_resolve_cache_make_room()
-        _interp_module_cache_order.push("F|" + key)
-    _interp_module_fast_cache[key] = result
-    _interp_module_fast_cache_probes[key] = probes
 
 fn module_resolve_cache_reset():
     _interp_module_fast_cache = {}
     _interp_module_cache = {}
-    _interp_module_fast_cache_probes = {}
-    _interp_module_cache_probes = {}
-    _interp_module_cache_order = []
-    _interp_module_active_probes = []
-    _interp_module_probe_recording = false
     _interp_module_uncached_count = 0
-    _interp_module_cache_eviction_count = 0
-    _interp_module_cache_invalidation_count = 0
-    _interp_module_cache_fast_invalidation_count = 0
-    _interp_module_cache_precise_invalidation_count = 0
-    _interp_module_cache_fail_closed_invalidation_count = 0
-    _interp_module_cache_normalization_ambiguity_count = 0
-    _interp_module_cache_mutation_event_count = 0
-    _interp_module_cache_mutation_path_count = 0
-    _interp_module_cache_create_event_count = 0
-    _interp_module_cache_edit_event_count = 0
-    _interp_module_cache_delete_event_count = 0
-    _interp_module_cache_move_event_count = 0
 
 fn module_resolve_uncached_count() -> i64:
     _interp_module_uncached_count
-
-fn module_resolve_cache_entry_count() -> i64:
-    _interp_module_fast_cache.len() + _interp_module_cache.len()
-
-fn module_resolve_cache_eviction_count() -> i64:
-    _interp_module_cache_eviction_count
-
-fn module_resolve_cache_invalidation_count() -> i64:
-    _interp_module_cache_invalidation_count
-
-fn module_resolve_cache_telemetry() -> ModuleResolveCacheTelemetry:
-    ModuleResolveCacheTelemetry(
-        entries: module_resolve_cache_entry_count(),
-        uncached_resolutions: _interp_module_uncached_count,
-        evictions: _interp_module_cache_eviction_count,
-        total_invalidations: _interp_module_cache_invalidation_count,
-        fast_invalidations: _interp_module_cache_fast_invalidation_count,
-        precise_full_invalidations: _interp_module_cache_precise_invalidation_count,
-        fail_closed_full_invalidations: _interp_module_cache_fail_closed_invalidation_count,
-        normalization_ambiguities: _interp_module_cache_normalization_ambiguity_count,
-        mutation_events: _interp_module_cache_mutation_event_count,
-        mutation_paths: _interp_module_cache_mutation_path_count,
-        create_events: _interp_module_cache_create_event_count,
-        edit_events: _interp_module_cache_edit_event_count,
-        delete_events: _interp_module_cache_delete_event_count,
-        move_events: _interp_module_cache_move_event_count
-    )
-
-fn _module_resolve_path_affects_probe(changed_path: text, probe_path: text) -> bool:
-    changed_path == probe_path or changed_path.starts_with(probe_path + "/") or probe_path.starts_with(changed_path + "/")
-
-fn _module_resolve_probe_set_affected(probes: [text], changed_paths: [text]) -> bool:
-    for probe_path in probes:
-        for changed_path in changed_paths:
-            if _module_resolve_path_affects_probe(changed_path, probe_path):
-                return true
-    false
-
-fn _module_resolve_changed_paths_match_full_probes(changed_paths: [text]) -> bool:
-    """Return false when any producer path cannot be related to a full entry.
-
-    The check runs before mutation so a precise match for one move identity
-    cannot hide a spelling/normalization mismatch for its other identity.
-    """
-    if changed_paths.len() == 0:
-        return false
-    for changed_path in changed_paths:
-        if changed_path == "":
-            return false
-        var matched = false
-        for token in _interp_module_cache_order:
-            if token.starts_with("C|"):
-                val key = token.substring(2, token.len())
-                if _interp_module_cache.has(key):
-                    val probes = _interp_module_cache_probes[key]
-                    for probe_path in probes:
-                        if _module_resolve_path_affects_probe(changed_path, probe_path):
-                            matched = true
-        if not matched:
-            return false
-    true
-
-fn _module_resolve_cache_invalidate_paths(changed_paths: [text]) -> i64:
-    """Invalidate exact/ancestor probe dependencies after a filesystem event.
-
-    Mutation is rare and the cache is capped at 256 entries, so a bounded scan
-    is cheaper and less error-prone than an unbounded reverse-index fanout.
-    Fast entries are caller-independent and therefore conservatively dropped
-    on every mutation; full entries retain unrelated callers.
-    """
-    val full_entries_before = _interp_module_cache.len()
-    val paths_match_full_probes = if full_entries_before == 0: true else: _module_resolve_changed_paths_match_full_probes(changed_paths)
-    var fast_invalidated: i64 = 0
-    var precise_invalidated: i64 = 0
-    var fail_closed_invalidated: i64 = 0
-    var retained_order: [text] = []
-    for token in _interp_module_cache_order:
-        if token.starts_with("F|"):
-            val key = token.substring(2, token.len())
-            if _interp_module_fast_cache.has(key):
-                _interp_module_fast_cache = _interp_module_fast_cache.remove(key)
-                _interp_module_fast_cache_probes = _interp_module_fast_cache_probes.remove(key)
-                fast_invalidated = fast_invalidated + 1
-        else:
-            val key = token.substring(2, token.len())
-            if _interp_module_cache.has(key):
-                val probes = _interp_module_cache_probes[key]
-                if _module_resolve_probe_set_affected(probes, changed_paths):
-                    _interp_module_cache = _interp_module_cache.remove(key)
-                    _interp_module_cache_probes = _interp_module_cache_probes.remove(key)
-                    precise_invalidated = precise_invalidated + 1
-                else:
-                    retained_order.push(token)
-    # Fail closed if a producer reports a path in a spelling the runtime did
-    # not return from rt_path_join (relative vs absolute, symlinked workspace,
-    # or platform separator differences).  Mutation events are rare; retaining
-    # a stale negative result is worse than conservatively dropping the bounded
-    # remainder.
-    if not paths_match_full_probes:
-        _interp_module_cache_normalization_ambiguity_count = _interp_module_cache_normalization_ambiguity_count + 1
-    if not paths_match_full_probes and retained_order.len() > 0:
-        fail_closed_invalidated = retained_order.len()
-        _interp_module_cache = {}
-        _interp_module_cache_probes = {}
-        retained_order = []
-    _interp_module_cache_order = retained_order
-    val invalidated = fast_invalidated + precise_invalidated + fail_closed_invalidated
-    _interp_module_cache_invalidation_count = _interp_module_cache_invalidation_count + invalidated
-    _interp_module_cache_fast_invalidation_count = _interp_module_cache_fast_invalidation_count + fast_invalidated
-    _interp_module_cache_precise_invalidation_count = _interp_module_cache_precise_invalidation_count + precise_invalidated
-    _interp_module_cache_fail_closed_invalidation_count = _interp_module_cache_fail_closed_invalidation_count + fail_closed_invalidated
-    invalidated
-
-fn module_resolve_cache_file_created(path: text) -> i64:
-    _interp_module_cache_mutation_event_count = _interp_module_cache_mutation_event_count + 1
-    _interp_module_cache_mutation_path_count = _interp_module_cache_mutation_path_count + 1
-    _interp_module_cache_create_event_count = _interp_module_cache_create_event_count + 1
-    _module_resolve_cache_invalidate_paths([path])
-
-fn module_resolve_cache_file_edited(path: text) -> i64:
-    _interp_module_cache_mutation_event_count = _interp_module_cache_mutation_event_count + 1
-    _interp_module_cache_mutation_path_count = _interp_module_cache_mutation_path_count + 1
-    _interp_module_cache_edit_event_count = _interp_module_cache_edit_event_count + 1
-    _module_resolve_cache_invalidate_paths([path])
-
-fn module_resolve_cache_file_deleted(path: text) -> i64:
-    _interp_module_cache_mutation_event_count = _interp_module_cache_mutation_event_count + 1
-    _interp_module_cache_mutation_path_count = _interp_module_cache_mutation_path_count + 1
-    _interp_module_cache_delete_event_count = _interp_module_cache_delete_event_count + 1
-    _module_resolve_cache_invalidate_paths([path])
-
-fn module_resolve_cache_file_moved(old_path: text, new_path: text) -> i64:
-    _interp_module_cache_mutation_event_count = _interp_module_cache_mutation_event_count + 1
-    _interp_module_cache_mutation_path_count = _interp_module_cache_mutation_path_count + 2
-    _interp_module_cache_move_event_count = _interp_module_cache_move_event_count + 1
-    _module_resolve_cache_invalidate_paths([old_path, new_path])
 
 fn resolve_module_path(module_name: text, current_file: text) -> text:
     # Fast path: check module-only cache first (no string concat needed)
@@ -304,15 +64,11 @@ fn resolve_module_path(module_name: text, current_file: text) -> text:
     if _interp_module_cache.has(cache_key):
         return _interp_module_cache[cache_key] ?? ""
     _interp_module_uncached_count = _interp_module_uncached_count + 1
-    _interp_module_active_probes = []
-    _interp_module_probe_recording = true
     val result = _resolve_module_path_uncached(module_name, current_file)
-    _interp_module_probe_recording = false
-    val probes = _interp_module_active_probes
-    _module_resolve_cache_store_full(cache_key, result, probes)
+    _interp_module_cache[cache_key] = result
     # Cache in fast path if it's a stdlib/lib import (not relative)
     if module_name.starts_with("std.") or module_name.starts_with("lib.") or module_name.starts_with("compiler.") or module_name.starts_with("app.") or module_name.starts_with("unit."):
-        _module_resolve_cache_store_fast(module_name, result, probes)
+        _interp_module_fast_cache[module_name] = result
     result
 
 fn _replace_text(value: text, from: text, to: text) -> text:
@@ -326,7 +82,7 @@ fn _domain_to_dir(domain: text) -> text:
     _replace_text(value: domain, from: "-", to: "_")
 
 fn _interp_path_parent(path: text) -> text:
-    val slash = path.last_index_of("/") ?? -1
+    val slash = path.last_index_of("/")
     if slash <= 0:
         return path
     path.substring(0, slash)
@@ -334,8 +90,8 @@ fn _interp_path_parent(path: text) -> text:
 fn _resolve_project_relative_path(current_dir: text, relative_path: text) -> text:
     var probe_dir = current_dir
     for _unused in 0..10:
-        val candidate = rt_path_join(probe_dir, relative_path)
-        if _module_resolve_file_exists(candidate):
+        val candidate = _sffi_path_join(probe_dir, relative_path)
+        if file_exists(candidate):
             return candidate
 
         val parent = _interp_path_parent(probe_dir)
@@ -348,14 +104,14 @@ fn _normalize_type_relative_path(module_name: text) -> text:
     if module_name.contains("/"):
         val explicit = module_name.split("/")
         if explicit.len() >= 2 and explicit[0].contains("-"):
-            return rt_path_join(
-                rt_path_join("type", _domain_to_dir(explicit[0])),
+            return _sffi_path_join(
+                _sffi_path_join("type", _domain_to_dir(explicit[0])),
                 explicit[1..].join("/")
             ) + ".spl"
 
     if not module_name.contains("."):
-        return rt_path_join(
-            rt_path_join("type", _domain_to_dir("simple-lang")),
+        return _sffi_path_join(
+            _sffi_path_join("type", _domain_to_dir("simple-lang")),
             module_name
         ) + ".spl"
 
@@ -381,31 +137,31 @@ fn resolve_unit_path(tail: [text]) -> text:
         org = "simple-lang"
         rest = tail[1..]
     else:
-        val direct_dir = rt_path_join(rt_path_join("src", "unit"), first)
-        val com_dir = rt_path_join(rt_path_join("src", "unit"), first + ".com")
-        if _module_resolve_file_exists(direct_dir) or _module_resolve_file_exists(com_dir):
+        val direct_dir = _sffi_path_join(_sffi_path_join("src", "unit"), first)
+        val com_dir = _sffi_path_join(_sffi_path_join("src", "unit"), first + ".com")
+        if file_exists(direct_dir) or file_exists(com_dir):
             org = first
             rest = tail[1..]
     # Strip a leading "com" segment mid-path (tolerates `unit.acme.com.robotics`).
     if rest.len() >= 1 and rest[0] == "com":
         rest = rest[1..]
 
-    val unit_root = rt_path_join("src", "unit")
-    val org_bare = rt_path_join(unit_root, org)
-    val org_com = rt_path_join(unit_root, org + ".com")
+    val unit_root = _sffi_path_join("src", "unit")
+    val org_bare = _sffi_path_join(unit_root, org)
+    val org_com = _sffi_path_join(unit_root, org + ".com")
     val joined = rest.join("/")
 
     val cand1 = org_bare + "/" + joined + ".spl"
-    if _module_resolve_file_exists(cand1):
+    if file_exists(cand1):
         return cand1
     val cand2 = org_bare + "/" + joined + "/__init__.spl"
-    if _module_resolve_file_exists(cand2):
+    if file_exists(cand2):
         return cand2
     val cand3 = org_com + "/" + joined + ".spl"
-    if _module_resolve_file_exists(cand3):
+    if file_exists(cand3):
         return cand3
     val cand4 = org_com + "/" + joined + "/__init__.spl"
-    if _module_resolve_file_exists(cand4):
+    if file_exists(cand4):
         return cand4
     ""
 
@@ -428,8 +184,8 @@ fn _resolve_module_path_uncached(module_name: text, current_file: text) -> text:
 
     # Reject deprecated `std.ffi` — must use `std.sffi` instead
     if path_parts.len() >= 2 and path_parts[0] == "std" and path_parts[1] == "ffi":
-        rt_eprintln("[error] `use std.ffi` is deprecated — use `use std.sffi` instead")
-        rt_eprintln("  hint: rename `std.ffi` → `std.sffi` in your import")
+        eprint("[error] `use std.ffi` is deprecated — use `use std.sffi` instead")
+        eprint("  hint: rename `std.ffi` → `std.sffi` in your import")
         path_parts[1] = "sffi"
 
     # Unit-system routing: `unit.<...>` → src/unit/<org>/<...>.spl
@@ -448,23 +204,20 @@ fn _resolve_module_path_uncached(module_name: text, current_file: text) -> text:
     # Try resolution strategies:
 
     # 1. Local directory (relative to current file)
-    val local_path = rt_path_join(current_dir, relative_path)
-    if _module_resolve_file_exists(local_path):
+    val local_path = _sffi_path_join(current_dir, relative_path)
+    if file_exists(local_path):
         return local_path
 
     # 2. SIMPLE_LIB environment variable
-    val simple_lib = rt_env_get("SIMPLE_LIB")
-    val has_simple_lib = simple_lib != ""
-    val lib_not_nil = simple_lib != nil
-    val should_check_lib = has_simple_lib and lib_not_nil
-    if should_check_lib:
-        val lib_path = rt_path_join(simple_lib, relative_path)
-        if _module_resolve_file_exists(lib_path):
+    val simple_lib = env_get_opt("SIMPLE_LIB") ?? ""
+    if simple_lib != "":
+        val lib_path = _sffi_path_join(simple_lib, relative_path)
+        if file_exists(lib_path):
             return lib_path
 
     # 3. Fallback to src/ directory
-    val src_path = rt_path_join("src", relative_path)
-    if _module_resolve_file_exists(src_path):
+    val src_path = _sffi_path_join("src", relative_path)
+    if file_exists(src_path):
         return src_path
 
     # 4. Try lib subdirectory search (lib/*/X for use std.X / use lib.X)
@@ -475,43 +228,85 @@ fn _resolve_module_path_uncached(module_name: text, current_file: text) -> text:
     #    > nogc_async_mut_noalloc
     if relative_path.starts_with("lib/"):
         val lib_subpath = relative_path.substring(4)
-        val lib_dir = rt_path_join("src", "lib")
-        val nam = rt_path_join(lib_dir, rt_path_join("nogc_async_mut", lib_subpath))
-        if _module_resolve_file_exists(nam):
+        val lib_dir = _sffi_path_join("src", "lib")
+        val nam = _sffi_path_join(lib_dir, _sffi_path_join("nogc_async_mut", lib_subpath))
+        if file_exists(nam):
             return nam
-        val naim = rt_path_join(lib_dir, rt_path_join("nogc_async_immut", lib_subpath))
-        if _module_resolve_file_exists(naim):
+        val naim = _sffi_path_join(lib_dir, _sffi_path_join("nogc_async_immut", lib_subpath))
+        if file_exists(naim):
             return naim
-        val nsim = rt_path_join(lib_dir, rt_path_join("nogc_sync_immut", lib_subpath))
-        if _module_resolve_file_exists(nsim):
+        val nsim = _sffi_path_join(lib_dir, _sffi_path_join("nogc_sync_immut", lib_subpath))
+        if file_exists(nsim):
             return nsim
-        val nsm = rt_path_join(lib_dir, rt_path_join("nogc_sync_mut", lib_subpath))
-        if _module_resolve_file_exists(nsm):
+        val nsm = _sffi_path_join(lib_dir, _sffi_path_join("nogc_sync_mut", lib_subpath))
+        if file_exists(nsm):
             return nsm
-        val cm = rt_path_join(lib_dir, rt_path_join("common", lib_subpath))
-        if _module_resolve_file_exists(cm):
+        val cm = _sffi_path_join(lib_dir, _sffi_path_join("common", lib_subpath))
+        if file_exists(cm):
             return cm
-        val gam = rt_path_join(lib_dir, rt_path_join("gc_async_mut", lib_subpath))
-        if _module_resolve_file_exists(gam):
+        val gam = _sffi_path_join(lib_dir, _sffi_path_join("gc_async_mut", lib_subpath))
+        if file_exists(gam):
             return gam
-        val gaim = rt_path_join(lib_dir, rt_path_join("gc_async_immut", lib_subpath))
-        if _module_resolve_file_exists(gaim):
+        val gaim = _sffi_path_join(lib_dir, _sffi_path_join("gc_async_immut", lib_subpath))
+        if file_exists(gaim):
             return gaim
-        val gsm = rt_path_join(lib_dir, rt_path_join("gc_sync_mut", lib_subpath))
-        if _module_resolve_file_exists(gsm):
+        val gsm = _sffi_path_join(lib_dir, _sffi_path_join("gc_sync_mut", lib_subpath))
+        if file_exists(gsm):
             return gsm
-        val gsim = rt_path_join(lib_dir, rt_path_join("gc_sync_immut", lib_subpath))
-        if _module_resolve_file_exists(gsim):
+        val gsim = _sffi_path_join(lib_dir, _sffi_path_join("gc_sync_immut", lib_subpath))
+        if file_exists(gsim):
             return gsim
-        val nanm = rt_path_join(lib_dir, rt_path_join("nogc_async_mut_noalloc", lib_subpath))
-        if _module_resolve_file_exists(nanm):
+        val nanm = _sffi_path_join(lib_dir, _sffi_path_join("nogc_async_mut_noalloc", lib_subpath))
+        if file_exists(nanm):
             return nanm
 
     # 5. Try numbered directory resolution (NN.name pattern)
     val numbered_path = resolve_with_numbered_dirs("src", path_parts)
     if numbered_path != "":
-        if _module_resolve_file_exists(numbered_path):
+        if file_exists(numbered_path):
             return numbered_path
+
+    # 6. `_`-transparent folder fallback (underscore packages). A class file
+    #    moved into a `_ClassName/` folder resolves as if it still sat in the
+    #    parent folder, so siblings keep importing it by the original path. The
+    #    `_` folder is transparent and applies recursively to nested `_` folders.
+    #    ponytail: only runs after every normal strategy misses (rare/error path),
+    #    so it adds no cost to successful imports.
+    val np = path_parts.len()
+    if np >= 1:
+        val t_name = path_parts[np - 1]
+        var rel_parts = relative_path.split("/")
+        var rel_dirs: [text] = []
+        var ri: i64 = 0
+        val rn = rel_parts.len()
+        for rp in rel_parts:
+            if ri < rn - 1:
+                rel_dirs = rel_dirs + [rp]
+            ri = ri + 1
+        # a) relative to the importing file
+        val ta = _resolve_transparent(current_dir, rel_dirs, t_name)
+        if ta != "":
+            return ta
+        # b) under src/
+        val tb = _resolve_transparent("src", rel_dirs, t_name)
+        if tb != "":
+            return tb
+        # c) under src/lib/<family>/ for std./lib. imports
+        if rel_dirs.len() >= 1 and rel_dirs[0] == "lib":
+            var sub: [text] = []
+            var si: i64 = 0
+            for sp in rel_dirs:
+                if si >= 1:
+                    sub = sub + [sp]
+                si = si + 1
+            val fams = ["nogc_async_mut", "nogc_async_immut", "nogc_sync_immut", "nogc_sync_mut", "common", "gc_async_mut", "gc_async_immut", "gc_sync_mut", "gc_sync_immut", "nogc_async_mut_noalloc"]
+            for fam in fams:
+                var famparts: [text] = ["lib", fam]
+                for sp2 in sub:
+                    famparts = famparts + [sp2]
+                val tc = _resolve_transparent("src", famparts, t_name)
+                if tc != "":
+                    return tc
 
     # Return attempted path even if not found (will error later)
     relative_path
@@ -525,8 +320,8 @@ fn resolve_with_numbered_dirs(base: text, parts: [text]) -> text:
     for part in parts:
         if pi < last_idx:
             # Intermediate segment — must be a directory
-            val direct = rt_path_join(current_dir, part)
-            if _module_resolve_dir_exists(direct):
+            val direct = _sffi_path_join(current_dir, part)
+            if dir_exists(direct):
                 current_dir = direct
             else:
                 # Try numbered directory
@@ -537,17 +332,17 @@ fn resolve_with_numbered_dirs(base: text, parts: [text]) -> text:
                     return ""
         else:
             # Last segment — try as .spl file
-            val file_path = rt_path_join(current_dir, part + ".spl")
+            val file_path = _sffi_path_join(current_dir, part + ".spl")
             return file_path
         pi = pi + 1
     ""
 
 fn find_numbered_dir_interp(parent: text, segment: text) -> text:
     """Find NN.segment directory in parent. Returns path or empty string."""
-    if not _module_resolve_dir_exists(parent):
+    if not dir_exists(parent):
         return ""
 
-    val entries = _module_resolve_dir_list(parent)
+    val entries = dir_list(parent)
     for entry in entries:
         # Look for dot in entry name
         var dot_pos: i64 = -1
@@ -568,8 +363,8 @@ fn find_numbered_dir_interp(parent: text, segment: text) -> text:
             if all_digits:
                 val name = entry.substring(dot_pos + 1)
                 if name == segment:
-                    val full_path = rt_path_join(parent, entry)
-                    if _module_resolve_dir_exists(full_path):
+                    val full_path = _sffi_path_join(parent, entry)
+                    if dir_exists(full_path):
                         return full_path
     ""
 
@@ -577,15 +372,15 @@ fn _find_transparent_file(dir: text, name: text) -> text:
     """Search `dir`'s `_`-prefixed descendant folders (recursively) for
     `name`.spl. A `_`-prefixed folder is a transparent package: its files
     resolve as if they sat directly in `dir`. Returns path or ""."""
-    if not _module_resolve_dir_exists(dir):
+    if not dir_exists(dir):
         return ""
-    val entries = _module_resolve_rt_dir_list(dir)
+    val entries = dir_list(dir)
     for entry in entries:
         if entry.starts_with("_"):
-            val tdir = rt_path_join(dir, entry)
-            if _module_resolve_dir_exists(tdir):
-                val cand = rt_path_join(tdir, name + ".spl")
-                if _module_resolve_file_exists(cand):
+            val tdir = _sffi_path_join(dir, entry)
+            if dir_exists(tdir):
+                val cand = _sffi_path_join(tdir, name + ".spl")
+                if file_exists(cand):
                     return cand
                 val deeper = _find_transparent_file(tdir, name)
                 if deeper != "":
@@ -597,8 +392,8 @@ fn _walk_dir_chain(base: text, parts: [text]) -> text:
     numbered child). Returns concrete dir path, or "" if a segment is missing."""
     var cur = base
     for part in parts:
-        val direct = rt_path_join(cur, part)
-        if _module_resolve_dir_exists(direct):
+        val direct = _sffi_path_join(cur, part)
+        if dir_exists(direct):
             cur = direct
         else:
             val numbered = find_numbered_dir_interp(cur, part)

@@ -16,73 +16,22 @@
 val HM_SIZE: i64 = 256        # Bucket count for global maps (~500 entries → avg chain ~2)
 val SCOPE_HM_SIZE: i64 = 32   # Bucket count for scope-level maps
 
-# A hash memo is mutable execution state. It must be owned by the interpreter
-# session (or another caller-confined execution domain), never by this module.
-# In particular, `hm_hash_text` remains stateless and safe for unrelated
-# interpreter sessions or tasks to call concurrently. Callers that can prove
-# ownership may create a memo and pass it explicitly to
-# `hm_hash_text_memoized`.
-class InterpreterHashMemo:
-    keys: [text]
-    values: [i64]
-    next_slot: i64
-    capacity: i64
-    hits: i64
-    misses: i64
-
-fn hm_hash_memo_new(capacity: i64) -> InterpreterHashMemo:
-    var bounded_capacity = capacity
-    if bounded_capacity < 0:
-        bounded_capacity = 0
-    InterpreterHashMemo(
-        keys: [], values: [], next_slot: 0, capacity: bounded_capacity,
-        hits: 0, misses: 0
-    )
-
 # ===== Hash Function =====
-# FNV-1a hash — processes ALL characters for uniform distribution.
+# FNV-1a hash — processes ALL UTF-8 bytes for uniform distribution.
 # Replaces old 3-char polynomial which caused excessive chain collisions.
 # Caller applies % bucket_count.
 
 fn hm_hash_text(s: text) -> i64:
-    val bytes = s.bytes()
-    val slen = bytes.len()
+    val slen = s.len()
     if slen == 0: return 0
     # FNV-1a offset basis + prime
     var h: i64 = -3750763034362895579
     var i: i64 = 0
     while i < slen:
-        h = h xor (bytes[i] as i64)
+        h = h xor (s.byte_at(i) as i64)
         h = h * 1099511628211
         i = i + 1
-    if h < 0: h = 0 - h
-    h
-
-# Explicitly-owned bounded memo. `memo` is a class (reference semantics), so
-# hit/miss counters and replacement state remain with the caller's session.
-# A zero-capacity memo is a deliberate disabled mode: it computes the exact
-# stateless hash and retains nothing.
-fn hm_hash_text_memoized(memo: InterpreterHashMemo, s: text) -> i64:
-    var cache_idx: i64 = 0
-    val cache_len = memo.keys.len()
-    while cache_idx < cache_len:
-        if memo.keys[cache_idx] == s:
-            memo.hits = memo.hits + 1
-            return memo.values[cache_idx]
-        cache_idx = cache_idx + 1
-
-    memo.misses = memo.misses + 1
-    val h = hm_hash_text(s)
-    if memo.capacity <= 0:
-        return h
-
-    if cache_len < memo.capacity:
-        memo.keys.push(s)
-        memo.values.push(h)
-    else:
-        memo.keys[memo.next_slot] = s
-        memo.values[memo.next_slot] = h
-        memo.next_slot = (memo.next_slot + 1) % memo.capacity
+    if h < 0: return 0 - h
     h
 
 # ===== Bucket Initialization =====
@@ -102,5 +51,4 @@ fn hm_make_scope_buckets() -> [i64]:
     hm_make_buckets(SCOPE_HM_SIZE)
 
 export HM_SIZE, SCOPE_HM_SIZE
-export InterpreterHashMemo, hm_hash_memo_new, hm_hash_text, hm_hash_text_memoized
-export hm_make_buckets, hm_make_global_buckets, hm_make_scope_buckets
+export hm_hash_text, hm_make_buckets, hm_make_global_buckets, hm_make_scope_buckets
