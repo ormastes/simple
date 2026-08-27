@@ -206,3 +206,18 @@ a claim that SFFI v2 is complete.
   current selection sweep. No benchmark supports a performance claim.
 - FAIL (global admission): no exact artifact/provider signature or semantic
   evidence exists. Global SFFI verification remains **FAIL**.
+
+## Follow-up: compiler cache-admission raw-owner consolidation (2026-08-27)
+
+- PASS (static/source): four raw admission filesystem/directory contracts are
+  unsafe-tagged and isolated in private always-inline lexical owners. The pin
+  reader uses canonical `file_read_nullable`; the authority audit and source
+  check pass.
+- PASS (performance shape): no loop, allocation, copy, lookup, or dispatch
+  was added. Full optimizer analysis reports 22 existing module opportunities
+  (21 MIR, one preallocation) for a separate measured optimization task.
+- WARN (contract): `nil` still normalizes to an empty pin set. That retains the
+  prior missing-pin behavior but does not distinguish an unreadable existing
+  pins file, so this boundary is not promoted to verified safe.
+- FAIL (global admission): no artifact-bound provider signature or semantic
+  evidence exists. Global SFFI verification remains **FAIL**.

@@ -309,3 +309,8 @@ passing placeholder.
     bounded candidate benchmark; the current source-text lease test failure
     (`variable dir not found`) is a separate compiler/test defect and cannot be
     recorded as a fast-GC pass.
+55. Keep cache admission's filesystem/directory raw calls behind four inline
+    lexical owners and use the canonical nullable pin-read facade. Do not call
+    the current `nil`-to-empty-pins policy verified: migrate it to a distinct
+    missing-versus-unreadable status before mission-critical cache admission.
+    Measure the recorded optimizer candidates independently.

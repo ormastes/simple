@@ -1715,3 +1715,20 @@ semantic issue, not evidence for this patch. It is recorded as WARN, not PASS.
 Optimizer analysis reports 58 existing fast-GC opportunities (including the
 pre-existing selection sweep); no throughput claim is made without a bounded
 CAS benchmark. This remains unsigned boundary containment.
+
+### Compiler cache-admission raw-owner consolidation (2026-08-27)
+
+The cache admission owner now contains four unsafe-tagged raw
+filesystem/directory contracts, each reached through a private always-inline
+lexical helper. Its pins read no longer declares a duplicate raw text ABI; it
+uses the canonical nullable read owner. This retains the existing missing-pin
+policy (`nil` normalizes to an empty pin set), so it is not a new signed or
+fail-closed ownership proof. A future contract migration must distinguish
+missing pins from an unreadable existing pins file before it can claim
+mission-critical admission safety.
+
+The new static authority audit and source check pass. Full optimizer analysis
+reports 22 existing opportunities (21 MIR, one collection preallocation); no
+loop, allocation, copy, lookup, or dispatch was added by the wrapper change.
+The already-recorded `gc_spec` lease-source-text test failure prevents claiming
+a full cache-GC test pass for this adjacent module.
