@@ -32,9 +32,22 @@ hang list, not investigated.
 
 ## 2. Measured classification
 
-Every real spec measured so far is a **pure timeout** — no verdict within
-900s, rc=124. None finished slowly; there is so far no "merely slow"
-category in this population.
+**Both categories exist — the exclusion list conflates them.** The sweep was
+run with a 900s budget against the 300s budget that produced the exclusion
+list, and that difference alone reclassifies at least one spec.
+
+### 2a. MERELY SLOW — finishes, was excluded only by the 300s budget
+
+| spec | wall | rc |
+|---|---|---|
+| `test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl` | **726s** | **0** |
+
+This spec is not a hang. It completes and passes; it was excluded because
+726s exceeds the sweep's 300s per-file budget. It belongs in a performance
+bucket, not a hang list. Its cost is consistent with root cause C below (the
+whole JS engine running interpreted).
+
+### 2b. TRUE TIMEOUT — no verdict within 900s (rc=124)
 
 | spec | wall | rc |
 |---|---|---|
@@ -46,10 +59,40 @@ category in this population.
 | `test/01_unit/lib/common/completed_animation_handle_capacity_spec.spl` | 900s | 124 |
 | `test/01_unit/lib/common/crypto/pbkdf2_native_perf_spec.spl` | 900s | 124 |
 | `test/01_unit/lib/common/js_timer_drain_limit_spec.spl` | 900s | 124 |
+| `test/01_unit/lib/common/search/unicode_17_0_0_spec.spl` | 900s | 124 |
+| `test/01_unit/lib/common/text_layout/font_renderer_spec.spl` | 900s | 124 |
 
-The remaining specs from the list were still being measured when this record
-was written; the sweep writes to `/mnt/data/tmp/claude-1000/hang_out/times.tsv`.
-Their measured rows must be appended here before this record is closed.
+**Log tails do not localize the stall.** For every row in 2b the last
+non-preamble line is a module-load `[use-warning]`; no spec emitted a verdict
+or step line. This is reported as "no verdict line reached" and **not** as
+evidence that the stall is at import time — the runner appears to buffer
+per-file test output until the verdict, so these logs cannot discriminate an
+import-time hang from an in-test hang. Anyone continuing this work should
+re-run one spec with per-step output forced before drawing that conclusion.
+
+### 2c. NOT YET MEASURED
+
+The sweep was still running when this record was written (it measures 4
+specs concurrently at 900s each, ~30 min per batch on a loaded box). These
+28 specs from the original list therefore have **no measured row yet** and
+are recorded as unmeasured, not as hangs:
+
+`ecc_p384_p521_kat`, `ed448_rfc8032_kat`, `ml_dsa_65`, `ml_dsa_87_kat`,
+`rsa_pss_sha256_roundtrip_slow`, `slh_dsa_128s`, `slh_dsa_192s_256s`,
+`fat32_format`, `simple_web_renderer`, `with_lock_guard`,
+`browser_session_security_boundary`, `browser_session_storage`,
+`ssh_kex_rsa_contract`, `arm64_desktop_arch_facade`,
+`simple_web_window_renderer`, `bip39_kat`, `p384`, `scram_sha256_rfc5802`,
+`scram_sha512`, `hda_controller`, `fb_driver`,
+`virtio_input_mmio_contract`, `mmio_test_backend`, `timer_test`,
+`qemu_systest_contract`, `virtio_snd_service_contract`,
+`p256_ecdhe_handshake_secret`, `text_tool_artifact_contract`,
+`spirv_khronos_validation`.
+
+Live results land in `/mnt/data/tmp/claude-1000/hang_out/times.tsv`
+(`<seconds>\t<rc>\t<spec>`; rc=124 is a timeout). Given 2a, each of these
+must be re-checked against a 900s budget before being called a hang —
+some are likely slow-but-finishing.
 
 ## 3. Root cause A — `set_object_property` is O(total properties) per write
 
