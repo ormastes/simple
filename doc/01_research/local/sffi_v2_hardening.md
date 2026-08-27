@@ -1630,3 +1630,20 @@ optimizer review pass (19 MIR-only, zero general patterns). Focused Rust tests
 are blocked by unrelated missing imports in `interpreter/expr/collections.rs`,
 and the deployed bootstrap binary remains stale, so this is not a completed
 cross-lane verification or signed-admission claim.
+
+### MIR actor and synchronization ABI follow-up (2026-08-26)
+
+The MIR runtime actor bridge now matches the Rust provider ABI for `spawn`
+(handler plus context) and `recv` (no timeout argument), and the direct mutex
+and read/write-lock owners retain their actual `i64` release/store status rather
+than declaring it as `Any`. Every direct raw call in these narrow owners is
+lexical `unsafe(ffi)`. The synchronization static authority audit records the
+status ABI and prevents a silent `Any` regression.
+
+This is declaration/call containment, not a global safety conclusion. In
+particular, the higher-level `actor_hooks.spl` facade still declares an
+incompatible actor ABI (`spawn(Any)` and `recv(actor_id)`) relative to the Rust
+runtime provider. It must be migrated to the scheduler-owned pure-Simple actor
+boundary or a separately generated contract; tagging it alone would be a
+cosmetic and unsafe workaround. No provider artifact is signed/admitted by
+this follow-up.
