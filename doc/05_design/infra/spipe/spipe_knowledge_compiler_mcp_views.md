@@ -879,8 +879,9 @@ current-parent fsync, then visibility and acknowledgement. Objects/terminals
 are append-only; only `current` is atomically replaced. Only an admitted true
 host provider may turn `EEXIST` into validated raw mismatch evidence and a new
 fenced operation. `ENOENT`/missing `current` is a `no-current` mismatch/re-read
-only for paired-null `G=0`; at `G>0` it is fatal
-`SPK704 corrupt_successor_missing_current`, with no mismatch/winner, retry, or
+only for paired-null `G=0`; at `G>0` it throws/rejects
+`HostReplaceFatalV1 {code:"SPK704",reason:"corrupt_successor_missing_current",generation:G}`
+with no mismatch/winner, retry, or
 publication. Normal Node never re-reads or retries. `EACCES`/`EPERM` deny,
 `EXDEV` invalidates mount, `ENOTSUP`/`EOPNOTSUPP` is unsupported, and every
 other host error is fatal. No Node rename fallback is allowed.
@@ -944,8 +945,12 @@ both expected fields are paired null, and no other null pairing is valid.
 `nextPointerBytes` must decode as `CurrentPointerV1` with exactly the request
 scope and `G`; `nextPointerDigest` must equal SHA-256 of those raw bytes. A
 `replaced` response returns bytes/digest exactly equal to that canonical next
-pointer. A lost (`outcome:"mismatch"`) response returns one validated winner pointer bytes/digest, or
-explicit `no-current` only for `G=0`; no response may carry ambiguous binding.
+pointer. A `MismatchV1` (`outcome:"mismatch"`) response returns one validated
+winner pointer bytes/digest, or paired-null `no-current` only for `G=0`; no
+mismatch response may carry ambiguous binding. The third channel is thrown/
+rejected `HostReplaceFatalV1`: successor absence is exactly
+`{code:"SPK704",reason:"corrupt_successor_missing_current",generation:G}` and
+has no `outcome`, current/winner bytes or digests, retry token, or receipt.
 
 P3 obtains no replacement function from a caller. The private composition root
 owns `HostReplaceCurrentCapabilityV1` in a lexical `WeakMap` keyed by its journal
@@ -956,8 +961,9 @@ structurally imitated. Its sole operation is:
 replaceCurrentIfExactV1({scopeBytes,generation,
   expectedCurrentBytesOrNull,expectedCurrentDigestOrNull,
   nextPointerBytes,nextPointerDigest}) ->
-  {outcome:"replaced",currentBytes,currentDigest} |
-  {outcome:"mismatch",winnerPointerBytesOrNull,winnerPointerDigestOrNull}
+  ReplacedV1 {outcome:"replaced",currentBytes,currentDigest} |
+  MismatchV1 {outcome:"mismatch",winnerPointerBytesOrNull,winnerPointerDigestOrNull} |
+  throws/rejects HostReplaceFatalV1 {code:"SPK704",reason:"corrupt_successor_missing_current",generation:G}
 ```
 
 All digest fields are SHA-256 of paired raw bytes. The provider rejects
@@ -971,8 +977,11 @@ object/proposal/record/terminal files and parents: stage -> fence -> replacement
 
 `EEXIST` yields fresh validated raw-evidence `mismatch`. `ENOENT`/missing
 `current` yields paired-null `no-current` mismatch/re-read only at `G=0`; at
-`G>0` it is fatal `SPK704 corrupt_successor_missing_current`, never a mismatch
-or null winner, and makes no publication mutation. `EACCES`/`EPERM` deny;
+`G>0` it throws/rejects `HostReplaceFatalV1 {code:"SPK704",
+reason:"corrupt_successor_missing_current",generation:G}`, never a mismatch
+or null winner, and makes no publication mutation, visibility,
+acknowledgement, or retry. The fatal carries no current/winner bytes or digests.
+`EACCES`/`EPERM` deny;
 `EXDEV` invalidates layout; `ENOTSUP`/`EOPNOTSUPP` is unsupported; all other
 errors are fatal. No rename or user-space emulation is permitted. Normal Node
 `fs` lacks this operation and is unsupported before mutation; production P3
@@ -980,5 +989,6 @@ positive flow cannot be wired until a true provider is admitted. Test-only
 native support is a private composition fixture selected by the same `WeakMap`,
 never a public or env/global/argv-injectable installer.
 Open/recovery follows the same closed map: an otherwise durable `G>0` record or
-terminal with absent `current` returns `SPK704`, never a genesis-style mismatch,
-and performs no repair, replacement, visibility, or acknowledgement.
+terminal with absent `current` throws/rejects `HostReplaceFatalV1(SPK704)`,
+never a genesis-style mismatch, and performs no repair, replacement, visibility,
+acknowledgement, or retry.

@@ -1674,13 +1674,14 @@ every `G>0` input must echo exact old current-pointer bytes/digest.
 | W5A-28b | Advance current between stale contender validation and fence after contender terminal file+parent fsync | contender gets stale-predecessor denial and performs no current/ack write; its append-only terminal cannot become visible winner |
 | W5A-28c | Two processes submit byte-identical proposal; force both terminal file+parent fsync before same fence | one terminal byte sequence exists durably before replacement; both outcomes replay it |
 | W5A-28d | Two valid different proposals share scope and `G` at same fence | one winner terminal; loser returns that winner and never exposes a second winner |
-| W5A-28e | SIGKILL before/after fence, conditional replacement, current-parent fsync, and ack; restart under certificate/clock/revocation mutations; remove `current` beneath an otherwise durable `G>0` successor | old-or-new only for valid pointer state; missing successor current is fatal `SPK704` with no repair/publication/ack; invalid certificate/window/revocation denies; no object, generation, or terminal identifier is reused |
+| W5A-28e | SIGKILL before/after fence, conditional replacement, current-parent fsync, and ack; restart under certificate/clock/revocation mutations; remove `current` beneath an otherwise durable `G>0` successor | old-or-new only for valid pointer state; missing successor current throws/rejects `HostReplaceFatalV1(SPK704)` with no bytes, repair/publication/ack/retry; invalid certificate/window/revocation denies; no object, generation, or terminal identifier is reused |
 
 The setup asserts append-only object/terminal namespaces and mutable current
 only. Only an admitted true host provider may report `EEXIST` as validated raw
 mismatch and start a fresh fenced operation. `ENOENT`/missing `current` may
 report paired-null `no-current` mismatch/re-read only at `G=0`; at `G>0` it
-must return fatal `SPK704 corrupt_successor_missing_current` with no
+must throw/reject `HostReplaceFatalV1 {code:"SPK704",
+reason:"corrupt_successor_missing_current",generation:G}` with no
 mismatch/winner, retry, or publication mutation. Normal Node is unsupported
 before mutation and never re-reads/retries. `EACCES`/`EPERM` deny, `EXDEV` rejects
 mount layout, `ENOTSUP`/`EOPNOTSUPP` is unsupported, and every other host error
@@ -1740,8 +1741,12 @@ both expected fields are paired null, and no other null pairing is valid.
 `nextPointerBytes` must decode as `CurrentPointerV1` with exactly the request
 scope and `G`; `nextPointerDigest` must equal SHA-256 of those raw bytes. A
 `replaced` response returns bytes/digest exactly equal to that canonical next
-pointer. A lost (`outcome:"mismatch"`) response returns one validated winner pointer bytes/digest, or
-explicit `no-current` only for `G=0`; no response may carry ambiguous binding.
+pointer. A `MismatchV1` (`outcome:"mismatch"`) response returns one validated
+winner pointer bytes/digest, or paired-null `no-current` only for `G=0`; no
+mismatch response may carry ambiguous binding. The third channel is thrown/
+rejected `HostReplaceFatalV1`: successor absence is exactly
+`{code:"SPK704",reason:"corrupt_successor_missing_current",generation:G}` and
+has no `outcome`, current/winner bytes or digests, retry token, or receipt.
 
 `W5A-40` runs only through the private native/test composition fixture for
 `HostReplaceCurrentCapabilityV1`; no environment/global/argv/public installer
@@ -1754,8 +1759,10 @@ conditional replacement reaches current-parent fsync/visibility/ack.
 `W5A-42` injects every mapped error and forces its generation: `EEXIST` yields
 validated raw-evidence `mismatch`; `ENOENT`/missing `current` yields paired-null
 `no-current` mismatch/re-read only for `G=0`, while identical absence at `G>0`
-yields fatal `SPK704 corrupt_successor_missing_current`—not a mismatch or null
-winner—and proves no retry, replacement, visibility, or acknowledgement.
+throws/rejects `HostReplaceFatalV1 {code:"SPK704",
+reason:"corrupt_successor_missing_current",generation:G}`—not a mismatch or
+null winner, with no current/winner bytes or digests—and proves no retry,
+replacement, visibility, or acknowledgement.
 `EACCES`/`EPERM` deny; `EXDEV` invalidates layout; `ENOTSUP`/`EOPNOTSUPP` marks
 unsupported; every other error is fatal without retry, rename, link/unlink, or
 mutation. `W5A-43` runs normal Node and proves it

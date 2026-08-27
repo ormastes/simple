@@ -1124,8 +1124,9 @@ P3 acquires `HostReplaceCurrentCapabilityV1` only through its private lexical
 composition-root `WeakMap`, never from a caller. Only an admitted true host
 provider may turn `EEXIST` into validated raw mismatch and a fresh fenced
 operation. `ENOENT`/missing `current` is a paired-null `no-current`
-mismatch/re-read only at `G=0`; at `G>0` it is fatal
-`SPK704 corrupt_successor_missing_current`, with no mismatch/winner, retry, or
+mismatch/re-read only at `G=0`; at `G>0` it throws/rejects
+`HostReplaceFatalV1 {code:"SPK704",reason:"corrupt_successor_missing_current",generation:G}`
+with no mismatch/winner, retry, or
 publication. Normal Node never re-reads/retries. `EACCES`/`EPERM` deny;
 `EXDEV` rejects layout; `ENOTSUP`/`EOPNOTSUPP` means unsupported; other host
 errors are fatal. No Node rename fallback. W5A-28a..e force reader, stale, same-proposal,
@@ -1153,16 +1154,24 @@ both expected fields are paired null, and no other null pairing is valid.
 `nextPointerBytes` must decode as `CurrentPointerV1` with exactly the request
 scope and `G`; `nextPointerDigest` must equal SHA-256 of those raw bytes. A
 `replaced` response returns bytes/digest exactly equal to that canonical next
-pointer. A lost (`outcome:"mismatch"`) response returns one validated winner pointer bytes/digest, or
-explicit `no-current` only for `G=0`; no response may carry ambiguous binding.
+pointer. A `MismatchV1` (`outcome:"mismatch"`) response returns one validated
+winner pointer bytes/digest, or paired-null `no-current` only for `G=0`; no
+mismatch response may carry ambiguous binding. The third channel is thrown/
+rejected `HostReplaceFatalV1`: successor absence is exactly
+`{code:"SPK704",reason:"corrupt_successor_missing_current",generation:G}` and
+has no `outcome`, current/winner bytes or digests, retry token, or receipt.
 
 Before P3 source work, the merge owner must admit a private composition-root
 `HostReplaceCurrentCapabilityV1`. It is lexical-`WeakMap` owned and has no
 public factory/installer/caller injection/env/global/argv seam. Its closed
 request is `{scopeBytes,generation,expectedCurrentBytesOrNull,
 expectedCurrentDigestOrNull,nextPointerBytes,nextPointerDigest}`;
-its response is only `replaced` with raw current bytes/digest or `mismatch` with
-raw validated winner-pointer bytes/digest (null only for `G=0`). It validates every SHA-256 byte pair and closed
+its closed response algebra is `ReplacedV1 | MismatchV1 | throws/rejects
+HostReplaceFatalV1`: `ReplacedV1` has raw current bytes/digest; `MismatchV1`
+has raw validated winner-pointer bytes/digest (paired null only at `G=0`); the
+successor absence fatal is exactly `HostReplaceFatalV1 {code:"SPK704",
+reason:"corrupt_successor_missing_current",generation:G}` and has no outcome,
+current/winner bytes or digests, retry token, or receipt. It validates every SHA-256 byte pair and closed
 pointer binding before mutation; null/null is only `G=0`, both exact predecessor
 fields are mandatory at `G>0`; it fences `(scopeBytes,G)`, rereads, performs
 true exact conditional replacement, and current-parent fsyncs before
@@ -1171,8 +1180,11 @@ visibility/ack.
 Inside that admitted true host provider only, `EEXIST` means validated raw
 mismatch and a fresh fenced re-read. `ENOENT`/missing `current` is the
 paired-null `no-current` mismatch/re-read only at `G=0`; for `G>0` it is fatal
-`SPK704 corrupt_successor_missing_current`, with no mismatch/winner, retry, or
-publication mutation. `EACCES`/`EPERM` deny; `EXDEV` invalidates layout;
+`SPK704 corrupt_successor_missing_current`, with no mismatch/winner, retry,
+publication mutation, visibility, or acknowledgement; it throws/rejects
+`HostReplaceFatalV1 {code:"SPK704",reason:"corrupt_successor_missing_current",
+generation:G}` with no current/winner bytes or digests. `EACCES`/`EPERM`
+deny; `EXDEV` invalidates layout;
 `ENOTSUP`/`EOPNOTSUPP` is unsupported; every other error is fatal.
 There is no rename/link/unlink/write-compare/user-lock substitute. Normal Node
 `fs` is unsupported before any mutation because it lacks conditional replacement
@@ -1180,8 +1192,10 @@ of an existing entry. A private native/test composition fixture may prove forced
 schedules, but no production positive P3 wiring is allowed until a true host
 provider is independently admitted.
 The same rule is mandatory in P3 open/recovery: absent `current` for an
-otherwise durable `G>0` successor returns fatal `SPK704` and cannot be repaired
-or surfaced as a genesis mismatch/winner.
+otherwise durable `G>0` successor throws/rejects the same `HostReplaceFatalV1
+{code:"SPK704",reason:"corrupt_successor_missing_current",generation:G}` and
+cannot be repaired or surfaced as a genesis
+mismatch/winner.
 
 ### 11.2 Wave 5a sealed-publication repair gate (2026-08-26)
 

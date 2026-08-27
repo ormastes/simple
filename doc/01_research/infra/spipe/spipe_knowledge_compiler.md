@@ -3380,7 +3380,8 @@ composition-root `WeakMap`, never from a caller. Only an admitted true host
 provider may translate `EEXIST` into fresh validated raw mismatch evidence and
 decide a new fenced operation. `ENOENT`/a missing `current` is a validated
 `no-current` mismatch/re-read only for paired-null `G=0` genesis; at `G>0` it
-is fatal `SPK704 corrupt_successor_missing_current`, never a null
+throws/rejects `HostReplaceFatalV1 {code:"SPK704",
+reason:"corrupt_successor_missing_current",generation:G}`, never a null
 winner/mismatch/retry or publication. Normal Node never re-reads or retries.
 `EACCES`/`EPERM` deny; `EXDEV` invalidates mount/layout;
 `ENOTSUP`/`EOPNOTSUPP` means unsupported atomic condition or directory fsync;
@@ -3395,7 +3396,7 @@ W5A-28 is five forced independent-process schedules, not one generic CAS test:
 | W5A-28b | stale contender reaches fence after current changes, with its terminal already file+parent durable | stale predecessor rejects; no current-pointer or ack write, and its append-only terminal never becomes the visible winner |
 | W5A-28c | two byte-identical proposals meet at fence | one stored terminal byte sequence; both callers replay it |
 | W5A-28d | two valid different proposals share scope/`G` at fence | one replacement wins; loser returns winner terminal and cannot expose its proposal |
-| W5A-28e | SIGKILL before/after fence, replacement, current-parent fsync, and ack; restart with certificate, clock, and revocation changes; remove `current` beneath an otherwise durable `G>0` successor | recovery exposes old-or-new only for valid pointer state; missing successor current is fatal `SPK704` with no repair/publication/ack; certificate/time/revocation validates and no digest/generation/terminal is reused |
+| W5A-28e | SIGKILL before/after fence, replacement, current-parent fsync, and ack; restart with certificate, clock, and revocation changes; remove `current` beneath an otherwise durable `G>0` successor | recovery exposes old-or-new only for valid pointer state; missing successor current throws/rejects `HostReplaceFatalV1(SPK704)` with no bytes, repair/publication/ack/retry; certificate/time/revocation validates and no digest/generation/terminal is reused |
 
 These schedules prove certificate rejection, clock-window failure, revocation
 failure, and no-reuse after recovery. They are the sole P3
@@ -3444,8 +3445,12 @@ both expected fields are paired null, and no other null pairing is valid.
 `nextPointerBytes` must decode as `CurrentPointerV1` with exactly the request
 scope and `G`; `nextPointerDigest` must equal SHA-256 of those raw bytes. A
 `replaced` response returns bytes/digest exactly equal to that canonical next
-pointer. A lost (`outcome:"mismatch"`) response returns one validated winner pointer bytes/digest, or
-explicit `no-current` only for `G=0`; no response may carry ambiguous binding.
+pointer. A `MismatchV1` (`outcome:"mismatch"`) response returns one validated
+winner pointer bytes/digest, or paired-null `no-current` only for `G=0`; no
+mismatch response may carry ambiguous binding. The third channel is thrown/
+rejected `HostReplaceFatalV1`: successor absence is exactly
+`{code:"SPK704",reason:"corrupt_successor_missing_current",generation:G}` and
+has no `outcome`, current/winner bytes or digests, retry token, or receipt.
 
 P3 cannot manufacture compare-and-replace from Node filesystem primitives. It
 needs one private composition-root `HostReplaceCurrentCapabilityV1`, held in a
@@ -3455,8 +3460,14 @@ structural lookalike is an authority path.
 
 Its closed request is `{scopeBytes,generation,expectedCurrentBytesOrNull,
 expectedCurrentDigestOrNull,nextPointerBytes,nextPointerDigest}`;
-its only results are `{outcome:"replaced",currentBytes,currentDigest}` and
-`{outcome:"mismatch",winnerPointerBytesOrNull,winnerPointerDigestOrNull}`.
+its closed result algebra is `ReplacedV1 | MismatchV1 | throws/rejects
+HostReplaceFatalV1`: `ReplacedV1` is `{outcome:"replaced",currentBytes,
+currentDigest}`; `MismatchV1` is `{outcome:"mismatch",
+winnerPointerBytesOrNull,winnerPointerDigestOrNull}`; successor absence is
+exactly `HostReplaceFatalV1 {code:"SPK704",
+reason:"corrupt_successor_missing_current",generation:G}`. Fatal values have
+no `outcome`, current/winner bytes or digests, retry token, or receipt; paired
+null appears only in `MismatchV1` at `G=0`.
 Every digest is SHA-256 of its raw byte field. Before mutation it checks closed
 scope/G/pointer bindings and every byte/digest pair. Null/null is allowed only
 for `G=0`; both predecessor fields are required for `G>0`. Under an exclusive
@@ -3468,8 +3479,11 @@ visibility precedes acknowledgement only after that parent fsync.
 Inside the admitted true host provider only, `EEXIST` -> validated raw
 `mismatch` and a fresh fenced re-read. `ENOENT`/missing `current` -> paired-null
 `no-current` mismatch/re-read only at `G=0`; at `G>0` -> fatal
-`SPK704 corrupt_successor_missing_current` with no mismatch/winner, retry, or
-publication mutation. `EACCES`/`EPERM` -> deny; `EXDEV` -> invalid layout;
+`SPK704 corrupt_successor_missing_current` with no mismatch/winner, retry,
+publication mutation, visibility, or acknowledgement. It throws/rejects
+`HostReplaceFatalV1 {code:"SPK704",reason:"corrupt_successor_missing_current",
+generation:G}` and carries no current/winner bytes or digests.
+`EACCES`/`EPERM` -> deny; `EXDEV` -> invalid layout;
 `ENOTSUP`/`EOPNOTSUPP` -> unsupported; anything else -> fatal. No rename,
 link/unlink, write-then-compare, retry, or user-space lock substitutes. Normal
 Node `fs` lacks true conditional replacement of an existing directory entry, so
@@ -3478,5 +3492,6 @@ provide the operation for forced schedules; it is never an env/global/argv or
 public-installer seam. Production P3 positive flow remains blocked until a true
 host provider is admitted.
 Open/recovery has no special escape: a `G>0` durable successor whose `current`
-is absent returns `SPK704 corrupt_successor_missing_current`, not a no-current
-mismatch, and does not repair, publish, expose, or acknowledge a terminal.
+is absent throws/rejects `HostReplaceFatalV1(SPK704
+corrupt_successor_missing_current)`, not a no-current mismatch, and does not
+repair, publish, expose, retry, or acknowledge a terminal.

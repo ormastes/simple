@@ -1828,8 +1828,9 @@ visible, ack. Objects and terminals are append-only; current alone is mutable.
 Only an admitted true host provider may translate `EEXIST` into fresh validated
 raw mismatch evidence and decide a new fenced operation. `ENOENT`/a missing
 `current` is a validated `no-current` mismatch/re-read only for paired-null
-`G=0` genesis; at `G>0` it is the deterministic fatal
-`SPK704 corrupt_successor_missing_current` state, with no mismatch/winner,
+`G=0` genesis; at `G>0` it throws/rejects deterministic
+`HostReplaceFatalV1 {code:"SPK704",reason:"corrupt_successor_missing_current",generation:G}`
+with no mismatch/winner,
 retry, replacement, visibility, or acknowledgement. Normal Node never
 re-reads or retries. `EACCES`/`EPERM` deny; `EXDEV` invalidates mount;
 `ENOTSUP`/`EOPNOTSUPP` means unsupported durability; all other host errors are
@@ -1879,8 +1880,13 @@ both expected fields are paired null, and no other null pairing is valid.
 `nextPointerBytes` must decode as `CurrentPointerV1` with exactly the request
 scope and `G`; `nextPointerDigest` must equal SHA-256 of those raw bytes. A
 `replaced` response returns bytes/digest exactly equal to that canonical next
-pointer. A lost (`outcome:"mismatch"`) response returns one validated winner pointer bytes/digest, or
-explicit `no-current` only for `G=0`; no response may carry ambiguous binding.
+pointer. A `MismatchV1` (`outcome:"mismatch"`) response returns one validated
+winner pointer bytes/digest, or explicit paired-null `no-current` only for
+`G=0`; no mismatch response may carry ambiguous binding. The third and only
+fatal channel is a thrown/rejected `HostReplaceFatalV1`; successor absence is
+exactly `{code:"SPK704",reason:"corrupt_successor_missing_current",generation:G}`.
+It has no `outcome`, current/winner bytes or digests, retry token, or publication
+receipt.
 
 `HostReplaceCurrentCapabilityV1` is a **private lexical capability** of the P3
 composition root. A module-scoped `WeakMap` maps the journal's private owner to
@@ -1893,8 +1899,14 @@ Its only operation is `replaceCurrentIfExactV1(request) -> response`.
 expectedCurrentDigestOrNull,nextPointerBytes,nextPointerDigest}`.
 `scopeBytes` is canonical `ScopeBindingV1`; every digest is lower-case SHA-256
 hex of its paired raw bytes; `generation` is canonical unsigned decimal `G`.
-The response is exactly `{outcome:"replaced",currentBytes,currentDigest}` or
-`{outcome:"mismatch",winnerPointerBytesOrNull,winnerPointerDigestOrNull}`.
+The response algebra is exactly `ReplacedV1 | MismatchV1 | throws/rejects
+HostReplaceFatalV1`: `ReplacedV1` is `{outcome:"replaced",currentBytes,
+currentDigest}`; `MismatchV1` is `{outcome:"mismatch",
+winnerPointerBytesOrNull,winnerPointerDigestOrNull}`; and the successor-absence
+fatal is exactly `HostReplaceFatalV1 {code:"SPK704",
+reason:"corrupt_successor_missing_current",generation:G}`. Fatal values carry
+no `outcome`, current/winner bytes or digests, retry token, or publication
+receipt; paired null appears only in `MismatchV1` at `G=0`.
 
 Before mutation, the provider validates canonical scope/G, every byte/digest
 pair, and replacement closed pointer bindings. Expected fields are null/null iff
@@ -1908,8 +1920,9 @@ current-parent fsync -> visible -> acknowledgement.
 The errno map is closed: `EEXIST` returns fresh validated raw `mismatch`
 evidence. `ENOENT`/a missing `current` returns the paired-null `no-current`
 `mismatch` and permits a fresh fenced re-read **only** for `G=0`; for `G>0` it
-returns fatal `SPK704 corrupt_successor_missing_current`, never a null winner
-or mismatch response, and makes no publication mutation. `EACCES`/`EPERM`
+throws/rejects that `SPK704 HostReplaceFatalV1`, never a null winner or mismatch
+response, and makes no publication mutation, visibility, acknowledgement, or
+retry. `EACCES`/`EPERM`
 deny; `EXDEV` is invalid single-mount layout;
 `ENOTSUP`/`EOPNOTSUPP` mean unsupported publication; every other host/Node
 error is fatal. `rename`, link/unlink, write-then-compare, and a user-space lock
@@ -1919,5 +1932,6 @@ publication mutation, including genesis. A test provider may exist only in a
 private native/test composition fixture selected by the same lexical `WeakMap`;
 it is not env/global/argv/public-installer injectable or a Node fallback.
 Open/recovery applies the identical rule: a durable successor record/terminal
-for `G>0` with absent `current` fails closed as `SPK704` and publishes, repairs,
-or acknowledges nothing; it cannot be reclassified as a genesis winner.
+for `G>0` with absent `current` throws/rejects the same `SPK704
+HostReplaceFatalV1` and publishes, repairs, or acknowledges nothing; it cannot
+be reclassified as a genesis winner.
