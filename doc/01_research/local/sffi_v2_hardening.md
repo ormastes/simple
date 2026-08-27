@@ -1816,3 +1816,14 @@ registered.  The dedicated source authority audit passes and the focused
 Simple check passes under the bootstrap seed.  Focused Rust test execution is
 blocked by unrelated missing imports in `interpreter/expr/collections.rs`; do
 not claim full cross-lane verification, signing, or global SFFI safety.
+
+### Dynamic Torch lexical-owner gap (2026-08-27)
+
+The next unresolved family is the optional libtorch facade. Its canonical raw
+declarations are unsafe-tagged, and its result wrappers reject unavailable
+providers and nonpositive handles, but 129 shared-facade calls bypass lexical
+`unsafe(ffi)` ownership. The provider has no signed artifact or ABI/evidence
+admission path. This requires private inline raw owners that retain the current
+one availability decision plus one typed provider call, not bulk annotation.
+The detailed migration and acceptance criteria are tracked in
+`doc/08_tracking/bug/sffi_torch_dynamic_facade_lexical_owner_gap_2026-08-27.md`.
