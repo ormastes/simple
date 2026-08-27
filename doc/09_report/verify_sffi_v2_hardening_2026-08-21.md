@@ -236,6 +236,19 @@ a claim that SFFI v2 is complete.
   artifact-bound provider signature or semantic evidence exists for the global
   SFFI set, so verification remains **FAIL**.
 
+## Follow-up: compiler cache-lease raw-owner repair (2026-08-27)
+
+- PASS (static/source): eight raw lease contracts are unsafe-tagged and
+  isolated in private always-inline lexical owners. The authority audit and
+  source check pass.
+- PASS (fail closed): unreadable existing leases raise
+  `E-SFFI-CACHE-LEASE-READ` for query paths; reclamation conservatively retains
+  them rather than deleting an unverified lease.
+- WARN (optimizer): 49 existing opportunities remain (48 MIR, one
+  preallocation); no benchmark supports an optimization claim.
+- FAIL (global admission): no artifact-bound provider signature or semantic
+  evidence exists. Global SFFI verification remains **FAIL**.
+
 ## Follow-up: compiler mark-sweep raw-owner consolidation (2026-08-27)
 
 - PASS (static/source): seven raw mark-sweep contracts are unsafe-tagged and
