@@ -8,6 +8,14 @@ or substitutes an architecture-local capability set.
 """
 
 use os.kernel.scheduler.scheduler_types.{Scheduler}
+use os.kernel.scheduler.scheduler_capability_snapshot_lease_v1.{
+    scheduler_current_execution_snapshot_task_id_v1,
+    scheduler_current_execution_snapshot_lifecycle_generation_v1,
+    scheduler_current_execution_snapshot_exec_generation_v1,
+    scheduler_current_execution_snapshot_lease_v1,
+    scheduler_capability_snapshot_consume_once_v1,
+    scheduler_pinned_capability_snapshot_caps_v1
+}
 use os.kernel.types.capability_types.{
     CapabilitySet, CapabilityToken, CapabilityKind, capability_kind_allows
 }
@@ -151,16 +159,21 @@ pub fn boot_authenticated_launch_lease_issue_current_v1(
 ) -> BootAuthenticatedLaunchLeaseV1?:
     """Snapshot a real current scheduler task for exactly one signed launch."""
     if not _boot_authenticated_launch_coordinates_valid_v1(coordinates): return nil
-    val caller = scheduler.current.id
-    if caller == 0u64: return nil
-    var current_caps: CapabilitySet? = nil
-    for task_opt in scheduler.tasks:
-        if task_opt != nil:
-            val task = task_opt.unwrap()
-            if task.id.id == caller:
-                current_caps = Some(task.capabilities)
-    if not current_caps.?: return nil
-    val caps = current_caps.unwrap()
+    # Use the scheduler's canonical current-execution snapshot rather than
+    # independently scanning mutable TCB state.  The snapshot atomically
+    # binds task id, lifecycle/exec generation, and concrete pledged tokens;
+    # consuming it here makes a failed or replayed boot issue burn only this
+    # derived observation, never minting authority.
+    val execution = scheduler.current_execution_snapshot_v1()
+    if not execution.?: return nil
+    val current = execution.unwrap()
+    val caller = scheduler_current_execution_snapshot_task_id_v1(current)
+    val pinned = scheduler_capability_snapshot_consume_once_v1(
+        scheduler_current_execution_snapshot_lease_v1(current), caller,
+        scheduler_current_execution_snapshot_lifecycle_generation_v1(current),
+        scheduler_current_execution_snapshot_exec_generation_v1(current))
+    if not pinned.?: return nil
+    val caps = scheduler_pinned_capability_snapshot_caps_v1(pinned.unwrap())
     if not _boot_authenticated_launch_pouch_valid_v1(caller, caps, coordinates.recipe):
         return nil
     if (_boot_authenticated_launch_mutex_v1 <= 0 or
