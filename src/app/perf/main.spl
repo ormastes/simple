@@ -22,15 +22,24 @@ fn _load_db() -> RunnerTestDb?:
             print "perf-error: {reason}"
             nil
 
-fn _samples(encoded: text) -> [f64]:
+fn _samples(encoded: text) -> [f64]?:
     var values: [f64] = []
     val body = encoded.trim().replace("[", "").replace("]", "")
     if body == "":
-        return values
+        return Some(values)
     for item in body.split(","):
         if item.trim() != "":
-            values.push(item.trim().to_float_or(0.0))
-    values
+            match item.trim().parse_float():
+                case Some(value): values.push(value)
+                case nil: return nil
+    Some(values)
+
+fn _positive_ms(raw: text) -> f64?:
+    match raw.trim().parse_float():
+        case Some(value):
+            if value > 0.0: Some(value)
+            else: nil
+        case nil: nil
 
 fn _default_policy() -> AnomalyPolicy:
     AnomalyPolicy(
@@ -47,13 +56,17 @@ fn _baseline_state(value: text) -> BaselineState:
 fn _record(args: [text]) -> i64:
     if args.len() != 3:
         return _usage()
+    val duration_ms = match _positive_ms(args[2]):
+        case Some(value): value
+        case nil:
+            print "perf-error: subject, cohort, and positive duration are required"
+            return 2
+    if args[0].trim() == "" or args[1].trim() == "":
+        print "perf-error: subject, cohort, and positive duration are required"
+        return 2
     var db = match _load_db():
         case Some(value): value
         case nil: return 2
-    val duration_ms = args[2].to_float_or(0.0)
-    if args[0].trim() == "" or args[1].trim() == "" or duration_ms <= 0.0:
-        print "perf-error: subject, cohort, and positive duration are required"
-        return 2
     if not db.record_timing_observation(args[0], args[1], duration_ms):
         print "perf-error: stable test subject not found: {args[0]}"
         return 2
@@ -87,8 +100,12 @@ fn _explain(args: [text]) -> i64:
 fn _compare(args: [text]) -> i64:
     if args.len() < 3:
         return _usage()
-    val candidate_ms = args[2].to_float_or(0.0)
-    if args[0].trim() == "" or args[1].trim() == "" or candidate_ms <= 0.0:
+    val candidate_ms = match _positive_ms(args[2]):
+        case Some(value): value
+        case nil:
+            print "perf-error: subject, cohort, and positive candidate duration are required"
+            return 2
+    if args[0].trim() == "" or args[1].trim() == "":
         print "perf-error: subject, cohort, and positive candidate duration are required"
         return 2
     val db = match _load_db():
@@ -99,10 +116,15 @@ fn _compare(args: [text]) -> i64:
         case nil:
             print "perf-incomplete: timing subject not found"
             return 2
+    val baseline_samples = match _samples(summary.baseline_samples):
+        case Some(values): values
+        case nil:
+            print "perf-error: malformed baseline samples for {args[0]}"
+            return 2
     val baseline = ApprovedBaseline(
         cohort_id: summary.baseline_cohort_id,
         state: _baseline_state(summary.baseline_state),
-        samples: _samples(summary.baseline_samples),
+        samples: baseline_samples,
         generation: summary.baseline_generation)
     val decision = compare_approved_baseline(
         baseline, [candidate_ms], args[1], args.contains("--confirmed"), _default_policy())
