@@ -21,7 +21,7 @@ Verifies selected Feature C and NFR C renderer parity and GPU/browser evidence t
 | Status | Active |
 | Requirements | doc/02_requirements/nfr/simple_web_browser_production_hardening.md |
 | Source | `test/03_system/gui/wm_compare/production_gui_web_renderer_parity_hardening_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-08-27 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -40,6 +40,35 @@ taxonomy contracts.
 #### generated common.ui widget HTML
 
 #### uses real GUI widget HTML without legacy fixture markers
+
+- uses real GUI widget HTML without legacy fixture markers
+   - Expected: html does not contain `data-simple-actual-gui-button`
+   - Expected: html does not contain `simple-web-engine2d-`
+   - Expected: html does not contain `data-font-corpus="known-site-fonts"`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-WEB-HARD-013
+# @req REQ-WEB-HARD-014
+# @req REQ-SSPEC-SYSTEM
+step("uses real GUI widget HTML without legacy fixture markers")
+val html = generated_gui_widget_html()
+expect(html).to_contain("widget-button")
+expect(html).to_contain("widget-image")
+expect(html).to_contain("data-action=\"run_production_gui\"")
+expect(html.contains("data-simple-actual-gui-button")).to_equal(false)
+expect(html.contains("simple-web-engine2d-")).to_equal(false)
+expect(html.contains("data-font-corpus=\"known-site-fonts\"")).to_equal(false)
+```
+
+</details>
+
 #### Simple Web Renderer backends
 
 #### renders marker-free widget HTML to a non-empty framebuffer
@@ -331,27 +360,26 @@ Requirements covered by the scenarios in this manual:
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `7a1d7bdfee597a6fcaa662ae661ebccdb21ae1cf940e52fe033b7fa203cf156f`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `d09f64b3f548d0567105e3a82cdd728d5987a3d98ab5173d0e6833e4bcd082e9`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `7a1d7bdfee597a6fcaa662ae661ebccdb21ae1cf940e52fe033b7fa203cf156f`.
+Source SHA-256: `d09f64b3f548d0567105e3a82cdd728d5987a3d98ab5173d0e6833e4bcd082e9`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `7a1d7bdfee597a6fcaa662ae661ebccdb21ae1cf940e52fe033b7fa203cf156f`  
+Source SHA-256: `d09f64b3f548d0567105e3a82cdd728d5987a3d98ab5173d0e6833e4bcd082e9`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **79/100**; effective score: **49/100**; blockers: **1**.
+Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
 
-SSpec documentization score: 49/100
+SSpec documentization score: 86/100
 source: test/03_system/gui/wm_compare/production_gui_web_renderer_parity_hardening_spec.spl
 mirror: doc/06_spec/03_system/gui/wm_compare/production_gui_web_renderer_parity_hardening_spec.md (current)
-findings: 8 blockers: 1
-  narrative=100 structure=90 oracle=70
-  traceability=60 evidence=70 coverage=100 maintainability=70
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-  raw=79; blocker cap makes effective=49
 doc/06_spec/03_system/gui/wm_compare/production_gui_web_renderer_parity_hardening_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
@@ -361,19 +389,13 @@ doc/06_spec/03_system/gui/wm_compare/production_gui_web_renderer_parity_hardenin
 test/03_system/gui/wm_compare/production_gui_web_renderer_parity_hardening_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 14 unexplained numeric expected value(s)
   why: Reviewers need to know why a magic expected value is authoritative.
   improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/03_system/gui/wm_compare/production_gui_web_renderer_parity_hardening_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 2 declared requirement(s) have no scenario binding
-  why: A requirement list without scenario evidence is inventory, not traceability.
-  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
-test/03_system/gui/wm_compare/production_gui_web_renderer_parity_hardening_spec.spl:39:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'uses real GUI widget HTML without legacy fixture markers' has no visible step flow
-  why: Ordered visible actions make the manual operable.
-  improve: Add ordered step("...") calls for meaningful actions.
-test/03_system/gui/wm_compare/production_gui_web_renderer_parity_hardening_spec.spl:56:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'renders marker-free widget HTML to a non-empty framebuffer' has no retained capture or evidence
+test/03_system/gui/wm_compare/production_gui_web_renderer_parity_hardening_spec.spl:39:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'uses real GUI widget HTML without legacy fixture markers' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/gui/wm_compare/production_gui_web_renderer_parity_hardening_spec.spl:77:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'matches CPU SIMD backend pixels exactly' has no retained capture or evidence
+test/03_system/gui/wm_compare/production_gui_web_renderer_parity_hardening_spec.spl:54:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'renders marker-free widget HTML to a non-empty framebuffer' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/gui/wm_compare/production_gui_web_renderer_parity_hardening_spec.spl:87:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'matches Metal backend pixels exactly with no tolerance' has no retained capture or evidence
+test/03_system/gui/wm_compare/production_gui_web_renderer_parity_hardening_spec.spl:75:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'matches CPU SIMD backend pixels exactly' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
 <!-- sspec-maintain:scorecard:end -->

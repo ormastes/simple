@@ -1,6 +1,6 @@
-# Graph Ir3d Specification
+# graph_ir3d_spec
 
-> Tests covering Graph IR 3D, REQ-3D-GRAPH-001: records backend-neutral 3D passes and draws, REQ-3D-GRAPH-002: optimizes draw order for 3D backend state locality, REQ-3D-GRAPH-003: replays optimized graph through RenderBackend3D.
+> Purpose and audience: render-graph engineers on the engine team who rely on
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -9,7 +9,24 @@
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Graph Ir3d Specification
+# graph_ir3d_spec
+
+Purpose and audience: render-graph engineers on the engine team who rely on
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Standard Library |
+| Status | Active |
+| Source | `test/01_unit/lib/nogc_sync_mut/engine/render/graph_ir3d_spec.spl` |
+| Updated | 2026-08-27 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+Purpose and audience: render-graph engineers on the engine team who rely on
+    the backend-neutral 3D graph (record -> optimize for state locality ->
+    replay through RenderBackend3D) staying observable and deterministic
+    without a live GPU device.
 
 ## Scenarios
 
@@ -18,6 +35,42 @@
 ### REQ-3D-GRAPH-001: records backend-neutral 3D passes and draws
 
 #### tracks pass, draw, and deduped resource counts
+
+- tracks pass, draw, and deduped resource counts
+   - Expected: stats.pass_count equals `1`
+   - Expected: stats.draw_count equals `2`
+   - Expected: stats.resource_count equals `6`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 18 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-3D-GRAPH-001
+# @req REQ-SSPEC-LIB
+step("tracks pass, draw, and deduped resource counts")
+var graph = GraphIr3D.new()
+val pass_id = graph.begin_pass(TextureHandle(id: 1), TextureHandle(id: 2))
+val mesh = mesh_handle(10, 11, 6)
+graph.add_draw(pass_id, mesh, BufferHandle(id: 12), PipelineHandle(id: 20))
+graph.add_draw(pass_id, mesh, BufferHandle(id: 12), PipelineHandle(id: 20))
+
+# resource_count 6 = deduped set {color tex 1, depth tex 2, mesh 10,
+# index buffer 11, vertex buffer 12, pipeline 20}: the second draw
+# reuses every resource, so it deduplicates to nothing new.
+val stats = graph.stats()
+expect(stats.pass_count).to_equal(1)
+expect(stats.draw_count).to_equal(2)
+expect(stats.resource_count).to_equal(6)
+val stats_evidence = scenario_api_evidence("graph ir3d stats", "GET", "render/graph-ir3d/stats", 200, "passes={stats.pass_count} draws={stats.draw_count} resources={stats.resource_count}", "graph-ir3d", "stats")
+expect(stats_evidence.body).to_contain("passes=1 draws=2 resources=6")
+```
+
+</details>
+
 #### ignores invalid mesh and pipeline handles
 
 - ignores invalid mesh and pipeline handles
@@ -58,10 +111,11 @@ expect(graph.stats().draw_count).to_equal(0)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-3D-GRAPH-002
 # @req REQ-SSPEC-LIB
 step("sorts draws inside each pass by pipeline then texture then mesh")
 var graph = GraphIr3D.new()
@@ -94,10 +148,11 @@ expect(optimized.draws[2].pipeline_id).to_equal(9)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-3D-GRAPH-002
 # @req REQ-SSPEC-LIB
 step("preserves pass boundaries while batching")
 var graph = GraphIr3D.new()
@@ -141,10 +196,11 @@ expect(optimized.draws[1].pass_id).to_equal(optimized.passes[1].id)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 39 lines folded for reproduction.
+Runnable source: 40 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-3D-GRAPH-003
 # @req REQ-SSPEC-LIB
 step("executes graph draws through a RenderBackend3D implementation")
 var backend = RecordingRenderBackend3D.create()
@@ -197,10 +253,11 @@ expect(backend.last_index_count).to_equal(3)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 26 lines folded for reproduction.
+Runnable source: 27 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-3D-GRAPH-003
 # @req REQ-SSPEC-LIB
 step("executes graph draws through the software 3D backend")
 var backend = SoftwareRenderBackend3D.create()
@@ -231,24 +288,6 @@ expect(backend.renderer.get_stats().draw_calls).to_equal(1)
 
 </details>
 
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Standard Library |
-| Status | Active |
-| Source | `test/01_unit/lib/nogc_sync_mut/engine/render/graph_ir3d_spec.spl` |
-| Updated | 2026-08-26 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering Graph IR 3D, REQ-3D-GRAPH-001: records backend-neutral 3D passes and draws, REQ-3D-GRAPH-002: optimizes draw order for 3D backend state locality, REQ-3D-GRAPH-003: replays optimized graph through RenderBackend3D.
-- Graph IR 3D
-- REQ-3D-GRAPH-001: records backend-neutral 3D passes and draws
-- REQ-3D-GRAPH-002: optimizes draw order for 3D backend state locality
-- REQ-3D-GRAPH-003: replays optimized graph through RenderBackend3D
-
 ## Scenario Summary
 
 | Metric | Count |
@@ -276,49 +315,42 @@ Requirements covered by the scenarios in this manual:
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `5ce446e543356e5c9c3ae63cf3564e6408d3af15c4c99a18e2b482b1e51e4f63`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `af5dbd90136f859f7125633a4bbd3dafd745038d5da8379ea71ff134daedbef2`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `5ce446e543356e5c9c3ae63cf3564e6408d3af15c4c99a18e2b482b1e51e4f63`.
+Source SHA-256: `af5dbd90136f859f7125633a4bbd3dafd745038d5da8379ea71ff134daedbef2`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `5ce446e543356e5c9c3ae63cf3564e6408d3af15c4c99a18e2b482b1e51e4f63`  
+Source SHA-256: `af5dbd90136f859f7125633a4bbd3dafd745038d5da8379ea71ff134daedbef2`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **79/100**; effective score: **49/100**; blockers: **1**.
+Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
 
-SSpec documentization score: 49/100
+SSpec documentization score: 86/100
 source: test/01_unit/lib/nogc_sync_mut/engine/render/graph_ir3d_spec.spl
 mirror: doc/06_spec/01_unit/lib/nogc_sync_mut/engine/render/graph_ir3d_spec.md (current)
-findings: 8 blockers: 1
-  narrative=100 structure=90 oracle=70
-  traceability=60 evidence=70 coverage=100 maintainability=70
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-  raw=79; blocker cap makes effective=49
 doc/06_spec/01_unit/lib/nogc_sync_mut/engine/render/graph_ir3d_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/lib/nogc_sync_mut/engine/render/graph_ir3d_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+doc/06_spec/01_unit/lib/nogc_sync_mut/engine/render/graph_ir3d_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/lib/nogc_sync_mut/engine/render/graph_ir3d_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 20 unexplained numeric expected value(s)
+test/01_unit/lib/nogc_sync_mut/engine/render/graph_ir3d_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 23 unexplained numeric expected value(s)
   why: Reviewers need to know why a magic expected value is authoritative.
   improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/01_unit/lib/nogc_sync_mut/engine/render/graph_ir3d_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 3 declared requirement(s) have no scenario binding
-  why: A requirement list without scenario evidence is inventory, not traceability.
-  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
-test/01_unit/lib/nogc_sync_mut/engine/render/graph_ir3d_spec.spl:157:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'tracks pass, draw, and deduped resource counts' has no visible step flow
-  why: Ordered visible actions make the manual operable.
-  improve: Add ordered step("...") calls for meaningful actions.
-test/01_unit/lib/nogc_sync_mut/engine/render/graph_ir3d_spec.spl:175:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'ignores invalid mesh and pipeline handles' has no retained capture or evidence
+test/01_unit/lib/nogc_sync_mut/engine/render/graph_ir3d_spec.spl:184:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'ignores invalid mesh and pipeline handles' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/lib/nogc_sync_mut/engine/render/graph_ir3d_spec.spl:186:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'sorts draws inside each pass by pipeline then texture then mesh' has no retained capture or evidence
+test/01_unit/lib/nogc_sync_mut/engine/render/graph_ir3d_spec.spl:195:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'sorts draws inside each pass by pipeline then texture then mesh' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/lib/nogc_sync_mut/engine/render/graph_ir3d_spec.spl:203:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'preserves pass boundaries while batching' has no retained capture or evidence
+test/01_unit/lib/nogc_sync_mut/engine/render/graph_ir3d_spec.spl:213:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'preserves pass boundaries while batching' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
 <!-- sspec-maintain:scorecard:end -->
