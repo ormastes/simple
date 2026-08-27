@@ -750,3 +750,14 @@ a claim that SFFI v2 is complete.
 - FAIL (global admission): the raw provider lacks artifact-bound ABI,
   ownership, verification, and trusted-signature evidence. A typed I/O-error
   state in the per-file result is needed before safe lifting.
+
+## Session closure: provider admission remains externally blocked (2026-08-27)
+
+- Recorded the remaining P1 work in
+  `doc/08_tracking/todo/sffi_v2_provider_admission_2026-08-27.md` and TODO DB
+  row 277. It requires exact provider artifacts, ABI/ownership contracts,
+  verification receipts, trusted signing identity, and loader admission.
+- No source-only scope, lint, or inventory result is treated as provider ABI
+  verification, artifact identity, or trusted-signature admission.
+- This documentation closure is unverified by request: no build, runtime test,
+  lint, benchmark, optimizer, or admission run was executed in this session.

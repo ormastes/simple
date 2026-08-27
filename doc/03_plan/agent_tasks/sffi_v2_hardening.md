@@ -526,3 +526,10 @@ passing placeholder.
     its per-file result can carry typed I/O error. Preserve one direct lexical
      read with no retry, extra I/O, copy, lookup, lock, or duplicate analysis;
      never convert unreadable backend source to an empty successful validation.
+101. Do not promote any contained `rt_*` boundary to verified or signed from
+     source evidence. The external admission task is tracked in
+     `doc/08_tracking/todo/sffi_v2_provider_admission_2026-08-27.md`: bind the
+     exact artifact, ABI/ownership contract, verification receipt, and trusted
+     signature before loader publication. Keep the hot path as a cached typed
+     call plus required validation; do not add per-call hashing, lookup,
+     signature work, allocation, copy, lock, retry, or provider call.
