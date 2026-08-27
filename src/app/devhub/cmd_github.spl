@@ -167,11 +167,13 @@ fn _self_review_steps(pr_number: text) -> [text]:
     """Canonical actionable redirect printed for self approve / approve PR / author cannot approve."""
     [
         "GitHub forbids a PR author from submitting an APPROVED review; do not retry.",
-        "1. Resolve PR #{pr_number}'s live head and perform a high/xhigh/max/ultra review of that exact SHA.",
-        "2. Record session ID, reviewer model, effort, PASS verdict, P0=0, and P1=0.",
-        "3. Dispatch the protected SPipe Self Review Admission workflow once:",
-        "   gh workflow run review-admission.yml --ref main -f pull_request_number={pr_number} -f session_id=\"$SESSION_ID\" -f reviewer_model=\"$REVIEWER_MODEL\" -f reviewer_effort=\"$REVIEWER_EFFORT\" -f self_attestation='PASS:0:0'",
-        "4. Poll SPipe Self Review Admission on that exact head; a different or stale SHA does not count.",
+        "1. Capture the live head: HEAD_SHA=$(gh pr view {pr_number} --repo ormastes/simple --json headRefOid --jq .headRefOid)",
+        "2. Perform a high/xhigh/max/ultra review of exactly $HEAD_SHA.",
+        "3. Record session ID, reviewer model, effort, PASS verdict, P0=0, and P1=0.",
+        "4. For Simple, dispatch the protected hosted workflow once (it performs internal policy evaluation):",
+        "   gh workflow run review-admission.yml --repo ormastes/simple --ref main -f pull_request_number={pr_number} -f session_id=\"$SESSION_ID\" -f reviewer_model=\"$REVIEWER_MODEL\" -f reviewer_effort=\"$REVIEWER_EFFORT\" -f self_attestation='PASS:0:0'",
+        "5. Poll SPipe Self Review Admission on that exact head: gh api \"repos/ormastes/simple/commits/$HEAD_SHA/check-runs?check_name=SPipe%20Self%20Review%20Admission\" --jq \".check_runs[] | select(.head_sha == \\\"$HEAD_SHA\\\") | [.status,.conclusion] | @tsv\"",
+        "Generic SPipe MCP path is separate: evaluate privilege first, then call approve only on allow; do not combine or reorder it with Simple's hosted workflow.",
         "Status meaning: required check only — not GitHub provider APPROVED and not independent review.",
         "Canonical help: spipe self-review-guide (or node .spipe/spipe/cli/spipe.js self-review-guide)."
     ]
@@ -184,17 +186,27 @@ fn _print_self_review_steps(pr_number: text):
 
 fn _github_pr_review(args: [text]) -> i64:
     """Review a PR, redirecting forbidden same-author approval to the protected SPipe status workflow."""
-    if not _has_flag(args, "--approve") or args.len() == 0:
+    if not (_has_flag(args, "--approve") or _has_flag(args, "-a")):
         return _github_passthrough(["pr", "review"] + args)
     if not gh_available():
         print_error(gh_actionable_error(""))
         return 1
 
-    val pr_number = args[0]
-    val (author_ok, author_stdout, _author_stderr) = gh_run(["pr", "view", pr_number, "--json", "author", "--jq", ".author.login"])
+    val selector = if args.len() > 0 and not args[0].starts_with("-"): args[0] else: ""
+    var view_args = ["pr", "view"]
+    if selector != "":
+        view_args = view_args + [selector]
+    view_args = view_args + ["--json", "number,author"]
+    val (author_ok, author_stdout, author_stderr) = gh_run(view_args)
     val (actor_ok, actor_stdout, _actor_stderr) = gh_run(["api", "user", "--jq", ".login"])
-    val author = author_stdout.trim()
+    val pr_obj = if author_ok: json_parse(author_stdout) else: nil
+    val pr_number = _gh_field(pr_obj, "number")
+    val author = _gh_login(pr_obj, "author")
     val actor = actor_stdout.trim()
+    if not author_ok or pr_number == "" or author == "":
+        print_error(gh_actionable_error(author_stderr))
+        print_error("cannot resolve pull request number and author; pass a PR number, URL, or branch, then retry")
+        return 1
     if author_ok and actor_ok and author != "" and author == actor:
         print_error("same-author GitHub approval is unavailable")
         _print_self_review_steps(pr_number)

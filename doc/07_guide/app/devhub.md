@@ -115,8 +115,9 @@ commands, one per host.
 ### `github` (alias `gh`)
 
 Thin wrapper around the real `gh` CLI: `list` gets reformatted into a table
-(or `--json`/`--jq`); every other verb is a **verbatim passthrough** to `gh`
-(all remaining flags go straight through, uninterpreted).
+(or `--json`/`--jq`). Most other verbs pass through to `gh`; `pr review
+--approve` and `pr review -a` first resolve the PR number and author so an
+author credential can be redirected to the protected SPipe admission status.
 
 | Verb | Passthrough target |
 |---|---|
@@ -149,13 +150,26 @@ a high-capability exact-head review at `high` effort or above that reports zero
 P0/P1 findings can request the live scoped gate instead:
 
 ```bash
-gh workflow run review-admission.yml --ref main \
+HEAD_SHA=$(gh pr view "$PR_NUMBER" --repo ormastes/simple --json headRefOid --jq .headRefOid)
+gh workflow run review-admission.yml --repo ormastes/simple --ref main \
   -f pull_request_number="$PR_NUMBER" \
   -f session_id="$SESSION_ID" \
   -f reviewer_model="$REVIEWER_MODEL" \
   -f reviewer_effort="$REVIEWER_EFFORT" \
   -f self_attestation='PASS:0:0'
 ```
+
+Poll only that captured head:
+
+```bash
+gh api "repos/ormastes/simple/commits/$HEAD_SHA/check-runs?check_name=SPipe%20Self%20Review%20Admission" \
+  --jq ".check_runs[] | select(.head_sha == \"$HEAD_SHA\") | [.status,.conclusion] | @tsv"
+```
+
+This Simple-hosted workflow owns its internal policy evaluation. The generic
+SPipe MCP path is different: call `spipe_self_review_privilege_evaluate`, then
+call `spipe_self_review_approve` only when evaluation allows it. Do not combine
+or reorder those paths.
 
 The trusted default-branch workflow resolves the PR head, base, merge base,
 diff, active protected ruleset, authorized dispatcher, and external policy

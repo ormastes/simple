@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 24 | 24 | 0 | 0 |
+| 26 | 26 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -232,7 +232,7 @@ expect(log.contains("pr create --title T --body B --base main")).to_equal(true)
 
 - Verify: detects the same author before provider approval and does not submit APPROVED
    - Expected: code equals `2`
-   - Expected: log contains `pr view 42 --json author --jq .author.login`
+   - Expected: log contains `pr view 42 --json number,author`
    - Expected: log does not contain `pr review 42 --approve`
 
 
@@ -247,8 +247,56 @@ step("Verify: detects the same author before provider approval and does not subm
 val dir = install_fake_gh(FAKE_GH_SAME_AUTHOR)
 val (code, log) = run_github_with_fake_gh(dir, ["pr", "review", "42", "--approve"])
 expect(code).to_equal(2)
-expect(log.contains("pr view 42 --json author --jq .author.login")).to_equal(true)
+expect(log.contains("pr view 42 --json number,author")).to_equal(true)
 expect(log.contains("pr review 42 --approve")).to_equal(false)
+```
+
+</details>
+
+#### recognizes -a and resolves an omitted selector from the current branch
+
+- Verify: recognizes -a and resolves an omitted selector from the current branch
+   - Expected: code equals `2`
+   - Expected: log contains `pr view --json number,author`
+   - Expected: log does not contain `pr review -a`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Verify: recognizes -a and resolves an omitted selector from the current branch")
+val dir = install_fake_gh(FAKE_GH_SAME_AUTHOR)
+val (code, log) = run_github_with_fake_gh(dir, ["pr", "review", "-a"])
+expect(code).to_equal(2)
+expect(log.contains("pr view --json number,author")).to_equal(true)
+expect(log.contains("pr review -a")).to_equal(false)
+```
+
+</details>
+
+#### resolves a URL selector and uses the returned PR number
+
+- Verify: resolves a URL selector and uses the returned PR number
+   - Expected: code equals `2`
+   - Expected: log contains `pr view https://github.com/ormastes/simple/pull/42 --json number,author`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Verify: resolves a URL selector and uses the returned PR number")
+val dir = install_fake_gh(FAKE_GH_SAME_AUTHOR)
+val (code, log) = run_github_with_fake_gh(dir, ["pr", "review", "https://github.com/ormastes/simple/pull/42", "--approve"])
+expect(code).to_equal(2)
+expect(log.contains("pr view https://github.com/ormastes/simple/pull/42 --json number,author")).to_equal(true)
 ```
 
 </details>
@@ -410,20 +458,22 @@ expect(_github_author_approval_rejected("ordinary validation error")).to_be(fals
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 step("Verify: exposes exact review dispatch poll steps for common agent searches")
 val steps = _self_review_steps("42")
 expect(steps[0]).to_contain("APPROVED")
-expect(steps[1]).to_contain("high/xhigh/max/ultra")
-expect(steps[2]).to_contain("P0=0")
-expect(steps[4]).to_contain("pull_request_number=42")
-expect(steps[4]).to_contain("self_attestation='PASS:0:0'")
-expect(steps[5]).to_contain("exact head")
-expect(steps[6]).to_contain("not GitHub provider APPROVED")
-expect(steps[7]).to_contain("spipe self-review-guide")
+expect(steps[1]).to_contain("--repo ormastes/simple")
+expect(steps[2]).to_contain("high/xhigh/max/ultra")
+expect(steps[3]).to_contain("P0=0")
+expect(steps[5]).to_contain("pull_request_number=42")
+expect(steps[5]).to_contain("self_attestation='PASS:0:0'")
+expect(steps[6]).to_contain("$HEAD_SHA")
+expect(steps[7]).to_contain("evaluate privilege first")
+expect(steps[8]).to_contain("not GitHub provider APPROVED")
+expect(steps[9]).to_contain("spipe self-review-guide")
 ```
 
 </details>
@@ -583,8 +633,8 @@ expect(_default_fields("issue")).to_equal("number,title,state,author,updatedAt")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 24 |
-| Active scenarios | 24 |
+| Total scenarios | 26 |
+| Active scenarios | 26 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
