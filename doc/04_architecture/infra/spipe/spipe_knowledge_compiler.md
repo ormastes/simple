@@ -2159,3 +2159,39 @@ store/backend factory, installer, synthetic authority, or public DI seam.  The
 fixture exposes observations and forced transport barriers, never authority
 construction.  It is first-slice contract evidence only and cannot stand in for
 a durable quorum service or satisfy W5A-65..93.
+
+### 21.14 Non-admitted sealed snapshot-read kernel
+
+`SnapshotAuthorityPortV1` is frozen here as a **non-admitted read kernel**, not
+as an available authority, store wrapper, or public extension point.  Its sole
+trusted input is a private, composition-root-branded
+`PublishedAuthorityInventoryV1`.  The kernel proves one closed seven-coordinate
+binding `{workspaceUid, projectUidOrNull, worktreeUid, baseSnapshotUid,
+authoritySnapshotUid, revisionId, registryRevisionId}` and additionally checks
+the authority-instance UID and authority-manifest digest carried by that
+published inventory.  It returns opaque canonical-target or directory-target
+**candidates** only; neither candidate is a capability, a locator, a grant, or
+a renderable value.
+
+The kernel is lexically sealed.  It imports no external open operation and no
+MCP, URI, cursor, filesystem, store, or projection module.  Conversely those
+modules cannot construct its inventory, view, target candidate, directory
+candidate, or expected-read binding.  Its only tests are private fixture tests
+inside the same sealed composition; fixtures may exercise malformed,
+cross-bound, swapped-digest, and target-membership negatives, but they are not
+production authority evidence and must not expose a public factory, inventory
+builder, signer, or dependency-injection seam.
+
+There is deliberately no positive canonical open in this slice.  Positive
+canonical open remains blocked on, in order: (1) a service-backed, durably
+published `PublishedAuthorityInventoryV1`; (2) the real
+`AuthorizationPortV1` canonical-read and cursor extension; and (3) a branded
+`ProjectionPortV1`/resolver consuming the resulting verified grant.  Until all
+three have independent production evidence, all snapshot-read results are
+non-admitted and cannot satisfy Wave 5 URI, MCP, cursor, materializer, or strict
+trace claims.
+
+The trace-inventory candidate is frozen as forensic material: its aliased-object
+limit bypass means it cannot establish unique inventory membership.  It is not
+strict trace completion, is not reusable as a fixture oracle, and must be
+replaced by a fresh independently reviewed implementation.

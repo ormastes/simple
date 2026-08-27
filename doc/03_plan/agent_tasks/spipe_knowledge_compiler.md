@@ -1144,6 +1144,29 @@ raw snapshot APIs, and exact `spipe-markdown-token-v1@1` <=6,000-token gate.
 Rejected cursor code is forensic evidence only; no owner may delete or weaken
 those contracts.
 
+### Wave 5A-R — sealed snapshot-read contract (non-admitted)
+
+**Owner:** read-authority design owner. **Deliverables:** freeze the private
+`SnapshotAuthorityPortV1` read kernel and opaque target/directory candidates.
+Its only trusted input is composition-root-branded
+`PublishedAuthorityInventoryV1`; it validates the exact seven-coordinate
+workspace/project/worktree/base-snapshot/authority-snapshot/revision/registry
+binding plus authority instance and manifest digest.  It imports no external
+open, MCP, URI, cursor, filesystem, store, or projection surface and exports no
+public constructor, inventory builder, signer, locator, grant, or DI seam.
+
+**Test scope:** private fixture-only negative brand, binding, digest, and
+membership cases.  The fixture cannot prove positive canonical open or strict
+trace completion.  Freeze the existing trace-inventory candidate as forensic
+only because its aliased-object limit bypass permits non-unique membership.
+
+**Exit gate:** independent highest-capability design review and `git diff
+--check`; this is a contract freeze only, not a Wave 5 admission.  Positive
+canonical open remains serially blocked on service-backed durable inventory
+publication, real AuthorizationPort canonical-read/cursor verification, then
+ProjectionPort/resolver integration.  URI/MCP/cursor/materializer and strict
+trace gates remain open.
+
 ### 10.24 Wave 5a commit-publisher prerequisite (2026-08-26)
 
 **Status: W5A authority primitive is `NON-ADMITTED`.** Existing stores persist

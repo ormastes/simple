@@ -2766,3 +2766,35 @@ or authority response.  Valid signed vectors originate inside that sealed
 fixture; public tests supply only invalid/malformed values.  This permits
 negative trust-boundary evidence without granting synthetic publication
 authority or claiming durable-service admission.
+
+### 20.3 Snapshot-read kernel: closed, fixture-only, and non-admitted
+
+The read-kernel implementation boundary is
+`SnapshotAuthorityPortV1.openBoundSnapshot(binding)`.  It accepts no raw
+manifest, map, path, store, snapshot handle, URI, cursor, or projection object.
+Its sealed composition root internally supplies its only admissible value: a
+private branded `PublishedAuthorityInventoryV1`; it does not expose or rename
+the separate `TargetInventoryStoreV1.openPublishedAuthorityInventoryV1`
+boundary.  Before a result is exposed,
+the kernel compares all seven binding coordinates
+`{workspaceUid,projectUidOrNull,worktreeUid,baseSnapshotUid,
+authoritySnapshotUid,revisionId,registryRevisionId}` plus
+`authorityInstanceUid` and `authorityManifestDigest`; a mismatch returns a
+closed non-admission failure.  `resolveCanonicalTarget` and
+`listDirectoryTarget` return opaque candidate values with no locator, byte
+reader, grant, URI, path, cursor position, or rendering method.
+
+This module has no imports from external-open, MCP, URI parsing, cursor,
+filesystem, store, or projection surfaces.  Its private fixture tests are
+limited to shape/brand/binding/membership negatives and opaque-result checks.
+They cannot create a positive open, call a renderer, or stand in for a durable
+publication.  No public factory, installer, fake inventory builder, or test DI
+hook exists.
+
+The first positive canonical open is intentionally deferred: a service must
+first publish the exact inventory durably, then `AuthorizationPortV1` must
+verify the canonical-read receipt and issue/verify a cursor when applicable,
+and only then may `ProjectionPortV1` and the resolver consume a verified grant.
+The frozen trace-inventory candidate is excluded from this kernel because its
+aliased-object limit bypass invalidates unique-membership proof; it supplies no
+strict-trace completion evidence.

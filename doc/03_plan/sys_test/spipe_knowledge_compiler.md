@@ -1908,3 +1908,23 @@ synthetic authority.
 W5A-99..104 are prerequisite gates for reviewing the first source slice.  They
 do not replace W5A-94..98; W5A-94..98 remain the initial codec/client/main
 coverage and W5A-65..93 remain future durable-service evidence.
+
+### 22.12 Snapshot-read contract-only schedules
+
+W5A-105..108 are private-fixture design checks, not authority or trace
+admission evidence.  The fixture owns a sealed
+`PublishedAuthorityInventoryV1`; tests cannot manufacture it or inject a store,
+filesystem, URI, cursor, MCP, projection, or external-open substitute.
+
+| ID | Fixture/boundary | Exact oracle |
+|---|---|---|
+| W5A-105 | supply a structurally similar or foreign-brand inventory | read kernel denies before it produces any candidate. |
+| W5A-106 | mutate independently one of the seven binding coordinates, authority-instance UID, or authority-manifest digest | denial before target/directory candidate lookup or any external call. |
+| W5A-107 | ask for absent/wrong-kind target or directory membership | opaque candidate is absent/denied; no locator, grant, path, cursor, or projection call is exposed. |
+| W5A-108 | inspect module imports/exports and private fixture boundary | no external open/MCP/URI/cursor/filesystem/store/projection import and no public factory, inventory builder, signer, or DI seam. |
+
+There is no positive canonical-open scenario in W5A-105..108.  Such a scenario
+awaits service-backed durable published inventory, real canonical-read/cursor
+AuthorizationPort support, and then ProjectionPort/resolver integration.  The
+trace-inventory candidate with the aliased-object limit bypass is frozen
+forensic material and cannot discharge any strict trace scenario.
