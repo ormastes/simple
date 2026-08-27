@@ -22,7 +22,7 @@ Launch the shipped cached `bin/caret` wrapper with the offline dummy provider.
 | Requirements | REQ-LLM-CARET-TUI-HARDEN-007, |
 | Plan | doc/03_plan/sys_test/llm_caret_cli_tui_hardening.md |
 | Source | `test/03_system/app/llm_caret/feature/llm_caret_tui_pty_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-08-27 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Scope
@@ -49,7 +49,41 @@ qualification.
 
 ### REQ-LLM-CARET-TUI-HARDEN-007: renderer routing uses real terminal state
 
-#### should route forced and automatic TTY sessions while keeping piped auto output plain
+#### routes forced and automatic TTY sessions while keeping piped auto output plain
+
+- forced and automatic TTY sessions are routed while piped auto output stays plain
+- Open the caret TUI
+- Send a prompt through the visible input
+- Check transcript and status
+   - Expected: result.exit_code equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 15 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-LLM-CARET-TUI-HARDEN-007
+# @req REQ-LLM-CARET-TUI-HARDEN-009
+# @req REQ-LLM-CARET-HIDDEN-008
+# @req REQ-LLM-CARET-FULL-003
+# @req REQ-SSPEC-SYSTEM
+step("forced and automatic TTY sessions are routed while piped auto output stays plain")
+step("Open the caret TUI")
+val result = run_caret_pty_case("routing")
+step("Send a prompt through the visible input")
+expect(result.stdout).to_contain("case=forced-tui-route status=PASS")
+expect(result.stdout).to_contain("case=auto-tty-route status=PASS")
+expect(result.stdout).to_contain("case=piped-auto-plain status=PASS")
+step("Check transcript and status")
+expect(result.stdout).to_contain("evidence_status=PASS")
+expect(result.exit_code).to_equal(0)
+```
+
+</details>
+
 ### REQ-LLM-CARET-TUI-HARDEN-009: terminal lifecycle is restored
 
 #### should restore terminal state after slash exit Ctrl-C Ctrl-D and EOF
@@ -426,67 +460,60 @@ Requirements covered by the scenarios in this manual:
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `4b8890d1ac37605cf2d911fbff81f1f9c8d265052bd82ad2e7e9fd26ffc091bb`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `b822141cb6359e9e0d8c7afc7d0f07573a6fa41f1ef63145f1f355b2a46162e4`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `4b8890d1ac37605cf2d911fbff81f1f9c8d265052bd82ad2e7e9fd26ffc091bb`.
+Source SHA-256: `b822141cb6359e9e0d8c7afc7d0f07573a6fa41f1ef63145f1f355b2a46162e4`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `4b8890d1ac37605cf2d911fbff81f1f9c8d265052bd82ad2e7e9fd26ffc091bb`  
+Source SHA-256: `b822141cb6359e9e0d8c7afc7d0f07573a6fa41f1ef63145f1f355b2a46162e4`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **74/100**; effective score: **49/100**; blockers: **1**.
+Raw score: **82/100**; effective score: **82/100**; blockers: **0**.
 
-SSpec documentization score: 49/100
+SSpec documentization score: 82/100
 source: test/03_system/app/llm_caret/feature/llm_caret_tui_pty_spec.spl
 mirror: doc/06_spec/03_system/app/llm_caret/feature/llm_caret_tui_pty_spec.md (current)
-findings: 14 blockers: 1
-  narrative=100 structure=60 oracle=70
-  traceability=60 evidence=70 coverage=100 maintainability=70
+findings: 12 blockers: 0
+  narrative=100 structure=70 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-  raw=74; blocker cap makes effective=49
 doc/06_spec/03_system/app/llm_caret/feature/llm_caret_tui_pty_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
 doc/06_spec/03_system/app/llm_caret/feature/llm_caret_tui_pty_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, assumptions/preconditions, primary workflow, unsupported/limitations
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/app/llm_caret/feature/llm_caret_tui_pty_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 9 unexplained numeric expected value(s)
+test/03_system/app/llm_caret/feature/llm_caret_tui_pty_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 10 unexplained numeric expected value(s)
   why: Reviewers need to know why a magic expected value is authoritative.
   improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/03_system/app/llm_caret/feature/llm_caret_tui_pty_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 4 declared requirement(s) have no scenario binding
-  why: A requirement list without scenario evidence is inventory, not traceability.
-  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
-test/03_system/app/llm_caret/feature/llm_caret_tui_pty_spec.spl:70:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'should route forced and automatic TTY sessions while keeping piped auto output plain' has no visible step flow
-  why: Ordered visible actions make the manual operable.
-  improve: Add ordered step("...") calls for meaningful actions.
-test/03_system/app/llm_caret/feature/llm_caret_tui_pty_spec.spl:70:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should route forced and automatic TTY sessions while keeping piped auto output plain' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/03_system/app/llm_caret/feature/llm_caret_tui_pty_spec.spl:89:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should restore terminal state after slash exit Ctrl-C Ctrl-D and EOF' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/03_system/app/llm_caret/feature/llm_caret_tui_pty_spec.spl:89:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should restore terminal state after slash exit Ctrl-C Ctrl-D and EOF' has no retained capture or evidence
+test/03_system/app/llm_caret/feature/llm_caret_tui_pty_spec.spl:70:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'routes forced and automatic TTY sessions while keeping piped auto output plain' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/app/llm_caret/feature/llm_caret_tui_pty_spec.spl:103:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should preserve UTF-8 editing navigation and bounded terminal geometry' describes the test rather than its outcome
+test/03_system/app/llm_caret/feature/llm_caret_tui_pty_spec.spl:88:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should restore terminal state after slash exit Ctrl-C Ctrl-D and EOF' describes the test rather than its outcome
   why: Outcome names describe product behavior rather than test mechanics.
   improve: Rename it to the observable product outcome.
-test/03_system/app/llm_caret/feature/llm_caret_tui_pty_spec.spl:103:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should preserve UTF-8 editing navigation and bounded terminal geometry' has no retained capture or evidence
+test/03_system/app/llm_caret/feature/llm_caret_tui_pty_spec.spl:88:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should restore terminal state after slash exit Ctrl-C Ctrl-D and EOF' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/app/llm_caret/feature/llm_caret_tui_pty_spec.spl:115:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should recover from malformed UTF-8 without leaking invalid bytes' describes the test rather than its outcome
+test/03_system/app/llm_caret/feature/llm_caret_tui_pty_spec.spl:102:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should preserve UTF-8 editing navigation and bounded terminal geometry' describes the test rather than its outcome
   why: Outcome names describe product behavior rather than test mechanics.
   improve: Rename it to the observable product outcome.
-test/03_system/app/llm_caret/feature/llm_caret_tui_pty_spec.spl:115:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should recover from malformed UTF-8 without leaking invalid bytes' has no retained capture or evidence
+test/03_system/app/llm_caret/feature/llm_caret_tui_pty_spec.spl:102:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should preserve UTF-8 editing navigation and bounded terminal geometry' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/app/llm_caret/feature/llm_caret_tui_pty_spec.spl:129:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should reject forced TUI before terminal mutation when raw mode is unavailable' describes the test rather than its outcome
+test/03_system/app/llm_caret/feature/llm_caret_tui_pty_spec.spl:114:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should recover from malformed UTF-8 without leaking invalid bytes' describes the test rather than its outcome
   why: Outcome names describe product behavior rather than test mechanics.
   improve: Rename it to the observable product outcome.
-test/03_system/app/llm_caret/feature/llm_caret_tui_pty_spec.spl:140:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should show a redacted offline Claude provider error while restoring the terminal' describes the test rather than its outcome
+test/03_system/app/llm_caret/feature/llm_caret_tui_pty_spec.spl:128:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should reject forced TUI before terminal mutation when raw mode is unavailable' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/app/llm_caret/feature/llm_caret_tui_pty_spec.spl:139:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should show a redacted offline Claude provider error while restoring the terminal' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/app/llm_caret/feature/llm_caret_tui_pty_spec.spl:154:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should show the offline Claude response through the visible TUI' describes the test rather than its outcome
   why: Outcome names describe product behavior rather than test mechanics.
   improve: Rename it to the observable product outcome.
 <!-- sspec-maintain:scorecard:end -->

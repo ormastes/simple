@@ -17,7 +17,6 @@ Verifies the currently implemented FAT32 mount-table surface:
 use std.spec.step
 
 use std.spipe.*
-use std.io_runtime.{read_file}
 use std.fs_driver.block_device.{BlockDevice}
 use std.fs_driver.ops.{FsDriver}
 use std.fs_driver.fat32_stub.{FsFat32Driver}
@@ -92,16 +91,17 @@ describe "FAT32 hosted seam — mount table registration":
         val boot_driver = mt.resolve_driver("/boot").unwrap()
         expect(boot_driver.driver_name()).to_equal("Fat32Driver")
 
-    it "stays on the shared FsFat32Driver surface":
+    it "keeps each shared FsFat32Driver instance independently mounted":
         # @req REQ-SSPEC-INTEGRATION
-        step("stays on the shared FsFat32Driver surface")
-        val source = read_file("test/integration/storage/dbfs/fat32_no_regression_spec.spl")
-        val legacy_type = "Fat32" + "Driver"
-        expect(source.contains("use os.services.fat32.fat32")).to_equal(false)
-        expect(source.contains(" " + legacy_type + ".new(")).to_equal(false)
-        expect(source.contains("=" + legacy_type + ".new(")).to_equal(false)
-        expect(source.contains("(" + legacy_type + ".new(")).to_equal(false)
-        expect(source.contains("FsFat32Driver.new(")).to_equal(true)
+        step("each shared FsFat32Driver instance mounts independently")
+        val table = MountTable.new()
+        val boot = FsFat32Driver.new("Fat32Driver", MockFat32BlockDevice.new())
+        val rescue = FsFat32Driver.new("Fat32Driver", MockFat32BlockDevice.new())
+        table.mount("/boot", DriverInstance.Fat32(boot), MountOptions.read_only()).unwrap()
+        table.mount("/rescue", DriverInstance.Fat32(rescue), MountOptions.read_only()).unwrap()
+        expect(table.resolve_driver("/boot/ANY.BIN").unwrap().driver_name()).to_equal("Fat32Driver")
+        expect(table.resolve_driver("/rescue/ANY.BIN").unwrap().driver_name()).to_equal("Fat32Driver")
+        expect(table.resolve_driver("/missing/ANY.BIN").is_err()).to_equal(true)
 
     it "routes atomic replace lifecycle operations through the shared mount table":
         # @req REQ-SSPEC-INTEGRATION

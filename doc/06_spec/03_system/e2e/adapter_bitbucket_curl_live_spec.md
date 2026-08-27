@@ -16,6 +16,20 @@
 ### adapter_bitbucket_curl — live (skipped)
 
 #### skipped (no creds: set BB_WORKSPACE/BB_REPO/BB_TOKEN/BB_TEST_PR_ID)
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+expect(BB_WS == "" or BB_RP == "" or BB_TK == "" or BB_PR_ID == 0).to_equal(true)
+```
+
+</details>
+
 ### adapter_bitbucket_curl — live read-only smoke
 
 #### get_pr returns success and id matches
@@ -114,7 +128,7 @@ expect(reason.len() > 0).to_equal(true)
 | Category | Other |
 | Status | Active |
 | Source | `test/03_system/e2e/adapter_bitbucket_curl_live_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-08-27 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -147,27 +161,26 @@ Requirements covered by the scenarios in this manual:
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `b52d746aa9cc7df1d06a1d0edb91d854f33154c253a303be85feb2beeb709657`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `55df14ab0f4eafdcb496cd6e65d91fbc263f9853c70581c0e10ab0e5446de10c`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `b52d746aa9cc7df1d06a1d0edb91d854f33154c253a303be85feb2beeb709657`.
+Source SHA-256: `55df14ab0f4eafdcb496cd6e65d91fbc263f9853c70581c0e10ab0e5446de10c`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `b52d746aa9cc7df1d06a1d0edb91d854f33154c253a303be85feb2beeb709657`  
+Source SHA-256: `55df14ab0f4eafdcb496cd6e65d91fbc263f9853c70581c0e10ab0e5446de10c`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **83/100**; effective score: **49/100**; blockers: **1**.
+Raw score: **89/100**; effective score: **89/100**; blockers: **0**.
 
-SSpec documentization score: 49/100
+SSpec documentization score: 89/100
 source: test/03_system/e2e/adapter_bitbucket_curl_live_spec.spl
 mirror: doc/06_spec/03_system/e2e/adapter_bitbucket_curl_live_spec.md (current)
-findings: 8 blockers: 1
+findings: 7 blockers: 0
   narrative=100 structure=60 oracle=100
-  traceability=60 evidence=100 coverage=100 maintainability=55
+  traceability=100 evidence=100 coverage=100 maintainability=55
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-  raw=83; blocker cap makes effective=49
 doc/06_spec/03_system/e2e/adapter_bitbucket_curl_live_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
@@ -177,19 +190,16 @@ doc/06_spec/03_system/e2e/adapter_bitbucket_curl_live_spec.md:1:1: warning SSDOC
 test/03_system/e2e/adapter_bitbucket_curl_live_spec.spl:1:1: advice SSDOC-MNT-001 [maintainability] (-15): multiple scenarios form a flat, unfolded presentation
   why: Long flat dumps obscure the primary workflow.
   improve: Group secondary detail and keep the primary workflow visible.
-test/03_system/e2e/adapter_bitbucket_curl_live_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 1 declared requirement(s) have no scenario binding
-  why: A requirement list without scenario evidence is inventory, not traceability.
-  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
 test/03_system/e2e/adapter_bitbucket_curl_live_spec.spl:66:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'skipped (no creds: set BB_WORKSPACE/BB_REPO/BB_TOKEN/BB_TEST_PR_ID)' has no visible step flow
   why: Ordered visible actions make the manual operable.
   improve: Add ordered step("...") calls for meaningful actions.
-test/03_system/e2e/adapter_bitbucket_curl_live_spec.spl:74:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'get_pr returns success and id matches' has no visible step flow
+test/03_system/e2e/adapter_bitbucket_curl_live_spec.spl:73:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'get_pr returns success and id matches' has no visible step flow
   why: Ordered visible actions make the manual operable.
   improve: Add ordered step("...") calls for meaningful actions.
-test/03_system/e2e/adapter_bitbucket_curl_live_spec.spl:87:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'list_pr_comments succeeds' has no visible step flow
+test/03_system/e2e/adapter_bitbucket_curl_live_spec.spl:86:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'list_pr_comments succeeds' has no visible step flow
   why: Ordered visible actions make the manual operable.
   improve: Add ordered step("...") calls for meaningful actions.
-test/03_system/e2e/adapter_bitbucket_curl_live_spec.spl:99:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'get_pr_statuses succeeds' has no visible step flow
+test/03_system/e2e/adapter_bitbucket_curl_live_spec.spl:98:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'get_pr_statuses succeeds' has no visible step flow
   why: Ordered visible actions make the manual operable.
   improve: Add ordered step("...") calls for meaningful actions.
 <!-- sspec-maintain:scorecard:end -->
