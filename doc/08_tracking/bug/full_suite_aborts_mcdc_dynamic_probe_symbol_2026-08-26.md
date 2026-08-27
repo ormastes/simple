@@ -43,7 +43,62 @@ crash and carries no instruction.
   `stdlib import … resolves from the project stdlib roots only` but still returns a value; the
   same probe inside the project is silent. Neither produces this hard error.
 
-## No discriminator found yet — and one false lead recorded
+## WORKING HYPOTHESIS (2026-08-27): co-compiled duplicates on the directory-only path
+
+The same run that aborts emits **11** duplicate-definition warnings, including:
+
+```
+warning: public function `discover_test_files` has 2 co-compiled definitions with 2 differing
+         signatures ((text)->[text] vs (text,TestOptions)->[text]); JIT call sites resolve ...
+warning: public function `env_get` has 4 co-compiled definitions with 2 differing signatures
+warning: public function `mcdc_condition_key` has 2 co-compiled definitions with 2 differing signatures
+warning: class `Trace32Adapter` has 2 co-compiled definitions across 2 modules; the interpreter
+         resolves class members by NAME across modules ...
+```
+
+`discover_test_files` is **the directory-expansion function** — a directory target calls it, a file
+target does not. That makes its two differing co-compiled signatures a plausible explanation for
+the discriminator above, but it does **not** establish causation. `mcdc_condition_key` being
+doubled the same way puts the MC/DC machinery in the same blast radius as the symbol named in the
+abort; it remains correlation until a controlled change removes or selects the duplicate and the
+two-file directory repro stops aborting.
+
+The interpreter resolving members **by name across modules** is a known defect class in this repo,
+and the warnings prove that class is present in the test runner's dependency graph. Evidence still
+needed for this specific abort: remove the duplicate `discover_test_files` definition or force the
+intended owner, then show the directory repro passes while an equivalent sabotage restores the
+failure. Until that experiment exists, the root cause remains **OPEN**.
+
+Likely source of the duplication: facade modules that re-export a sibling family wholesale, e.g.
+`src/lib/nogc_async_mut/test_runner/test_runner_types.spl:1` is
+`export use std.nogc_sync_mut.test_runner.test_runner_types.*`. A wildcard re-export makes both
+copies co-compiled, so every name in the family exists twice.
+
+**Not fixed here.** De-duplicating those module families is a real refactor with wide blast radius
+across the test runner, and doing it blind — while `bin/simple test` cannot run to give a
+regression signal — would be reckless. The right order is: fix the duplication (or make the
+interpreter's cross-module resolution deterministic), then re-run this repro, which is now a
+two-second check rather than a 15,000-file run.
+
+## DISCRIMINATOR FOUND (2026-08-27): directory target aborts, file target does not
+
+The same single spec, same binary, same tree:
+
+```
+bin/simple test test/zz_mini            --no-cover-check   ->  error: ... not found   (ABORTS)
+bin/simple test test/zz_mini/foo_spec.spl --no-cover-check ->  Results: 1 total       (RUNS)
+```
+
+A **two-file** directory reproduces it, so this is fast to iterate on — no 15k-file run needed.
+The trigger is the *target being a directory*, not batch size and not any particular spec: the
+directory used here contains ordinary compiler specs with no MC/DC reference at all.
+
+That narrows it to whatever the directory path does differently from the file path before the
+per-file loop — discovery/expansion and the session setup that follows it. It also explains the
+one fact that previously did not fit: a concurrent session's run was executing specs normally
+because of how it invoked the runner, not because the defect was intermittent.
+
+## Earlier: no discriminator, and one false lead recorded
 
 An earlier draft of this record claimed that adding `--no-mcdc` avoided the abort, and concluded
 MC/DC must be active by some non-env route. **That was wrong.** `--no-mcdc` is not a `test`
