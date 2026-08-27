@@ -491,11 +491,11 @@ a claim that SFFI v2 is complete.
 - FAIL (global admission): runtime source backing is not exact artifact-bound
   ABI/ownership verification or trusted signature evidence.
 
-## Follow-up: Engine 2D scalar math containment (2026-08-27)
+## Follow-up: Engine scalar math containment (2026-08-27)
 
-- PASS (static/source): `engine/math2d` explicitly tags its three raw scalar
-  math declarations and confines its three existing direct wrapper calls to
-  lexical `unsafe(ffi)` expressions.
+- PASS (static/source): `engine/math2d` and `engine/math3d` explicitly tag
+  their four raw scalar math declarations and confine their four existing
+  direct wrapper calls to lexical `unsafe(ffi)` expressions.
 - PASS (performance shape): the source-shape guard confirms the same three
   direct calls. No helper indirection, allocation, copy, lookup, lock, retry,
   or additional provider call was introduced. No runtime benchmark was run.
