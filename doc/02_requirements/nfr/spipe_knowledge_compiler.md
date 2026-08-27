@@ -168,27 +168,43 @@ Final verification must trace every acceptance criterion to authoritative curren
 
 Evidence: final verification matrix, review record, command log, and commit/file-count evidence. Traces: AC-17, DC-1.
 
+### Selected host-authority profile
+
+#### NFR-SPKC-026 — Authority-service safety, availability, and performance
+
+The transactional authority service is a required P3 availability dependency for publication and canonical authority open. It must use mutually authenticated service/client identity, least-authority operation capabilities, workspace/tenant isolation, replay protection, durable audit records, and fail-closed authorization. Its own durable decision, never a client cache or filesystem pointer, is authoritative.
+
+Authentication or availability failure before journal admission must return the separate `ServiceTransportFailureV1` request-layer failure with no mutation or receipt; it is outside the closed P3 outcome algebra. A timeout, partition, or lost response may occur after the service has made a durable authority decision. In that case the client must never infer success, publish locally, or fall back: it must resolve the immutable request/idempotency key and receive the exact accepted terminal/winner evidence or a definitive no-admission result. The service must publish explicit RTO/RPO, backpressure, queue, single-writer or quorum, fencing, and split-brain prevention policies; acknowledgement before durable decision is forbidden. Wave 0 must set measured local and remote P95/P99 publish/open latency, durable throughput, queue bounds, and restart-recovery targets. Measurements must include contention, crash/replay, lost-response resolution, and service-unavailable cases, and no target may trade away durability or linearizability.
+
+Evidence: deterministic pre-admission authentication/unavailability fixtures proving `ServiceTransportFailureV1` has no journal admission, receipt, or mutation; deterministic commit-then-lost-response and partition/replay fixtures proving idempotency-key resolution returns the exact accepted terminal/winner or definitive no-admission; plus independent multi-client, SIGKILL/restart, authorization, load, and latency fixtures proving exactly one linearizable winner and no client-side publication fallback. Traces: AC-5, AC-7, AC-8, AC-14, AC-17.
+
+#### NFR-SPKC-027 — Optional native-provider certification
+
+An optional native authority backend must be capability-bound, input-validated, memory-safe, and fail closed on every unadmitted host/filesystem tuple. For each admitted OS/kernel/filesystem/version tuple, certification must prove exact raw-byte predecessor behavior (including paired-null genesis), exclusive fencing, parent durability, SIGKILL recovery, the closed errno/result map, and golden ABI parity with the authority service. The compatibility matrix must prove every other tuple, including Node, is unavailable before P3 stages or mutates publication state. Recertification is required whenever the native runtime, kernel, filesystem, or provider changes.
+
+Evidence: per-tuple stress/fault/errno fixtures, contention/recovery measurements for fsync, fencing, and conditional replacement latency, and a negative activation matrix. Traces: AC-7, AC-14, AC-17.
+
 ## Acceptance-Criteria Trace Summary
 
 | State AC | Primary NFRs |
 |---|---|
-| AC-1 | NFR-SPKC-001–025 (selected NFR set) |
+| AC-1 | NFR-SPKC-001–027 (selected NFR set) |
 | AC-2 | 009–010, 017–019, 022–024 |
 | AC-3 | 001–003, 009–010 |
 | AC-4 | 001–003, 007, 012–016 |
-| AC-5 | 001, 004–006, 011, 019 |
+| AC-5 | 001, 004–006, 011, 019, 026 |
 | AC-6 | 005–006, 011, 019, 022 |
-| AC-7 | 004, 008–010, 023 |
-| AC-8 | 002, 008–010, 020–021 |
+| AC-7 | 004, 008–010, 023, 026–027 |
+| AC-8 | 002, 008–010, 020–021, 026 |
 | AC-9 | 001, 017, 023 |
 | AC-10 | 003, 007, 016, 018 |
 | AC-11 | 024 |
 | AC-12 | 002–003, 006–007, 012–016 |
 | AC-13 | 020–021, 024 |
-| AC-14 | 003–021, 023 |
+| AC-14 | 003–021, 023, 026–027 |
 | AC-15 | 003, 016, 019–022 |
 | AC-16 | 018, 020–021, 024 |
-| AC-17 | 020–025 |
+| AC-17 | 020–027 |
 | DC-1 | 025 (delivery control, separate from product AC-1–17) |
 
 ## Design-Owned Measurement Decisions
