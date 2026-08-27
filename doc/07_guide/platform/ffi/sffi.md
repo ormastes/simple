@@ -78,6 +78,23 @@ Before publishing an ordinary wrapper, preserve the actual ABI result and:
 
 If an obligation is unknown, retain an unsafe API or isolate the provider.
 
+### Direct runtime-hook warning and migration
+
+Run `scripts/audit/sffi-unsafe-backlog.shs` to inventory owned direct `rt_*`
+declarations that do not yet carry a contract-bearing unsafe boundary. Treat
+its output as a source-only warning queue: it can prioritize containment work,
+but it cannot establish ABI compatibility, nullability, ownership, loaded
+artifact identity, provider verification, or signature admission.
+
+Do **not** apply a blanket autofix to direct `rt_*` calls. A rewrite is allowed
+only when the symbol has an approved per-contract mapping to a canonical safe
+facade, or when it can add the exact declaration annotation and smallest
+lexical `unsafe(capabilities: [ffi])` scope without changing the ABI, error
+meaning, ownership, call count, allocation/copy behavior, lookup/lock work, or
+hot-path dispatch. Otherwise leave the boundary explicitly unsafe and record a
+migration task. In particular, never auto-convert a nullable/sentinel result
+to `nil`, zero, `false`, or empty data.
+
 ### Return representation is part of the ABI
 
 Names do not authorize a conversion between integer and floating-point return

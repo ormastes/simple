@@ -14,6 +14,13 @@ Before adding an `extern fn` or foreign-library wrapper:
 4. Keep extern ownership in the canonical no-GC sync backend; compatibility
    families should export that owner rather than duplicate runtime hooks.
 5. Verify wrapper ABI, error propagation, ownership, and compiled execution.
+6. Run `scripts/audit/sffi-unsafe-backlog.shs` when reviewing direct `rt_*`
+   use. Its result is a source-only warning queue, never signed/provider
+   admission evidence. Do not blanket-autofix calls: use an approved
+   per-contract safe facade mapping, or add only the exact declaration tag and
+   smallest lexical `unsafe(capabilities: [ffi])` scope while preserving ABI,
+   error/null semantics, ownership, call count, and hot-path allocation/copy
+   behavior. Otherwise leave the boundary explicitly unsafe and track it.
 
 Database rule:
 
