@@ -347,6 +347,29 @@ jobs:
                       .app.id == $check.integration_id))' \
             build/convergence-receipt/check-evidence.json >/dev/null
 
+      # GitHub rejects a workflow before job creation when one `run` template
+      # exceeds its service limit. Keep this replay in a second fail-closed
+      # step and reconstruct every local from immutable checked-in/receipt data.
+      - name: Replay convergence content and run pure admission
+        env:
+          VERSION: ${{ steps.freeze.outputs.version }}
+          COMMIT: ${{ steps.freeze.outputs.commit }}
+          EXPECTED_RECEIPT_SHA256: ${{ inputs.convergence_receipt_sha256 }}
+        run: |
+          set -euo pipefail
+          receipt=build/convergence-receipt/convergence-receipt.json
+          test -f "$receipt"
+          release_ref=$(jq -er '.release_ref' "$receipt")
+          main_sha=$(git rev-parse refs/remotes/origin/main)
+          release_sha=$(git rev-parse "refs/remotes/origin/$release_ref")
+          inventory_head=$(jq -er '.provider.release_inventory_head_sha' "$receipt")
+          integration_pr_number=$(jq -er '.provider.integration_pr_number' "$receipt")
+          integration_head_sha=$(jq -er '.provider.integration_head_sha' "$receipt")
+          required_checks=$(jq -cS '
+            [.rules[] | select(.type == "required_status_checks") |
+             .parameters.required_status_checks[] | {context,integration_id}]' \
+            .github/rulesets/spipe-vcs-v3-release-lines.json)
+
           # Exact inventories are recomputed from fetched protected refs.  The
           # reviewed receipt must classify every source-only commit, including
           # the legitimate empty case; an invented [] cannot conceal drift.
