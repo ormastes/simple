@@ -590,3 +590,15 @@ a claim that SFFI v2 is complete.
   lookup, lock, or extra generation pass. No runtime benchmark was run.
 - FAIL (global admission): the canonical file-read provider remains outside
   artifact-bound ABI/ownership verification and trusted-signature admission.
+
+## Follow-up: dashboard remote-session collector containment (2026-08-27)
+
+- PASS (static/source): the collector's one raw session-file declaration and
+  direct call are explicitly unsafe/lexical.
+- PASS (semantics/performance shape): unreadable input is not converted to a
+  fabricated missing task. The existing single direct read is retained with no
+  retry, extra I/O, copy, lookup, lock, or fabricated task. No runtime
+  benchmark was run.
+- FAIL (global admission): the raw text provider has no artifact-bound ABI,
+  ownership, verification, or trusted-signature evidence. This boundary remains
+  unsafe until its public API can propagate a typed error.

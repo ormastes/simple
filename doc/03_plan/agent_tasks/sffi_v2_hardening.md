@@ -467,3 +467,8 @@ passing placeholder.
     input must diagnose and return instead of becoming fabricated empty source.
     Preserve one normal read and one `generate_c_code` call; do not add retries,
     extra I/O, copies, lookup, locks, or code-generation passes.
+87. Keep the dashboard remote-session collector's one raw session-file read
+    explicitly unsafe until its public collection API gains an error channel.
+    Do not silently interpret an unreadable session file as absence; preserve
+    its one direct call with no retry, extra I/O, copy, lookup, lock, or task
+    fabrication.
