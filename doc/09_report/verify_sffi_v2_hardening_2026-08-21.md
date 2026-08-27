@@ -695,3 +695,14 @@ a claim that SFFI v2 is complete.
 - FAIL (global admission): both raw providers lack artifact-bound ABI,
   ownership, verification, and trusted-signature evidence. They remain unsafe
   until the narrow helper APIs can propagate typed provider failure.
+
+## Follow-up: cross-reference lint file-I/O migration (2026-08-27)
+
+- PASS (static/source): the lint no longer declares/calls raw file I/O; its two
+  reads use `read_file_text_result` and its existence checks use `file_exists`.
+- PASS (semantics/performance shape): unreadable source/requirement input emits
+  `XREF005` and stops affected analysis before misleading cross-reference
+  warnings. Normal read/scan count is retained with no retry, extra I/O, copy,
+  lookup, lock, or duplicate lint pass. No runtime benchmark was run.
+- FAIL (global admission): the canonical I/O providers remain outside
+  artifact-bound ABI/ownership verification and trusted-signature admission.

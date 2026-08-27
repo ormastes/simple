@@ -505,3 +505,8 @@ passing placeholder.
     calls and outcome semantics; do not add result-object plumbing, retries,
     extra I/O, copies, lookup, locks, or test execution/coverage passes until
     its narrow helper APIs can carry typed provider failures.
+96. Keep cross-reference lint on safe I/O facades. Unreadable test or
+    requirement input must emit `XREF005` and stop the affected analysis rather
+    than creating misleading missing/unknown-reference warnings. Preserve the
+    normal read/scan count without retries, extra I/O, copies, lookup, locks,
+    or duplicate lint passes.
