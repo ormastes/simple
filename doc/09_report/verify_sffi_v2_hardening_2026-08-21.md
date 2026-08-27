@@ -310,3 +310,15 @@ a claim that SFFI v2 is complete.
 - FAIL (provider): no runtime implementation, interpreter registration, ABI
   contract, provider artifact, trusted signature, or semantic evidence exists.
   This legacy facade remains unsafe-only and cannot be called verified.
+
+## Follow-up: syscall clock/progress lexical authority (2026-08-27)
+
+- PASS (static/source): nine clock/progress declarations are explicitly
+  `unsafe(ffi)` and six executed calls are lexical. Native realtime/monotonic
+  failures retain their negative sentinels rather than becoming a timestamp.
+- PASS (performance shape): progress init and elapsed retain their existing
+  one-clock-read paths; the guard rejects allocation, dynamic lookup, and lock
+  work in the owner.
+- FAIL (global admission): this is a backed source contract, not a signed
+  artifact or semantic verification receipt. The provider remains unsafe and
+  unsigned at repository scope.
