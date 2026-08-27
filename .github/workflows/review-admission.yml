@@ -187,7 +187,7 @@ jobs:
                 title='Scoped self-review rejected'
                 rejection_reason=$failure_stage
                 for decision_file in "$audit_dir/current-decision.json" "$audit_dir/decision.json"; do
-                  if [[ -s "$decision_file" ]] && jq -e '.reason | type == "string" and length > 0' "$decision_file" >/dev/null 2>&1; then
+                  if [[ -s "$decision_file" ]] && jq -e '.allowed == false and (.reason | type == "string" and length > 0)' "$decision_file" >/dev/null 2>&1; then
                     rejection_reason=$(jq -r '.reason' "$decision_file")
                     break
                   fi
@@ -264,9 +264,14 @@ jobs:
           check_id=$(gh api --method POST "repos/$GITHUB_REPOSITORY/check-runs" --input "$RUNNER_TEMP/check-start.json" --jq '.id')
 
           failure_stage='provider fetch or exact changed-manifest binding failed'
-          git fetch --no-tags origin "+refs/pull/$PR_NUMBER/head:refs/remotes/origin/self-review/$PR_NUMBER/head" "+refs/heads/$base_ref_name:refs/remotes/origin/self-review/$PR_NUMBER/base"
+          git fetch --no-tags --no-recurse-submodules origin "+refs/pull/$PR_NUMBER/head:refs/remotes/origin/self-review/$PR_NUMBER/head" "+refs/heads/$base_ref_name:refs/remotes/origin/self-review/$PR_NUMBER/base"
           test "$(git rev-parse refs/remotes/origin/self-review/$PR_NUMBER/head)" = "$head_sha"
-          test "$(git rev-parse refs/remotes/origin/self-review/$PR_NUMBER/base)" = "$base_sha"
+          fetched_base_sha=$(git rev-parse refs/remotes/origin/self-review/$PR_NUMBER/base)
+          if [[ "$fetched_base_sha" != "$base_sha" ]]; then
+            failure_stage='protected base advanced after provider resolution; sync the PR branch, review its new exact head, and dispatch again'
+            echo "self-review admission: protected base advanced from $base_sha to $fetched_base_sha; sync the PR branch, review its new exact head, and dispatch again" >&2
+            exit 1
+          fi
           merge_base_sha=$(git merge-base "$base_sha" "$head_sha")
           scripts/release/self-review-changed-manifest.shs github "$repository_id" "$repository_node_id" "$repository_name" "$PR_NUMBER" "$base_repository_id" "$base_repository_node_id" "$base_repository" "$base_ref" "$base_sha" "$head_sha" "$merge_base_sha" "$audit_dir/changed-paths.sdn"
           diff_sha256=$(awk '$1 == "diff_sha256:" { print $2 }' "$audit_dir/changed-paths.sdn")
@@ -339,8 +344,13 @@ jobs:
           jq -e 'any(.rules[]; .type == "required_status_checks" and .parameters.strict_required_status_checks_policy == true and any(.parameters.required_status_checks[]; .context == "SPipe Self Review Admission"))' <<<"$current_ruleset" >/dev/null
           gh api "repos/$GITHUB_REPOSITORY/rules/branches/$base_ref_name" |
             jq -e --argjson id "$target_ruleset_id" 'any(.[]; .ruleset_id == $id)' >/dev/null
-          git fetch --no-tags origin "+refs/heads/$base_ref_name:refs/remotes/origin/self-review/$PR_NUMBER/base"
-          test "$(git rev-parse refs/remotes/origin/self-review/$PR_NUMBER/base)" = "$base_sha"
+          git fetch --no-tags --no-recurse-submodules origin "+refs/heads/$base_ref_name:refs/remotes/origin/self-review/$PR_NUMBER/base"
+          fetched_base_sha=$(git rev-parse refs/remotes/origin/self-review/$PR_NUMBER/base)
+          if [[ "$fetched_base_sha" != "$base_sha" ]]; then
+            failure_stage='protected base advanced during evaluation; sync the PR branch, review its new exact head, and dispatch again'
+            echo "self-review admission: protected base advanced from $base_sha to $fetched_base_sha during evaluation; sync the PR branch, review its new exact head, and dispatch again" >&2
+            exit 1
+          fi
           test "$(git merge-base "$base_sha" "$head_sha")" = "$merge_base_sha"
           scripts/release/self-review-changed-manifest.shs github "$repository_id" "$repository_node_id" "$repository_name" "$PR_NUMBER" "$base_repository_id" "$base_repository_node_id" "$base_repository" "$base_ref" "$base_sha" "$head_sha" "$merge_base_sha" "$audit_dir/revalidated-changed-paths.sdn"
           cmp "$audit_dir/changed-paths.sdn" "$audit_dir/revalidated-changed-paths.sdn"
