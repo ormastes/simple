@@ -1,6 +1,7 @@
 # Local Research: Release Process Hardening
 
-**Date:** 2026-08-26  
+**Date:** 2026-08-26
+
 **Status:** Complete companion index
 
 The full repository audit is

@@ -1,7 +1,8 @@
 # Stage 2 driver const-fold import resolves relative to `80.driver`
 
 **Status:** Initial fix submitted as PR #25; dependent Stage 2 closure admitted locally
-**Observed:** 2026-08-26  
+**Observed:** 2026-08-26
+
 **Affected revision:** `67fac9ed179` (also present on fetched `origin/main` at `e35d34f9eeda1b899abd439c56aa8ecec674a1cf`)
 
 ## Failure
