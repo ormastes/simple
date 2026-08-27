@@ -334,3 +334,15 @@ a claim that SFFI v2 is complete.
   to that path.
 - FAIL (global admission): no signed logger/runtime artifact or semantic
   provider receipt was created. This is source containment, not verification.
+
+## Follow-up: JWT clock cross-lane ABI repair (2026-08-27)
+
+- PASS (static/source): JWT replaces the legacy seconds symbol—which presents
+  as a float in the Rust interpreter lane—with the shared integer microsecond
+  ABI. Its negative sentinel lifts into `Result`; JWT validation and reset
+  token creation/verification now fail closed on clock failure.
+- PASS (performance shape): each affected operation retains one clock read;
+  failure handling adds no work to a successful timestamp path.
+- FAIL (global admission): the runtime clock artifact is not signed/admitted
+  with an exact evidence receipt. This closes a cross-lane contract defect but
+  does not globally verify the provider.
