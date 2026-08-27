@@ -19,6 +19,29 @@ fn _is_standalone_assertion(line: text) -> bool:
         lower.contains("assert_contains(") or lower.contains("assert_nil(") or
         lower.contains("assert_not_nil(")
 
+fn _is_quoted_literal(value: text) -> bool:
+    val trimmed = value.trim()
+    trimmed.len() > 1 and trimmed.starts_with("\"") and trimmed.ends_with("\"") and
+        not trimmed.substring(1, trimmed.len() - 1).contains("\"")
+
+fn _comparison_tautology(line: text) -> bool:
+    """True when a comparison call compares two literals; asserts nothing about the system."""
+    val lower = line.lower()
+    val start = lower.find("(")
+    if start < 0:
+        return false
+    var body = line.substring(start + 1).trim()
+    if body.ends_with(")"):
+        body = body.substring(0, body.len() - 1).trim()
+    for op in ["==", "!=", ">=", "<=", ">", "<"]:
+        val index = body.find(op)
+        if index > 0:
+            val left = body.substring(0, index).trim()
+            val right = body.substring(index + op.len()).trim()
+            return (_is_numeric_literal(left) or _is_quoted_literal(left)) and
+                (_is_numeric_literal(right) or _is_quoted_literal(right))
+    false
+
 fn _is_real_assertion(line: text) -> bool:
     val lower = line.lower()
     val trimmed = lower.trim()
@@ -37,6 +60,11 @@ fn _is_real_assertion(line: text) -> bool:
             lower.contains("assert_true(true)") or lower.contains("assert_false(false)") or
             lower.contains("check(true)") or trimmed == "check true":
         return false
+    # T4a (2026-08-27): a comparison whose BOTH sides are literals —
+    # check(1 == 1), check("a" == "a"), check(2 > 0) — is compiler
+    # knowledge, not a system oracle; same class as assert(true) above.
+    if _comparison_tautology(line):
+        return false
     val expect_start = lower.index_of("expect(")
     val equal_start = lower.index_of(").to_equal(")
     if expect_start >= 0 and equal_start > expect_start:
@@ -45,6 +73,11 @@ fn _is_real_assertion(line: text) -> bool:
         if expected.ends_with(")"):
             expected = expected[:-1].trim()
         if actual == expected:
+            return false
+        # expect(<literal>).to_equal(<literal>) compares two constants —
+        # compiler knowledge, not a system oracle (2026-08-27).
+        if (_is_numeric_literal(actual) and _is_numeric_literal(expected)) or
+                (_is_quoted_literal(actual) and _is_quoted_literal(expected)):
             return false
     true
 
@@ -272,6 +305,10 @@ fn extract_sspec_source_facts(path: text, source: text) -> SspecSourceFacts:
     var requirements: i64 = 0
     var line_number: i64 = 0
     var has_bare_step = false
+    # T4b (2026-08-27): the exact same narrative-bearing comment line repeated
+    # verbatim 3+ times is bulk-stuffed boilerplate, not authored voice.
+    var narrative_comment_counts: Dict<text, i64> = {}
+    var has_duplicated_narrative = false
     # Triple-quoted fixture strings often contain column-0 lines; without
     # string-state tracking those lines END the current scenario early and
     # every assertion after the fixture lands outside any scenario (2026-08-22).
@@ -281,6 +318,17 @@ fn extract_sspec_source_facts(path: text, source: text) -> SspecSourceFacts:
         if in_triple_string:
             if _count_unescaped_triple(raw) > 0:
                 in_triple_string = false
+            # Narrative docstrings still DECLARE requirements (the manual voice
+            # carries REQ ids per the scoring spec's dangling-req oracle);
+            # collect ids but no scenario/assertion facts from string content.
+            if _contains_requirement(raw):
+                for requirement_id in _requirement_ids(raw):
+                    if not all_requirement_ids.contains(requirement_id):
+                        all_requirement_ids.push(requirement_id)
+                    if raw.lower().contains("planned") and
+                            not planned_requirement_ids.contains(requirement_id):
+                        planned_requirement_ids.push(requirement_id)
+                requirements = all_requirement_ids.len()
             continue
         val line = raw.trim()
         val line_lower = line.lower()
@@ -296,6 +344,16 @@ fn extract_sspec_source_facts(path: text, source: text) -> SspecSourceFacts:
             current_line = 0
             current_name = ""
         if line.starts_with("@step "): has_bare_step = true
+        if not has_duplicated_narrative and line.starts_with("#") and line.len() > 20 and
+                (line_lower.contains("purpose") or line_lower.contains("audience") or
+                    line_lower.contains("research:") or line_lower.contains("plan:") or
+                    line_lower.contains("architecture:") or line_lower.contains("design:")):
+            if narrative_comment_counts.has(line):
+                narrative_comment_counts[line] = narrative_comment_counts[line] + 1
+            else:
+                narrative_comment_counts[line] = 1
+            if narrative_comment_counts[line] >= 3:
+                has_duplicated_narrative = true
         # slow_it / ignore_it are the same scenario construct as it (slow lane /
         # expected-failure variants of the spec DSL) — treating them as
         # non-scenarios left 44k scenarios invisible to every per-scenario rule.
@@ -439,6 +497,7 @@ fn extract_sspec_source_facts(path: text, source: text) -> SspecSourceFacts:
         # (or instead of) the heading.
         has_purpose: (lower.contains("purpose and audience") or
             lower.contains("## purpose")) and _count_sub(source, "\"\"\"") > 0,
+        has_duplicated_narrative_boilerplate: has_duplicated_narrative,
         has_placeholder_narrative: lower.contains("todo: describe") or
             lower.contains("todo: author") or
             lower.contains("description of this block") or lower.contains("lorem ipsum"),
