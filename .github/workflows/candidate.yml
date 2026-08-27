@@ -88,44 +88,47 @@ jobs:
           echo "attempt=$((10#$attempt))" >> "$GITHUB_OUTPUT"
           echo "attempt_name=$attempt_name" >> "$GITHUB_OUTPUT"
 
-      - name: Enforce create-once candidate artifact identity
-        id: create_once
+      - name: Build receipt-free admitted Stage 2 trust root
         env:
-          GH_TOKEN: ${{ github.token }}
-          ARTIFACT_NAME: candidate-${{ steps.freeze.outputs.version }}-${{ steps.freeze.outputs.attempt_name }}-${{ steps.freeze.outputs.commit }}
-          COMMIT: ${{ steps.freeze.outputs.commit }}
-          STATUS_CONTEXT: simple-release/candidate/${{ steps.freeze.outputs.version }}/${{ steps.freeze.outputs.attempt_name }}
-          RUN_ATTEMPT: ${{ github.run_attempt }}
+          SIMPLE_NO_STUB_FALLBACK: '1'
         run: |
           set -euo pipefail
-          # A rerun must allocate a new candidate attempt/ref; it may not
-          # replace the identity reserved by an earlier execution. Commit
-          # status history is durable beyond artifact retention and failures;
-          # the candidate-ref concurrency group serializes this check/create.
-          test "$RUN_ATTEMPT" = 1
-          reservations=$(gh api --paginate \
-            "repos/${GITHUB_REPOSITORY}/commits/${COMMIT}/statuses?per_page=100" |
-            jq -s --arg context "$STATUS_CONTEXT" \
-              '[.[][] | select(.context == $context)] | length')
-          test "$reservations" = 0 || {
-            echo "candidate attempt was already reserved; allocate a new candidate attempt" >&2
-            exit 1
-          }
-          existing=$(gh api --paginate \
-            "repos/${GITHUB_REPOSITORY}/actions/artifacts?name=${ARTIFACT_NAME}&per_page=100" |
-            jq -s --arg name "$ARTIFACT_NAME" \
-              '[.[].artifacts[] | select(.name == $name)] | length')
-          test "$existing" = 0 || {
-            echo "candidate artifact identity already exists; allocate a new candidate attempt" >&2
-            exit 1
-          }
-          gh api -X POST "repos/${GITHUB_REPOSITORY}/statuses/${COMMIT}" \
-            -f state=pending \
-            -f context="$STATUS_CONTEXT" \
-            -f description='Candidate attempt reserved; rebuilds require a new attempt' \
-            -f target_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
-            >/dev/null
-          echo "reserved=true" >> "$GITHUB_OUTPUT"
+          sh scripts/bootstrap/bootstrap-from-scratch.sh \
+            --backend=llvm --mode=dynload --full-bootstrap \
+            --stop-after-stage2 --no-mcp --jobs=2
+
+      - name: Resume admitted Stage 3 with planner receipt
+        run: |
+          set -euo pipefail
+          stage2=$(find build/bootstrap/stage2 -type f -name simple -print -quit)
+          test -n "$stage2"
+          receipt="$PWD/build/bootstrap/candidate-stage3-planner-admission-v2.env"
+          sh scripts/bootstrap/produce-bootstrap-planner-admission-v2.shs \
+            --target=//bootstrap:stage3 \
+            --reason=verify-landed-compiler-fix \
+            --parent-compiler="$stage2" \
+            --out="$receipt"
+          sh scripts/bootstrap/bootstrap-from-scratch.sh \
+            --bootstrap-receipt="$receipt" \
+            --resume-stage3-from-admitted=build/bootstrap
+
+      - name: Resume release-bound Stage 4 with planner receipt
+        env:
+          SIMPLE_NO_STUB_FALLBACK: '1'
+        run: |
+          set -euo pipefail
+          stage2=$(find build/bootstrap/stage2 -type f -name simple -print -quit)
+          test -n "$stage2"
+          receipt="$PWD/build/bootstrap/candidate-stage4-planner-admission-v2.env"
+          sh scripts/bootstrap/produce-bootstrap-planner-admission-v2.shs \
+            --target=//bootstrap:stage4 \
+            --reason=release-trust-verification \
+            --parent-compiler="$stage2" \
+            --out="$receipt"
+          sh scripts/bootstrap/bootstrap-from-scratch.sh \
+            --bootstrap-receipt="$receipt" \
+            --resume-stage4-from-admitted=build/bootstrap \
+            --release --strategy=full
 
       - name: Validate canonical version and required support policy
         env:
@@ -156,14 +159,6 @@ jobs:
               .status == "not_executed" or .status == "unsupported" or
               .status == "experimental")' \
             build/release-contract/support-check.json >/dev/null
-
-      - name: Full bootstrap and release-bound whole suite
-        env:
-          SIMPLE_NO_STUB_FALLBACK: '1'
-        run: |
-          set -euo pipefail
-          sh scripts/bootstrap/bootstrap-from-scratch.sh \
-            --full-bootstrap --release --strategy=full
 
       - name: Download exact protected-integration convergence receipt
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
@@ -346,6 +341,29 @@ jobs:
                       .name == $check.context and
                       .app.id == $check.integration_id))' \
             build/convergence-receipt/check-evidence.json >/dev/null
+
+      # GitHub rejects a workflow before job creation when one `run` template
+      # exceeds its service limit. Keep this replay in a second fail-closed
+      # step and reconstruct every local from immutable checked-in/receipt data.
+      - name: Replay convergence content and run pure admission
+        env:
+          VERSION: ${{ steps.freeze.outputs.version }}
+          COMMIT: ${{ steps.freeze.outputs.commit }}
+          EXPECTED_RECEIPT_SHA256: ${{ inputs.convergence_receipt_sha256 }}
+        run: |
+          set -euo pipefail
+          receipt=build/convergence-receipt/convergence-receipt.json
+          test -f "$receipt"
+          release_ref=$(jq -er '.release_ref' "$receipt")
+          main_sha=$(git rev-parse refs/remotes/origin/main)
+          release_sha=$(git rev-parse "refs/remotes/origin/$release_ref")
+          inventory_head=$(jq -er '.provider.release_inventory_head_sha' "$receipt")
+          integration_pr_number=$(jq -er '.provider.integration_pr_number' "$receipt")
+          integration_head_sha=$(jq -er '.provider.integration_head_sha' "$receipt")
+          required_checks=$(jq -cS '
+            [.rules[] | select(.type == "required_status_checks") |
+             .parameters.required_status_checks[] | {context,integration_id}]' \
+            .github/rulesets/spipe-vcs-v3-release-lines.json)
 
           # Exact inventories are recomputed from fetched protected refs.  The
           # reviewed receipt must classify every source-only commit, including
@@ -568,6 +586,44 @@ jobs:
             .main_remains_independent == true' build/release-contract/convergence-admission.json >/dev/null
           mkdir -p candidate
           cp "$receipt" candidate/convergence-receipt.json
+
+      - name: Reserve create-once candidate artifact after qualification
+        id: create_once
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_NAME: candidate-${{ steps.freeze.outputs.version }}-${{ steps.freeze.outputs.attempt_name }}-${{ steps.freeze.outputs.commit }}
+          COMMIT: ${{ steps.freeze.outputs.commit }}
+          STATUS_CONTEXT: simple-release/candidate/${{ steps.freeze.outputs.version }}/${{ steps.freeze.outputs.attempt_name }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          # Qualification above is receipt-bound and read-only with respect to
+          # the immutable attempt. Only a run that reached this point may burn
+          # the create-once identity; reruns still require a new attempt.
+          test "$RUN_ATTEMPT" = 1
+          reservations=$(gh api --paginate \
+            "repos/${GITHUB_REPOSITORY}/commits/${COMMIT}/statuses?per_page=100" |
+            jq -s --arg context "$STATUS_CONTEXT" \
+              '[.[][] | select(.context == $context)] | length')
+          test "$reservations" = 0 || {
+            echo "candidate attempt was already reserved; allocate a new candidate attempt" >&2
+            exit 1
+          }
+          existing=$(gh api --paginate \
+            "repos/${GITHUB_REPOSITORY}/actions/artifacts?name=${ARTIFACT_NAME}&per_page=100" |
+            jq -s --arg name "$ARTIFACT_NAME" \
+              '[.[].artifacts[] | select(.name == $name)] | length')
+          test "$existing" = 0 || {
+            echo "candidate artifact identity already exists; allocate a new candidate attempt" >&2
+            exit 1
+          }
+          gh api -X POST "repos/${GITHUB_REPOSITORY}/statuses/${COMMIT}" \
+            -f state=pending \
+            -f context="$STATUS_CONTEXT" \
+            -f description='Qualified candidate attempt reserved; rebuilds require a new attempt' \
+            -f target_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            >/dev/null
+          echo "reserved=true" >> "$GITHUB_OUTPUT"
 
       - name: Assemble admitted candidate without fallback
         env:

@@ -44,6 +44,26 @@ Apply the commit only on the private work branch, rerun affected tests, and subm
 
 During a long beta or bootstrap qualification run, schedule a bounded read-only fetch-and-compare checkpoint before every candidate attempt, after a bootstrap failure is repaired, and before release admission. `inspect_release_main_convergence` fetches exact remote heads with bounded refspecs, compares at most 256 source-only commits, and verifies that every selected SHA is review-bound, reachable from the source, and not already represented in the target. It must not choose, cherry-pick, merge, or push a fix. Avoid tight polling and do not give the bootstrap worker protected-ref credentials.
 
+The default-branch workflow `release-convergence-checkpoint.yml` invokes a
+source-hosted observation every six hours and by operator dispatch. Scheduled runs derive
+`release/X.Y` from `release/version.sdn` and report not-applicable when that
+line does not exist; an operator dispatch requires the line to exist and may
+name it explicitly. It fetches only the two exact remote-tracking refs, bounds
+each source-only inventory to 256 commits, and emits
+`simple-release-source-convergence-observation/1` JSON. It invokes no compiler
+at all: `deployed_runtime_used=false` and `release_admission_eligible=false`
+make the fresh-runner boundary explicit instead of pretending that source-hosted
+Git comparison is a deployed pure-Simple payload.
+The equivalent local observation is:
+
+```sh
+scripts/release/convergence-checkpoint.shs --release-ref=release/X.Y --require-release-line
+```
+
+A checkpoint is an operator hint only: it cannot
+select a fix or satisfy review, backport/forward-port, integration, candidate,
+or promotion admission.
+
 For each operator-selected exact commit:
 
 1. From `main` to `release/X.Y`, create a private backport branch/worktree, verify the source review, apply only that commit, renew focused evidence, and submit to the release-line integration authority.
