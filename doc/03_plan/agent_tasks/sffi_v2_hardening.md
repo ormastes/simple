@@ -463,3 +463,7 @@ passing placeholder.
     lexical. Preserve its one call and avoid bootstrap imports, array copies,
     lookup, locking, retries, or additional argument reads; it remains unsafe
     until the exact provider ABI/artifact has been admitted.
+86. Keep the quick C-codegen sample on `read_file_text_result`; unreadable
+    input must diagnose and return instead of becoming fabricated empty source.
+    Preserve one normal read and one `generate_c_code` call; do not add retries,
+    extra I/O, copies, lookup, locks, or code-generation passes.

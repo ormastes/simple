@@ -579,3 +579,14 @@ a claim that SFFI v2 is complete.
   retry, or second argument read was introduced. No runtime benchmark was run.
 - FAIL (global admission): the raw array provider is not bound to ABI/ownership
   verification or a trusted signature, so this tiny probe remains unsafe.
+
+## Follow-up: quick C-codegen file-read migration (2026-08-27)
+
+- PASS (static/source): the sample no longer declares/calls raw
+  `rt_file_read_text`; it uses `read_file_text_result` and emits a diagnostic
+  before returning when the source cannot be read.
+- PASS (performance shape): normal operation retains one file read and one
+  code-generation call, with no empty-source fallback, retry, extra I/O, copy,
+  lookup, lock, or extra generation pass. No runtime benchmark was run.
+- FAIL (global admission): the canonical file-read provider remains outside
+  artifact-bound ABI/ownership verification and trusted-signature admission.
