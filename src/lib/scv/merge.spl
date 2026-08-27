@@ -9,6 +9,71 @@ use std.scv.structural_match.{scv_default_match_config, scv_compute_edit_script,
 use std.scv.region_merge.{scv_region_merge_text}
 use std.scv.merge_validation.{scv_merge_validation_accept}
 use std.scv.conflict_v2.{scv_conflict_v2_payload, scv_conflict_v2_write, scv_conflict_v2_classify}
+use std.scv.preprocessor_regions.{scv_pp_divergence, scv_pp_guard_rewritten, scv_pp_has_construct}
+
+# ---------------------------------------------------------------------------
+# Preprocessor-region conflict detection.
+#
+# Fixes the missed-real-conflict class recorded in
+# `doc/08_tracking/bug/scv_merge_silently_merges_across_divergent_preprocessor_branches_2026-08-26.md`:
+# the syntax-node and line rungs below compute disjointness over raw line
+# indices, so a `#ifdef` line and the statements it governs look independent.
+# Corpus case 22 was merged CLEAN into `int mode = 7;` under `#ifdef FEATURE_B`
+# — a configuration neither side authored. See preprocessor_regions.spl for the
+# region model and its honest lexical-only ceiling.
+#
+# Scope: `.spl` is excluded outright — Simple has no preprocessor and uses `#`
+# as its comment character, so running the detector there could only ever
+# manufacture spurious conflicts.
+# ---------------------------------------------------------------------------
+
+fn scv_pp_applicable_path(rel: text) -> bool:
+    not rel.ends_with(".spl")
+
+# The chunk text behind a tree line, or "" when unreadable/binary.
+fn scv_read_line_text(root: text, line: text) -> text:
+    if line == "":
+        return ""
+    val path = scv_chunk_path(root, scv_tree_line_chunk_id(line))
+    if not file_exists(path):
+        return ""
+    val t = file_read(path)
+    if t.contains("\u0000"):
+        return ""
+    t
+
+# Diagnostic when the two sides' edits are preprocessor-divergent, else "".
+fn scv_pp_merge_divergence(root: text, rel: text, base_line: text, left_line: text, right_line: text) -> text:
+    if not scv_pp_applicable_path(rel):
+        return ""
+    val b = scv_read_line_text(root, base_line)
+    val l = scv_read_line_text(root, left_line)
+    val r = scv_read_line_text(root, right_line)
+    if b == "" or l == "" or r == "":
+        return ""
+    scv_pp_divergence(b, l, r)
+
+# Rename companion: one side renamed the file, the other rewrote its guard
+# conditions. Carrying the edit onto the new path would silently change which
+# build configuration compiles it. A body-only edit is NOT flagged — that is
+# ordinary rename+edit, which corpus cases 07/12 pin as clean.
+fn scv_pp_rename_guard_divergence(root: text, rel: text, base_line: text, edited_line: text) -> text:
+    if not scv_pp_applicable_path(rel):
+        return ""
+    val b = scv_read_line_text(root, base_line)
+    val s = scv_read_line_text(root, edited_line)
+    if b == "" or s == "":
+        return ""
+    if not scv_pp_has_construct(b):
+        return ""
+    if not scv_pp_guard_rewritten(b, s):
+        return ""
+    "one side renamed the file while the other rewrote its preprocessor guard conditions; carrying the edit onto the new path changes which build configuration compiles it"
+
+fn scv_write_pp_conflict(root: text, rel: text, base_line: text, left_line: text, right_line: text, diagnostics: text, attempted: text) -> text:
+    val id = scv_write_conflict_kind(root, rel, "preprocessor_region_divergent", "", base_line, left_line, right_line)
+    scv_conflict_v2_write(root, scv_conflict_v2_payload(rel, "preprocessor_region_divergent", "", base_line, left_line, right_line, attempted, diagnostics))
+    id
 
 # ---------------------------------------------------------------------------
 # Structural merge helpers
@@ -356,18 +421,36 @@ fn scv_pick_merge_line(root: text, rel: text, base_tree: text, left_tree: text, 
         val old_left = scv_tree_find_old_line_by_chunk(base_tree, left_tree, left_chunk)
         val old_right_line = scv_tree_line_for_path(right_tree, scv_tree_line_path(old_left))
         if old_left != "" and old_right_line != "" and scv_tree_line_chunk_id(old_right_line) != left_chunk:
-            return (scv_tree_line_with_path(old_right_line, rel), "", "left-rename-right-edit")
+            val carried_r = scv_tree_line_with_path(old_right_line, rel)
+            val rdiag = scv_pp_rename_guard_divergence(root, rel, old_left, carried_r)
+            if rdiag != "":
+                val rid = scv_write_pp_conflict(root, rel, old_left, left_line, carried_r, rdiag, "path-rename")
+                return (carried_r, rid, "preprocessor-rename-guard-conflict")
+            return (carried_r, "", "left-rename-right-edit")
     if base_line == "" and right_line != "" and left_line == "":
         val old_right = scv_tree_find_old_line_by_chunk(base_tree, right_tree, right_chunk)
         val old_left_line = scv_tree_line_for_path(left_tree, scv_tree_line_path(old_right))
         if old_right != "" and old_left_line != "" and scv_tree_line_chunk_id(old_left_line) != right_chunk:
-            return (scv_tree_line_with_path(old_left_line, rel), "", "right-rename-left-edit")
+            val carried_l = scv_tree_line_with_path(old_left_line, rel)
+            val ldiag = scv_pp_rename_guard_divergence(root, rel, old_right, carried_l)
+            if ldiag != "":
+                val lid = scv_write_pp_conflict(root, rel, old_right, carried_l, right_line, ldiag, "path-rename")
+                return (carried_l, lid, "preprocessor-rename-guard-conflict")
+            return (carried_l, "", "right-rename-left-edit")
     if left_chunk == right_chunk:
         return (left_line, "", "same-content")
     if left_chunk == base_chunk:
         return (right_line, "", "right-only")
     if right_chunk == base_chunk:
         return (left_line, "", "left-only")
+    # Both sides changed the file differently. Before ANY aggressive rung runs,
+    # refuse when the two edits are preprocessor-region divergent: the line and
+    # syntax-node rungs below reason on raw line indices and would merge these
+    # clean into a build configuration neither side authored.
+    val pp_diag = scv_pp_merge_divergence(root, rel, base_line, left_line, right_line)
+    if pp_diag != "":
+        val pp_id = scv_write_pp_conflict(root, rel, base_line, left_line, right_line, pp_diag, "preprocessor-regions")
+        return (left_line, pp_id, "preprocessor-region-conflict")
     # Attempt structural merge (WS-B: GumTree-grade anchor merge).
     # Only for .spl files or files with parser_index entries.
     # scv_try_structural_merge returns non-empty on success → structural-anchor-merge.
