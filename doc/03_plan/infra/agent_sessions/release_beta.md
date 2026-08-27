@@ -24,11 +24,13 @@ signed promotion, and byte-identical package publication.
    branch push does not create a path-named zero-job candidate run and that
    manual dispatch is registered under `Build and qualify immutable candidate`.
 2. Create `release/1.0` only through the protected release-line authority.
-3. Run the scheduled/operator fetch-only convergence checkpoint. For every
+3. Run the scheduled/operator source-hosted, fetch-only convergence observation.
+   It is explicitly ineligible for release admission. For every
    operator-selected reviewed fix, use an isolated backport/forward-port session,
    stable patch-ID equivalence, renewed evidence, and protected CAS integration.
-4. Allocate a new immutable candidate attempt, obtain admitted Stage 3/4 and
-   required whole-test evidence, then promote the same assets without rebuilding.
+4. Qualify receipt-free Stage 2, planner-receipted Stage 3/4, version/support,
+   and reviewed convergence first. Reserve the immutable candidate attempt only
+   after those prerequisites pass, then promote the same assets without rebuilding.
 
 Do not reuse the historical `release_beta_verify` Stage-2 result as current
 release evidence and do not create a release line, version, or candidate from

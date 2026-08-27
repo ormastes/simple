@@ -33,3 +33,9 @@ path-named zero-job push failures. Independent candidate-review broker approval,
 signer use, creation of the real maintenance line, fresh Stage 3/4 plus whole-
 suite evidence, and real beta candidate/publication receipts remain open. The
 handoff must name exact commands/receipts and may not claim release PASS.
+
+Candidate qualification must build the sole receipt-free Stage 2 trust root,
+produce and consume typed planner receipts for Stage 3 and Stage 4, and pass
+runtime-backed version/support plus reviewed convergence checks before recording
+the create-once reservation. The periodic fresh-runner checkpoint is a bounded
+Git-only source observation and is never an admission receipt.

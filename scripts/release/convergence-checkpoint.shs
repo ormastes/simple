@@ -1,5 +1,7 @@
 #!/bin/sh
-# Bounded read-only main/release convergence checkpoint for operators and CI.
+# Bounded source-hosted main/release observation for operators and CI.
+# This is deliberately not release admission: it uses Git only, never a
+# deployed compiler, and cannot select or mutate either protected line.
 set -eu
 
 root=.
@@ -18,9 +20,6 @@ for arg in "$@"; do
 done
 
 root=$(cd "$root" && pwd -P)
-main_workspace=$(git -C "$root" worktree list --porcelain |
-    awk 'index($0, "worktree ") == 1 { print substr($0, 10); exit }')
-main_workspace=$(cd "$main_workspace" && pwd -P)
 if test -z "$release_ref"; then
     version=$(awk '$1 == "semver:" { print $2; exit }' "$root/release/version.sdn")
     base_version=${version%%-*}
@@ -40,106 +39,76 @@ if ! git -C "$root" ls-remote --exit-code --heads origin "refs/heads/$release_re
         exit 1
     fi
     echo "release-convergence-checkpoint: SKIP (no active $release_ref)"
-    if test -n "${GITHUB_STEP_SUMMARY:-}"; then
-        printf '## Release/main convergence checkpoint\n\n- status: not applicable\n- reason: no active `%s` remote ref\n' \
-            "$release_ref" >> "$GITHUB_STEP_SUMMARY"
-    fi
     exit 0
 fi
 
+# Fetch is the sole mutation and is confined to remote-tracking refs in this
+# disposable/source checkout. No local branch, remote branch, or candidate is
+# created or updated.
 git -C "$root" fetch --no-tags --prune origin \
     "+refs/heads/main:refs/remotes/origin/main" \
     "+refs/heads/$release_ref:refs/remotes/origin/$release_ref"
 main_sha=$(git -C "$root" rev-parse refs/remotes/origin/main)
 release_sha=$(git -C "$root" rev-parse "refs/remotes/origin/$release_ref")
-runtime=${SIMPLE_RELEASE_RUNTIME:-$root/bin/release/simple}
-test -x "$runtime" || {
-    echo "release-convergence-checkpoint: admitted Simple runtime is missing: $runtime" >&2
+
+if git -C "$root" merge-base --is-ancestor "$release_sha" "$main_sha" ||
+   git -C "$root" merge-base --is-ancestor "$main_sha" "$release_sha"; then
+    echo "release-convergence-checkpoint: protected lines are not independent" >&2
     exit 1
-}
+fi
 
 case "$output_root" in
     /*) ;;
     *) output_root="$root/$output_root" ;;
 esac
 mkdir -p "$output_root"
-temporary_root=$(mktemp -d)
-checkpoint_worktree=
-checkpoint_branch=
-
-cleanup_current_worktree() {
-    if test -n "$checkpoint_worktree" && test -d "$checkpoint_worktree"; then
-        git -C "$root" worktree remove --force "$checkpoint_worktree" >/dev/null 2>&1 || true
-    fi
-    if test -n "$checkpoint_branch" &&
-       git -C "$root" show-ref --verify --quiet "refs/heads/$checkpoint_branch"; then
-        git -C "$root" branch -D "$checkpoint_branch" >/dev/null 2>&1 || true
-    fi
-    checkpoint_worktree=
-    checkpoint_branch=
-}
-
-cleanup() {
-    cleanup_current_worktree
-    rmdir "$temporary_root" >/dev/null 2>&1 || true
-}
-trap cleanup EXIT
-trap 'exit 130' HUP INT TERM
 
 observe_direction() {
-    direction=$1
-    if test "$direction" = main_to_release; then
-        target_ref=$release_ref
-        target_sha=$release_sha
-    else
-        target_ref=main
-        target_sha=$main_sha
+    direction=$1 range=$2 result=$3
+    inventory="$output_root/.${direction}.inventory.$$"
+    git -C "$root" rev-list --reverse --topo-order --max-count=257 "$range" >"$inventory"
+    count=$(wc -l <"$inventory" | tr -d ' ')
+    if test "$count" -gt 256; then
+        rm -f "$inventory"
+        echo "release-convergence-checkpoint: source-only inventory exceeds 256 commits ($direction)" >&2
+        exit 1
     fi
-
-    identity=${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-1}-${direction}-$$
-    checkpoint_branch="work/release/checkpoint-$identity"
-    checkpoint_worktree="$temporary_root/$direction"
-    git -C "$root" worktree add --quiet -b "$checkpoint_branch" \
-        "$checkpoint_worktree" "$target_sha"
-    workspace=$(cd "$checkpoint_worktree" && pwd -P)
-    policy_sha256=$(sha256sum "$checkpoint_worktree/.spipe/policy/vcs.sdn" | awk '{ print $1 }')
-    current_epoch=$(date +%s)
-    result="$output_root/$direction.json"
-
-    if test "$direction" = release_to_main; then
-        set -- --forward-port-required --forward-port-target=main
-    else
-        set --
-    fi
-    SIMPLE_LIB="$root/src" "$runtime" run "$root/src/app/release/main.spl" \
-        convergence-discover --json \
-        --root="$checkpoint_worktree" --session="checkpoint-$identity" \
-        --workspace="$workspace" --main-workspace="$main_workspace" \
-        --branch="$checkpoint_branch" --target="$target_ref" \
-        --base-sha="$target_sha" --target-sha="$target_sha" \
-        --policy-sha256="$policy_sha256" --direction="$direction" \
-        --release-ref="$release_ref" --last-main-sha="$main_sha" \
-        --current-main-sha="$main_sha" --release-head-sha="$release_sha" \
-        --last-scan-epoch=0 --current-epoch="$current_epoch" --scan-interval=1 \
-        "$@" > "$result"
-    jq -e '.status == "ok" and .mutation == "fetch-only" and
-        .main_remains_independent == true' "$result" >/dev/null
-    source_only_count=$(jq '.source_only_commit_shas | length' "$result")
-    echo "release-convergence-checkpoint: PASS ($direction, $source_only_count source-only commits)"
-    cleanup_current_worktree
+    jq -n \
+        --arg direction "$direction" \
+        --arg release_ref "$release_ref" \
+        --arg main_sha "$main_sha" \
+        --arg release_sha "$release_sha" \
+        --rawfile commits "$inventory" '
+        {
+          schema: "simple-release-source-convergence-observation/1",
+          status: "ok",
+          boundary_kind: "source_hosted_read_only",
+          deployed_runtime_used: false,
+          release_admission_eligible: false,
+          mutation: "fetch-only",
+          main_remains_independent: true,
+          direction: $direction,
+          release_ref: $release_ref,
+          main_sha: $main_sha,
+          release_sha: $release_sha,
+          source_only_commit_shas: ($commits | split("\n") | map(select(length > 0)))
+        }' >"$result"
+    rm -f "$inventory"
+    echo "release-convergence-checkpoint: PASS ($direction, $count source-only commits; source observation only)"
 }
 
-observe_direction main_to_release
-observe_direction release_to_main
+observe_direction main_to_release "$release_sha..$main_sha" "$output_root/main_to_release.json"
+observe_direction release_to_main "$main_sha..$release_sha" "$output_root/release_to_main.json"
 
 if test -n "${GITHUB_STEP_SUMMARY:-}"; then
     {
-        echo '## Release/main convergence checkpoint'
+        echo '## Release/main source convergence observation'
         echo
         echo "- main: \`$main_sha\`"
         echo "- release: \`$release_ref\` at \`$release_sha\`"
         echo "- main-to-release source-only: $(jq '.source_only_commit_shas | length' "$output_root/main_to_release.json")"
         echo "- release-to-main source-only: $(jq '.source_only_commit_shas | length' "$output_root/release_to_main.json")"
-        echo '- mutation: fetch-only'
-    } >> "$GITHUB_STEP_SUMMARY"
+        echo '- boundary: source-hosted, read-only, fetch-only'
+        echo '- release admission eligible: no'
+    } >>"$GITHUB_STEP_SUMMARY"
 fi

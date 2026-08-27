@@ -20,9 +20,10 @@
   splits it below the provider boundary and adds a local regression gate. Live
   workflow acceptance remains unproved until the repair reaches the default
   branch and a subsequent push no longer creates the path-named zero-job run.
-- The scheduled/operator convergence checkpoint is source-wired as fetch-only.
-  It does not choose, cherry-pick, merge, or push a fix and cannot replace the
-  protected review/integration receipts required for a real release line.
+- The scheduled/operator convergence checkpoint is a fresh-runner-safe Git-only
+  source observation. Its JSON states that no deployed runtime was used and
+  that the result is ineligible for release admission. It does not choose,
+  cherry-pick, merge, or push a fix and cannot replace protected receipts.
 
 ## Implemented evidence
 
@@ -38,7 +39,9 @@
 - Candidate CI emits one schema family for candidate, qualification, and
   admission evidence, binds build graph, creator, support, convergence,
   qualification, artifact, and provenance identities, and admits candidate-built
-  MCP/LSP npm tarballs.
+  MCP/LSP npm tarballs. It reserves the create-once attempt only after the
+  receipt-free Stage 2 trust root, planner-receipted Stage 3/4, runtime-backed
+  preflight, and reviewed convergence qualification pass.
 - Promotion CI is promote-only and retry-idempotent: an existing tag must match
   signature, commit, and admission digest; draft and published assets must have
   exactly the admitted names and bytes. It contains no build/fallback path.
