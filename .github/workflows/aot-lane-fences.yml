@@ -109,12 +109,27 @@ jobs:
           SIMPLE_PROJECT_ROOT: ${{ github.workspace }}
           SIMPLE_NO_STUB_FALLBACK: "1"
         run: |
+          # Admission is deliberately two-phase. First produce the narrowly
+          # scoped Stage 2 trust root, then let the canonical producer measure
+          # that exact parent, runtime snapshot, planner closure, and planner.
           sh scripts/bootstrap/bootstrap-from-scratch.sh \
             --backend=llvm \
             --mode=dynload \
             --full-bootstrap \
+            --stop-after-stage2 \
             --no-mcp \
             --jobs=2
+          stage2="$(find build/bootstrap/stage2 -type f -name simple -print -quit)"
+          test -n "$stage2"
+          bootstrap_receipt="$PWD/build/bootstrap/aot-stage3-planner-admission-v2.env"
+          sh scripts/bootstrap/produce-bootstrap-planner-admission-v2.shs \
+            --target=//bootstrap:stage3 \
+            --reason=verify-landed-compiler-fix \
+            --parent-compiler="$stage2" \
+            --out="$bootstrap_receipt"
+          sh scripts/bootstrap/bootstrap-from-scratch.sh \
+            --bootstrap-receipt="$bootstrap_receipt" \
+            --resume-stage3-from-admitted=build/bootstrap
 
       - name: Upload bootstrap failure logs
         if: failure() && steps.pure_simple_bootstrap.outcome == 'failure'

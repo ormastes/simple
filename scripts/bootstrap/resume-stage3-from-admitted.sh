@@ -272,6 +272,9 @@ stage3_args=$(bootstrap_stage3_args_sha256 \
   --mode dynload --runtime-path "$runtime" -o "$candidate" \
   src/app/cli/bootstrap_main.spl)
 
+bootstrap_planner_v2_verify_parent_compiler_binding \
+  "$planner_admission" "$stage2" "$admitted" || exit 64
+
 set +e
 bootstrap_stage3_run_transcribed "$stage3_transcript" "$root" "$stage3_log" \
   "$home" "$tmp" "$path" RUST_LOG=error LIBRARY_PATH= \
