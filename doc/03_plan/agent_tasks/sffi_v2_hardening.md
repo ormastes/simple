@@ -484,3 +484,7 @@ passing placeholder.
     API returns `Option` and cannot distinguish I/O failure from absence. Do
     not fabricate `None` or empty sessions; preserve two lexical direct reads
     with no retry, extra I/O, copy, lookup, lock, or session fabrication.
+91. Keep Portal static-asset reads on `read_file_text_result`; a post-existence
+    read failure must produce HTTP 500 rather than empty/fabricated content.
+    Preserve one normal read and response build with no retries, extra I/O,
+    copies, lookup, locks, or duplicate response generation.

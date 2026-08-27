@@ -637,3 +637,14 @@ a claim that SFFI v2 is complete.
 - FAIL (global admission): this raw text provider lacks artifact-bound ABI,
   ownership, verification, and trusted-signature evidence. A future `Result`
   API migration is required to distinguish I/O failure from session absence.
+
+## Follow-up: Portal static-asset file-read migration (2026-08-27)
+
+- PASS (static/source): Portal no longer declares/calls local raw
+  `rt_file_read_text`; its static-asset route uses `read_file_text_result`.
+- PASS (semantics/performance shape): a post-existence read failure returns an
+  HTTP 500 instead of fabricated asset content. Normal operation retains one
+  read and response build with no retry, extra I/O, copy, lookup, lock, or
+  duplicate response. No runtime benchmark was run.
+- FAIL (global admission): the canonical file-read provider remains outside
+  artifact-bound ABI/ownership verification and trusted-signature admission.
