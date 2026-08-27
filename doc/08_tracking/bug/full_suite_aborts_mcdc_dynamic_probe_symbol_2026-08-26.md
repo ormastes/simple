@@ -150,7 +150,9 @@ difference is a live lead, not an explanation.
 
 `bin/simple test` with no flags cannot produce a verdict for the tree. Any session reporting full
 suite results must be passing flags, using a different entry point, or reading a run that never
-executed. No workaround is known yet: the only flag tried, `--no-mcdc`, is not a valid `test` option. Directory-scoped runs (e.g. `bin/simple test test/01_unit`) do reach execution, so a verdict can be assembled from sequential per-directory runs.
+executed. No workaround is known yet: the only flag tried, `--no-mcdc`, is not a valid `test`
+option, and the directory-scoped runs tested here abort too. A working workaround or alternate
+entry point has not been established.
 
 (The `--no-cover-check` half is separate and benign — a documented preflight gate fires because
 2113 system tests lack `# @cover`, and it announces itself and its bypass properly.)
