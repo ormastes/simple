@@ -256,6 +256,7 @@ pub fn hash_variant_discriminant(variant_name: &str) -> u32 {
     (hasher.finish() & 0xFFFFFFFF) as u32
 }
 
+pub(crate) const RESULT_ENUM_ID: u32 = 0;
 pub(crate) const OPTION_ENUM_ID: u32 = 1;
 
 pub(crate) fn rt_option_none() -> RuntimeValue {
@@ -390,12 +391,13 @@ pub extern "C" fn rt_unwrap_or_trap(value: RuntimeValue) -> RuntimeValue {
 /// `.expect()` (aborts on Err/None instead of returning a fallback).
 /// `.unwrap_or(default)` was routed through `rt_unwrap_or_self` (ignoring
 /// `default` entirely), which only correctly special-cases Option: a
-/// `Result` receiver (no reserved enum_id, unlike Option) hit the "return
-/// self" branch and returned the boxed `Result` enum unchanged for BOTH
+/// `Result` receiver hit the "return self" branch and returned the boxed
+/// `Result` enum unchanged for BOTH
 /// `Ok` and `Err` receivers instead of the payload / the default — see
 /// doc/08_tracking/bug/native_unwrap_returns_enum_wrapper_instead_of_payload_2026-08-11.md.
-/// Uses the same discriminant-hash technique as `rt_unwrap_or_trap` to
-/// identify Ok/Err since Result has no reserved enum_id.
+/// Result and Option have reserved runtime IDs (0 and 1 respectively). Both
+/// the ID and discriminant must match: a user enum is allowed to name variants
+/// `Ok` or `Err`, and remains an opaque present value just like the interpreter.
 #[no_mangle]
 pub extern "C" fn rt_unwrap_or_value(value: RuntimeValue, default: RuntimeValue) -> RuntimeValue {
     let Some(p) = get_typed_ptr::<RuntimeEnum>(value, HeapObjectType::Enum) else {
@@ -406,20 +408,22 @@ pub extern "C" fn rt_unwrap_or_value(value: RuntimeValue, default: RuntimeValue)
     let (enum_id, discriminant, payload) = unsafe { ((*p).enum_id, (*p).discriminant, (*p).payload) };
 
     if enum_id == OPTION_ENUM_ID {
-        if discriminant == hash_variant_discriminant("Some") {
+        if discriminant == 0 || discriminant == hash_variant_discriminant("Some") {
             return payload;
         }
-        if discriminant == hash_variant_discriminant("None") {
+        if discriminant == 1 || discriminant == hash_variant_discriminant("None") {
             return default;
         }
         return value;
     }
 
-    if discriminant == hash_variant_discriminant("Ok") {
-        return payload;
-    }
-    if discriminant == hash_variant_discriminant("Err") {
-        return default;
+    if enum_id == RESULT_ENUM_ID {
+        if discriminant == hash_variant_discriminant("Ok") {
+            return payload;
+        }
+        if discriminant == hash_variant_discriminant("Err") {
+            return default;
+        }
     }
 
     // Arbitrary user enum: preserve the pre-existing "return self" fallback.
@@ -511,7 +515,9 @@ pub extern "C" fn rt_is_none(value: RuntimeValue) -> bool {
     }
     let none_disc = hash_variant_discriminant("None");
     get_typed_ptr::<RuntimeEnum>(value, HeapObjectType::Enum)
-        .is_some_and(|p| unsafe { (*p).enum_id == OPTION_ENUM_ID && (*p).discriminant == none_disc })
+        .is_some_and(|p| unsafe {
+            (*p).enum_id == OPTION_ENUM_ID && ((*p).discriminant == 1 || (*p).discriminant == none_disc)
+        })
 }
 
 /// Check if a value is Some (not None/nil).
