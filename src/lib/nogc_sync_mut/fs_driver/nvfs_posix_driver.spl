@@ -67,25 +67,38 @@ impl NvfsPosixDriver:
         Ok(Inode(id: 1))
 
     fn stat_path(path: Path) -> Result<StatInfo, FsError>:
+        self.stat_path_with_persistence(path, true)
+
+    fn stat_path_with_persistence(
+        path: Path, persistence_allowed: bool
+    ) -> Result<StatInfo, FsError>:
         if not _nvfs_posix_path_valid(path.raw):
             return Err(FsError.InvalidArg)
-        self._ensure_persisted_path(path.raw)?
+        if persistence_allowed:
+            self._ensure_persisted_path(path.raw)?
         self.inner.stat_path(path)
 
     fn stat(path: Path) -> Result<StatInfo, FsError>:
         self.stat_path(path)
 
     fn open_path(path: Path, flags: OpenFlags) -> Result<FileHandle, FsError>:
+        self.open_path_with_persistence(path, flags, true)
+
+    fn open_path_with_persistence(
+        path: Path, flags: OpenFlags, persistence_allowed: bool
+    ) -> Result<FileHandle, FsError>:
         if self.inst_id <= 0 or not _nvfs_posix_path_valid(path.raw):
             return Err(FsError.InvalidArg)
         if _nvfs_posix_open.len() >= _NVFS_POSIX_MAX_OPEN_HANDLES:
             return Err(FsError.TooLarge)
-        self._ensure_persisted_path(path.raw)?
+        if persistence_allowed:
+            self._ensure_persisted_path(path.raw)?
         val had_persisted_record = _nvfs_posix_file_index(path.raw) >= 0
-        if not had_persisted_record and _nvfs_posix_files.len() >= _NVFS_POSIX_MAX_FILES:
+        if persistence_allowed and not had_persisted_record and
+                _nvfs_posix_files.len() >= _NVFS_POSIX_MAX_FILES:
             return Err(FsError.TooLarge)
         val handle = self.inner.open_path(path, flags)?
-        if not had_persisted_record:
+        if persistence_allowed and not had_persisted_record:
             _nvfs_posix_store_file(path.raw, [])
         _nvfs_posix_track_open(self.inst_id, handle.id as u64, path.raw)
         Ok(handle)
