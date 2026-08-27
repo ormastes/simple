@@ -444,3 +444,8 @@ passing placeholder.
     untagged owned Simple extern declarations. It must emit file, line, symbol,
     signature fingerprint, tag/contract/provider state, and never call an
     untagged declaration safe, verified, or signed. Keep it audit-time only.
+82. Keep `app.check.main`'s transient scope and monotonic-clock SFFI direct.
+    Its boolean scope success/failure contract remains `bool`; its three clock
+    reads and two scope calls require lexical unsafe scopes. Do not introduce
+    numeric substitutes, helper dispatch, allocation, copying, lookup, locks,
+    retries, or extra calls. This is source containment, not provider admission.

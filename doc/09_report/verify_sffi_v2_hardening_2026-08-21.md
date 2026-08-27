@@ -534,3 +534,15 @@ a claim that SFFI v2 is complete.
 - FAIL (global admission): the backlog deliberately reports no admission
   evidence. An untagged row is neither safe, verified, nor signed; the tool
   must not be used as an ABI/ownership/provider proof.
+
+## Follow-up: standalone check-entrypoint containment (2026-08-27)
+
+- PASS (static/source): the check entrypoint explicitly tags three raw
+  declarations and confines its two transient-scope and three clock calls to
+  lexical FFI expressions. Native and Rust providers expose the scope result
+  as a boolean, retained without numeric substitution.
+- PASS (performance shape): the guard retains the exact five direct calls; no
+  helper dispatch, allocation, copy, lookup, lock, retry, or extra time read
+  was added. No runtime benchmark was run.
+- FAIL (global admission): these providers have no artifact-bound ABI/ownership
+  verification receipt or trusted signature, so the boundary remains unsafe.

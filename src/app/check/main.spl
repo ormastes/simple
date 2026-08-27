@@ -16,8 +16,11 @@ use app.check.concurrency_lint.{run_concurrency_api_lint}
 use std.io_runtime.{get_args}
 use std.io_runtime.{file_exists}
 use std.io_runtime.{read_file_text}
+@unsafe(reason: "raw transient heap scope ABI", capabilities: [ffi])
 extern fn rt_transient_array_scope_begin() -> bool
+@unsafe(reason: "raw transient heap scope ABI", capabilities: [ffi])
 extern fn rt_transient_array_scope_end() -> bool
+@unsafe(reason: "raw monotonic clock ABI", capabilities: [ffi])
 extern fn rt_time_now_micros() -> i64
 
 fn get_cli_args() -> [text]:
@@ -83,7 +86,7 @@ fn wants_phase_profile(args: [text]) -> bool:
 fn check_phase_mark(enabled: bool, phase: text, started_us: i64, path: text, done: i64, total: i64, terminal: text) -> i64:
     if not enabled:
         return started_us
-    val now_us = rt_time_now_micros()
+    val now_us = unsafe(capabilities: [ffi]): rt_time_now_micros()
     val elapsed_ms = (now_us - started_us) / 1000
     eprint "event=check_phase phase={phase} elapsed_ms={elapsed_ms} done={done} total={total} current={path} terminal={terminal}"
     now_us
@@ -188,13 +191,13 @@ fn checker_begin_file_scope() -> bool:
     # before allocations become owned by the per-file transient scope.
     reset_all_pools()
     ast_reset()
-    rt_transient_array_scope_begin()
+    unsafe(capabilities: [ffi]): rt_transient_array_scope_begin()
 
 fn checker_end_file_scope() -> bool:
     # Drop source roots first, reclaim the file-owned heap second, then rebuild
     # process-lifetime arenas outside the ended scope for the next file.
     lexer_release_parse_source_globals()
-    val ended = rt_transient_array_scope_end()
+    val ended = unsafe(capabilities: [ffi]): rt_transient_array_scope_end()
     ast_reset()
     ended
 
@@ -210,7 +213,7 @@ fn check_one_profiled(path: text, as_json: bool, phase_profile: bool, done: i64,
     var file_started_us: i64 = 0
     var phase_started_us: i64 = 0
     if phase_profile:
-        file_started_us = rt_time_now_micros()
+        file_started_us = unsafe(capabilities: [ffi]): rt_time_now_micros()
         phase_started_us = file_started_us
     if not file_exists(path):
         if phase_profile:
@@ -271,7 +274,7 @@ fn main() -> i64:
     val phase_profile = wants_phase_profile(args) and not as_json
     var command_started_us: i64 = 0
     if phase_profile:
-        command_started_us = rt_time_now_micros()
+        command_started_us = unsafe(capabilities: [ffi]): rt_time_now_micros()
     val option_error = check_option_error(args)
     if option_error != "":
         print "ERROR: {option_error}"
