@@ -45,6 +45,9 @@ case $args in
     environment=${args##*/}
     jq '{protection_rules:((if .wait_timer > 0 then [{type:"wait_timer",wait_timer:.wait_timer}] else [] end) + (if (.reviewers|length)>0 then [{type:"required_reviewers",prevent_self_review:.prevent_self_review,reviewers:[.reviewers[]|{type,reviewer:{id}}]}] else [] end)),deployment_branch_policy}' "$root/.github/$environment-environment.json"
     ;;
+  "api repos/"*"/actions/permissions/workflow")
+    cat "$root/.github/actions-workflow-permissions.json"
+    ;;
   "api repos/"*"/immutable-releases --jq .enabled") echo true ;;
   "api repos/"*"/pulls/28")
     printf '%s\n' '{"number":28,"base":{"ref":"main"},"head":{"sha":"0123456789abcdef0123456789abcdef01234567"}}'
@@ -56,6 +59,27 @@ case $args in
   "api repos/"*"/git/commits/"*" --jq .sha") printf '%s\n' "${MOCK_COMMIT_SHA:-}" ;;
   "api repos/"*"/git/ref/heads/release/"*" --jq .object.sha") printf '%s\n' "${MOCK_TARGET_SHA:-}" ;;
   "api --method POST repos/"*"/git/refs --input -") cat >"${MOCK_POST_CAPTURE:?}" ;;
+  "api --method PUT repos/"*"/actions/permissions/workflow --input "*)
+    input=${args##* --input }
+    jq -e '.default_workflow_permissions == "read" and .can_approve_pull_request_reviews == false' "$input" >/dev/null
+    [ -z "${MOCK_APPLY_LOG:-}" ] || printf '%s\n' workflow-permissions >>"$MOCK_APPLY_LOG"
+    ;;
+  "api --method PUT repos/"*"/environments/self-review-admission --input "*)
+    input=${args##* --input }
+    jq -e '.wait_timer == 0 and .prevent_self_review == false and .reviewers == [] and
+      .deployment_branch_policy == {protected_branches:true,custom_branch_policies:false}' "$input" >/dev/null
+    [ -z "${MOCK_APPLY_LOG:-}" ] || printf '%s\n' self-review-admission-environment >>"$MOCK_APPLY_LOG"
+    ;;
+  "api --method PUT repos/"*"/rulesets/"*" --input "*)
+    input=${args##* --input }
+    name=$(jq -r '.name' "$input")
+    [ -z "${MOCK_APPLY_LOG:-}" ] || printf 'ruleset:%s\n' "$name" >>"$MOCK_APPLY_LOG"
+    ;;
+  "api --method POST repos/"*"/rulesets --input "*)
+    input=${args##* --input }
+    name=$(jq -r '.name' "$input")
+    [ -z "${MOCK_APPLY_LOG:-}" ] || printf 'ruleset:%s\n' "$name" >>"$MOCK_APPLY_LOG"
+    ;;
   "api --method "*) exit 0 ;;
   *) echo "mock gh: unsupported: $args" >&2; exit 90 ;;
 esac
@@ -76,9 +100,33 @@ MOCK_MODE=missing; export MOCK_MODE
 expect_fail "MISSING ruleset" "$policy" verify-live "$repo"
 MOCK_MODE=drift; export MOCK_MODE
 expect_fail "DRIFT ruleset" "$policy" verify-live "$repo"
-MOCK_MODE=valid MOCK_ACTOR=99; export MOCK_MODE MOCK_ACTOR
-expect_fail "live apply unsupported until an external signed review broker" \
+MOCK_MODE=valid MOCK_ACTOR=2378857 MOCK_APPLY_LOG="$tmp/apply.log"
+export MOCK_MODE MOCK_ACTOR MOCK_APPLY_LOG
+: >"$MOCK_APPLY_LOG"
+"$policy" apply-live --yes "$repo" >"$tmp/apply.out"
+[ "$(cat "$MOCK_APPLY_LOG")" = "workflow-permissions
+self-review-admission-environment
+ruleset:spipe-vcs-v3-main
+ruleset:spipe-vcs-v3-release-lines" ] || fail "self-attested apply mutated an unexpected projection"
+grep -E 'PASS live projection sha256 [0-9a-f]{64}$' "$tmp/apply.out" >/dev/null ||
+  fail "self-attested apply did not finish with a verified live digest"
+MOCK_ACTOR=99; export MOCK_ACTOR
+: >"$MOCK_APPLY_LOG"
+expect_fail "authenticated GitHub actor is not the authorized policy dispatcher" \
   "$policy" apply-live --yes "$repo"
+[ ! -s "$MOCK_APPLY_LOG" ] || fail "unauthorized actor reached a live mutation"
+MOCK_ACTOR=2378857; export MOCK_ACTOR
+
+broker_root="$tmp/broker-signed-repo"
+mkdir -p "$broker_root/scripts/release" "$broker_root/.github"
+git -C "$broker_root" init -q
+cp "$policy" "$broker_root/scripts/release/github-policy.shs"
+jq '.privileged_self_review.review_evidence_mode="broker_signed" |
+    .configured=false | .signed_receipt_protocol="unimplemented"' \
+  "$root/.github/review-admission-broker.json" >"$broker_root/.github/review-admission-broker.json"
+expect_fail "broker_signed live apply requires a configured external signed broker" \
+  sh -c 'cd "$1" && exec ./scripts/release/github-policy.shs apply-live --yes "$2"' \
+  sh "$broker_root" "$repo"
 
 issued=$(date -u -d '1 minute ago' '+%Y-%m-%dT%H:%M:%SZ')
 expires=$(date -u -d '1 hour' '+%Y-%m-%dT%H:%M:%SZ')
@@ -125,4 +173,4 @@ jq -e --arg ref refs/heads/candidate/v1.4.0-beta.2/a001 --arg sha "$commit" '.re
 MOCK_CANDIDATE_EXISTS=1; export MOCK_CANDIDATE_EXISTS
 expect_fail "candidate already exists; refusing update" "$candidate" --yes "$repo" candidate/v1.4.0-beta.2/a001 "$commit" release/1.4
 
-echo "test-github-policy-contracts: PASS — render, live drift, closed review receipts, planner-only broker, target binding, and create-once"
+echo "test-github-policy-contracts: PASS — render, live drift, self-attested generic Actions apply, signed-broker fail-close, closed review receipts, target binding, and create-once"

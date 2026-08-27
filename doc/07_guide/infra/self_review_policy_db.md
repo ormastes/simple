@@ -87,6 +87,30 @@ default is read-only and the intended emitter is gated by the
 App into a distinct broker identity. Replace it with a dedicated App if an
 independent security boundary is required.
 
+## Applying the GitHub projection
+
+After the workflow is present on the trusted default branch and the external
+policy DB secret is configured, the repository policy owner may run:
+
+```sh
+sh scripts/release/github-policy.shs apply-live --yes ormastes/simple
+```
+
+Live apply is intentionally limited to the configured `self_attested` generic
+Actions mode. Its preflight requires the explicit generic-App trust acceptance,
+App ID, zero provider approvals, exact `SPipe Self Review Admission` status
+check, read-only repository workflow defaults, and the protected-branch-only
+`self-review-admission` execution environment. It then applies only the `main`
+and `release/*` self-review rulesets together with those workflow defaults and
+environment. An unconfigured `broker_signed` mode fails closed; the dedicated
+candidate/release broker remains a separate unsupported lane.
+
+The command finishes by reading the live rulesets, environments, workflow
+defaults, and immutable-release setting back from GitHub. Every normalized
+projection must match before it prints the deterministic live projection
+SHA-256. A digest is post-apply configuration evidence, not review, candidate,
+or release admission. Run `verify-live` separately for read-only inspection.
+
 Immediately before success, the workflow re-resolves the PR/base/ruleset and
 regenerates the merge-base diff and compares the normalized active-ruleset
 digest. PR edit/retarget/synchronize/close events, protected-base pushes, and
