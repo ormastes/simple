@@ -14,6 +14,13 @@
 pub struct AggregateFieldCopy {
     pub word_index: u32,
     pub byte_size: u32,
+    /// Name of this field's declared struct type, when resolvable. Codegen
+    /// needs it to apply the same +8 vtable-header shift that `StructInit`
+    /// and `effective_field_offset` apply for trait-implementing structs:
+    /// without it a nested vtable-carrying struct is copied 8 bytes short and
+    /// its LAST field slot falls outside the copy. See
+    /// doc/08_tracking/bug/sj_segv_struct_param_field_extract_2026-08-27.md
+    pub type_name: Option<String>,
     pub nested: Vec<AggregateFieldCopy>,
 }
 

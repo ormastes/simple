@@ -992,12 +992,13 @@ impl<'a> MirLowerer<'a> {
             if inner.is_empty() {
                 continue;
             }
-            path.push(fname_ty);
+            path.push(fname_ty.clone());
             let nested = Self::struct_deep_fields(registry, type_value_kinds, inner, path);
             path.pop();
             out.push(crate::mir::AggregateFieldCopy {
                 word_index: i as u32,
                 byte_size: (inner.len() as u32) * 8,
+                type_name: Some(fname_ty),
                 nested,
             });
         }

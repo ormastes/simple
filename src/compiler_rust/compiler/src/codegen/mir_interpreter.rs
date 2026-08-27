@@ -121,6 +121,7 @@ impl CodegenEmitter for MirInterpreterEmitter {
         dest: VReg,
         src: VReg,
         _byte_size: u32,
+        _type_name: Option<&str>,
         _deep_fields: &[crate::mir::AggregateFieldCopy],
     ) -> Result<(), Self::Error> {
         // The MIR interpreter models registers as plain i64 with no heap, so
