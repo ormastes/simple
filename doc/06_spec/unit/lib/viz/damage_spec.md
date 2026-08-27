@@ -22,6 +22,7 @@
 
 
 - union_rects with empty second operand returns first
+   - Expected: eq is true
 
 
 <details>
@@ -37,7 +38,7 @@ val a = _rect(10.0, 20.0, 50.0, 60.0)
 val empty = _empty_rect()
 val result = union_rects(a, empty)
 val eq = _rect_eq(result, a)
-eq.to_equal(true)
+expect(eq).to_equal(true)
 ```
 
 </details>
@@ -45,6 +46,10 @@ eq.to_equal(true)
 #### union_rects of two disjoint rects returns bounding box
 
 - union_rects of two disjoint rects returns bounding box
+   - Expected: result.left equals `0.0`
+   - Expected: result.top equals `0.0`
+   - Expected: result.right equals `40.0`
+   - Expected: result.bottom equals `50.0`
 
 
 <details>
@@ -59,10 +64,10 @@ step("union_rects of two disjoint rects returns bounding box")
 val a = _rect(0.0, 0.0, 10.0, 10.0)
 val b = _rect(20.0, 30.0, 40.0, 50.0)
 val result = union_rects(a, b)
-result.left.to_equal(0.0)
-result.top.to_equal(0.0)
-result.right.to_equal(40.0)
-result.bottom.to_equal(50.0)
+expect(result.left).to_equal(0.0)
+expect(result.top).to_equal(0.0)
+expect(result.right).to_equal(40.0)
+expect(result.bottom).to_equal(50.0)
 ```
 
 </details>
@@ -70,6 +75,10 @@ result.bottom.to_equal(50.0)
 #### union_rects of two overlapping rects returns outer bounds
 
 - union_rects of two overlapping rects returns outer bounds
+   - Expected: result.left equals `0.0`
+   - Expected: result.top equals `0.0`
+   - Expected: result.right equals `50.0`
+   - Expected: result.bottom equals `50.0`
 
 
 <details>
@@ -84,10 +93,10 @@ step("union_rects of two overlapping rects returns outer bounds")
 val a = _rect(0.0, 0.0, 30.0, 30.0)
 val b = _rect(20.0, 20.0, 50.0, 50.0)
 val result = union_rects(a, b)
-result.left.to_equal(0.0)
-result.top.to_equal(0.0)
-result.right.to_equal(50.0)
-result.bottom.to_equal(50.0)
+expect(result.left).to_equal(0.0)
+expect(result.top).to_equal(0.0)
+expect(result.right).to_equal(50.0)
+expect(result.bottom).to_equal(50.0)
 ```
 
 </details>
@@ -95,6 +104,10 @@ result.bottom.to_equal(50.0)
 #### intersect_rect of disjoint rects returns empty
 
 - intersect_rect of disjoint rects returns empty
+   - Expected: result.left equals `0.0`
+   - Expected: result.top equals `0.0`
+   - Expected: result.right equals `0.0`
+   - Expected: result.bottom equals `0.0`
 
 
 <details>
@@ -109,10 +122,10 @@ step("intersect_rect of disjoint rects returns empty")
 val a = _rect(0.0, 0.0, 10.0, 10.0)
 val b = _rect(20.0, 20.0, 40.0, 40.0)
 val result = intersect_rect(a, b)
-result.left.to_equal(0.0)
-result.top.to_equal(0.0)
-result.right.to_equal(0.0)
-result.bottom.to_equal(0.0)
+expect(result.left).to_equal(0.0)
+expect(result.top).to_equal(0.0)
+expect(result.right).to_equal(0.0)
+expect(result.bottom).to_equal(0.0)
 ```
 
 </details>
@@ -120,6 +133,10 @@ result.bottom.to_equal(0.0)
 #### intersect_rect of contained rects returns the smaller rect
 
 - intersect_rect of contained rects returns the smaller rect
+   - Expected: result.left equals `10.0`
+   - Expected: result.top equals `10.0`
+   - Expected: result.right equals `40.0`
+   - Expected: result.bottom equals `40.0`
 
 
 <details>
@@ -134,10 +151,10 @@ step("intersect_rect of contained rects returns the smaller rect")
 val outer = _rect(0.0, 0.0, 100.0, 100.0)
 val inner = _rect(10.0, 10.0, 40.0, 40.0)
 val result = intersect_rect(outer, inner)
-result.left.to_equal(10.0)
-result.top.to_equal(10.0)
-result.right.to_equal(40.0)
-result.bottom.to_equal(40.0)
+expect(result.left).to_equal(10.0)
+expect(result.top).to_equal(10.0)
+expect(result.right).to_equal(40.0)
+expect(result.bottom).to_equal(40.0)
 ```
 
 </details>
@@ -145,6 +162,7 @@ result.bottom.to_equal(40.0)
 #### aggregate_damage with no children equals root damage clipped to viewport
 
 - aggregate_damage with no children equals root damage clipped to viewport
+   - Expected: eq is true
 
 
 <details>
@@ -163,7 +181,7 @@ val no_children: [CompositorFrame] = []
 val no_clips: [SkRect] = []
 val result = aggregate_damage(root, no_children, no_clips)
 val eq = _rect_eq(result, damage)
-eq.to_equal(true)
+expect(eq).to_equal(true)
 ```
 
 </details>
@@ -171,6 +189,10 @@ eq.to_equal(true)
 #### aggregate_damage unions child damage clipped by child clip rect
 
 - aggregate_damage unions child damage clipped by child clip rect
+   - Expected: result.left equals `0.0`
+   - Expected: result.top equals `0.0`
+   - Expected: result.right equals `100.0`
+   - Expected: result.bottom equals `100.0`
 
 
 <details>
@@ -197,10 +219,10 @@ val result        = aggregate_damage(root_frame, children, clips)
 
 # union of root(0,0,50,50) and clipped-child(0,0,100,100) = (0,0,100,100)
 # then clamped to viewport (0,0,800,600) => (0,0,100,100)
-result.left.to_equal(0.0)
-result.top.to_equal(0.0)
-result.right.to_equal(100.0)
-result.bottom.to_equal(100.0)
+expect(result.left).to_equal(0.0)
+expect(result.top).to_equal(0.0)
+expect(result.right).to_equal(100.0)
+expect(result.bottom).to_equal(100.0)
 ```
 
 </details>
@@ -211,6 +233,7 @@ result.bottom.to_equal(100.0)
 #### propagate_damage_up through identity matrix returns unchanged rect
 
 - propagate_damage_up through identity matrix returns unchanged rect
+   - Expected: eq is true
 
 
 <details>
@@ -226,7 +249,7 @@ val dmg    = _rect(10.0, 20.0, 80.0, 90.0)
 val ident  = Matrix3x3.identity()
 val result = propagate_damage_up(dmg, ident)
 val eq = _rect_eq(result, dmg)
-eq.to_equal(true)
+expect(eq).to_equal(true)
 ```
 
 </details>
@@ -273,36 +296,35 @@ Requirements covered by the scenarios in this manual:
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `ead90b72aa7293055c8e20ee26ba250904b5ccd7a96a367a036a2eec84df457b`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `f09afc3ca062a773bca4089b5388c84ee7b20ad8030be12b0e86102a150c6f16`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `ead90b72aa7293055c8e20ee26ba250904b5ccd7a96a367a036a2eec84df457b`.
+Source SHA-256: `f09afc3ca062a773bca4089b5388c84ee7b20ad8030be12b0e86102a150c6f16`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `ead90b72aa7293055c8e20ee26ba250904b5ccd7a96a367a036a2eec84df457b`  
+Source SHA-256: `f09afc3ca062a773bca4089b5388c84ee7b20ad8030be12b0e86102a150c6f16`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **82/100**; effective score: **49/100**; blockers: **1**.
+Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
 
-SSpec documentization score: 49/100
+SSpec documentization score: 86/100
 source: test/unit/lib/viz/damage_spec.spl
 mirror: doc/06_spec/unit/lib/viz/damage_spec.md (current)
-findings: 6 blockers: 1
-  narrative=100 structure=100 oracle=50
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=70
   traceability=100 evidence=70 coverage=100 maintainability=70
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-  raw=82; blocker cap makes effective=49
 doc/06_spec/unit/lib/viz/damage_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
 doc/06_spec/unit/lib/viz/damage_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/unit/lib/viz/damage_spec.spl:1:1: blocker SSDOC-ORA-001 [oracle] (-50): no real executed assertion or compiler oracle
-  why: A passing-looking document without an oracle is not conformance evidence.
-  improve: Replace placeholders with an observable production assertion.
+test/unit/lib/viz/damage_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 20 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
 test/unit/lib/viz/damage_spec.spl:77:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'union_rects with empty second operand returns first' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
