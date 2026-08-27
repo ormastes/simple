@@ -26,7 +26,7 @@ This unit spec covers the Tier 3 MCP analysis handlers used by editor and agent 
 | Design | doc/05_design/lib/web/cli_mcp_alignment_matrix.md |
 | Research | doc/01_research/app/mcp/mcp_cli_gap_analysis.md |
 | Source | `test/unit/app/mcp_unit/mcp_analysis_tools_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-08-27 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -183,14 +183,15 @@ expect(out).to_contain("use std.io_runtime")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # @req REQ-SSPEC-UNIT
 step("works without file for project summary")
-val source = rt_file_read_text("src/app/mcp/main_lazy_query_tools.spl") ?? ""
-expect(source).to_contain("simple_dependencies (project summary)")
+val out = handle_simple_dependencies("d-proj", "{}")
+expect(out).to_contain("simple_dependencies (project summary)")
+expect(out).to_contain("Total import statements:")
 ```
 
 </details>
@@ -211,8 +212,8 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # @req REQ-SSPEC-UNIT
 step("requires file parameter")
-val source = rt_file_read_text("src/app/mcp/main_lazy_query_tools.spl") ?? ""
-expect(source).to_contain("Missing required parameter: file")
+val out = handle_simple_api_diff("a0", "{}")
+expect(out).to_contain("Missing required parameter: file")
 ```
 
 </details>
@@ -312,14 +313,15 @@ expect(source.contains("shell_cmd(\"timeout 10 git show")).to_equal(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # @req REQ-SSPEC-UNIT
 step("requires file parameter except source-less sql query")
+val out = handle_simple_context("d-ctx-nofile", "{}")
+expect(out).to_contain("Missing required parameter: file")
 val source = rt_file_read_text("src/app/mcp/main_lazy_query_tools.spl") ?? ""
-expect(source).to_contain("Missing required parameter: file")
 expect(source).to_contain("val sourceless_sql_query = file == \"\" and sql_enabled and query != \"\"")
 expect(source).to_contain("if file == \"\" and not sourceless_sql_query")
 ```
@@ -620,8 +622,8 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # @req REQ-SSPEC-UNIT
 step("requires file parameter")
-val source = rt_file_read_text("src/app/mcp/main_lazy_query_tools.spl") ?? ""
-expect(source).to_contain("Missing required parameter: file")
+val out = handle_simple_ponytail("pt0", "{}")
+expect(out).to_contain("Missing required parameter: file")
 ```
 
 </details>
@@ -1080,15 +1082,15 @@ Requirements covered by the scenarios in this manual:
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `28158a97cbbcd6ad448534cf0729d06cddda7f316be3870a0634b56d63abfda3`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `609cee8e11721e41b3b7153e1607d1c3257512004ec911b2d8a8ae9491ca67ed`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `28158a97cbbcd6ad448534cf0729d06cddda7f316be3870a0634b56d63abfda3`.
+Source SHA-256: `609cee8e11721e41b3b7153e1607d1c3257512004ec911b2d8a8ae9491ca67ed`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `28158a97cbbcd6ad448534cf0729d06cddda7f316be3870a0634b56d63abfda3`  
+Source SHA-256: `609cee8e11721e41b3b7153e1607d1c3257512004ec911b2d8a8ae9491ca67ed`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
 Raw score: **82/100**; effective score: **49/100**; blockers: **1**.
 
@@ -1116,7 +1118,7 @@ test/unit/app/mcp_unit/mcp_analysis_tools_spec.spl:142:1: warning SSDOC-EVD-001 
 test/unit/app/mcp_unit/mcp_analysis_tools_spec.spl:149:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'works without file for project summary' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/unit/app/mcp_unit/mcp_analysis_tools_spec.spl:160:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'requires file parameter' has no retained capture or evidence
+test/unit/app/mcp_unit/mcp_analysis_tools_spec.spl:161:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'requires file parameter' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
 <!-- sspec-maintain:scorecard:end -->
