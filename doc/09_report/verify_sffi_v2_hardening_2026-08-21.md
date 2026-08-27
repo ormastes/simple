@@ -356,3 +356,13 @@ a claim that SFFI v2 is complete.
   added allocation, lookup, lock, retry, or copy on successful reads.
 - FAIL (global admission): the clock provider has no exact signed artifact or
   verification receipt, so this is not a provider-verification claim.
+
+## Follow-up: tiered-JIT monotonic clock ABI repair (2026-08-27)
+
+- PASS (static/source): tiered-JIT diagnostics use the shared integer monotonic
+  microsecond ABI through one lexical raw owner. Missing/regressed timestamps
+  return a negative timing sentinel and are excluded from aggregate timing.
+- PASS (performance shape): a compilation still performs exactly two clock
+  reads; no allocation, lookup, lock, retry, or hot call-path work was added.
+- FAIL (global admission): no signed runtime artifact or verification receipt
+  exists, so the provider remains unsafe/unsigned globally.

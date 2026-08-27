@@ -370,3 +370,8 @@ passing placeholder.
     returns `Err`. Neither consumer may retain the legacy float-interpreter/
     integer-native seconds ABI or add a second clock read. This is fail-closed
     containment only, pending signed artifact-bound provider evidence.
+67. Tiered-JIT diagnostics use the shared monotonic microsecond ABI, not the
+    legacy wall-clock float declaration. Preserve exactly two clock reads per
+    compilation, report a negative timing sentinel on clock failure/regression,
+    and never add invalid timing to the aggregate. This is a cold diagnostics
+    path and does not establish signed provider admission.

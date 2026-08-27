@@ -20,8 +20,8 @@ extern fn rt_jit_call_void(handle: i64, name: text) -> i64
 extern fn rt_jit_has_function(handle: i64, name: text) -> bool
 @unsafe(reason: "raw native JIT provider boundary", capabilities: [ffi])
 extern fn rt_jit_cleanup(handle: i64) -> i64
-@unsafe(reason: "raw wall clock for JIT diagnostics; provider is unsigned", capabilities: [ffi])
-extern fn rt_time_now_seconds() -> f64
+@unsafe(reason: "raw monotonic microsecond clock for JIT diagnostics; negative sentinel is failure", capabilities: [ffi])
+extern fn rt_time_now_micros() -> i64
 
 @always_inline
 fn _tiered_jit_create_raw() -> i64:
@@ -54,9 +54,9 @@ fn _tiered_jit_cleanup_raw(handle: i64) -> i64:
         rt_jit_cleanup(handle)
 
 @always_inline
-fn _tiered_jit_time_now_seconds_raw() -> f64:
+fn _tiered_jit_time_now_micros_raw() -> i64:
     unsafe(capabilities: [ffi]):
-        rt_time_now_seconds()
+        rt_time_now_micros()
 
 # ============================================================================
 # TieredJitManager
@@ -156,18 +156,25 @@ class TieredJitManager:
         if source == "":
             return 0.0
         var handle = self._ensure_jit()
-        var t0 = _tiered_jit_time_now_seconds_raw()
+        val t0 = _tiered_jit_time_now_micros_raw()
         val raw_err = _tiered_jit_compile_source_raw(handle, source)
         var err = raw_err ?? "E-SFFI-017: JIT compile provider returned null"
-        var t1 = _tiered_jit_time_now_seconds_raw()
-        var ms = (t1 - t0) * 1000.0
-        self.total_compile_time_ms = self.total_compile_time_ms + ms
+        val t1 = _tiered_jit_time_now_micros_raw()
+        val ms = if t0 < 0 or t1 < 0 or t1 < t0:
+            -1.0
+        else:
+            ((t1 - t0) as f64) / 1000.0
+        if ms >= 0.0:
+            self.total_compile_time_ms = self.total_compile_time_ms + ms
         if err != "":
             if self.config.debug_mode:
                 print("  [JIT] compile error: " + err)
         else:
             if self.config.debug_mode:
-                print("  [JIT] compiled in " + ms.to_string() + " ms")
+                if ms >= 0.0:
+                    print("  [JIT] compiled in " + ms.to_string() + " ms")
+                else:
+                    print("  [JIT] compiled; timing unavailable")
         ms
 
     fn call_i64(name: text, arg: i64) -> i64:
