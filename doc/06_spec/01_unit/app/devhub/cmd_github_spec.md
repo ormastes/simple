@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 29 | 29 | 0 | 0 |
+| 30 | 30 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -232,7 +232,7 @@ expect(log.contains("pr create --title T --body B --base main")).to_equal(true)
 
 - Verify: detects the same author before provider approval and does not submit APPROVED
    - Expected: code equals `2`
-   - Expected: log contains `pr view 42 --json number,author`
+   - Expected: log contains `pr view 42 --json number,author,url`
    - Expected: log does not contain `pr review 42 --approve`
 
 
@@ -247,7 +247,7 @@ step("Verify: detects the same author before provider approval and does not subm
 val dir = install_fake_gh(FAKE_GH_SAME_AUTHOR)
 val (code, log) = run_github_with_fake_gh(dir, ["pr", "review", "42", "--approve"])
 expect(code).to_equal(2)
-expect(log.contains("pr view 42 --json number,author")).to_equal(true)
+expect(log.contains("pr view 42 --json number,author,url")).to_equal(true)
 expect(log.contains("pr review 42 --approve")).to_equal(false)
 ```
 
@@ -257,7 +257,7 @@ expect(log.contains("pr review 42 --approve")).to_equal(false)
 
 - Verify: recognizes -a and resolves an omitted selector from the current branch
    - Expected: code equals `2`
-   - Expected: log contains `pr view --json number,author`
+   - Expected: log contains `pr view --json number,author,url`
    - Expected: log does not contain `pr review -a`
 
 
@@ -272,7 +272,7 @@ step("Verify: recognizes -a and resolves an omitted selector from the current br
 val dir = install_fake_gh(FAKE_GH_SAME_AUTHOR)
 val (code, log) = run_github_with_fake_gh(dir, ["pr", "review", "-a"])
 expect(code).to_equal(2)
-expect(log.contains("pr view --json number,author")).to_equal(true)
+expect(log.contains("pr view --json number,author,url")).to_equal(true)
 expect(log.contains("pr review -a")).to_equal(false)
 ```
 
@@ -282,7 +282,7 @@ expect(log.contains("pr review -a")).to_equal(false)
 
 - Verify: resolves a URL selector and uses the returned PR number
    - Expected: code equals `2`
-   - Expected: log contains `pr view https://github.com/ormastes/simple/pull/42 --json number,author`
+   - Expected: log contains `pr view https://github.com/ormastes/simple/pull/42 --json number,author,url`
 
 
 <details>
@@ -296,7 +296,7 @@ step("Verify: resolves a URL selector and uses the returned PR number")
 val dir = install_fake_gh(FAKE_GH_SAME_AUTHOR)
 val (code, log) = run_github_with_fake_gh(dir, ["pr", "review", "https://github.com/ormastes/simple/pull/42", "--approve"])
 expect(code).to_equal(2)
-expect(log.contains("pr view https://github.com/ormastes/simple/pull/42 --json number,author")).to_equal(true)
+expect(log.contains("pr view https://github.com/ormastes/simple/pull/42 --json number,author,url")).to_equal(true)
 ```
 
 </details>
@@ -305,7 +305,7 @@ expect(log.contains("pr view https://github.com/ormastes/simple/pull/42 --json n
 
 - Verify: finds a selector placed after the approval flag
    - Expected: code equals `2`
-   - Expected: log contains `pr view 64 --json number,author`
+   - Expected: log contains `pr view 64 --json number,author,url`
 
 
 <details>
@@ -319,7 +319,7 @@ step("Verify: finds a selector placed after the approval flag")
 val dir = install_fake_gh(FAKE_GH_SAME_AUTHOR)
 val (code, log) = run_github_with_fake_gh(dir, ["pr", "review", "--approve", "64"])
 expect(code).to_equal(2)
-expect(log.contains("pr view 64 --json number,author")).to_equal(true)
+expect(log.contains("pr view 64 --json number,author,url")).to_equal(true)
 ```
 
 </details>
@@ -328,7 +328,7 @@ expect(log.contains("pr view 64 --json number,author")).to_equal(true)
 
 - Verify: binds a leading repository flag to the same resolution query
    - Expected: code equals `2`
-   - Expected: log contains `pr view 64 --repo ormastes/simple --json number,author`
+   - Expected: log contains `pr view 64 --repo ormastes/simple --json number,author,url`
 
 
 <details>
@@ -342,7 +342,7 @@ step("Verify: binds a leading repository flag to the same resolution query")
 val dir = install_fake_gh(FAKE_GH_SAME_AUTHOR)
 val (code, log) = run_github_with_fake_gh(dir, ["pr", "review", "-R", "ormastes/simple", "-a", "64"])
 expect(code).to_equal(2)
-expect(log.contains("pr view 64 --repo ormastes/simple --json number,author")).to_equal(true)
+expect(log.contains("pr view 64 --repo ormastes/simple --json number,author,url")).to_equal(true)
 ```
 
 </details>
@@ -509,7 +509,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 step("Verify: exposes exact review dispatch poll steps for common agent searches")
-val steps = _self_review_steps("42")
+val steps = _self_review_steps("42", "ormastes/simple")
 expect(steps[0]).to_contain("APPROVED")
 expect(steps[1]).to_contain("--repo ormastes/simple")
 expect(steps[2]).to_contain("high/xhigh/max/ultra")
@@ -525,6 +525,28 @@ expect(steps[9]).to_contain("spipe self-review-guide")
 
 </details>
 
+#### never redirects another repository's same-number PR to Simple
+
+- Verify: never redirects another repository's same-number PR to Simple
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Verify: never redirects another repository's same-number PR to Simple")
+val steps = _self_review_steps("42", "ormastes/Spipe")
+expect(steps[1]).to_contain("ormastes/Spipe")
+expect(steps[2]).to_contain("Do not dispatch ormastes/simple")
+expect(steps[3]).to_contain("spipe_self_review_privilege_evaluate")
+expect(steps[4]).to_contain("fail closed")
+```
+
+</details>
+
 #### parses review selectors while skipping flags and their values
 
 - Verify: parses review selectors while skipping flags and their values
@@ -532,12 +554,13 @@ expect(steps[9]).to_contain("spipe self-review-guide")
    - Expected: _github_review_selector(["-R", "ormastes/simple", "-a", "feature/head"]) equals `feature/head`
    - Expected: _github_review_selector(["--body", "looks good", "-a"]) equals ``
    - Expected: _github_review_repo_args(["--repo=ormastes/simple", "-a", "64"])[1] equals `ormastes/simple`
+   - Expected: _github_pr_repository(json_parse("{\"url\":\"https://github.com/ormastes/simple/pull/64\"}")) equals `ormastes/simple`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -546,6 +569,7 @@ expect(_github_review_selector(["--approve", "64"])).to_equal("64")
 expect(_github_review_selector(["-R", "ormastes/simple", "-a", "feature/head"])).to_equal("feature/head")
 expect(_github_review_selector(["--body", "looks good", "-a"])).to_equal("")
 expect(_github_review_repo_args(["--repo=ormastes/simple", "-a", "64"])[1]).to_equal("ormastes/simple")
+expect(_github_pr_repository(json_parse("{\"url\":\"https://github.com/ormastes/simple/pull/64\"}"))).to_equal("ormastes/simple")
 ```
 
 </details>
@@ -705,8 +729,8 @@ expect(_default_fields("issue")).to_equal("number,title,state,author,updatedAt")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 29 |
-| Active scenarios | 29 |
+| Total scenarios | 30 |
+| Active scenarios | 30 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

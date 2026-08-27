@@ -20,7 +20,7 @@ Audience: compiler and tooling engineers who maintain this spec.
 # value to capture in-process, so the pure JSON-extraction helpers
 # (_gh_field/_gh_login/_default_fields) are covered directly instead.
 
-use app.devhub.cmd_github.{handle_github, _gh_field, _gh_login, _default_fields, _github_author_approval_rejected, _self_review_steps, _github_review_selector, _github_review_repo_args}
+use app.devhub.cmd_github.{handle_github, _gh_field, _gh_login, _default_fields, _github_author_approval_rejected, _self_review_steps, _github_review_selector, _github_review_repo_args, _github_pr_repository}
 use std.json.{json_parse}
 
 extern fn rt_dir_create_all(path: text) -> bool
@@ -69,9 +69,9 @@ val FAKE_GH_UNAUTHED = "#!/bin/sh\necho \"$@\" >> \"{ARGV_LOG}\"\ncase \"$1\" in
 
 val FAKE_GH_PASSTHROUGH_OK = "#!/bin/sh\necho \"$@\" >> \"{ARGV_LOG}\"\ncase \"$1\" in\n  --version) echo 'gh version 2.0.0 (fake)'; exit 0 ;;\nesac\necho 'ok'\nexit 0\n"
 
-val FAKE_GH_SAME_AUTHOR = "#!/bin/sh\necho \"$@\" >> \"{ARGV_LOG}\"\ncase \"$1 $2\" in\n  '--version ') echo 'gh version 2.0.0 (fake)'; exit 0 ;;\n  'pr view') echo '{{\"number\":42,\"author\":{{\"login\":\"alice\"}}}}'; exit 0 ;;\n  'api user') echo 'alice'; exit 0 ;;\nesac\nexit 1\n"
+val FAKE_GH_SAME_AUTHOR = "#!/bin/sh\necho \"$@\" >> \"{ARGV_LOG}\"\ncase \"$1 $2\" in\n  '--version ') echo 'gh version 2.0.0 (fake)'; exit 0 ;;\n  'pr view') echo '{{\"number\":42,\"author\":{{\"login\":\"alice\"}},\"url\":\"https://github.com/ormastes/simple/pull/42\"}}'; exit 0 ;;\n  'api user') echo 'alice'; exit 0 ;;\nesac\nexit 1\n"
 
-val FAKE_GH_AUTHOR_REJECTION = "#!/bin/sh\necho \"$@\" >> \"{ARGV_LOG}\"\ncase \"$1 $2\" in\n  '--version ') echo 'gh version 2.0.0 (fake)'; exit 0 ;;\n  'pr view') echo '{{\"number\":42,\"author\":{{\"login\":\"alice\"}}}}'; exit 0 ;;\n  'api user') echo 'bob'; exit 0 ;;\n  'pr review') echo 'cannot approve your own pull request' >&2; exit 1 ;;\nesac\nexit 1\n"
+val FAKE_GH_AUTHOR_REJECTION = "#!/bin/sh\necho \"$@\" >> \"{ARGV_LOG}\"\ncase \"$1 $2\" in\n  '--version ') echo 'gh version 2.0.0 (fake)'; exit 0 ;;\n  'pr view') echo '{{\"number\":42,\"author\":{{\"login\":\"alice\"}},\"url\":\"https://github.com/ormastes/simple/pull/42\"}}'; exit 0 ;;\n  'api user') echo 'bob'; exit 0 ;;\n  'pr review') echo 'cannot approve your own pull request' >&2; exit 1 ;;\nesac\nexit 1\n"
 
 
 use std.spec.step
@@ -154,7 +154,7 @@ describe "itf github (fake-binary fixture)":
             val dir = install_fake_gh(FAKE_GH_SAME_AUTHOR)
             val (code, log) = run_github_with_fake_gh(dir, ["pr", "review", "42", "--approve"])
             expect(code).to_equal(2)
-            expect(log.contains("pr view 42 --json number,author")).to_equal(true)
+            expect(log.contains("pr view 42 --json number,author,url")).to_equal(true)
             expect(log.contains("pr review 42 --approve")).to_equal(false)
 
         it "recognizes -a and resolves an omitted selector from the current branch":
@@ -162,7 +162,7 @@ describe "itf github (fake-binary fixture)":
             val dir = install_fake_gh(FAKE_GH_SAME_AUTHOR)
             val (code, log) = run_github_with_fake_gh(dir, ["pr", "review", "-a"])
             expect(code).to_equal(2)
-            expect(log.contains("pr view --json number,author")).to_equal(true)
+            expect(log.contains("pr view --json number,author,url")).to_equal(true)
             expect(log.contains("pr review -a")).to_equal(false)
 
         it "resolves a URL selector and uses the returned PR number":
@@ -170,21 +170,21 @@ describe "itf github (fake-binary fixture)":
             val dir = install_fake_gh(FAKE_GH_SAME_AUTHOR)
             val (code, log) = run_github_with_fake_gh(dir, ["pr", "review", "https://github.com/ormastes/simple/pull/42", "--approve"])
             expect(code).to_equal(2)
-            expect(log.contains("pr view https://github.com/ormastes/simple/pull/42 --json number,author")).to_equal(true)
+            expect(log.contains("pr view https://github.com/ormastes/simple/pull/42 --json number,author,url")).to_equal(true)
 
         it "finds a selector placed after the approval flag":
             step("Verify: finds a selector placed after the approval flag")
             val dir = install_fake_gh(FAKE_GH_SAME_AUTHOR)
             val (code, log) = run_github_with_fake_gh(dir, ["pr", "review", "--approve", "64"])
             expect(code).to_equal(2)
-            expect(log.contains("pr view 64 --json number,author")).to_equal(true)
+            expect(log.contains("pr view 64 --json number,author,url")).to_equal(true)
 
         it "binds a leading repository flag to the same resolution query":
             step("Verify: binds a leading repository flag to the same resolution query")
             val dir = install_fake_gh(FAKE_GH_SAME_AUTHOR)
             val (code, log) = run_github_with_fake_gh(dir, ["pr", "review", "-R", "ormastes/simple", "-a", "64"])
             expect(code).to_equal(2)
-            expect(log.contains("pr view 64 --repo ormastes/simple --json number,author")).to_equal(true)
+            expect(log.contains("pr view 64 --repo ormastes/simple --json number,author,url")).to_equal(true)
 
         it "prints the same workflow after GitHub rejects author approval":
             step("Verify: prints the same workflow after GitHub rejects author approval")
@@ -232,7 +232,7 @@ describe "cmd_github pure JSON-extraction helpers":
 
         it "exposes exact review dispatch poll steps for common agent searches":
             step("Verify: exposes exact review dispatch poll steps for common agent searches")
-            val steps = _self_review_steps("42")
+            val steps = _self_review_steps("42", "ormastes/simple")
             expect(steps[0]).to_contain("APPROVED")
             expect(steps[1]).to_contain("--repo ormastes/simple")
             expect(steps[2]).to_contain("high/xhigh/max/ultra")
@@ -245,12 +245,21 @@ describe "cmd_github pure JSON-extraction helpers":
             expect(steps[8]).to_contain("not GitHub provider APPROVED")
             expect(steps[9]).to_contain("spipe self-review-guide")
 
+        it "never redirects another repository's same-number PR to Simple":
+            step("Verify: never redirects another repository's same-number PR to Simple")
+            val steps = _self_review_steps("42", "ormastes/Spipe")
+            expect(steps[1]).to_contain("ormastes/Spipe")
+            expect(steps[2]).to_contain("Do not dispatch ormastes/simple")
+            expect(steps[3]).to_contain("spipe_self_review_privilege_evaluate")
+            expect(steps[4]).to_contain("fail closed")
+
         it "parses review selectors while skipping flags and their values":
             step("Verify: parses review selectors while skipping flags and their values")
             expect(_github_review_selector(["--approve", "64"])).to_equal("64")
             expect(_github_review_selector(["-R", "ormastes/simple", "-a", "feature/head"])).to_equal("feature/head")
             expect(_github_review_selector(["--body", "looks good", "-a"])).to_equal("")
             expect(_github_review_repo_args(["--repo=ormastes/simple", "-a", "64"])[1]).to_equal("ormastes/simple")
+            expect(_github_pr_repository(json_parse("{\"url\":\"https://github.com/ormastes/simple/pull/64\"}"))).to_equal("ormastes/simple")
 
     context "_gh_field":
 

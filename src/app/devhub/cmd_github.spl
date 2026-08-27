@@ -163,8 +163,17 @@ fn _github_author_approval_rejected(stderr: text) -> bool:
         lower.contains("review cannot be submitted by pull request author")
 
 
-fn _self_review_steps(pr_number: text) -> [text]:
+fn _self_review_steps(pr_number: text, repository: text) -> [text]:
     """Canonical actionable redirect printed for self approve / approve PR / author cannot approve."""
+    if repository.lower() != "ormastes/simple":
+        return [
+            "GitHub forbids a PR author from submitting an APPROVED review; do not retry.",
+            "Resolved repository: {repository}; Simple's hosted workflow is only valid for ormastes/simple.",
+            "Do not dispatch ormastes/simple for this PR number.",
+            "Use the generic SPipe MCP path: call spipe_self_review_privilege_evaluate for the exact reviewed head, then call spipe_self_review_approve only on allow.",
+            "If the generic protected broker is unavailable or evaluation denies, fail closed and report the remediation; this status is not GitHub provider APPROVED.",
+            "Canonical help: spipe self-review-guide (or node .spipe/spipe/cli/spipe.js self-review-guide)."
+        ]
     [
         "GitHub forbids a PR author from submitting an APPROVED review; do not retry.",
         "1. Capture the live head: HEAD_SHA=$(gh pr view {pr_number} --repo ormastes/simple --json headRefOid --jq .headRefOid)",
@@ -179,9 +188,18 @@ fn _self_review_steps(pr_number: text) -> [text]:
     ]
 
 
-fn _print_self_review_steps(pr_number: text):
-    for line in _self_review_steps(pr_number):
+fn _print_self_review_steps(pr_number: text, repository: text):
+    for line in _self_review_steps(pr_number, repository):
         print line
+
+
+fn _github_pr_repository(pr_obj: any) -> text:
+    """Extract the target owner/name from gh's canonical PR URL; unknown hosts fail closed."""
+    val url = _gh_field(pr_obj, "url")
+    val parts = url.split("/")
+    if parts.len() >= 5 and parts[2].lower() == "github.com":
+        return "{parts[3]}/{parts[4]}"
+    ""
 
 
 fn _github_review_selector(args: [text]) -> text:
@@ -229,12 +247,13 @@ fn _github_pr_review(args: [text]) -> i64:
     var view_args = ["pr", "view"]
     if selector != "":
         view_args = view_args + [selector]
-    view_args = view_args + repo_args + ["--json", "number,author"]
+    view_args = view_args + repo_args + ["--json", "number,author,url"]
     val (author_ok, author_stdout, author_stderr) = gh_run(view_args)
     val (actor_ok, actor_stdout, _actor_stderr) = gh_run(["api", "user", "--jq", ".login"])
     val pr_obj = if author_ok: json_parse(author_stdout) else: nil
     val pr_number = _gh_field(pr_obj, "number")
     val author = _gh_login(pr_obj, "author")
+    val repository = _github_pr_repository(pr_obj)
     val actor = actor_stdout.trim()
     if not author_ok or pr_number == "" or author == "":
         print_error(gh_actionable_error(author_stderr))
@@ -242,7 +261,7 @@ fn _github_pr_review(args: [text]) -> i64:
         return 1
     if author_ok and actor_ok and author != "" and author == actor:
         print_error("same-author GitHub approval is unavailable")
-        _print_self_review_steps(pr_number)
+        _print_self_review_steps(pr_number, repository)
         return 2
 
     val (ok, stdout, stderr) = gh_run(["pr", "review"] + args)
@@ -251,7 +270,7 @@ fn _github_pr_review(args: [text]) -> i64:
     if not ok:
         print_error(gh_actionable_error(stderr))
         if _github_author_approval_rejected(stderr):
-            _print_self_review_steps(pr_number)
+            _print_self_review_steps(pr_number, repository)
         return 1
     0
 
