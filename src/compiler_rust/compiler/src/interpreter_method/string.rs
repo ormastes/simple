@@ -47,12 +47,15 @@ if let Value::Str(ref s) = recv_val {
             // `start`, mirroring `rt_text_find` exactly so the interpreter and
             // the compiled lane agree: start < 0 clamps to 0; empty needle
             // returns min(start, len); start past the end returns -1;
-            // byte-indexed result, -1 for not-found. Scoped to `index_of`
-            // only — `find`/`find_str` keep their one-arg contract (extra
-            // args were and remain ignored) because the compiled lane lowers
-            // only two-arg `index_of`, and a wider interpreter would silently
-            // diverge from it.
-            if method == "index_of" && args.len() >= 2 {
+            // byte-indexed result, -1 for not-found. Applies to all three
+            // aliases: `find`/`find_str` used to IGNORE a second argument and
+            // return a match from position 0 — a plausible wrong answer that
+            // never crashed (`"abcabc".find("abc", 1)` answered 0, not 3), and
+            // which infinite-looped an advancing-position lint scan. The
+            // compiled lane now lowers two-arg `find`/`find_str` through the
+            // same `rt_text_find` as `index_of`, so widening the gate here
+            // keeps the interpreter and the compiled lane in agreement.
+            if args.len() >= 2 {
                 let start_raw = eval_arg_int(args, 1, 0, env, functions, classes, enums, impl_methods)?;
                 let start = start_raw.max(0) as usize;
                 let bytes = s.as_bytes();
