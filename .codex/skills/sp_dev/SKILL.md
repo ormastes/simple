@@ -937,13 +937,20 @@ When a workflow or tool contract changes, update the matching `doc/07_guide`,
 as unfinished work, not release cleanup.
 
 For a protected GitHub publication, keep the handoff state explicit:
-`unverified`, `REVIEW_REQUIRED`, `awaiting-independent-approval`,
-`awaiting-required-checks`, `merge-blocked`, or `merged`. A static or
-higher-effort agent review is advisory evidence, never a GitHub approval. The
-PR author must not self-approve through the same credential; use an eligible,
-independent reviewer. `--no-verify` skips local Git hooks only and never
-bypasses repository protection or required checks. See
-`doc/07_guide/app/devhub.md` and
+`unverified`, `REVIEW_REQUIRED`, `awaiting-self-review-admission`,
+`awaiting-independent-approval`, `awaiting-required-checks`, `merge-blocked`,
+or `merged`. A high-capability, high-effort exact-head review that reports zero
+P0/P1 findings may dispatch the trusted default-branch `SPipe Self Review
+Admission` workflow with `PASS:0:0`. That short-lived required check is
+self-attested admission, not a GitHub provider `APPROVED` review or independent
+authentication. Never have the PR author's credential call
+`gh pr review --approve`; use the scoped admission when policy permits, or an
+eligible independent provider reviewer when provider approval is required.
+After a push, base/PR edit, policy/ruleset change, or expiry, treat the old
+admission as invalid and perform a new exact-state review before redispatch.
+`--no-verify` skips local Git hooks only and never bypasses repository
+protection or required checks. See `doc/07_guide/app/devhub.md`,
+`doc/07_guide/infra/self_review_policy_db.md`, and
 `tools/claude-plugin/repo-and-pull-req/skills/git/gh_pull_req_review.md`.
 
 For broad SPipe planning lanes, split independent research or implementation

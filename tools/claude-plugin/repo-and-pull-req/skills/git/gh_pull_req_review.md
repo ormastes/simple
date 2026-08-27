@@ -6,11 +6,14 @@ fixes code or replies, then branches by `--level`:
 - **L1** (default): post review, opportunistic auto-rebase + merge if
   PR is **already** APPROVED at check time. Single-pass, no polling.
   This is the existing behavior — preserved verbatim.
-- **L2**: post review, run Codex-first bot reviewer, then bot-approves via
-  `gh pr review --approve` only when its authenticated GitHub identity is not
-  the PR author; polls checks and merges via `gh pr merge --squash`.
-- **L3**: post review, wait for **human** APPROVED review (do NOT
-  bot-approve), poll checks, merge.
+- **L2**: post review and run the Codex-first reviewer. An independent
+  credential may submit a provider approval; the author credential instead
+  dispatches the scoped `SPipe Self Review Admission` after a high-effort exact
+  review reports zero P0/P1. Poll required checks and merge via
+  `gh pr merge --squash`.
+- **L3**: post review, wait for an eligible independent provider `User`
+  account (not a GitHub App) to submit `APPROVED`, poll checks, and merge. This
+  provider type is not proof that a person operated the account.
 
 `--level` is read from env `CLI_LEVEL` (set by the dispatcher) or
 defaults to `1`. Older state files with no `level` key default to `1`.
@@ -151,42 +154,58 @@ L1 deviates from the arch doc table (which lists L1 as comments-only)
 to preserve the existing single-pass merge-on-APPROVED behavior. No
 polling, no bot-approve, no checks-wait.
 
-#### L2 — Bot-approve via `gh pr review --approve` + poll-merge
+#### L2 — Provider approval or scoped self-review admission + poll-merge
 
 1. Invoke `agents/review_loop_codex_first.md` to get
    `verdict ∈ {approve, request-changes, comment}` plus `approver` and
-   `verdict_source`. Persist these in state JSON.
+   `verdict_source`. Also require the exact reviewed `head_sha`, model,
+   effort, and P0/P1 counts. Persist them in state JSON.
 2. If `verdict == approve`:
    ```bash
-   if ! AUTHOR=$(gh pr view "${PR_NUMBER}" --json author --jq .author.login) || [ -z "$AUTHOR" ]; then
-     echo "could not determine PR author; do not approve" >&2
-     exit 2
-   fi
-   if ! ACTOR=$(gh api user --jq .login) || [ -z "$ACTOR" ]; then
-     echo "could not determine authenticated reviewer; do not approve" >&2
-     exit 2
-   fi
-   if [ "$ACTOR" = "$AUTHOR" ]; then
-     echo "blocked-self-review: author credential cannot approve its own PR" >&2
-     exit 2
-   fi
+   REPO=$(gh repo view --json nameWithOwner --jq .nameWithOwner)
+   PR_JSON=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}")
+   HEAD_SHA=$(printf '%s\n' "$PR_JSON" | jq -er .head.sha)
+   BASE_SHA=$(printf '%s\n' "$PR_JSON" | jq -er .base.sha)
+   AUTHOR_ID=$(printf '%s\n' "$PR_JSON" | jq -er .user.id)
+   ACTOR_ID=$(gh api user --jq .id)
    ```
-   GitHub remains the authority for configured reviewer eligibility; a rejected
-   review submission blocks the workflow and must not be retried as a bypass.
+
+   If `ACTOR_ID != AUTHOR_ID`, submit a provider approval. GitHub remains the
+   authority for reviewer eligibility. Any rejected submission is terminal for
+   this loop; save `status=blocked-provider-approval`, post one comment, cancel
+   the schedule, and exit rather than retrying.
+
+   If `ACTOR_ID == AUTHOR_ID`, never call `gh pr review --approve`. Require the
+   reviewer result to bind `HEAD_SHA`, use effort `high|xhigh|max|ultra`, and
+   report `p0_count=0` and `p1_count=0`. Require non-empty `SESSION_ID` and
+   `REVIEWER_MODEL`, then dispatch the trusted default-branch workflow once for
+   the exact `HEAD_SHA:BASE_SHA` scope:
 
    ```bash
-   gh pr review "${PR_NUMBER}" --approve --body "Bot approval (${APPROVER}/${VERDICT_SOURCE})"
-   APPROVE_RC=$?
+   gh workflow run review-admission.yml --repo "$REPO" --ref main \
+     -f pull_request_number="$PR_NUMBER" \
+     -f session_id="$SESSION_ID" \
+     -f reviewer_model="$REVIEWER_MODEL" \
+     -f reviewer_effort="$REVIEWER_EFFORT" \
+     -f self_attestation='PASS:0:0'
    ```
-   Capture HTTP status (use `gh api --include` if needed). On
-   401/403/409: see *Failure Modes* in `agents/review_loop.md` —
-   set `status=blocked-*`, post one comment, **cancel schedule, exit**.
-3. Poll checks:
-   ```bash
-   CHECKS=$(gh pr checks "${PR_NUMBER}" --json bucket --jq '[.[] | .bucket] | unique')
-   # All "pass" → green; any "fail" → failing; any "pending" → still running
-   ```
-4. If `bot_approved && checks_passing && !merge_attempted`:
+
+   Persist `admission_dispatched=true`, `admission_scope=HEAD_SHA:BASE_SHA`, and
+   `status=awaiting-self-review-admission`. While that scope is pending, poll;
+   do not redispatch every cycle. Missing admission prerequisites or a failed
+   dispatch are terminal `blocked-self-review-admission`: save state, post one
+   comment, cancel the schedule, and exit.
+3. Poll the exact-head admission and all provider-required checks. Accept only
+   the latest `SPipe Self Review Admission` check on `HEAD_SHA` from GitHub
+   Actions App ID `15368`. `success` sets `self_review_admitted=true`.
+   `failure`, `action_required`, `cancelled`, `timed_out`, or `skipped` is a
+   terminal `blocked-self-review-admission`; cancel and require an explicit
+   restart with a fresh exact-state review. A changed head/base resets the old
+   scope and also requires a fresh review before dispatch. Pushes, PR/base
+   edits, protected-base pushes, policy/ruleset changes, and the ten-minute
+   expiry invalidate the old admission.
+4. If `(bot_approved || self_review_admitted) && checks_passing &&
+   !merge_attempted`:
    ```bash
    gh pr merge "${PR_NUMBER}" --squash --delete-branch
    MERGE_RC=$?
@@ -194,30 +213,31 @@ polling, no bot-approve, no checks-wait.
    On 403/409/401: blocked, see *Failure Modes*. On success:
    `status=merged`.
 
-#### L3 — Post review only + poll for human approval + merge
+#### L3 — Poll for an eligible independent provider user-account approval
 
 1. Post review comments only. Do NOT bot-approve.
-2. Poll for an independent human APPROVED review.  A GitHub `User` is the
-   documented non-bot minimum; an unknown or bot account does not qualify:
+2. Poll for an independent `APPROVED` review whose provider actor type is
+   `User`, not `Bot`/App. This proves only the provider account class and
+   independence from the author; it does not prove a human operated it:
    ```bash
    if ! AUTHOR=$(gh pr view "${PR_NUMBER}" --json author --jq .author.login) || [ -z "$AUTHOR" ]; then
      echo "could not determine PR author; keep waiting" >&2
      exit 2
    fi
    REVIEWS_JSON=$(gh pr view "${PR_NUMBER}" --json reviews)
-   HUMAN_APPROVED_COUNT=0
+   USER_ACCOUNT_APPROVED_COUNT=0
    for reviewer in $(printf '%s\n' "$REVIEWS_JSON" | jq --arg author "$AUTHOR" -r \
      '.reviews[] | select(.state=="APPROVED" and .author.login != $author) | .author.login'); do
      if reviewer_type=$(gh api "users/${reviewer}" --jq .type) && [ "$reviewer_type" = "User" ]; then
-       HUMAN_APPROVED_COUNT=$((HUMAN_APPROVED_COUNT + 1))
+       USER_ACCOUNT_APPROVED_COUNT=$((USER_ACCOUNT_APPROVED_COUNT + 1))
      fi
    done
-   if [ "$HUMAN_APPROVED_COUNT" -gt 0 ]; then
-     HUMAN_APPROVED=true
+   if [ "$USER_ACCOUNT_APPROVED_COUNT" -gt 0 ]; then
+     USER_ACCOUNT_APPROVED=true
    fi
    ```
 3. Poll checks (same query as L2).
-4. If `human_approved && checks_passing && !merge_attempted`:
+4. If `user_account_approved && checks_passing && !merge_attempted`:
    ```bash
    gh pr merge "${PR_NUMBER}" --squash --delete-branch
    ```
@@ -225,8 +245,9 @@ polling, no bot-approve, no checks-wait.
 
 ### Step 5b — Failure-Mode Capture (L2/L3 only)
 
-For each `gh pr review --approve` and `gh pr merge` call, classify
-the exit:
+For each provider-approval, admission-dispatch, and merge call, classify the
+exit. Every nonzero admission dispatch and rejected same-author provider
+approval is terminal; unknown nonzero exits are not safe to retry automatically.
 
 | Exit / HTTP | State field        | Action                                  |
 |-------------|--------------------|-----------------------------------------|
@@ -234,7 +255,7 @@ the exit:
 | 403         | `blocked`          | Post one comment ("Bot lacks permission"), cancel schedule, exit |
 | 409         | `blocked-conflict` | Post one comment ("Merge conflict — manual rebase needed"), cancel schedule, exit |
 | 401         | `blocked-auth`     | Post one comment ("Bot token invalid — re-run setup"), cancel schedule, exit |
-| other ≠ 0   | continue cycle     | Log and retry next cycle                |
+| other ≠ 0   | `blocked`          | Preserve error, post once, cancel schedule, exit |
 
 The bot must NEVER tight-loop on auth/policy errors. Once `blocked*`,
 the schedule is cancelled and the human must restart manually.

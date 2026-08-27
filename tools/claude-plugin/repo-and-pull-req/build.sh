@@ -30,12 +30,33 @@ for f in \
     skills/mail/mail_review.md \
     skills/mail/mail_notify.md \
     agents/review_loop.md \
+    agents/review_loop_codex_first.md \
     agents/bug_triage.md; do
     if [ ! -f "${SCRIPT_DIR}/${f}" ]; then
         echo "ERROR: Referenced file ${f} not found"; exit 1
     fi
     echo "  OK: ${f}"
 done
+
+# Keep the L2 exact-head admission contract synchronized across the public
+# skill and both review agents. Same-author automation must never regress to a
+# provider self-approval/retry loop.
+for f in \
+    skills/git/gh_pull_req_review.md \
+    agents/review_loop.md \
+    agents/review_loop_codex_first.md; do
+    grep -q 'SPipe Self Review Admission' "${SCRIPT_DIR}/${f}" || {
+        echo "ERROR: ${f} is missing scoped self-review admission"; exit 1;
+    }
+done
+if grep -Eq '[Ww]ait(s|ing)? for human|HUMAN_APPROVED' \
+    "${SCRIPT_DIR}/skills/git/gh_pull_req_review.md" \
+    "${SCRIPT_DIR}/agents/review_loop.md" \
+    "${SCRIPT_DIR}/agents/review_loop_codex_first.md"; then
+    echo "ERROR: provider User-account approval must not be claimed as guaranteed human approval"
+    exit 1
+fi
+echo "OK: review admission and provider-account wording are synchronized"
 
 # Validate JSON syntax
 if python3 -c "import json, sys; json.load(open(sys.argv[1]))" \
