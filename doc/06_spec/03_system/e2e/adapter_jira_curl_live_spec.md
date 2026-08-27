@@ -16,6 +16,20 @@
 ### adapter_jira_curl - live Jira Cloud
 
 #### skipped (no creds: set JIRA_URL, JIRA_USER, JIRA_TOKEN)
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+expect(_have_creds).to_equal(false)
+```
+
+</details>
+
 #### search returns >= 0 issues for the configured project
 
 <details>
@@ -74,7 +88,7 @@ else:
 | Category | Other |
 | Status | Active |
 | Source | `test/03_system/e2e/adapter_jira_curl_live_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-08-27 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -106,27 +120,26 @@ Requirements covered by the scenarios in this manual:
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `22d0669caca9e0794acf0144e53f310d06fcb190d8862166e643821adda5af05`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `3ce42bf35e45c516dcf40f1fb657ae21a24503fc2b5825c8c39b1ad6c6937029`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `22d0669caca9e0794acf0144e53f310d06fcb190d8862166e643821adda5af05`.
+Source SHA-256: `3ce42bf35e45c516dcf40f1fb657ae21a24503fc2b5825c8c39b1ad6c6937029`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `22d0669caca9e0794acf0144e53f310d06fcb190d8862166e643821adda5af05`  
+Source SHA-256: `3ce42bf35e45c516dcf40f1fb657ae21a24503fc2b5825c8c39b1ad6c6937029`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **83/100**; effective score: **49/100**; blockers: **1**.
+Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
 
-SSpec documentization score: 49/100
+SSpec documentization score: 86/100
 source: test/03_system/e2e/adapter_jira_curl_live_spec.spl
 mirror: doc/06_spec/03_system/e2e/adapter_jira_curl_live_spec.md (current)
-findings: 8 blockers: 1
-  narrative=100 structure=70 oracle=90
-  traceability=60 evidence=100 coverage=100 maintainability=55
+findings: 8 blockers: 0
+  narrative=80 structure=70 oracle=90
+  traceability=100 evidence=100 coverage=100 maintainability=55
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-  raw=83; blocker cap makes effective=49
 doc/06_spec/03_system/e2e/adapter_jira_curl_live_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
@@ -136,19 +149,19 @@ doc/06_spec/03_system/e2e/adapter_jira_curl_live_spec.md:1:1: warning SSDOC-MNT-
 test/03_system/e2e/adapter_jira_curl_live_spec.spl:1:1: advice SSDOC-MNT-001 [maintainability] (-15): multiple scenarios form a flat, unfolded presentation
   why: Long flat dumps obscure the primary workflow.
   improve: Group secondary detail and keep the primary workflow visible.
+test/03_system/e2e/adapter_jira_curl_live_spec.spl:1:1: warning SSDOC-NAR-001 [narrative] (-20): missing authored purpose and audience
+  why: Readers need scope, audience, and intent before executable detail.
+  improve: Add authored purpose, scope, and audience facts.
 test/03_system/e2e/adapter_jira_curl_live_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-10): 1 unexplained numeric expected value(s)
   why: Reviewers need to know why a magic expected value is authoritative.
   improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/03_system/e2e/adapter_jira_curl_live_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 1 declared requirement(s) have no scenario binding
-  why: A requirement list without scenario evidence is inventory, not traceability.
-  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
 test/03_system/e2e/adapter_jira_curl_live_spec.spl:38:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'skipped (no creds: set JIRA_URL, JIRA_USER, JIRA_TOKEN)' has no visible step flow
   why: Ordered visible actions make the manual operable.
   improve: Add ordered step("...") calls for meaningful actions.
-test/03_system/e2e/adapter_jira_curl_live_spec.spl:44:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'search returns >= 0 issues for the configured project' has no visible step flow
+test/03_system/e2e/adapter_jira_curl_live_spec.spl:43:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'search returns >= 0 issues for the configured project' has no visible step flow
   why: Ordered visible actions make the manual operable.
   improve: Add ordered step("...") calls for meaningful actions.
-test/03_system/e2e/adapter_jira_curl_live_spec.spl:56:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'view of the first search hit succeeds' has no visible step flow
+test/03_system/e2e/adapter_jira_curl_live_spec.spl:55:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'view of the first search hit succeeds' has no visible step flow
   why: Ordered visible actions make the manual operable.
   improve: Add ordered step("...") calls for meaningful actions.
 <!-- sspec-maintain:scorecard:end -->

@@ -24,7 +24,7 @@ This executable system manual covers the active GUI hardening JS/WebEngine/WASM 
 | Design | doc/05_design/browser_wasm_webgpu_infra.md |
 | Research | doc/01_research/local/browser_wasm_webgpu_infra.md |
 | Source | `test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-08-27 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -73,7 +73,42 @@ WASM-originated Simple2D fill payload bytes into a WebGPU compute pass.
 
 ### REQ-WGPU-001: secure context exposure
 
-#### should expose navigator gpu metadata to secure JavaScript pages
+#### exposes navigator gpu metadata to secure JavaScript pages
+
+- navigator gpu metadata is exposed to secure JavaScript pages
+   - Expected: _display_js(value) equals `true:object:true`
+   - Expected: "unexpected js error: {err}" equals ``
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 18 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-WGPU-001
+# @req REQ-WGPU-002
+# @req REQ-WGPU-003
+# @req REQ-WGPU-004
+# @req REQ-WGPU-005
+# @req REQ-WGPU-006
+# @req REQ-WGPU-007
+# @req REQ-SSPEC-SYSTEM
+step("navigator gpu metadata is exposed to secure JavaScript pages")
+var session = BrowserSession.new()
+session.open_html("https://example.com/webgpu.html", "<html><body>GPU</body></html>")
+
+val result = session.eval_script("window.isSecureContext + ':' + typeof navigator.gpu + ':' + navigator.gpu.adapterAvailable")
+match result:
+    Ok(value):
+        expect(_display_js(value)).to_equal("true:object:true")
+    Err(err):
+        expect("unexpected js error: {err}").to_equal("")
+```
+
+</details>
+
 #### should hide navigator gpu from insecure JavaScript pages
 
 - should hide navigator gpu from insecure JavaScript pages
@@ -3942,27 +3977,26 @@ Requirements covered by the scenarios in this manual:
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `653fa1cc13c6b097d2a2a2181d2a391c44e53e885a15bfefead3ceffb8c89948`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `ba231f2412c8b1982fb01efbaeb46e5bdec64645862b6a8de29fe8ccab312f1a`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `653fa1cc13c6b097d2a2a2181d2a391c44e53e885a15bfefead3ceffb8c89948`.
+Source SHA-256: `ba231f2412c8b1982fb01efbaeb46e5bdec64645862b6a8de29fe8ccab312f1a`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `653fa1cc13c6b097d2a2a2181d2a391c44e53e885a15bfefead3ceffb8c89948`  
+Source SHA-256: `ba231f2412c8b1982fb01efbaeb46e5bdec64645862b6a8de29fe8ccab312f1a`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **74/100**; effective score: **49/100**; blockers: **1**.
+Raw score: **82/100**; effective score: **82/100**; blockers: **0**.
 
-SSpec documentization score: 49/100
+SSpec documentization score: 82/100
 source: test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.spl
 mirror: doc/06_spec/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.md (current)
-findings: 14 blockers: 1
-  narrative=100 structure=60 oracle=70
-  traceability=60 evidence=70 coverage=100 maintainability=70
+findings: 12 blockers: 0
+  narrative=100 structure=70 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-  raw=74; blocker cap makes effective=49
 doc/06_spec/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
@@ -3972,37 +4006,31 @@ doc/06_spec/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.md:1:1: war
 test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 21 unexplained numeric expected value(s)
   why: Reviewers need to know why a magic expected value is authoritative.
   improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 7 declared requirement(s) have no scenario binding
-  why: A requirement list without scenario evidence is inventory, not traceability.
-  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
-test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.spl:121:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'should expose navigator gpu metadata to secure JavaScript pages' has no visible step flow
-  why: Ordered visible actions make the manual operable.
-  improve: Add ordered step("...") calls for meaningful actions.
-test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.spl:121:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should expose navigator gpu metadata to secure JavaScript pages' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.spl:142:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should hide navigator gpu from insecure JavaScript pages' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.spl:142:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should hide navigator gpu from insecure JavaScript pages' has no retained capture or evidence
+test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.spl:121:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'exposes navigator gpu metadata to secure JavaScript pages' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.spl:155:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should expose requestAdapter as a JavaScript function shape' describes the test rather than its outcome
+test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.spl:141:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should hide navigator gpu from insecure JavaScript pages' describes the test rather than its outcome
   why: Outcome names describe product behavior rather than test mechanics.
   improve: Rename it to the observable product outcome.
-test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.spl:155:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should expose requestAdapter as a JavaScript function shape' has no retained capture or evidence
+test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.spl:141:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should hide navigator gpu from insecure JavaScript pages' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.spl:169:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should expose Simple 2D drawing evidence beside WebGPU canvas wrappers' describes the test rather than its outcome
+test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.spl:154:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should expose requestAdapter as a JavaScript function shape' describes the test rather than its outcome
   why: Outcome names describe product behavior rather than test mechanics.
   improve: Rename it to the observable product outcome.
-test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.spl:169:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should expose Simple 2D drawing evidence beside WebGPU canvas wrappers' has no retained capture or evidence
+test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.spl:154:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should expose requestAdapter as a JavaScript function shape' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.spl:183:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should submit Simple 2D commands through the WebGPU render path' describes the test rather than its outcome
+test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.spl:168:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should expose Simple 2D drawing evidence beside WebGPU canvas wrappers' describes the test rather than its outcome
   why: Outcome names describe product behavior rather than test mechanics.
   improve: Rename it to the observable product outcome.
-test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.spl:203:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should expose Simple 3D command evidence beside WebGPU canvas wrappers' describes the test rather than its outcome
+test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.spl:182:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should submit Simple 2D commands through the WebGPU render path' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.spl:202:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should expose Simple 3D command evidence beside WebGPU canvas wrappers' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/app/browser/feature/webgpu_js_wasm_simple_spec.spl:218:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should submit encoded Simple 3D scene commands through the WebGPU path' describes the test rather than its outcome
   why: Outcome names describe product behavior rather than test mechanics.
   improve: Rename it to the observable product outcome.
 <!-- sspec-maintain:scorecard:end -->
